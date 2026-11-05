@@ -1,0 +1,527 @@
+//! Pass 1 — parse & intern (TDD §5 Pass 1, minimal M1 shape).
+//!
+//! Per input file, materializes the per-file arena the later passes consume:
+//! input sections (with decoded relocations) and the typed symbol table.
+//! Relocations are *located here* and applied in Pass 4 (emit); pair
+//! decoding (`ADDEND`→page relocs, `SUBTRACTOR`→`UNSIGNED`) happens once,
+//! here, exactly like the spec demands.
+//!
+//! Input lifetime: the caller holds the object bytes for the whole link (the
+//! M4 `InputArena`); all cross-references are byte ranges, never pointers.
+
+use crate::LinkError;
+use crate::ids::{FileId, StringId};
+use pgr_format::consts::{
+    ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
+    ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
+    ARM64_RELOC_POINTER_TO_GOT, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED, N_EXT, N_STAB,
+    N_TYPE, N_UNDF, N_WEAK_DEF, N_WEAK_REF, S_ZEROFILL, SECTION_TYPE_MASK,
+};
+use pgr_format::header::MachHeader64;
+use pgr_format::load_command::{LoadCommandIter, LoadCommandKind};
+use pgr_format::reloc::RelocationInfo;
+use pgr_format::segment::{Section64, SegmentCommand64};
+
+/// The decoded relocation kinds the M1 emit path can apply (TDD §3.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelocKind {
+    /// 8-byte absolute pointer slot → chained fixup (rebase at M1).
+    Unsigned,
+    /// `B`/`BL` 26-bit branch immediate.
+    Branch26,
+    /// ADRP page immediate, with its paired `ADDEND`.
+    Page21 {
+        /// Addend carried by the paired `ADDEND` entry.
+        addend: i64,
+    },
+    /// ADD/LDR/STR 12-bit page-offset immediate, with its paired `ADDEND`.
+    PageOff12 {
+        /// Addend carried by the paired `ADDEND` entry.
+        addend: i64,
+    },
+    /// Paired subtraction: this relocation's `target` is the *subtrahend*;
+    /// the preceding `SUBTRACTOR` named the minuend.
+    Subtractor {
+        /// The minuend target from the paired `SUBTRACTOR` entry.
+        minuend: RelocTarget,
+    },
+}
+
+/// What a relocation refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelocTarget {
+    /// An external symbol (interned name).
+    Extern(StringId),
+    /// A section of the same input file (0-based local ordinal).
+    Section(usize),
+}
+
+/// A decoded, pair-resolved relocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedReloc {
+    /// Section-relative offset of the relocated item.
+    pub offset: u32,
+    /// Decoded kind (pairs already merged).
+    pub kind: RelocKind,
+    /// What the relocation names.
+    pub target: RelocTarget,
+    /// True when PC-relative.
+    pub pcrel: bool,
+    /// `r_length` exponent.
+    pub length_log2: u32,
+}
+
+/// One input section of a relocatable object.
+#[derive(Debug, Clone)]
+pub struct InputSection {
+    /// Section name (`__text`...).
+    pub name: String,
+    /// Owning segment name (`__TEXT`...).
+    pub segment: String,
+    /// `S_*` type/attribute flags.
+    pub flags: u32,
+    /// Alignment exponent.
+    pub align_log2: u32,
+    /// Byte range within the object (empty for zero-fill sections).
+    pub data: core::ops::Range<u64>,
+    /// Virtual size (== byte length except zero-fill).
+    pub size: u64,
+    /// True for `S_ZEROFILL` (no file bytes).
+    pub zerofill: bool,
+    /// Raw `relocation_info` table (pairs decoded after symbol parsing).
+    raw_relocs: Vec<RelocationInfo>,
+    /// Decoded relocation table (populated by [`InputObject::finish`]).
+    pub relocs: Vec<DecodedReloc>,
+}
+
+impl InputSection {
+    /// The input bytes backing this section.
+    #[must_use]
+    pub fn bytes<'a>(&self, file: &'a [u8]) -> &'a [u8] {
+        if self.zerofill {
+            &[]
+        } else {
+            file.get(self.data.start as usize..self.data.end as usize)
+                .unwrap_or(&[])
+        }
+    }
+}
+
+/// One symbol table entry of a relocatable object, typed once (Pass 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputSymbol {
+    /// Interned name (patched by [`InputObject::finish`] after interning).
+    pub name: StringId,
+    /// True when `N_EXT`.
+    pub external: bool,
+    /// True for stabs (skipped everywhere).
+    pub stab: bool,
+    /// 0-based defining section (`N_SECT`), `None` otherwise.
+    pub section: Option<usize>,
+    /// `n_value`: address / common size.
+    pub value: u64,
+    /// `N_WEAK_DEF`.
+    pub weak_def: bool,
+    /// `N_WEAK_REF`.
+    pub weak_ref: bool,
+    /// Common-symbol alignment exponent (`GET_COMM_ALIGN`) when tentative.
+    pub common_align: Option<u32>,
+}
+
+impl InputSymbol {
+    /// True when this is an external definition (`N_SECT | N_EXT`).
+    #[must_use]
+    pub const fn is_defined(&self) -> bool {
+        self.external && self.section.is_some()
+    }
+
+    /// True when this is a tentative/common symbol.
+    #[must_use]
+    pub const fn is_common(&self) -> bool {
+        self.external && self.section.is_none() && !self.stab && self.value != 0
+    }
+
+    /// True when this is a plain undefined external.
+    #[must_use]
+    pub const fn is_undefined(&self) -> bool {
+        self.external && self.section.is_none() && !self.stab && self.value == 0
+    }
+}
+
+/// A parsed relocatable object (Pass 1 arena).
+#[derive(Debug, Clone)]
+pub struct InputObject {
+    /// Command-line identity.
+    pub file: FileId,
+    /// File name (diagnostics only).
+    pub name: String,
+    /// The raw object bytes (caller-owned for the whole link).
+    pub bytes: Vec<u8>,
+    /// Input sections in file order (the file's `n_sect` numbering).
+    pub sections: Vec<InputSection>,
+    /// Symbol table in file order.
+    pub symbols: Vec<InputSymbol>,
+    /// Symbol names in table order (drained into the global interner).
+    symbol_names: Vec<Vec<u8>>,
+}
+
+impl InputObject {
+    /// Parses one relocatable object.
+    ///
+    /// # Errors
+    /// [`LinkError::Parse`] on malformed Mach-O; [`LinkError::Unsupported`]
+    /// on input constructs M1 does not link (scattered relocs, unknown arm64
+    /// relocation types, GOT-based references).
+    pub fn parse(file: FileId, name: &str, bytes: Vec<u8>) -> Result<Self, LinkError> {
+        let fail = |msg: String| LinkError::Parse {
+            file: name.to_string(),
+            message: msg,
+        };
+        let unsupported = |msg: String| LinkError::Unsupported {
+            file: name.to_string(),
+            message: msg,
+        };
+
+        let header = MachHeader64::parse(&bytes)
+            .map_err(|e| fail(format!("not a valid Mach-O image: {e}")))?;
+        if header.filetype != pgr_format::consts::MH_OBJECT {
+            return Err(unsupported(format!(
+                "file type {} is not MH_OBJECT (M1 links direct .o inputs only)",
+                header.filetype
+            )));
+        }
+
+        // ---- sweep 1: sections + symtab command ----------------------------
+        let mut sections: Vec<InputSection> = Vec::new();
+        let mut symtab = None;
+        let mut it =
+            LoadCommandIter::new(&bytes, MachHeader64::SIZE, header.ncmds, header.sizeofcmds)
+                .map_err(|e| fail(format!("load command walk failed: {e}")))?;
+        while let Some(cmd) = it
+            .next_command()
+            .map_err(|e| fail(format!("load command walk failed: {e}")))?
+        {
+            match cmd.kind {
+                LoadCommandKind::Segment64 => {
+                    let seg = SegmentCommand64::parse(cmd.bytes, 0)
+                        .map_err(|e| fail(format!("segment command: {e}")))?;
+                    let sects = seg
+                        .sections(cmd.bytes, SegmentCommand64::SIZE)
+                        .map_err(|e| fail(format!("section table: {e}")))?;
+                    for s in sects {
+                        sections.push(convert_section(s, &bytes, &fail)?);
+                    }
+                }
+                LoadCommandKind::Symtab if symtab.is_none() => {
+                    symtab = Some(
+                        pgr_format::SymtabCommand::parse(cmd.bytes, 0)
+                            .map_err(|e| fail(format!("LC_SYMTAB: {e}")))?,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // ---- sweep 2: symbol table -----------------------------------------
+        let st = symtab.ok_or_else(|| fail("relocatable object has no LC_SYMTAB".into()))?;
+        let strtab = bytes
+            .get(st.stroff as usize..st.stroff as usize + st.strsize as usize)
+            .ok_or_else(|| fail("string table out of bounds".into()))?;
+        let mut symbols = Vec::with_capacity(st.nsyms as usize);
+        let mut names: Vec<Vec<u8>> = Vec::with_capacity(st.nsyms as usize);
+        for i in 0..st.nsyms as usize {
+            let off = st.symoff as usize + i * 16;
+            let raw: pgr_format::symtab::Nlist64 =
+                pgr_format::cursor::pod_read_unaligned_at(&bytes, off)
+                    .map_err(|e| fail(format!("symbol {i}: {e}")))?;
+            let name_bytes: &[u8] = if (raw.n_strx as usize) < strtab.len() {
+                let rest = &strtab[raw.n_strx as usize..];
+                let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+                &rest[..end]
+            } else {
+                b""
+            };
+            names.push(name_bytes.to_vec());
+
+            let stab = raw.n_type & N_STAB != 0;
+            let external = raw.n_type & N_EXT != 0;
+            let ntype = raw.n_type & N_TYPE;
+            let (section, common_align) = if !stab && external && ntype == N_UNDF {
+                if raw.n_value != 0 {
+                    (None, Some(pgr_format::consts::get_comm_align(raw.n_desc)))
+                } else {
+                    (None, None)
+                }
+            } else if !stab && ntype == pgr_format::consts::N_SECT && raw.n_sect > 0 {
+                if raw.n_sect as usize > sections.len() {
+                    return Err(fail(format!(
+                        "symbol {i}: defining section {} out of range (file has {})",
+                        raw.n_sect,
+                        sections.len()
+                    )));
+                }
+                (Some(raw.n_sect as usize - 1), None)
+            } else {
+                (None, None)
+            };
+            symbols.push(InputSymbol {
+                name: StringId(0), // patched by `finish` after interning
+                external,
+                stab,
+                section,
+                value: raw.n_value,
+                weak_def: raw.n_desc & N_WEAK_DEF != 0,
+                weak_ref: raw.n_desc & N_WEAK_REF != 0,
+                common_align,
+            });
+        }
+
+        let obj = Self {
+            file,
+            name: name.to_string(),
+            bytes,
+            sections,
+            symbols,
+            symbol_names: names,
+        };
+        Ok(obj)
+    }
+
+    /// Symbol names in table order, handed to the global interner build.
+    ///
+    /// Drained by [`crate::link`]; [`InputObject::finish`] patches the ids.
+    #[doc(hidden)]
+    pub fn take_symbol_names(&mut self) -> Vec<Vec<u8>> {
+        core::mem::take(&mut self.symbol_names)
+    }
+
+    /// Patches interned ids and decodes relocation pairs (Pass 1 phase C).
+    ///
+    /// `name_ids[i]` is the [`StringId`] for table position `i`.
+    ///
+    /// # Errors
+    /// [`LinkError::Parse`] on malformed relocation tables;
+    /// [`LinkError::Unsupported`] on relocation constructs M1 rejects.
+    pub fn finish(&mut self, name_ids: &[StringId]) -> Result<(), LinkError> {
+        let fail = |msg: String| LinkError::Parse {
+            file: self.name.clone(),
+            message: msg,
+        };
+        let unsupported = |msg: String| LinkError::Unsupported {
+            file: self.name.clone(),
+            message: msg,
+        };
+        for (i, s) in self.symbols.iter_mut().enumerate() {
+            s.name = *name_ids
+                .get(i)
+                .ok_or_else(|| fail(format!("symbol {i}: missing interner entry")))?;
+        }
+
+        // Pair rules (arm64, TDD §3.5): ADDEND precedes its PAGE21/PAGEOFF12;
+        // SUBTRACTOR precedes the UNSIGNED that carries the subtrahend.
+        for si in 0..self.sections.len() {
+            let mut decoded: Vec<DecodedReloc> = Vec::new();
+            let table = core::mem::take(&mut self.sections[si].raw_relocs);
+            let mut i = 0usize;
+            while i < table.len() {
+                let r = table[i];
+                if r.is_scattered() {
+                    return Err(unsupported(
+                        "scattered relocation (not generated by modern clang)".into(),
+                    ));
+                }
+                match r.rtype() {
+                    ARM64_RELOC_ADDEND => {
+                        // r_symbolnum carries the addend value here, not a
+                        // symbol/section reference.
+                        let addend = r.symbolnum() as i32 as i64;
+                        let Some(r2) = table.get(i + 1) else {
+                            return Err(fail(
+                                "ADDEND relocation is not followed by its target".into(),
+                            ));
+                        };
+                        let kind = match r2.rtype() {
+                            ARM64_RELOC_PAGE21 => RelocKind::Page21 { addend },
+                            ARM64_RELOC_PAGEOFF12 => RelocKind::PageOff12 { addend },
+                            other => {
+                                return Err(fail(format!(
+                                    "ADDEND pair target is relocation type {other}, not PAGE21/PAGEOFF12"
+                                )));
+                            }
+                        };
+                        let t2 = self.reloc_target(r2, &fail)?;
+                        decoded.push(DecodedReloc {
+                            offset: r.r_address,
+                            kind,
+                            target: t2,
+                            pcrel: r2.pcrel(),
+                            length_log2: r2.length_log2(),
+                        });
+                        i += 2;
+                    }
+                    ARM64_RELOC_SUBTRACTOR => {
+                        let minuend = self.reloc_target(&r, &fail)?;
+                        let Some(r2) = table.get(i + 1) else {
+                            return Err(fail(
+                                "SUBTRACTOR relocation is not followed by its UNSIGNED".into(),
+                            ));
+                        };
+                        if r2.rtype() != ARM64_RELOC_UNSIGNED {
+                            return Err(fail(
+                                "SUBTRACTOR pair target is not an UNSIGNED relocation".into(),
+                            ));
+                        }
+                        if r2.length_log2() != 3 {
+                            return Err(fail(
+                                "SUBTRACTOR pair must relocate an 8-byte pointer".into(),
+                            ));
+                        }
+                        let subtrahend = self.reloc_target(r2, &fail)?;
+                        decoded.push(DecodedReloc {
+                            offset: r.r_address,
+                            kind: RelocKind::Subtractor { minuend },
+                            target: subtrahend,
+                            pcrel: false,
+                            length_log2: r2.length_log2(),
+                        });
+                        i += 2;
+                    }
+                    ARM64_RELOC_UNSIGNED => {
+                        if r.pcrel() {
+                            return Err(unsupported(
+                                "PC-relative UNSIGNED is not a standalone arm64 construct".into(),
+                            ));
+                        }
+                        if r.length_log2() != 3 {
+                            return Err(unsupported(format!(
+                                "UNSIGNED relocation of {} byte(s) (only 8-byte pointers chain)",
+                                r.length()
+                            )));
+                        }
+                        let target = self.reloc_target(&r, &fail)?;
+                        decoded.push(DecodedReloc {
+                            offset: r.r_address,
+                            kind: RelocKind::Unsigned,
+                            target,
+                            pcrel: false,
+                            length_log2: r.length_log2(),
+                        });
+                        i += 1;
+                    }
+                    ARM64_RELOC_BRANCH26 => {
+                        let target = self.reloc_target(&r, &fail)?;
+                        decoded.push(DecodedReloc {
+                            offset: r.r_address,
+                            kind: RelocKind::Branch26,
+                            target,
+                            pcrel: true,
+                            length_log2: r.length_log2(),
+                        });
+                        i += 1;
+                    }
+                    ARM64_RELOC_PAGE21 | ARM64_RELOC_PAGEOFF12 => {
+                        return Err(fail(
+                            "unpaired PAGE21/PAGEOFF12 (arm64 page relocs carry their addend \
+                             in a preceding ADDEND pair member)"
+                                .into(),
+                        ));
+                    }
+                    ARM64_RELOC_GOT_LOAD_PAGE21
+                    | ARM64_RELOC_GOT_LOAD_PAGEOFF12
+                    | ARM64_RELOC_POINTER_TO_GOT => {
+                        return Err(unsupported(
+                            "GOT-based reference (M1 links -static; GOT synthesis arrives at M2)"
+                                .into(),
+                        ));
+                    }
+                    other => {
+                        return Err(unsupported(format!(
+                            "relocation type {other} is not an arm64 construct Peregrine \
+                             links at M1"
+                        )));
+                    }
+                }
+            }
+            decoded.sort_by_key(|d| d.offset);
+            self.sections[si].relocs = decoded;
+        }
+        Ok(())
+    }
+
+    /// Resolves one relocation's target to an interned name or local section.
+    fn reloc_target(
+        &self,
+        r: &RelocationInfo,
+        fail: &dyn Fn(String) -> LinkError,
+    ) -> Result<RelocTarget, LinkError> {
+        if r.is_extern() {
+            let idx = r.symbolnum() as usize;
+            let sym = self
+                .symbols
+                .get(idx)
+                .ok_or_else(|| fail(format!("relocation references symbol index {idx}")))?;
+            Ok(RelocTarget::Extern(sym.name))
+        } else {
+            let ord = r.symbolnum() as usize;
+            if ord == 0 || ord > self.sections.len() {
+                return Err(fail(format!(
+                    "relocation section ordinal {ord} out of range (1..={})",
+                    self.sections.len()
+                )));
+            }
+            Ok(RelocTarget::Section(ord - 1))
+        }
+    }
+}
+
+// `symbol_names` is private with accessors so the transient Vec never leaks
+// into user copies of the struct.
+
+/// Reads a `Section64` into the arena form (raw relocs kept for pairing).
+fn name16(field: &[u8; 16]) -> String {
+    let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    String::from_utf8_lossy(&field[..end]).into_owned()
+}
+
+fn convert_section(
+    s: &Section64,
+    file_bytes: &[u8],
+    fail: &dyn Fn(String) -> LinkError,
+) -> Result<InputSection, LinkError> {
+    let zerofill = s.flags & SECTION_TYPE_MASK == S_ZEROFILL;
+    let size = s.size;
+    let name = name16(&s.sectname);
+    let segment = name16(&s.segname);
+
+    let mut data = 0u64..0u64;
+    if !zerofill && size > 0 {
+        let start = s.offset as u64;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| fail(format!("section {name}: size overflow")))?;
+        if end > file_bytes.len() as u64 {
+            return Err(fail(format!(
+                "section {name}: file range [{start:#x}, {end:#x}) exceeds the file"
+            )));
+        }
+        data = start..end;
+    }
+    let mut raw_relocs = Vec::with_capacity(s.nreloc as usize);
+    for i in 0..s.nreloc as usize {
+        let off = s.reloff as usize + i * 8;
+        let r = RelocationInfo::parse(file_bytes, off)
+            .map_err(|e| fail(format!("section {name}: relocation {i}: {e}")))?;
+        raw_relocs.push(r);
+    }
+    Ok(InputSection {
+        name,
+        segment,
+        flags: s.flags,
+        align_log2: s.align.min(14),
+        data,
+        size,
+        zerofill,
+        raw_relocs,
+        relocs: Vec::new(),
+    })
+}
