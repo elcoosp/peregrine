@@ -26,6 +26,7 @@ pub mod reloc;
 pub mod segment;
 pub mod signature;
 pub mod symtab;
+pub mod tbd;
 
 pub use commands::{
     BuildToolVersion, BuildVersionCommand, DataInCodeEntry, DylibCommand, DylinkerCommand,
@@ -38,6 +39,7 @@ pub use reloc::RelocationInfo;
 pub use segment::{Section64, SegmentCommand64};
 pub use signature::{CodeDirectory, SuperBlob};
 pub use symtab::{DysymtabCommand, Nlist64, SymtabCommand};
+pub use tbd::{Tbd, TbdSymbol, parse_tbd};
 
 use consts::LC_DYLD_CHAINED_FIXUPS;
 use cursor::Cursor;
