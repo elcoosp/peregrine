@@ -1,0 +1,16 @@
+[package]
+name = "pgr-driver"
+description = "pgr - the Peregrine linker driver (ld64-compatible CLI surface)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "pgr"
+path = "src/main.rs"
+
+[lints]
+workspace = true
