@@ -157,8 +157,81 @@ fn main() {
     )
     .expect("write seed");
 
+    // M2: a GOT-carrying object seed — the link_object target exercises the
+    // __got/__stubs synthesis and bind path with it.
+    let mut got_o = ObjectBuilder::new("seed_got.o");
+    let text = got_o.add_section(ObjectSection::text(
+        "__text",
+        [
+            0x9000_0000u32, // adrp x0, printf@gotpage
+            0xF940_0000u32, // ldr x0, [x0, printf@gotpageoff]
+            0x9400_0000u32, // bl printf
+            0xD65F_03C0u32, // ret
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect(),
+        Vec::new(),
+    ));
+    got_o.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: text,
+        value: 0,
+        weak: false,
+    });
+    let printf_sym = got_o.add_symbol(ObjectSymbol::Undefined {
+        name: "_printf".into(),
+        weak_ref: false,
+    });
+    let printf = got_o.sym_index(printf_sym);
+    got_o.section_mut(text).relocs = vec![
+        ObjectReloc::got_page21(printf).at(0),
+        ObjectReloc::got_pageoff12(printf).at(4),
+        ObjectReloc::branch26(printf).at(8),
+    ];
+    std::fs::write(dir.join("seed_got.o"), got_o.build().expect("got seed")).expect("write seed");
+
+    // M2: a .tbd seed for the parse_tbd target (v4 + v3 documents).
+    std::fs::write(
+        dir.join("seed_libsystem.tbd"),
+        [
+            "--- !tapi-tbd",
+            "tbd-version: 4",
+            "targets: [ arm64-macos ]",
+            "install-name: /usr/lib/libSystem.B.dylib",
+            "current-version: 1.2.3",
+            "compatibility-version: 1.0.0",
+            "exports:",
+            "  - targets: [ arm64-macos ]",
+            "    symbols: [ _printf, _strlen ]",
+            "    weak-symbols: [ _weakfn ]",
+            "...",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write tbd seed");
+    std::fs::write(
+        dir.join("seed_libold.tbd"),
+        [
+            "--- !tbd-tbd-version-3.0",
+            "tbd-version: 3",
+            "targets: [ arm64-macos ]",
+            "uuids: [ arm64-macos: 1234 ]",
+            "install-name: /usr/lib/libold.dylib",
+            "current-version: 1.2.3",
+            "exports:",
+            "  - targets: [ arm64-macos ]",
+            "    symbols: [ _old ]",
+            "...",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write v3 tbd seed");
+
     println!(
-        "wrote 3 seed images + 2 seed objects into {}",
+        "wrote 3 seed images + 3 seed objects + 2 tbd seeds into {}",
         dir.display()
     );
 }
