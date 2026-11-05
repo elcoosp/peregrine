@@ -1,7 +1,7 @@
-# Peregrine Benchmarks — M0/M1 Baselines
+# Peregrine Benchmarks — M0/M1/M2 Baselines
 
-Status: **M0 and M1 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
-end-to-end link baseline).
+Status: **M0, M1 and M2 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
+end-to-end link baseline + architecture doc §10.3 M2 dynamic-link baseline).
 
 These numbers are **dev-sandbox baselines**, not Apple Silicon results. They
 exist to (a) prove the benchmark harness works end-to-end from day one and
@@ -46,8 +46,20 @@ cargo bench -p pgr-driver
 
 | Bench | Input | Median | Notes |
 |---|---|---|---|
-| `pgr-driver/link/small_4_objects` | 4 objects, 256 defs + 256 refs each, 8 KiB text | **~2.3 ms** | full Pass 0–5, single-threaded |
-| `pgr-driver/link/large_32_objects` | 32 objects, 2 048 defs + 2 048 refs each, 32 KiB text (~1.6 MiB inputs) | **~170 ms** | ~9.5 MB/s of input; resolution graph spans all 32 objects |
+| `pgr-driver/link/small_4_objects` | 4 objects, 256 defs + 256 refs each, 8 KiB text | **~2.3 ms** (M1) / ~3.4 ms (M2) | full Pass 0–5, single-threaded |
+| `pgr-driver/link/large_32_objects` | 32 objects, 2 048 defs + 2 048 refs each, 32 KiB text (~1.6 MiB inputs) | **~170 ms** (M1) / ~289 ms (M2) | ~9.5 MB/s of input; resolution graph spans all 32 objects |
+
+The M2 deltas are the cost of the dynamic-link surface added on the same
+corpora: `__mh_execute_header` + full export-trie build, undefined-symbol
+symtab entries, the indirect symbol table, and the two extra `__got`
+bucket passes — all single-threaded, all due to become tile-local in M4.
+
+## Recorded baseline (M2, dynamic executables via `.tbd`)
+
+| Bench | Input | Median | Throughput | Notes |
+|---|---|---|---|---|
+| `pgr-driver/link_dylib/small_4_objects_dylib` | 4 callers × 256 branch-through-stub relocs + one 256-export `.tbd` | **~2.0 ms** | ~88 MiB/s | full bind path: stub/GOT synthesis, first-use import table, bind chains |
+| `pgr-driver/link_dylib/large_32_objects_dylib` | 32 callers × 2 048 dylib calls (~1 MiB text) + `.tbd` | **~42 ms** | ~88 MiB/s | 65 536 chained bind slots (GOT + stubs) per link |
 
 How to read the M1 numbers:
 
@@ -81,11 +93,27 @@ every input byte and therefore start well below these numbers.
    skeleton for that ships with this milestone, the hardware baselines do
    not exist yet.
 
+## M2 perf gate status (architecture doc §10.3 row M2)
+
+The M2 performance gate — "Pass 2 and Pass 3 meet the parallel-efficiency
+budget on the 100 MB corpus" — requires the Phase P0 Apple Silicon rig
+(perf doc §9.1: parallel efficiency ≥ 70% for Passes 1/3/4 at 8 P-cores,
+single-threaded fraction ≤ 15% except flush). This milestone ships the
+**harness and the baseline** (`link_dylib` corpora above); the gate itself
+stays open until the rig exists, exactly like the M0/M1 numbers.
+
+The bind path is already shaped for M4's tile emit: the import table is
+assigned in first-use order over address-sorted slots (spike S6 result —
+`ld64.lld` verified), so chain encoding never mutates the table and the
+per-page fixup lists (perf doc §4.3) can bucket by destination page without
+re-sorting.
+
 ## Known follow-ups
 
 * Add a bench for the *byte-touching* parse (section data copied/summed) so
-  the M2 parser baseline is memory-bound, not metadata-bound.
+  the parser baseline is memory-bound, not metadata-bound.
 * Parameterize the corpus generator (symbols/relocs/got slots) behind CLI
   flags of a small `xtask` so nightly runs can sweep corpus shapes.
-* M2 adds bind chains (imports + two-level ordinals) — extend
-  `pgr-driver/link` with a `.tbd`-based corpus shape when that lands.
+* Import-table canonical order (D7) can replace first-use order when the
+  M4 tile scheduler needs it — the planner isolates that decision (see
+  `pgr-core/src/fixups.rs` module docs).
