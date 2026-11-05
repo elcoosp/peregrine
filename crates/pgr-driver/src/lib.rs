@@ -1,14 +1,16 @@
 //! The `pgr` driver library (TDD §5 Pass 0 + the driver loop): option
 //! parsing, input mapping, and the Pass 1–5 orchestration.
 //!
-//! The M1 loop is deliberately boring: map inputs → parse/intern/resolve/
-//! layout (`pgr-core`) → emit bytes (`pgr-emit`) → flush. Determinism is an
-//! end-to-end property (§4.3): linking the same corpus twice in separate
-//! calls produces byte-identical images, asserted in the integration tests.
+//! The M2 loop: map inputs (`.o` objects and `.tbd` dylib stubs, plus the
+//! `-l` library search) → parse/intern/resolve/layout (`pgr-core`) → emit
+//! bytes (`pgr-emit`) → flush. Determinism is an end-to-end property (§4.3):
+//! linking the same corpus twice in separate calls produces byte-identical
+//! images, asserted in the integration tests.
 
 pub mod opts;
 
 use pgr_core::LinkInput;
+use pgr_core::resolve::Dylib;
 use pgr_emit::write_image;
 use std::path::Path;
 
@@ -45,6 +47,22 @@ pub enum DriverError {
         /// The OS error.
         source: std::io::Error,
     },
+    /// A `.tbd` stub failed to parse or a library was not found.
+    #[error("{path}: {source}")]
+    Tbd {
+        /// The stub path (or the flag that wanted one).
+        path: String,
+        /// The parse failure.
+        source: pgr_format::FormatError,
+    },
+    /// A `-u` force-load symbol did not resolve to an in-image definition.
+    #[error("-u {symbol}: {message}")]
+    ForceLoad {
+        /// The force-loaded symbol.
+        symbol: String,
+        /// What failed.
+        message: String,
+    },
 }
 
 /// The in-memory link product: image bytes plus the plan facts.
@@ -58,24 +76,145 @@ pub struct ImageAndPlan {
     pub fixup_slots: usize,
 }
 
+/// Classifies an input by content: `true` when the bytes look like a
+/// text-based dylib stub (`--- !tapi-tbd` / `--- !tbd-tbd`).
+#[must_use]
+fn looks_like_tbd(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"--- !tapi-tbd")
+        || bytes.starts_with(b"--- !tbd-tbd")
+        || bytes.starts_with(b"--- !tbd-tbd-version")
+}
+
+/// Maps one `.tbd` document to a [`Dylib`] input.
+///
+/// # Errors
+/// [`DriverError::Tbd`] on parse failures, [`DriverError::Io`] on reads.
+pub fn tbd_to_dylib(path: &str, bytes: &[u8], weak: bool) -> Result<Dylib, DriverError> {
+    let tbd = pgr_format::parse_tbd(bytes).map_err(|e| DriverError::Tbd {
+        path: path.to_string(),
+        source: e,
+    })?;
+    Ok(Dylib {
+        install_name: tbd.install_name,
+        current_version: tbd.current_version,
+        compatibility_version: tbd.compatibility_version,
+        exports: tbd
+            .exports
+            .into_iter()
+            .map(|s| s.name.into_bytes())
+            .collect(),
+        weak,
+    })
+}
+
+/// Resolves `-l<name>` against the `-L` search dirs (then the default
+/// `/usr/lib`) to a `.tbd` path. Mach-O dylib binaries are M3 — the search
+/// reports them distinctly.
+///
+/// # Errors
+/// [`DriverError::Io`] when the file exists but cannot be read.
+pub fn resolve_lib(
+    name: &str,
+    lib_dirs: &[String],
+) -> Result<Option<(String, Vec<u8>)>, DriverError> {
+    let candidates = ["lib".to_owned() + name + ".tbd", name.to_owned() + ".tbd"];
+    let mut dirs: Vec<&str> = lib_dirs.iter().map(String::as_str).collect();
+    dirs.push("/usr/lib");
+    for dir in &dirs {
+        for cand in &candidates {
+            let p = Path::new(dir).join(cand);
+            if p.is_file() {
+                let bytes = std::fs::read(&p).map_err(|source| DriverError::Io {
+                    path: p.display().to_string(),
+                    source,
+                })?;
+                return Ok(Some((p.display().to_string(), bytes)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Links the option inputs into image bytes (no filesystem). Exposed for
 /// tests, benchmarks and the verifier pipeline.
 ///
 /// # Errors
-/// [`DriverError`] on option, link or emit failures.
+/// [`DriverError`] on option, link, emit, tbd or I/O failures.
 pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> {
     let mut inputs = Vec::with_capacity(opts.inputs.len());
+    let mut dylibs: Vec<Dylib> = Vec::new();
     for (i, path) in opts.inputs.iter().enumerate() {
         let bytes = std::fs::read(path).map_err(|source| DriverError::Io {
             path: path.clone(),
             source,
         })?;
+        if looks_like_tbd(&bytes) {
+            let weak = opts.weak_library_inputs.contains(&i);
+            dylibs.push(tbd_to_dylib(path, &bytes, weak)?);
+            continue;
+        }
         inputs.push(LinkInput {
             name: format!("{path} (input {i})"),
             bytes,
         });
     }
-    let result = pgr_core::link(&inputs, &opts.config)?;
+    // `-l` library search: every hit is a `.tbd` stub (M2); a Mach-O dylib
+    // binary is an explicit M3 error.
+    for name in &opts.libs {
+        match resolve_lib(name, &opts.lib_dirs)? {
+            Some((path, bytes)) => {
+                if looks_like_tbd(&bytes) {
+                    dylibs.push(tbd_to_dylib(&path, &bytes, false)?);
+                } else if pgr_format::MachHeader64::parse(&bytes)
+                    .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
+                {
+                    return Err(DriverError::Tbd {
+                        path,
+                        source: pgr_format::FormatError::Malformed {
+                            what: "Mach-O dylib binaries arrive at M3 (use a .tbd stub at M2)"
+                                .into(),
+                        },
+                    });
+                } else {
+                    return Err(DriverError::Tbd {
+                        path,
+                        source: pgr_format::FormatError::Malformed {
+                            what: "not a .tbd stub".into(),
+                        },
+                    });
+                }
+            }
+            None => {
+                return Err(DriverError::Tbd {
+                    path: format!("lib{name}.tbd"),
+                    source: pgr_format::FormatError::Malformed {
+                        what: "library not found (searched -L dirs and /usr/lib)".into(),
+                    },
+                });
+            }
+        }
+    }
+    let mut config = opts.config.clone();
+    config.dylibs = dylibs;
+    let result = pgr_core::link(&inputs, &config)?;
+
+    // `-u <symbol>`: the symbol must resolve to an in-image definition
+    // (force-loading archive members is M3; the check is the M2 shape).
+    for sym in &opts.force_load {
+        let defined = result.layout.symbols.iter().any(|s| {
+            s.external
+                && s.n_type & pgr_format::consts::N_TYPE != pgr_format::consts::N_UNDF
+                && result.interner.bytes(s.name) == sym.as_bytes()
+        });
+        if !defined {
+            return Err(DriverError::ForceLoad {
+                symbol: sym.clone(),
+                message: "not defined by any object input (force-loading archive members                           arrives at M3)"
+                    .into(),
+            });
+        }
+    }
+
     let image = pgr_emit::build_image(&result.layout, &result.objects)?;
     Ok(ImageAndPlan {
         entryoff: result.layout.entryoff,
