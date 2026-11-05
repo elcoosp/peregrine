@@ -1,0 +1,25 @@
+[package]
+name = "pgr-verify"
+description = "Peregrine read-side verifier: structural checks, segment contract, chain-walk simulation, signature recompute (M0)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+pgr-format = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+pgr-fixtures = { workspace = true }
+object = { workspace = true }
+proptest = { workspace = true }
+
+[[bin]]
+name = "pgr-verify"
+path = "src/main.rs"
+
+[lints]
+workspace = true
