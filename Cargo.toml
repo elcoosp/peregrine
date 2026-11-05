@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/pgr-driver",
+    "crates/pgr-format",
+    "crates/pgr-core",
+    "crates/pgr-emit",
+    "crates/pgr-verify",
+    "crates/pgr-fixtures",
+]
+# cargo-fuzz harness lives in its own workspace (nightly-only).
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Peregrine contributors"]
+
+[workspace.dependencies]
+pgr-format = { path = "crates/pgr-format" }
+pgr-fixtures = { path = "crates/pgr-fixtures" }
+bytemuck = { version = "1", features = ["derive"] }
+thiserror = "2"
+sha2 = "0.10"
+object = { version = "0.37", default-features = false, features = ["read"] }
+proptest = "1"
+criterion = { version = "0.7", default-features = false, features = ["html_reports"] }
+
+# Workspace-wide lint policy (Peregrine hot-path rules, perf doc §5):
+#   * `unsafe` is forbidden everywhere at M0. When `pgr-emit`/`pgr-format` later
+#     need audited `unsafe` blocks (perf doc rule 9), they must opt in per crate
+#     with a design note — never blanket-allowed.
+#   * No lint suppression anywhere: CI runs `cargo clippy -- -D warnings` and the
+#     codebase carries no `#[allow]`/`#[expect]` attributes.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+
+# TDD §8: build the linker itself for speed. `panic = "abort"` is deferred to the
+# M4 speed pass (it interferes with criterion's catch_unwind in benches).
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
