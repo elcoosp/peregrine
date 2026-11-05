@@ -42,4 +42,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "parse_tbd"
+path = "fuzz_targets/parse_tbd.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
