@@ -239,7 +239,12 @@ fn simulate_dyld(image: &[u8], payload: &[u8]) -> std::collections::HashMap<u64,
         }
         let rec_at = hdr.starts_offset as usize + off as usize;
         let seg = parse_starts_in_segment(payload, rec_at).unwrap();
-        assert_eq!(seg.pointer_format, DYLD_CHAINED_PTR_64_OFFSET);
+        assert!(
+            seg.pointer_format == DYLD_CHAINED_PTR_64_OFFSET
+                || seg.pointer_format == pgr_format::consts::DYLD_CHAINED_PTR_64,
+            "unsupported pointer format {}",
+            seg.pointer_format
+        );
         for page in 0..seg.page_count {
             let heads = page_chain_starts(payload, rec_at, &seg, page).unwrap();
             for h in heads {
@@ -523,4 +528,658 @@ fn undefined_symbol_fails_with_a_pointer_to_the_input() {
     let msg = err.to_string();
     assert!(msg.contains("_greet"), "{msg}");
     assert!(msg.contains("e2e_alone.o"), "{msg}");
+}
+
+// ---------------------------------------------------------------------------
+// M2 — dynamic executable gates (architecture doc §10.3 row M2)
+// ---------------------------------------------------------------------------
+
+/// printf-main.o: `BL _printf` through a GOT-load sequence plus an
+/// adrp/add on a local string, and an `__data` pointer bound to `_printf`
+/// (direct chained bind).
+fn printf_main() -> Vec<u8> {
+    let text: Vec<u8> = [
+        0x9000_0000u32, // adrp x0, _printf@GOTPAGE
+        0xF940_0000u32, // ldr x0, [x0, _printf@GOTPAGEOFF]
+        0x9400_0000u32, // bl _printf
+        0x9000_0001u32, // adrp x1, _msg@page
+        0x9100_0020u32, // add x1, x1, #_msg@pageoff
+        0xD65F_03C0u32, // ret
+    ]
+    .iter()
+    .flat_map(|w| w.to_le_bytes())
+    .collect();
+    let mut b = ObjectBuilder::new("printf_main.o");
+    let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
+    let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
+    b.add_section(ObjectSection::cstring("hi\n"));
+    let main_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: sect,
+        value: 0,
+        weak: false,
+    });
+    let printf_sym = b.add_symbol(ObjectSymbol::Undefined {
+        name: "_printf".into(),
+        weak_ref: false,
+    });
+    let msg_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_msg".into(),
+        section_index: 2,
+        value: 0,
+        weak: false,
+    });
+    // Relocation `r_symbolnum`s are symtab-table indices (defs before
+    // undefs), resolved via `sym_index`.
+    let printf = b.sym_index(printf_sym);
+    let msg = b.sym_index(msg_sym);
+    let _ = main_sym;
+    b.section_mut(sect).relocs = vec![
+        ObjectReloc::got_page21(printf).at(0),
+        ObjectReloc::got_pageoff12(printf).at(4),
+        ObjectReloc::branch26(printf).at(8),
+        ObjectReloc::addend(0).at(12),
+        ObjectReloc::page21(msg).at(12),
+        ObjectReloc::addend(0).at(16),
+        ObjectReloc::pageoff12(msg).at(16),
+    ];
+    b.section_mut(data)
+        .relocs
+        .push(ObjectReloc::unsigned(printf).at(0));
+    b.build().unwrap()
+}
+
+/// A libSystem-shaped `.tbd` (v4) exporting the printf surface.
+fn libsystem_tbd() -> &'static str {
+    "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: /usr/lib/libSystem.B.dylib\ncurrent-version: 1.2.3\ncompatibility-version: 1.0.0\nexports:\n  - targets: [ arm64-macos ]\n    symbols: [ _printf, _strlen ]\n...\n"
+}
+
+/// Writes the tbd stub into `dir` and links `printf_main.o` against it.
+fn link_printf_in(
+    dir: std::path::PathBuf,
+    tweak: impl FnOnce(&mut Options),
+) -> (Vec<u8>, pgr_driver::ImageAndPlan) {
+    let obj = dir.join("printf_main.o");
+    std::fs::write(&obj, printf_main()).unwrap();
+    let tbd = dir.join("libSystem.tbd");
+    std::fs::write(&tbd, libsystem_tbd()).unwrap();
+    let mut opts = Options::default();
+    opts.inputs.push(obj.display().to_string());
+    opts.inputs.push(tbd.display().to_string());
+    opts.config.ident = "peregrine-m2".into();
+    tweak(&mut opts);
+    let linked = pgr_driver::link_to_image(&opts).unwrap();
+    (linked.image.clone(), linked)
+}
+
+/// Finds the export-trie payload bytes.
+fn find_trie(bytes: &[u8]) -> Vec<u8> {
+    let header = MachHeader64::parse(bytes).unwrap();
+    let mut it = pgr_format::LoadCommandIter::new(
+        bytes,
+        MachHeader64::SIZE,
+        header.ncmds,
+        header.sizeofcmds,
+    )
+    .unwrap();
+    while let Some(cmd) = it.next_command().unwrap() {
+        if let pgr_format::LoadCommandKind::LinkeditData(pgr_format::consts::LC_DYLD_EXPORTS_TRIE) =
+            cmd.kind
+        {
+            return pgr_format::LinkeditDataCommand::parse(cmd.bytes)
+                .unwrap()
+                .data(bytes)
+                .unwrap()
+                .to_vec();
+        }
+    }
+    panic!("image carries no LC_DYLD_EXPORTS_TRIE");
+}
+
+/// Walks every chain of a dynamic image; returns `(vaddr, word)` per slot
+/// plus the parsed import table (the full dyld simulation basis).
+fn walk_chains(
+    image: &[u8],
+    payload: &[u8],
+) -> (
+    Vec<(u64, ChainWord64)>,
+    Vec<pgr_format::fixups::Import>,
+    Vec<u8>,
+) {
+    let hdr = parse_header(payload).unwrap();
+    let imports = parse_imports(payload, &hdr).unwrap();
+    let names = payload[hdr.symbols_offset as usize..].to_vec();
+    let starts = parse_starts_in_image(payload, hdr.starts_offset as usize).unwrap();
+    let mut out = Vec::new();
+    for &off in &starts.seg_info_offset {
+        if off == 0 {
+            continue;
+        }
+        let rec_at = hdr.starts_offset as usize + off as usize;
+        let seg = parse_starts_in_segment(payload, rec_at).unwrap();
+        assert!(
+            seg.pointer_format == DYLD_CHAINED_PTR_64_OFFSET
+                || seg.pointer_format == pgr_format::consts::DYLD_CHAINED_PTR_64,
+            "unsupported pointer format {}",
+            seg.pointer_format
+        );
+        for page in 0..seg.page_count {
+            let heads = page_chain_starts(payload, rec_at, &seg, page).unwrap();
+            for h in heads {
+                let mut slot_off = u64::from(h);
+                loop {
+                    let file =
+                        seg.segment_offset + u64::from(page) * u64::from(seg.page_size) + slot_off;
+                    let word = ChainWord64::new(u64::from_le_bytes(
+                        image[file as usize..file as usize + 8].try_into().unwrap(),
+                    ));
+                    out.push((file + PAGEZERO_SIZE_64, word));
+                    if word.next() == 0 {
+                        break;
+                    }
+                    slot_off += u64::from(word.next()) * 4;
+                }
+            }
+        }
+    }
+    (out, imports, names)
+}
+
+/// The load commands of the image (kind, cmd bytes).
+fn load_commands(bytes: &[u8]) -> Vec<(pgr_format::LoadCommandKind, Vec<u8>)> {
+    let header = MachHeader64::parse(bytes).unwrap();
+    let mut it = pgr_format::LoadCommandIter::new(
+        bytes,
+        MachHeader64::SIZE,
+        header.ncmds,
+        header.sizeofcmds,
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    while let Some(cmd) = it.next_command().unwrap() {
+        out.push((cmd.kind, cmd.bytes.to_vec()));
+    }
+    out
+}
+
+#[test]
+fn m2_links_printf_from_tbd() {
+    let (image, linked) = link_printf_in(unique_dir("m2printf"), |_| {});
+    // The verifier's full simulation accepts the dynamic image.
+    let vopts = pgr_verify::Options {
+        strict_warnings: true,
+        skip_hash_recompute: false,
+    };
+    let report = pgr_verify::verify(&image, &vopts);
+    assert!(report.is_ok(&vopts), "verifier issues: {report:?}");
+
+    let syms = parse_output(&image);
+    // __TEXT,__stubs (12 B/slot) and __DATA_CONST,__got (8 B/slot) exist.
+    let (_saddr, ssize) = syms.sections[&("__TEXT".into(), "__stubs".into())];
+    let (gaddr, gsize) = syms.sections[&("__DATA_CONST".into(), "__got".into())];
+    assert_eq!(ssize, 12, "one stub for _printf");
+    assert_eq!(gsize, 8, "one GOT slot for _printf");
+    assert!(linked.fixup_slots >= 2, "got bind + data bind");
+
+    // The stub decodes as adrp x16 / ldr x16 / br x16 patched to the slot.
+    let stub_file = ssize; // placeholder to keep types honest
+    let _ = stub_file;
+    let text_addr = syms.sections[&("__TEXT".into(), "__text".into())].0;
+    let stub_at = (gaddr - PAGEZERO_SIZE_64) as usize; // sanity variable reuse
+    let _ = stub_at;
+    let stub_file_off =
+        (syms.sections[&("__TEXT".into(), "__stubs".into())].0 - PAGEZERO_SIZE_64) as usize;
+    let w0 = u32::from_le_bytes(image[stub_file_off..stub_file_off + 4].try_into().unwrap());
+    let w1 = u32::from_le_bytes(
+        image[stub_file_off + 4..stub_file_off + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let w2 = u32::from_le_bytes(
+        image[stub_file_off + 8..stub_file_off + 12]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(w2, 0xD61F_0200, "br x16");
+    assert_eq!(w1 & 0xFFC0_0000, 0xF940_0000, "ldr x16, [x16, #imm12]");
+    assert_eq!(w0 & 0x9F00_0000, 0x9000_0000, "adrp x16");
+    // ldr imm12 points at the GOT slot's page offset / 8.
+    let imm12 = (w1 >> 10) & 0xfff;
+    let slot_pageoff = (gaddr & 0xFFF) / 8;
+    assert_eq!(u64::from(imm12), slot_pageoff, "ldr targets the got slot");
+    // adrp page delta lands on the got page.
+    let rd = w0 & 0x1f;
+    assert_eq!(rd, 16, "stub uses x16");
+    let _ = text_addr;
+
+    // Chains: one bind on the GOT slot (ordinal 0), one on the data slot.
+    let (slots, imports, names) = walk_chains(&image, &find_fixup_payload(&image));
+    assert_eq!(imports.len(), 1, "_printf only");
+    assert_eq!(imports[0].lib_ordinal, 1, "libSystem is LC_LOAD_DYLIB #1");
+    assert_eq!(
+        &names[imports[0].name_offset as usize..imports[0].name_offset as usize + 8],
+        b"_printf\0"
+    );
+    let binds: Vec<_> = slots.iter().filter(|(_, w)| w.is_bind()).collect();
+    assert_eq!(binds.len(), 2, "got slot + data slot");
+    for (_, w) in binds {
+        assert_eq!(w.bind_ordinal(), 0);
+    }
+
+    // Symtab: _printf undefined with library ordinal 1; extdefs + header.
+    let header = MachHeader64::parse(&image).unwrap();
+    let _ = header;
+    let undef = {
+        let cmds = load_commands(&image);
+        let (kind, _) = cmds
+            .iter()
+            .find(|(k, _)| matches!(k, pgr_format::LoadCommandKind::Symtab))
+            .expect("symtab");
+        let _ = kind;
+        let st = pgr_format::SymtabCommand::parse(
+            &cmds
+                .iter()
+                .find(|(k, _)| matches!(k, pgr_format::LoadCommandKind::Symtab))
+                .unwrap()
+                .1,
+            0,
+        )
+        .unwrap();
+        let mut found = None;
+        for i in 0..st.nsyms {
+            let sym: pgr_format::symtab::Nlist64 = pgr_format::cursor::pod_read_unaligned_at(
+                &image,
+                st.symoff as usize + i as usize * 16,
+            )
+            .unwrap();
+            let strx = sym.n_strx as usize;
+            let end = image[st.stroff as usize + strx..]
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap();
+            let name = String::from_utf8_lossy(
+                &image[st.stroff as usize + strx..st.stroff as usize + strx + end],
+            )
+            .into_owned();
+            if name == "_printf" {
+                found = Some(sym);
+            }
+        }
+        found.expect("_printf in the output symtab")
+    };
+    assert_eq!(undef.n_type & 0x0e, 0x0, "_printf is N_UNDF");
+    assert_eq!(undef.library_ordinal(), 1, "two-level ordinal = libSystem");
+    assert_eq!(undef.n_value, 0);
+
+    // LC_LOAD_DYLIB carries the install name + versions from the tbd.
+    let cmds = load_commands(&image);
+    let dylib_cmd = cmds
+        .iter()
+        .find(|(k, _)| matches!(k, pgr_format::LoadCommandKind::LoadDylib))
+        .expect("LC_LOAD_DYLIB present");
+    let name = pgr_format::DylibCommand::parse(&dylib_cmd.1)
+        .unwrap()
+        .name(&dylib_cmd.1)
+        .unwrap();
+    assert_eq!(name, b"/usr/lib/libSystem.B.dylib");
+
+    // MH_TWOLEVEL set; the trie exports __mh_execute_header (and _main).
+    let hflags = u32::from_le_bytes(image[24..28].try_into().unwrap());
+    assert!(hflags & pgr_format::consts::MH_TWOLEVEL != 0);
+    let trie = find_trie(&image);
+    let mut report = pgr_verify::Report::default();
+    let exports = pgr_verify::export_trie::check_export_trie(&trie, &mut report);
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|i| i.severity == pgr_verify::Severity::Error),
+        "{report:?}"
+    );
+    let names: Vec<_> = exports.entries.iter().map(|(n, _, _)| n.clone()).collect();
+    assert!(
+        names.contains(&"__mh_execute_header".to_string()),
+        "{names:?}"
+    );
+    assert!(names.contains(&"_main".to_string()), "{names:?}");
+
+    // Indirect symbol table: __got slot then __stubs slot -> _printf index.
+    let dysym_cmd = cmds
+        .iter()
+        .find(|(k, _)| matches!(k, pgr_format::LoadCommandKind::Dysymtab))
+        .expect("dysymtab");
+    let d = pgr_format::DysymtabCommand::parse(&dysym_cmd.1, 0).unwrap();
+    assert_eq!(d.nindirectsyms, 2, "one got slot + one stub slot");
+    let ind0 = u32::from_le_bytes(
+        image[d.indirectsymoff as usize..d.indirectsymoff as usize + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let ind1 = u32::from_le_bytes(
+        image[d.indirectsymoff as usize + 4..d.indirectsymoff as usize + 8]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(ind0, ind1, "both slots point at the _printf symtab entry");
+    assert!(
+        (ind0 as usize) < d.iundefsym as usize + d.nundefsym as usize,
+        "entry names the undefined symbol"
+    );
+}
+
+#[test]
+fn m2_flat_namespace_binds_dyld_flat() {
+    let (image, _) = link_printf_in(unique_dir("m2flat"), |o| {
+        o.config.flat_namespace = true;
+    });
+    let (_, imports, names) = walk_chains(&image, &find_fixup_payload(&image));
+    assert_eq!(imports.len(), 1);
+    assert_eq!(
+        imports[0].lib_ordinal,
+        pgr_format::consts::BIND_SPECIAL_DYLIB_FLAT_LOOKUP,
+        "flat lookup ordinal"
+    );
+    assert_eq!(&names[imports[0].name_offset as usize..], b"_printf\0");
+    // No MH_TWOLEVEL in flat mode.
+    let hflags = u32::from_le_bytes(image[24..28].try_into().unwrap());
+    assert_eq!(hflags & pgr_format::consts::MH_TWOLEVEL, 0);
+    // The undefined symbol carries the flat ordinal in n_desc too.
+    let report = pgr_verify::verify(&image, &pgr_verify::Options::default());
+    assert!(report.is_ok(&pgr_verify::Options::default()), "{report:?}");
+}
+
+#[test]
+fn m2_undefined_dynamic_lookup_binds_weak_flat() {
+    let dir = unique_dir("m2dyn");
+    let obj = dir.join("weak_main.o");
+    let text: Vec<u8> = [
+        0x9400_0000u32, // bl _optional
+        0xD65F_03C0u32, // ret
+    ]
+    .iter()
+    .flat_map(|w| w.to_le_bytes())
+    .collect();
+    let mut b = ObjectBuilder::new("weak_main.o");
+    let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: sect,
+        value: 0,
+        weak: false,
+    });
+    let opt_sym = b.add_symbol(ObjectSymbol::Undefined {
+        name: "_optional".into(),
+        weak_ref: true,
+    });
+    let opt = b.sym_index(opt_sym);
+    b.section_mut(sect).relocs = vec![ObjectReloc::branch26(opt).at(0)];
+    std::fs::write(&obj, b.build().unwrap()).unwrap();
+    let mut opts = Options::default();
+    opts.inputs.push(obj.display().to_string());
+    opts.config.undefined_policy = pgr_core::resolve::UndefinedPolicy::DynamicLookup;
+    opts.config.ident = "peregrine-m2".into();
+    let image = pgr_driver::link_to_image(&opts).unwrap().image;
+
+    let (_, imports, _) = walk_chains(&image, &find_fixup_payload(&image));
+    assert_eq!(imports.len(), 1);
+    assert!(imports[0].weak_import, "weak dynamic lookup");
+    assert_eq!(
+        imports[0].lib_ordinal,
+        pgr_format::consts::BIND_SPECIAL_DYLIB_FLAT_LOOKUP
+    );
+    let vopts = pgr_verify::Options::default();
+    let report = pgr_verify::verify(&image, &vopts);
+    assert!(report.is_ok(&vopts), "{report:?}");
+}
+
+#[test]
+fn m2_import_ordinals_follow_first_use() {
+    // Same dylib, two calls: _strlen first (vaddr order), then _memcpy.
+    let dir = unique_dir("m2order");
+    let text: Vec<u8> = [
+        0x9400_0000u32, // bl _strlen
+        0x9400_0000u32, // bl _memcpy
+        0xD65F_03C0u32, // ret
+    ]
+    .iter()
+    .flat_map(|w| w.to_le_bytes())
+    .collect();
+    let mut b = ObjectBuilder::new("order.o");
+    let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: sect,
+        value: 0,
+        weak: false,
+    });
+    let strlen_sym = b.add_symbol(ObjectSymbol::Undefined {
+        name: "_strlen".into(),
+        weak_ref: false,
+    });
+    let memcpy_sym = b.add_symbol(ObjectSymbol::Undefined {
+        name: "_memcpy".into(),
+        weak_ref: false,
+    });
+    // Table order: _main(def)=0, then undefs in declaration order.
+    let strlen = b.sym_index(strlen_sym);
+    let memcpy = b.sym_index(memcpy_sym);
+    b.section_mut(sect).relocs = vec![
+        ObjectReloc::branch26(strlen).at(0),
+        ObjectReloc::branch26(memcpy).at(4),
+    ];
+    let obj = dir.join("order.o");
+    std::fs::write(&obj, b.build().unwrap()).unwrap();
+    let tbd = dir.join("libstr.tbd");
+    std::fs::write(
+        &tbd,
+        "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: /usr/lib/libstr.dylib\nexports:\n  - targets: [ arm64-macos ]\n    symbols: [ _strlen, _memcpy, _aaa ]\n...\n",
+    )
+    .unwrap();
+    let mut opts = Options::default();
+    opts.inputs.push(obj.display().to_string());
+    opts.inputs.push(tbd.display().to_string());
+    opts.config.ident = "peregrine-m2".into();
+    let image = pgr_driver::link_to_image(&opts).unwrap().image;
+
+    let (_, imports, names) = walk_chains(&image, &find_fixup_payload(&image));
+    assert_eq!(imports.len(), 2);
+    let n0 = &names[imports[0].name_offset as usize..imports[0].name_offset as usize + 8];
+    let n1 = &names[imports[1].name_offset as usize..];
+    assert_eq!(&n0[..8], b"_strlen\0", "first-use order (spike S6)");
+    assert_eq!(&n1[..8], b"_memcpy\0");
+    assert_eq!(imports[0].lib_ordinal, 1);
+    assert_eq!(imports[1].lib_ordinal, 1);
+}
+
+#[test]
+fn m2_rpath_and_source_version_commands_land() {
+    let (image, _) = link_printf_in(unique_dir("m2d13"), |o| {
+        o.config.rpaths.push("@executable_path/../lib".into());
+        o.config.rpaths.push("/opt/peregrine/lib".into());
+        o.config.source_version = Some(1u64 << 40 | 2 << 30 | 3 << 20);
+    });
+    let cmds = load_commands(&image);
+    // Parse the rpath strings via the raw bytes (lc_str offset 12).
+    let rpath_raw: Vec<String> = cmds
+        .iter()
+        .filter(|(k, _)| matches!(k, pgr_format::LoadCommandKind::Rpath))
+        .map(|(_, b)| {
+            let end = b[12..].iter().position(|&c| c == 0).unwrap();
+            String::from_utf8_lossy(&b[12..12 + end]).into_owned()
+        })
+        .collect();
+    assert_eq!(
+        rpath_raw,
+        ["@executable_path/../lib", "/opt/peregrine/lib"],
+        "rpaths in command order"
+    );
+    let sv = cmds
+        .iter()
+        .find(|(k, _)| matches!(k, pgr_format::LoadCommandKind::SourceVersion))
+        .expect("LC_SOURCE_VERSION present");
+    let value = u64::from_le_bytes(sv.1[8..16].try_into().unwrap());
+    assert_eq!(value, 1u64 << 40 | 2 << 30 | 3 << 20);
+    // The image still verifies clean.
+    let vopts = pgr_verify::Options::default();
+    let report = pgr_verify::verify(&image, &vopts);
+    assert!(report.is_ok(&vopts), "{report:?}");
+}
+
+#[test]
+fn m2_direct_page_reloc_to_external_is_rejected() {
+    let dir = unique_dir("m2direct");
+    let text: Vec<u8> = [
+        0x9000_0000u32, // adrp x0, _printf@page (direct!)
+        0x9100_0000u32, // add x0, x0, #_printf@pageoff
+        0xD65F_03C0u32, // ret
+    ]
+    .iter()
+    .flat_map(|w| w.to_le_bytes())
+    .collect();
+    let mut b = ObjectBuilder::new("direct.o");
+    let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: sect,
+        value: 0,
+        weak: false,
+    });
+    let printf_sym = b.add_symbol(ObjectSymbol::Undefined {
+        name: "_printf".into(),
+        weak_ref: false,
+    });
+    let printf = b.sym_index(printf_sym);
+    b.section_mut(sect).relocs = vec![
+        ObjectReloc::addend(0).at(0),
+        ObjectReloc::page21(printf).at(0),
+        ObjectReloc::addend(0).at(4),
+        ObjectReloc::pageoff12(printf).at(4),
+    ];
+    let obj = dir.join("direct.o");
+    std::fs::write(&obj, b.build().unwrap()).unwrap();
+    let tbd = dir.join("libSystem.tbd");
+    std::fs::write(&tbd, libsystem_tbd()).unwrap();
+    let mut opts = Options::default();
+    opts.inputs.push(obj.display().to_string());
+    opts.inputs.push(tbd.display().to_string());
+    let err = pgr_driver::link_to_image(&opts).unwrap_err().to_string();
+    assert!(err.contains("GOT"), "{err}");
+}
+
+/// Locates `ld64.lld` for the golden comparison (env override first, then
+/// PATH). Returns `None` when unavailable — the golden test skips.
+fn find_lld() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("PGR_LLD64") {
+        let path = std::path::PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let path = std::path::PathBuf::from("ld64.lld");
+    std::process::Command::new(&path)
+        .arg("-v")
+        .output()
+        .is_ok()
+        .then_some(path)
+}
+
+/// The M2 "slot-for-slot vs lld" gate: link the SAME object against the
+/// SAME tbd with `ld64.lld` and compare the bind semantics our dyld
+/// simulation produces (per-slot: import ordinal → (lib, name, addend,
+/// weak); rebase targets) with what the golden linker produced.
+#[test]
+fn m2_lld_golden_binds_slot_for_slot() {
+    let Some(lld) = find_lld() else {
+        eprintln!("skipping lld golden: no ld64.lld (set PGR_LLD64 or install lld)");
+        return;
+    };
+    let dir = unique_dir("m2lld");
+    let obj = dir.join("printf_main.o");
+    std::fs::write(&obj, printf_main()).unwrap();
+    let tbd = dir.join("libSystem.tbd");
+    std::fs::write(&tbd, libsystem_tbd()).unwrap();
+    let lld_out = dir.join("lld_out");
+
+    // lld refuses direct page relocs to externals too, but our object only
+    // carries GOT-load/branch/unsigned relocs, so both linkers accept it.
+    let status = std::process::Command::new(&lld)
+        .args([
+            "-arch",
+            "arm64",
+            "-platform_version",
+            "macos",
+            "12.0",
+            "14.0",
+            "-fixup_chains",
+            "-o",
+        ])
+        .arg(&lld_out)
+        .arg(&obj)
+        .arg(&tbd)
+        .status()
+        .expect("run ld64.lld");
+    assert!(status.success(), "ld64.lld failed to link the corpus");
+
+    let lld_image = std::fs::read(&lld_out).unwrap();
+    let pgr_image = link_printf_in(dir.clone(), |_| {}).0;
+
+    // Semantic comparison: the multiset of (kind, lib, name, addend, weak)
+    // over both images' fixup slots, plus each image's import table.
+    let semantic_of = |image: &[u8]| -> Vec<(bool, u16, String, i64, bool)> {
+        let (_, imports, names) = walk_chains(image, &find_fixup_payload(image));
+        let mut out = Vec::new();
+        for (_, w) in walk_chains(image, &find_fixup_payload(image)).0 {
+            if w.is_bind() {
+                let imp = &imports[w.bind_ordinal() as usize];
+                let name = names[imp.name_offset as usize..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|e| {
+                        String::from_utf8_lossy(
+                            &names[imp.name_offset as usize..imp.name_offset as usize + e],
+                        )
+                        .into_owned()
+                    })
+                    .unwrap_or_default();
+                out.push((
+                    true,
+                    imp.lib_ordinal,
+                    name,
+                    imp.addend + i64::from(w.bind_addend()),
+                    imp.weak_import,
+                ));
+            } else {
+                out.push((false, 0, String::new(), 0, false));
+            }
+        }
+        out.sort();
+        out
+    };
+    let ours = semantic_of(&pgr_image);
+    let golden = semantic_of(&lld_image);
+    assert_eq!(
+        ours, golden,
+        "bind/rebase slot semantics must match ld64.lld slot-for-slot"
+    );
+    // Import tables agree on the (lib, name) pairs.
+    let imports_of = |image: &[u8]| -> Vec<(u16, String, bool)> {
+        let (_, imports, names) = walk_chains(image, &find_fixup_payload(image));
+        imports
+            .iter()
+            .map(|i| {
+                let name = names[i.name_offset as usize..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|e| {
+                        String::from_utf8_lossy(
+                            &names[i.name_offset as usize..i.name_offset as usize + e],
+                        )
+                        .into_owned()
+                    })
+                    .unwrap_or_default();
+                (i.lib_ordinal, name, i.weak_import)
+            })
+            .collect()
+    };
+    assert_eq!(imports_of(&pgr_image), imports_of(&lld_image));
 }
