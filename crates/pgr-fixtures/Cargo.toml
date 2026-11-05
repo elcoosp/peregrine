@@ -1,0 +1,16 @@
+[package]
+name = "pgr-fixtures"
+description = "Deterministic Mach-O test-image builder shared by pgr-verify tests and pgr-format benches (not published)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+pgr-format = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
