@@ -22,10 +22,10 @@ use pgr_format::load_command::{LoadCommandIter, LoadCommandKind};
 use pgr_format::reloc::RelocationInfo;
 use pgr_format::segment::{Section64, SegmentCommand64};
 
-/// The decoded relocation kinds the M1 emit path can apply (TDD §3.5).
+/// The decoded relocation kinds the emit path can apply (TDD §3.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelocKind {
-    /// 8-byte absolute pointer slot → chained fixup (rebase at M1).
+    /// 8-byte absolute pointer slot → chained fixup (rebase or bind).
     Unsigned,
     /// `B`/`BL` 26-bit branch immediate.
     Branch26,
@@ -39,6 +39,21 @@ pub enum RelocKind {
         /// Addend carried by the paired `ADDEND` entry.
         addend: i64,
     },
+    /// ADRP against the symbol's synthetic GOT slot, with its paired
+    /// `ADDEND` (M2: the slot is synthesized in `__DATA_CONST,__got`).
+    GotLoadPage21 {
+        /// Addend carried by the paired `ADDEND` entry.
+        addend: i64,
+    },
+    /// LDR against the symbol's synthetic GOT slot, with its paired
+    /// `ADDEND` (M2).
+    GotLoadPageOff12 {
+        /// Addend carried by the paired `ADDEND` entry.
+        addend: i64,
+    },
+    /// A pointer whose value is the symbol's GOT slot address (M2: the
+    /// slot becomes a chained rebase targeting the GOT slot's vaddr).
+    PointerToGot,
     /// Paired subtraction: this relocation's `target` is the *subtrahend*;
     /// the preceding `SUBTRACTOR` named the minuend.
     Subtractor {
@@ -82,6 +97,10 @@ pub struct InputSection {
     pub flags: u32,
     /// Alignment exponent.
     pub align_log2: u32,
+    /// Section `addr`: the base symbol `n_value`s are relative to. Nonzero
+    /// under the LLVM single-segment convention where the address is the
+    /// section's offset into the object's section-data blob.
+    pub addr: u64,
     /// Byte range within the object (empty for zero-fill sections).
     pub data: core::ops::Range<u64>,
     /// Virtual size (== byte length except zero-fill).
@@ -264,12 +283,29 @@ impl InputObject {
             } else {
                 (None, None)
             };
+            // Normalize the value to *section-relative*: the LLVM
+            // single-segment convention carries blob-relative `n_value`s and
+            // nonzero section addresses; the legacy per-section convention
+            // has addr == 0. One subtraction covers both.
+            let value = match section {
+                Some(idx) => {
+                    let base = sections[idx].addr;
+                    if raw.n_value < base {
+                        return Err(fail(format!(
+                            "symbol {i}: n_value {:#x} below section base {:#x}",
+                            raw.n_value, base
+                        )));
+                    }
+                    raw.n_value - base
+                }
+                None => raw.n_value,
+            };
             symbols.push(InputSymbol {
                 name: StringId(0), // patched by `finish` after interning
                 external,
                 stab,
                 section,
-                value: raw.n_value,
+                value,
                 weak_def: raw.n_desc & N_WEAK_DEF != 0,
                 weak_ref: raw.n_desc & N_WEAK_REF != 0,
                 common_align,
@@ -343,9 +379,13 @@ impl InputObject {
                         let kind = match r2.rtype() {
                             ARM64_RELOC_PAGE21 => RelocKind::Page21 { addend },
                             ARM64_RELOC_PAGEOFF12 => RelocKind::PageOff12 { addend },
+                            ARM64_RELOC_GOT_LOAD_PAGE21 => RelocKind::GotLoadPage21 { addend },
+                            ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
+                                RelocKind::GotLoadPageOff12 { addend }
+                            }
                             other => {
                                 return Err(fail(format!(
-                                    "ADDEND pair target is relocation type {other}, not PAGE21/PAGEOFF12"
+                                    "ADDEND pair target is relocation type {other}, not a                                      PAGE/GOT-load reference"
                                 )));
                             }
                         };
@@ -426,18 +466,43 @@ impl InputObject {
                                 .into(),
                         ));
                     }
-                    ARM64_RELOC_GOT_LOAD_PAGE21
-                    | ARM64_RELOC_GOT_LOAD_PAGEOFF12
-                    | ARM64_RELOC_POINTER_TO_GOT => {
-                        return Err(unsupported(
-                            "GOT-based reference (M1 links -static; GOT synthesis arrives at M2)"
-                                .into(),
-                        ));
+                    ARM64_RELOC_GOT_LOAD_PAGE21 | ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
+                        // Standalone GOT-load (no ADDEND pair): the addend
+                        // is zero; clang emits the paired form, this shape
+                        // appears in hand-built objects.
+                        let target = self.reloc_target(&r, &fail)?;
+                        let kind = if r.rtype() == ARM64_RELOC_GOT_LOAD_PAGE21 {
+                            RelocKind::GotLoadPage21 { addend: 0 }
+                        } else {
+                            RelocKind::GotLoadPageOff12 { addend: 0 }
+                        };
+                        decoded.push(DecodedReloc {
+                            offset: r.r_address,
+                            kind,
+                            target,
+                            pcrel: r.pcrel(),
+                            length_log2: r.length_log2(),
+                        });
+                        i += 1;
+                    }
+                    ARM64_RELOC_POINTER_TO_GOT => {
+                        if r.pcrel() {
+                            return Err(fail("POINTER_TO_GOT is not PC-relative".into()));
+                        }
+                        let target = self.reloc_target(&r, &fail)?;
+                        decoded.push(DecodedReloc {
+                            offset: r.r_address,
+                            kind: RelocKind::PointerToGot,
+                            target,
+                            pcrel: false,
+                            length_log2: r.length_log2(),
+                        });
+                        i += 1;
                     }
                     other => {
                         return Err(unsupported(format!(
                             "relocation type {other} is not an arm64 construct Peregrine \
-                             links at M1"
+                             links"
                         )));
                     }
                 }
@@ -518,6 +583,7 @@ fn convert_section(
         segment,
         flags: s.flags,
         align_log2: s.align.min(14),
+        addr: s.addr,
         data,
         size,
         zerofill,
