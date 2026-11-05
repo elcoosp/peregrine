@@ -8,9 +8,24 @@ license.workspace = true
 authors.workspace = true
 publish = false
 
+[dependencies]
+pgr-format = { workspace = true }
+pgr-core = { path = "../pgr-core" }
+pgr-emit = { path = "../pgr-emit" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pgr-fixtures = { workspace = true }
+pgr-verify = { workspace = true }
+criterion = { workspace = true }
+
 [[bin]]
 name = "pgr"
 path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "link"
+harness = false
