@@ -1,0 +1,12 @@
+[package]
+name = "pgr-core"
+description = "Peregrine core pipeline: interner, symbol table, resolution, layout (Passes 1-3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
