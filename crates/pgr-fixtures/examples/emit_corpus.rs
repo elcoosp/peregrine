@@ -1,12 +1,14 @@
 //! Emits deterministic valid Mach-O fixtures into a directory, used to seed
-//! the cargo-fuzz corpus (see .github/workflows/fuzz.yml).
+//! the cargo-fuzz corpus (see .github/workflows/fuzz.yml). M1 adds
+//! relocatable-object seeds for the `link_object` target.
 //!
 //! Usage: `cargo run -p pgr-fixtures --example emit_corpus -- <dir>`
 
 use std::path::PathBuf;
 
 use pgr_fixtures::{
-    ImageBuilder, ImportsFormat, SectionSpec, SegmentSpec, SlotKind, SymbolSpec, filler,
+    ImageBuilder, ImportsFormat, ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol,
+    SectionSpec, SegmentSpec, SlotKind, SymbolSpec, filler,
 };
 use pgr_format::consts::{
     S_ATTR_PURE_INSTRUCTIONS, S_REGULAR, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
@@ -89,5 +91,74 @@ fn main() {
     let exec3 = b.build().expect("format-3 seed");
     std::fs::write(dir.join("exec_imports_addend64"), &exec3.bytes).expect("write seed");
 
-    println!("wrote 3 seed images into {}", dir.display());
+    // M1: relocatable-object seeds for the link_object fuzz target — a
+    // small hello-shaped pair exercising every supported relocation kind.
+    let mut main_o = ObjectBuilder::new("seed_main.o");
+    let text = main_o.add_section(ObjectSection::text(
+        "__text",
+        [
+            0x9000_0000u32, // adrp x0, msg@page
+            0x9100_0000u32, // add x0, x0, msg@pageoff
+            0x9400_0000u32, // bl greet
+            0x5280_0000u32, // mov w0, #0
+            0xD65F_03C0u32, // ret
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect(),
+        vec![
+            ObjectReloc::addend(0).at(0),
+            ObjectReloc::page21(1).at(0),
+            ObjectReloc::addend(0).at(4),
+            ObjectReloc::pageoff12(1).at(4),
+            ObjectReloc::branch26(2).at(8),
+        ],
+    ));
+    main_o.add_section(ObjectSection::cstring("hello\n"));
+    main_o.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: text,
+        value: 0,
+        weak: false,
+    });
+    main_o.add_symbol(ObjectSymbol::Defined {
+        name: "_msg".into(),
+        section_index: 1,
+        value: 0,
+        weak: false,
+    });
+    main_o.add_symbol(ObjectSymbol::Undefined {
+        name: "_greet".into(),
+        weak_ref: false,
+    });
+    std::fs::write(dir.join("seed_main.o"), main_o.build().expect("main seed"))
+        .expect("write seed");
+
+    let mut greet_o = ObjectBuilder::new("seed_greet.o");
+    let greet_text = greet_o.add_section(ObjectSection::text(
+        "__text",
+        vec![0xC0, 0x03, 0x5F, 0xD6], // ret
+        Vec::new(),
+    ));
+    let data = greet_o.add_section(ObjectSection::data("__data", vec![0u8; 8], Vec::new()));
+    greet_o
+        .section_mut(data)
+        .relocs
+        .push(ObjectReloc::unsigned(0).at(0));
+    greet_o.add_symbol(ObjectSymbol::Defined {
+        name: "_greet".into(),
+        section_index: greet_text,
+        value: 0,
+        weak: false,
+    });
+    std::fs::write(
+        dir.join("seed_greet.o"),
+        greet_o.build().expect("greet seed"),
+    )
+    .expect("write seed");
+
+    println!(
+        "wrote 3 seed images + 2 seed objects into {}",
+        dir.display()
+    );
 }
