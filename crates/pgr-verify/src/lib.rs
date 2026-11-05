@@ -17,6 +17,7 @@
 
 pub mod chain_starts;
 pub mod dynamic;
+pub mod export_trie;
 pub mod misc;
 pub mod signature;
 pub mod structural;
@@ -71,8 +72,10 @@ pub enum Code {
     SignatureLayout,
     /// A recomputed page hash does not match the CodeDirectory.
     SignatureHashMismatch,
-    /// Entry point, build version, trie or function-start payload invalid.
+    /// Entry point, build version or function-start payload invalid.
     LinkeditPayload,
+    /// The export trie is malformed, unsorted or unreadable by dyld.
+    ExportTrie,
     /// Suspicious but non-fatal condition.
     Suspicious,
 }
@@ -96,6 +99,7 @@ impl Code {
             Code::SignatureLayout => "signature_layout",
             Code::SignatureHashMismatch => "signature_hash_mismatch",
             Code::LinkeditPayload => "linkedit_payload",
+            Code::ExportTrie => "export_trie",
             Code::Suspicious => "suspicious",
         }
     }
