@@ -1,62 +1,57 @@
 //! `pgr` — the Peregrine linker driver.
 //!
-//! M0 placeholder: the ld64-compatible option surface (TDD §5 Pass 0) lands
-//! with the M1 pipeline. This binary only reports version/build metadata so
-//! the workspace shape is exercisable from day one. Deliberately
-//! dependency-free: TDD §8 keeps heavy dependencies out of `pgr-driver`.
+//! M1: the ld64-compatible option surface for static links plus the Pass 0–5
+//! loop. `pgr --help` documents the surface; `pgr-verify <image>` validates
+//! any output.
 
 use std::process::ExitCode;
 
 /// Program name as invoked on the command line.
 const PROGRAM: &str = "pgr";
 
-/// Returns the one-line version banner printed by `pgr --version`.
-pub fn version_line() -> String {
-    format!("{PROGRAM} (Peregrine) {}", env!("CARGO_PKG_VERSION"))
-}
-
-/// Returns the short usage text printed by `pgr --help`.
-pub fn usage() -> String {
-    let mut s = String::with_capacity(512);
-    s.push_str(&version_line());
-    s.push_str("\n\n");
-    s.push_str("Peregrine: ultra-fast Mach-O linker for arm64-apple-darwin.\n\n");
-    s.push_str("M0 ships the verifier-first toolchain only; linking passes arrive at M1.\n");
-    s.push_str("Use `pgr-verify <image>` to validate a Mach-O file in the meantime.\n");
-    s
-}
-
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
-    match args.next().as_deref().and_then(|a| a.to_str()) {
-        Some("--version") | Some("-V") => {
-            println!("{}", version_line());
-            ExitCode::SUCCESS
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match args.first().and_then(|a| a.to_str()) {
+        Some("--version") | Some("-version") | Some("-V") => {
+            println!("{}", pgr_driver::version_line());
+            return ExitCode::SUCCESS;
         }
-        Some("--help") | Some("-h") => {
-            print!("{}", usage());
-            ExitCode::SUCCESS
+        Some("--help") | Some("-help") | Some("-h") => {
+            print!("{}", pgr_driver::usage());
+            return ExitCode::SUCCESS;
         }
-        _ => {
-            eprintln!(
-                "{PROGRAM}: no linkable work is implemented at M0; see --help.\nLinking passes start at M1 (TDD roadmap)."
+        _ => {}
+    }
+
+    match run(&args) {
+        Ok(outcome) => {
+            println!(
+                "{PROGRAM}: wrote {} ({} bytes, entryoff {:#x}, {} fixup slot(s))",
+                outcome.output, outcome.file_size, outcome.entryoff, outcome.fixup_slots
             );
+            ExitCode::SUCCESS
+        }
+        Err(pgr_driver::DriverError::Opts(_)) | Err(pgr_driver::DriverError::Io { .. }) => {
+            eprintln!("{PROGRAM}: error: {}", first_error(&args));
             ExitCode::from(2)
         }
+        Err(e) => {
+            eprintln!("{PROGRAM}: error: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn version_line_contains_pkg_version() {
-        let line = super::version_line();
-        assert!(line.contains(env!("CARGO_PKG_VERSION")));
-        assert!(line.starts_with("pgr"));
-    }
+/// Runs the driver over `args`, mapping results to a summary line.
+fn run(args: &[std::ffi::OsString]) -> Result<pgr_driver::LinkOutcome, pgr_driver::DriverError> {
+    let opts = pgr_driver::opts::parse(args)?;
+    pgr_driver::run(&opts)
+}
 
-    #[test]
-    fn usage_mentions_verify() {
-        assert!(super::usage().contains("pgr-verify"));
+/// The error message for the failing option (parse errors carry the flag).
+fn first_error(args: &[std::ffi::OsString]) -> String {
+    match pgr_driver::opts::parse(args) {
+        Err(e) => e.to_string(),
+        Ok(_) => "option handling failed".into(),
     }
 }
