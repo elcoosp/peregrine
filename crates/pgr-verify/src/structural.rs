@@ -316,7 +316,9 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
     let file_len = bytes.len() as u64;
 
     // Canonical ordering: __PAGEZERO (exec), __TEXT, __DATA_CONST, __DATA,
-    // __LINKEDIT-last among named segments.
+    // __LINKEDIT-last among named segments. ld64-compatible images may omit
+    // empty segments, so the check is a canonical *subsequence* order (M1's
+    // own output carries all five; the emit-side tests assert that).
     let names: Vec<&str> = img.segments.iter().filter_map(|s| s.name().ok()).collect();
     if exec {
         if names.first() != Some(&"__PAGEZERO") {
@@ -326,10 +328,32 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                 None,
             ));
         }
-        if !names.contains(&"__TEXT") {
-            report
-                .issues
-                .push(Issue::error(Code::SegmentLayout, "no __TEXT segment", None));
+        const CANONICAL: [&str; 5] = [
+            "__PAGEZERO",
+            "__TEXT",
+            "__DATA_CONST",
+            "__DATA",
+            "__LINKEDIT",
+        ];
+        // The present segments must appear in canonical relative order.
+        let mut next = 0usize;
+        let mut ordered = true;
+        for name in &names {
+            if let Some(pos) = CANONICAL.iter().position(|c| c == name) {
+                if pos < next {
+                    ordered = false;
+                    break;
+                }
+                next = pos + 1;
+            }
+            // Non-canonical segment names are tolerated (unknown segments).
+        }
+        if !ordered {
+            report.issues.push(Issue::error(
+                Code::SegmentLayout,
+                format!("executable segments {names:?} violate the canonical order {CANONICAL:?}"),
+                None,
+            ));
         }
     }
     if !names.contains(&"__LINKEDIT") {
