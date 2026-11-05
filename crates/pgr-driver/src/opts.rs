@@ -1,15 +1,16 @@
-//! ld64-compatible option surface (TDD §5 Pass 0, M1 subset).
+//! ld64-compatible option surface (TDD §5 Pass 0, M2 subset).
 //!
-//! M1 links direct `.o` inputs with `-static` semantics. Flags real builds
-//! use that arrive at later milestones (`-dylib`, `-dead_strip`, `-rpath`,
-//! `-framework`, `-l`, `-L`, `-filelist`, `-order_file`, TLV, bitcode) are
-//! rejected with actionable messages rather than silently ignored — a linker
-//! that pretends to understand a flag it drops is worse than one that says
-//! "not yet".
+//! M2 links direct `.o` inputs against `.tbd` dylib stubs: `-l`/`-L`
+//! library search, `-rpath`, `-flat_namespace`, `-undefined`,
+//! `-weak_library`, `-u` and `-source_version` join the surface. Flags real
+//! builds use that arrive at later milestones (`-dylib`, `-dead_strip`,
+//! `-framework`, `-filelist`, `-order_file`, TLV, bitcode) are rejected with
+//! actionable messages rather than silently ignored — a linker that pretends
+//! to understand a flag it drops is worse than one that says "not yet".
 
 use pgr_core::layout::LinkConfig;
 
-/// Parsed driver options (M1 surface).
+/// Parsed driver options (M2 surface).
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Output path (`-o`).
@@ -22,6 +23,15 @@ pub struct Options {
     pub segalign: u64,
     /// `-headerpad` (advisory at M1: commands never grow after the link).
     pub headerpad: u64,
+    /// `-L` library search directories, in command-line order.
+    pub lib_dirs: Vec<String>,
+    /// `-l` requested library basenames (`-lfoo` / `-l foo`), in order.
+    pub libs: Vec<String>,
+    /// `-u <symbol>`: force the symbol to be treated as defined (must
+    /// resolve; a plain liveness marker at M2).
+    pub force_load: Vec<String>,
+    /// Indices into `inputs` loaded weakly (`-weak_library`).
+    pub weak_library_inputs: Vec<usize>,
 }
 
 impl Default for Options {
@@ -32,6 +42,10 @@ impl Default for Options {
             config: LinkConfig::default(),
             segalign: pgr_format::consts::PAGE_SIZE_16K,
             headerpad: 0,
+            lib_dirs: Vec::new(),
+            libs: Vec::new(),
+            force_load: Vec::new(),
+            weak_library_inputs: Vec::new(),
         }
     }
 }
@@ -85,23 +99,19 @@ const NOOP_FLAGS: [&str; 5] = [
 ];
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
-const LATER_FLAGS: [(&str, &str); 27] = [
-    ("-dylib", "M3 scope"),
-    ("-bundle", "M3 scope"),
-    ("-dylinker", "M3 scope"),
+const LATER_FLAGS: [(&str, &str); 20] = [
+    ("-dylib", "M3 scope (dylibs and bundles)"),
+    ("-bundle", "M3 scope (dylibs and bundles)"),
+    ("-dylinker", "M3 scope (dylibs and bundles)"),
     ("-dead_strip", "M5 scope"),
-    ("-rpath", "M2 scope (dylibs)"),
-    ("-framework", "M2 scope (dylibs)"),
-    ("-weak_framework", "M2 scope (dylibs)"),
-    ("-l", "M2 scope (dylibs)"),
-    ("-L", "M2 scope (dylibs)"),
-    ("-filelist", "M2 scope (dylibs)"),
+    ("-framework", "M3 scope (framework bundles)"),
+    ("-weak_framework", "M3 scope (framework bundles)"),
+    ("-lazy_framework", "M3 scope (framework bundles)"),
+    ("-lazy_library", "M3 scope"),
+    ("-filelist", "M3 scope"),
     ("-order_file", "M5 scope"),
     ("-install_name", "M3 scope"),
-    ("-flat_namespace", "M2 scope (dylibs)"),
-    ("-undefined", "M2 scope (dylibs)"),
-    ("-u", "M2 scope (dylibs)"),
-    ("-U", "M2 scope (dylibs)"),
+    ("-U", "M3 scope (make-undefined)"),
     ("-pagezero_size", "later milestone"),
     ("-sub_library", "M3 scope"),
     ("-sub_umbrella", "M3 scope"),
@@ -110,9 +120,6 @@ const LATER_FLAGS: [(&str, &str); 27] = [
     ("-current_version", "M3 scope"),
     ("-mark_dead_strippable_dylib", "M3 scope"),
     ("-cache_path_limiter", "later milestone"),
-    ("-weak_library", "M2 scope (dylibs)"),
-    ("-lazy_framework", "M2 scope (dylibs)"),
-    ("-lazy_library", "M2 scope (dylibs)"),
 ];
 
 /// Parses argv (without the program name).
@@ -224,10 +231,57 @@ fn apply_flag(
         "-no_fixup_chains" => opts.config.fixup_chains = false,
         "-adhoc" => opts.config.adhoc = true,
         "-no_adhoc" => opts.config.adhoc = false,
+        "-flat_namespace" => opts.config.flat_namespace = true,
+        "-no_flat_namespace" | "-twolevel_namespace" => {
+            opts.config.flat_namespace = false;
+        }
+        "-undefined" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.undefined_policy = match v.as_str() {
+                "error" => pgr_core::resolve::UndefinedPolicy::Error,
+                "dynamic_lookup" => pgr_core::resolve::UndefinedPolicy::DynamicLookup,
+                other => {
+                    return Err(OptsError::InvalidValue {
+                        flag: arg.into(),
+                        value: format!("{other} (error | dynamic_lookup)"),
+                    });
+                }
+            };
+        }
+        "-rpath" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.rpaths.push(v);
+        }
+        "-source_version" => {
+            let v = next_value(args, i, arg)?;
+            let sv = parse_source_version(&v).ok_or_else(|| OptsError::InvalidValue {
+                flag: arg.into(),
+                value: format!("{v} (A24.B10.C10.D10.E10, e.g. 1.2.3.4.5)"),
+            })?;
+            opts.config.source_version = Some(sv);
+        }
+        "-weak_library" => {
+            // The whole dylib loads weakly (LC_LOAD_WEAK_DYLIB + weak binds).
+            let v = next_value(args, i, arg)?;
+            opts.inputs.push(v);
+            opts.weak_library_inputs.push(opts.inputs.len() - 1);
+        }
+        "-l" | "-L" | "-u" => {
+            let v = next_value(args, i, arg)?;
+            match arg {
+                "-l" => opts.libs.push(v),
+                "-L" => opts.lib_dirs.push(v),
+                _ => opts.force_load.push(v),
+            }
+        }
         "-help" | "--help" | "-h" => Err(OptsError::Unsupported {
             flag: arg.into(),
             hint: "handled by the CLI shell before parsing".into(),
         })?,
+        _ if arg.starts_with("-l") && arg.len() > 2 && !arg.starts_with("-lazy") => {
+            // Attached library form: -lSystem, -lfoo.
+            opts.libs.push(arg[2..].to_string());
+        }
         _ if NOOP_FLAGS.contains(&arg) => {
             // Accepted no-ops at M1 (the features they toggle do not exist
             // yet; emitting nothing matches the requested state).
@@ -282,6 +336,25 @@ pub fn parse_version(v: &str) -> Option<u32> {
             return None;
         }
         out |= n << (16 - 8 * k);
+    }
+    Some(out)
+}
+
+/// Parses `A.B.C.D.E` into the packed `A24.B10.C10.D10.E10` source version.
+#[must_use]
+pub fn parse_source_version(v: &str) -> Option<u64> {
+    let mut out = 0u64;
+    let bits = [24u32, 10, 10, 10, 10];
+    for (seen, part) in v.split('.').enumerate() {
+        if part.is_empty() {
+            return None;
+        }
+        let n: u64 = part.parse().ok()?;
+        if seen >= 5 || n >= (1 << bits[seen]) {
+            return None;
+        }
+        let shift = bits[seen..].iter().sum::<u32>() - bits[seen];
+        out |= n << shift;
     }
     Some(out)
 }
@@ -363,9 +436,66 @@ mod tests {
         let err = parse(&args(&["-o", "out", "-dead_strip", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("M5"), "{err}");
         let err = parse(&args(&["-o", "out", "-framework", "Foo", "a.o"])).unwrap_err();
-        assert!(err.to_string().contains("M2"), "{err}");
+        assert!(err.to_string().contains("M3"), "{err}");
         let err = parse(&args(&["-o", "out", "--wat", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"), "{err}");
+    }
+
+    #[test]
+    fn m2_flags_shape_the_config() {
+        let o = parse(&args(&[
+            "-o",
+            "out",
+            "-l",
+            "System",
+            "-lfoo",
+            "-L",
+            "/opt/libs",
+            "-rpath",
+            "/opt/r",
+            "-flat_namespace",
+            "-undefined",
+            "dynamic_lookup",
+            "-u",
+            "_force_me",
+            "-weak_library",
+            "/opt/weak.tbd",
+            "-source_version",
+            "1.2.3.4.5",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(o.libs, ["System", "foo"]);
+        assert_eq!(o.lib_dirs, ["/opt/libs"]);
+        assert_eq!(o.config.rpaths, ["/opt/r"]);
+        assert!(o.config.flat_namespace);
+        assert_eq!(
+            o.config.undefined_policy,
+            pgr_core::resolve::UndefinedPolicy::DynamicLookup
+        );
+        assert_eq!(o.force_load, ["_force_me"]);
+        assert_eq!(o.weak_library_inputs, [0]);
+        assert_eq!(
+            o.config.source_version,
+            Some(1u64 << 40 | 2 << 30 | 3 << 20 | 4 << 10 | 5)
+        );
+    }
+
+    #[test]
+    fn m2_flag_values_are_validated() {
+        assert!(parse(&args(&["-o", "out", "-undefined", "wat", "a.o"])).is_err());
+        assert!(
+            parse(&args(&[
+                "-o",
+                "out",
+                "-source_version",
+                "1.2.3.4.5.6",
+                "a.o"
+            ]))
+            .is_err()
+        );
+        assert!(parse(&args(&["-o", "out", "-source_version", "1.2000.0", "a.o"])).is_err());
+        assert!(parse(&args(&["-o", "out", "-twolevel_namespace", "a.o"])).is_ok());
     }
 
     #[test]
