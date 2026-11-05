@@ -8,7 +8,7 @@
 use thiserror::Error;
 
 /// A recoverable, offset-tagged parse failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FormatError {
     /// The input ended before a fixed-size structure or field was complete.
     #[error("unexpected end of input at offset {offset}: need {need} bytes, have {have}")]
@@ -46,6 +46,13 @@ pub enum FormatError {
         /// Raw field value, for diagnostics.
         value: u64,
     },
+    /// A structural violation the bit-field errors cannot express (text
+    /// formats such as `.tbd` describe their own failure).
+    #[error("malformed input: {what}")]
+    Malformed {
+        /// What was wrong.
+        what: String,
+    },
     /// A leading magic number did not identify a supported image.
     #[error("bad magic {magic:#x} at offset {offset}")]
     BadMagic {
@@ -66,6 +73,9 @@ impl FormatError {
             | FormatError::Unaligned { offset, .. }
             | FormatError::Invalid { offset, .. }
             | FormatError::BadMagic { offset, .. } => offset,
+            // Text formats do not track byte offsets; the message is the
+            // diagnostic surface.
+            FormatError::Malformed { .. } => 0,
         }
     }
 }
