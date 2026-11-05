@@ -1,0 +1,35 @@
+[package]
+name = "peregrine-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.pgr-format]
+path = "../crates/pgr-format"
+
+[dependencies.pgr-verify]
+path = "../crates/pgr-verify"
+
+# Keep fuzz targets out of the main workspace's test runs; they build with
+# the nightly-only libFuzzer runtime.
+[[bin]]
+name = "parse_any"
+path = "fuzz_targets/parse_any.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_image"
+path = "fuzz_targets/verify_image.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
