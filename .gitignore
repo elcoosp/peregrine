@@ -1,0 +1,8 @@
+/target
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage
+Cargo.lock.bak
+*.profraw
+*.profdata
+.DS_Store
