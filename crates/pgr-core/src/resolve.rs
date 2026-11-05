@@ -16,13 +16,17 @@
 //! `(rank, file)`, so the M4 CAS key packs exactly these two fields and the
 //! winner stays schedule-independent.
 //!
-//! M1 liveness: every command-line object is live (no archives yet).
+//! M2 adds rank 6 (dylib exports): an undefined reference resolves against
+//! the first `LC_LOAD_DYLIB` (in command order) that exports the name —
+//! two-level namespace — or, under `-flat_namespace`, stays ordinal-free
+//! (dyld looks it up at launch). Liveness: every command-line object is
+//! live (archives are M3+).
 
 use crate::LinkError;
-use crate::ids::FileId;
+use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
 use crate::object::{InputObject, InputSymbol};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Definition rank (lower wins; TDD §5 Pass 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,6 +37,38 @@ pub enum Rank {
     WeakDef = 2,
     /// Tentative/common symbol.
     Common = 5,
+    /// Dylib export (rank 6: any definition in this image beats a dylib).
+    DylibExport = 6,
+}
+
+/// One input dylib (`LC_LOAD_DYLIB`): a parsed `.tbd` (M2) or a Mach-O
+/// dylib scan (M3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dylib {
+    /// Install name — the two-level namespace key and the `LC_LOAD_DYLIB`
+    /// string. The 1-based position in this list is the symbol's library
+    /// ordinal.
+    pub install_name: String,
+    /// `LC_LOAD_DYLIB` current version.
+    pub current_version: u32,
+    /// `LC_LOAD_DYLIB` compatibility version.
+    pub compatibility_version: u32,
+    /// Exported symbol names (with the C underscore).
+    pub exports: Vec<Vec<u8>>,
+    /// `-weak_library`: the whole dylib loads weakly (`LC_LOAD_WEAK_DYLIB`)
+    /// and every bind to it is weak.
+    pub weak: bool,
+}
+
+/// What to do with references no input and no dylib resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UndefinedPolicy {
+    /// `-undefined error` (default): hard error.
+    #[default]
+    Error,
+    /// `-undefined dynamic_lookup`: the reference becomes a dynamic lookup
+    /// bind (dyld resolves it at launch or kills the image).
+    DynamicLookup,
 }
 
 /// The winning definition of a resolved symbol.
@@ -65,6 +101,13 @@ pub struct Resolution {
     /// References: for each referenced name, the (file, sym) list that
     /// undefined it (diagnostics; references drive no liveness at M1).
     references: BTreeMap<u32, Vec<(FileId, usize)>>,
+    /// Input dylibs in `LC_LOAD_DYLIB` order (1-based ordinals).
+    dylibs: Vec<Dylib>,
+    /// Interned name → 1-based dylib ordinal that exports it (the first
+    /// dylib in command order exporting the name; two-level namespace).
+    dylib_exports: BTreeMap<u32, u16>,
+    /// Names left to dyld (`-undefined dynamic_lookup`).
+    dynamic_lookups: BTreeSet<u32>,
 }
 
 impl Resolution {
@@ -189,28 +232,68 @@ impl Resolution {
         }
     }
 
-    /// Verifies every referenced name resolves (Pass 2, static semantics).
+    /// Installs the dylib list (Pass 2 step 1b) and resolves two-level
+    /// ordinals for every referenced name a dylib exports.
+    ///
+    /// `export_ids` are the interned ids of the flattened export names, in
+    /// `(dylib index, export index)` order — [`crate::link()`] appends them to
+    /// the interner batch after the object symbol names.
+    pub fn install_dylibs(&mut self, dylibs: &[Dylib], export_ids: &[StringId]) {
+        self.dylibs = dylibs.to_vec();
+        let mut cursor = 0usize;
+        for (ord, dylib) in dylibs.iter().enumerate() {
+            let ordinal = (ord + 1) as u16;
+            for _ in &dylib.exports {
+                if let Some(id) = export_ids.get(cursor) {
+                    // First dylib in command order wins (two-level lookup
+                    // order); a local definition overrides later in layout.
+                    self.dylib_exports.entry(id.0).or_insert(ordinal);
+                }
+                cursor += 1;
+            }
+        }
+    }
+
+    /// Verifies every referenced name resolves (Pass 2, static + dylib
+    /// semantics), recording the references that become dynamic lookups.
     ///
     /// # Errors
     /// [`LinkError::Symbol`] listing each undefined name and a referencing
-    /// file.
+    /// file (policy [`UndefinedPolicy::Error`]).
     pub fn require_all_resolved(
-        &self,
+        &mut self,
         interner: &Interner,
         objects: &[crate::object::InputObject],
+        policy: UndefinedPolicy,
     ) -> Result<(), LinkError> {
+        self.dynamic_lookups.clear();
         let mut missing: Vec<String> = Vec::new();
         for (key, refs) in &self.references {
-            if !self.defs.contains_key(key) {
-                let (file, _sym) = refs.first().copied().unwrap_or((FileId(0), 0));
-                let file_name = objects
-                    .get(file.0 as usize)
-                    .map(|o| o.name.clone())
-                    .unwrap_or_else(|| format!("input {}", file.0));
-                missing.push(format!(
-                    "\"{}\" (referenced from {file_name})",
-                    interner.name(crate::ids::StringId(*key))
-                ));
+            if self.defs.contains_key(key) || self.dylib_exports.contains_key(key) {
+                continue;
+            }
+            let (file, sym) = refs.first().copied().unwrap_or((FileId(0), 0));
+            match policy {
+                UndefinedPolicy::DynamicLookup => {
+                    self.dynamic_lookups.insert(*key);
+                }
+                UndefinedPolicy::Error => {
+                    let is_weak_ref = objects
+                        .get(file.0 as usize)
+                        .and_then(|o| o.symbols.get(sym).map(|s| s.weak_ref));
+                    if is_weak_ref == Some(true) {
+                        self.dynamic_lookups.insert(*key);
+                        continue;
+                    }
+                    let file_name = objects
+                        .get(file.0 as usize)
+                        .map(|o| o.name.clone())
+                        .unwrap_or_else(|| format!("input {}", file.0));
+                    missing.push(format!(
+                        "\"{}\" (referenced from {file_name})",
+                        interner.name(crate::ids::StringId(*key))
+                    ));
+                }
             }
         }
         if missing.is_empty() {
@@ -223,10 +306,55 @@ impl Resolution {
         }
     }
 
+    /// The 1-based library ordinal that exports `id`, if any dylib does.
+    #[must_use]
+    pub fn dylib_ordinal(&self, id: StringId) -> Option<u16> {
+        self.dylib_exports.get(&id.0).copied()
+    }
+
+    /// The input dylib list in `LC_LOAD_DYLIB` order.
+    #[must_use]
+    pub fn dylibs(&self) -> &[Dylib] {
+        &self.dylibs
+    }
+
+    /// True when the name was left to dyld (`-undefined dynamic_lookup` or
+    /// an unresolvable weak reference).
+    #[must_use]
+    pub fn is_dynamic_lookup(&self, id: StringId) -> bool {
+        self.dynamic_lookups.contains(&id.0)
+    }
+
+    /// True when at least one *bind* in the image is weak (dyld semantics
+    /// flag `MH_BINDS_TO_WEAK`): a reference that resolves to a dylib
+    /// export or a dynamic lookup, carried by a weak-referenced symbol.
+    #[must_use]
+    pub fn any_weak_bind(&self, objects: &[InputObject]) -> bool {
+        self.references.iter().any(|(key, refs)| {
+            let binds = self.dylib_exports.contains_key(key) || self.dynamic_lookups.contains(key);
+            binds
+                && refs.iter().any(|(f, s)| {
+                    objects
+                        .get(f.0 as usize)
+                        .and_then(|o| o.symbols.get(*s))
+                        .is_some_and(|sym| sym.weak_ref)
+                })
+        })
+    }
+
     /// The winning definition for a name, if any.
     #[must_use]
     pub fn def(&self, id: crate::ids::StringId) -> Option<&Def> {
         self.defs.get(&id.0)
+    }
+
+    /// All reference sites of a name (`(file, symbol index)` pairs).
+    #[must_use]
+    pub fn reference_sites(&self, id: StringId) -> &[(FileId, usize)] {
+        self.references
+            .get(&id.0)
+            .map(std::vec::Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// All winning definitions keyed by name.
@@ -243,7 +371,7 @@ impl Resolution {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rank, Resolution};
+    use super::{Rank, Resolution, UndefinedPolicy};
     use crate::ids::FileId;
     use crate::interner::Interner;
     use crate::object::InputObject;
@@ -457,8 +585,10 @@ mod tests {
             weak_ref: false,
         });
 
-        let (interner, _objects, res) = run(vec![a]);
-        let err = res.require_all_resolved(&interner, &[]).unwrap_err();
+        let (interner, _objects, mut res) = run(vec![a]);
+        let err = res
+            .require_all_resolved(&interner, &[], UndefinedPolicy::Error)
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("_nowhere"), "{msg}");
         assert!(msg.contains("input 0"), "{msg}");
@@ -495,7 +625,8 @@ mod tests {
             weak: false,
         });
 
-        let (interner, _objects, res) = run(vec![a, b]);
-        res.require_all_resolved(&interner, &[]).unwrap();
+        let (interner, _objects, mut res) = run(vec![a, b]);
+        res.require_all_resolved(&interner, &[], UndefinedPolicy::Error)
+            .unwrap();
     }
 }
