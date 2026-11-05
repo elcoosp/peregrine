@@ -7,7 +7,7 @@
 //! changing the plan types.
 
 use crate::LinkError;
-use crate::ids::FileId;
+use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
 use crate::layout::{Layout, LinkConfig, layout};
 use crate::object::InputObject;
@@ -30,6 +30,8 @@ pub struct LinkResult {
     pub layout: Layout,
     /// Parsed input objects (Pass 1 arenas; Pass 4 copies from these).
     pub objects: Vec<InputObject>,
+    /// The interner (name diagnostics for driver-side checks).
+    pub interner: Interner,
 }
 
 /// Runs Passes 1–3 over the inputs, producing the emit plan.
@@ -46,6 +48,19 @@ pub fn link(inputs: &[LinkInput], cfg: &LinkConfig) -> Result<LinkResult, LinkEr
         names.append(&mut obj.take_symbol_names());
         objects.push(obj);
     }
+    // Dylib export names join the interner batch *after* the object symbol
+    // stream, so the object id slices stay stable (M2 two-level namespace).
+    let dylib_export_count: usize = cfg.dylibs.iter().map(|d| d.exports.len()).sum();
+    let mut export_names: Vec<Vec<u8>> = Vec::with_capacity(dylib_export_count);
+    for d in &cfg.dylibs {
+        export_names.extend(d.exports.iter().cloned());
+    }
+    names.extend(export_names.iter().cloned());
+    // `__mh_execute_header` is always interned so the layout pass can emit
+    // the executable's header symbol (ld64/lld convention).
+    names.push(b"__mh_execute_header".to_vec());
+    let header_symbol_slot = 1usize;
+
     let (interner, ids) = Interner::build(&names);
     let mut cursor = 0usize;
     for obj in &mut objects {
@@ -58,15 +73,22 @@ pub fn link(inputs: &[LinkInput], cfg: &LinkConfig) -> Result<LinkResult, LinkEr
         obj.finish(&ids[cursor..cursor + take])?;
         cursor += take;
     }
+    let export_ids: Vec<StringId> = ids[cursor..cursor + dylib_export_count].to_vec();
+    let _ = header_symbol_slot;
 
     // ---- Pass 2: resolution --------------------------------------------------
     let mut res = Resolution::default();
     res.install(&objects)?;
-    res.require_all_resolved(&interner, &objects)?;
+    res.install_dylibs(&cfg.dylibs, &export_ids);
+    res.require_all_resolved(&interner, &objects, cfg.undefined_policy)?;
 
     // ---- Pass 3: layout -------------------------------------------------------
     let layout = layout(&objects, &res, &interner, cfg)?;
-    Ok(LinkResult { layout, objects })
+    Ok(LinkResult {
+        layout,
+        objects,
+        interner,
+    })
 }
 
 #[cfg(test)]
