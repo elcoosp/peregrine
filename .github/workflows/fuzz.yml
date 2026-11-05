@@ -1,9 +1,9 @@
 name: Fuzz
 
-# Nightly libFuzzer runs for the parsers, the verifier and the M1 link
-# pipeline (TDD §11: "a linker is a hostile-input parser; its crash is a
-# build crash"). Smoke-sized runs keep cost bounded; scale -max_total_time
-# up on dedicated hardware.
+# Nightly libFuzzer runs for the parsers (Mach-O + .tbd), the verifier and
+# the link pipeline (TDD §11: "a linker is a hostile-input parser; its crash
+# is a build crash"). Smoke-sized runs keep cost bounded; scale
+# -max_total_time up on dedicated hardware.
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse_any, verify_image, link_object]
+        target: [parse_any, parse_tbd, verify_image, link_object]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -39,6 +39,12 @@ jobs:
       - name: Seed corpus with valid fixtures
         run: |
           cargo run --locked -p pgr-fixtures --example emit_corpus -- fuzz/corpus/${{ matrix.target }}
+      - name: Seed .tbd corpus (parse_tbd)
+        if: matrix.target == 'parse_tbd'
+        run: |
+          mkdir -p fuzz/corpus/parse_tbd
+          printf -- '--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: /usr/lib/libSystem.B.dylib\ncurrent-version: 1.2.3\ncompatibility-version: 1.0.0\nexports:\n  - targets: [ arm64-macos ]\n    symbols: [ _printf, _strlen ]\n    weak-symbols: [ _weakfn ]\n...\n' > fuzz/corpus/parse_tbd/libsystem-v4.tbd
+          printf -- '--- !tbd-tbd-version-3.0\ntbd-version: 3\ntargets: [ arm64-macos ]\nuuids: [ arm64-macos: 1234 ]\ninstall-name: /usr/lib/libold.dylib\ncurrent-version: 1.2.3\nexports:\n  - targets: [ arm64-macos ]\n    symbols: [ _old ]\n...\n' > fuzz/corpus/parse_tbd/libold-v3.tbd
       - name: Run (${{ matrix.target }}, 120 s)
         run: |
           cargo +nightly fuzz run ${{ matrix.target }} \
