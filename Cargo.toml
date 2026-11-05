@@ -12,7 +12,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -21,6 +21,7 @@ authors = ["Peregrine contributors"]
 [workspace.dependencies]
 pgr-format = { path = "crates/pgr-format" }
 pgr-fixtures = { path = "crates/pgr-fixtures" }
+pgr-verify = { path = "crates/pgr-verify" }
 bytemuck = { version = "1", features = ["derive"] }
 thiserror = "2"
 sha2 = "0.10"
