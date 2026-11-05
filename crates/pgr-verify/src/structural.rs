@@ -1,0 +1,735 @@
+//! Structural checks: header, load commands, the 16 KiB segment contract and
+//! the symbol tables.
+
+use crate::{Code, Issue, Report, issue_from};
+use pgr_format::LinkeditDataCommand;
+use pgr_format::consts::{
+    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, MH_BUNDLE, MH_DYLIB, MH_DYLINKER, MH_EXECUTE,
+    MH_FILESET, MH_KEXT_BUNDLE, MH_OBJECT, MH_PRELOAD, PAGE_SIZE_16K, PAGEZERO_SIZE_64,
+    S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL, VM_PROT_EXECUTE, VM_PROT_WRITE,
+};
+use pgr_format::header::MachHeader64;
+use pgr_format::load_command::{LoadCommandIter, LoadCommandKind, ParsedCommand};
+use pgr_format::segment::SegmentCommand64;
+use pgr_format::symtab::{DysymtabCommand, Nlist64, SymtabCommand};
+
+/// Everything the checks need, collected once in load-command order.
+pub(crate) struct ParsedImage<'a> {
+    /// Parsed header.
+    pub header: MachHeader64,
+    /// Load commands in header order.
+    pub commands: Vec<ParsedCommand<'a>>,
+    /// `LC_SEGMENT_64` commands in header order (`__PAGEZERO` included).
+    pub segments: Vec<SegmentCommand64>,
+    /// Total number of sections.
+    pub nsections: u32,
+    /// `LC_SYMTAB` payload.
+    pub symtab: Option<SymtabCommand>,
+    /// `LC_DYSYMTAB` payload.
+    pub dysymtab: Option<DysymtabCommand>,
+    /// `LC_DYLD_CHAINED_FIXUPS` payload command.
+    pub fixups: Option<LinkeditDataCommand>,
+    /// `LC_CODE_SIGNATURE` payload command.
+    pub code_signature: Option<LinkeditDataCommand>,
+    /// `LC_MAIN` payload command.
+    pub main: Option<pgr_format::EntryPointCommand>,
+    /// `LC_BUILD_VERSION` payload command.
+    pub build_version: Option<pgr_format::BuildVersionCommand>,
+    /// Dependent dylib install names (`LC_LOAD_DYLIB`, in ordinal order).
+    pub dylibs: Vec<String>,
+    /// Number of chained-fixup slots counted during the pre-pass walk.
+    pub fixup_slot_count: u64,
+    /// Total virtual span of the image (LINKEDIT vmaddr + vmsize).
+    pub total_vmsize: u64,
+}
+
+/// Loads and pre-validates the image: any failure here is fatal for all
+/// downstream checks.
+pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
+    let header = MachHeader64::parse(bytes).map_err(|e| issue_from(&e, Code::HeaderInvalid))?;
+    let mut commands = Vec::new();
+    let mut segments = Vec::new();
+    let mut nsections = 0u32;
+    let mut symtab = None;
+    let mut dysymtab = None;
+    let mut fixups = None;
+    let mut code_signature = None;
+    let mut main = None;
+    let mut build_version = None;
+    let mut dylibs = Vec::new();
+    let mut fixup_slot_count = 0u64;
+
+    let mut it = LoadCommandIter::new(bytes, MachHeader64::SIZE, header.ncmds, header.sizeofcmds)
+        .map_err(|e| issue_from(&e, Code::LoadCommandMalformed))?;
+    while let Some(cmd) = it
+        .next_command()
+        .map_err(|e| issue_from(&e, Code::LoadCommandMalformed))?
+    {
+        commands.push(cmd);
+        match cmd.kind {
+            LoadCommandKind::Segment64 => {
+                let seg = SegmentCommand64::parse(cmd.bytes, 0)
+                    .map_err(|e| issue_from(&e, Code::LoadCommandMalformed))?;
+                nsections += seg.nsects;
+                segments.push(seg);
+            }
+            LoadCommandKind::Symtab => {
+                if symtab.is_none() {
+                    symtab = SymtabCommand::parse(cmd.bytes, 0).ok();
+                }
+            }
+            LoadCommandKind::Dysymtab => {
+                if dysymtab.is_none() {
+                    dysymtab = DysymtabCommand::parse(cmd.bytes, 0).ok();
+                }
+            }
+            LoadCommandKind::LinkeditData(pgr_format::consts::LC_DYLD_CHAINED_FIXUPS) => {
+                if let Ok(lc) = LinkeditDataCommand::parse(cmd.bytes) {
+                    fixup_slot_count = count_fixup_slots(bytes, &lc, segments.len());
+                    fixups = Some(lc);
+                }
+            }
+            LoadCommandKind::LinkeditData(pgr_format::consts::LC_CODE_SIGNATURE) => {
+                if let Ok(lc) = LinkeditDataCommand::parse(cmd.bytes) {
+                    code_signature = Some(lc);
+                }
+            }
+            LoadCommandKind::Main => {
+                if main.is_none() {
+                    main = pgr_format::EntryPointCommand::parse(cmd.bytes).ok();
+                }
+            }
+            LoadCommandKind::BuildVersion => {
+                if build_version.is_none() {
+                    build_version = pgr_format::BuildVersionCommand::parse(cmd.bytes).ok();
+                }
+            }
+            LoadCommandKind::LoadDylib => {
+                if let Ok(d) = pgr_format::DylibCommand::parse(cmd.bytes) {
+                    if let Ok(name) = d.name(cmd.bytes) {
+                        dylibs.push(String::from_utf8_lossy(name).into_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let total_vmsize = segments
+        .last()
+        .map(|s| s.vmaddr.saturating_add(s.vmsize))
+        .unwrap_or(0);
+
+    Ok(ParsedImage {
+        header,
+        commands,
+        segments,
+        nsections,
+        symtab,
+        dysymtab,
+        fixups,
+        code_signature,
+        main,
+        build_version,
+        dylibs,
+        fixup_slot_count,
+        total_vmsize,
+    })
+}
+
+/// Counts fixup slots cheaply (pre-pass) without validating: full validation
+/// happens in [`crate::dynamic`]. Returns 0 when anything is malformed.
+fn count_fixup_slots(bytes: &[u8], lc: &LinkeditDataCommand, nsegments: usize) -> u64 {
+    let Ok(payload) = lc.data(bytes) else {
+        return 0;
+    };
+    let Ok(hdr) = pgr_format::fixups::parse_header(payload) else {
+        return 0;
+    };
+    let Ok(starts) = pgr_format::fixups::parse_starts_in_image(payload, hdr.starts_offset as usize)
+    else {
+        return 0;
+    };
+    if starts.seg_info_offset.len() > nsegments.max(1) {
+        return 0;
+    }
+    let mut total = 0u64;
+    for (i, &off) in starts.seg_info_offset.iter().enumerate() {
+        if off == 0 || i >= nsegments {
+            continue;
+        }
+        let Ok(seg) = pgr_format::fixups::parse_starts_in_segment(
+            payload,
+            hdr.starts_offset as usize + off as usize,
+        ) else {
+            continue;
+        };
+        for p in 0..seg.page_count {
+            if let Ok(heads) = pgr_format::fixups::page_chain_starts(
+                payload,
+                hdr.starts_offset as usize + off as usize,
+                &seg,
+                p,
+            ) {
+                let page_base = match bytes.get(seg.segment_offset as usize..) {
+                    Some(_) => seg.segment_offset,
+                    None => continue,
+                };
+                for h in heads {
+                    if h == pgr_format::consts::DYLD_CHAINED_PTR_START_NONE {
+                        continue;
+                    }
+                    // Walk the chain, counting slots (best effort).
+                    let mut slot_off = u64::from(h);
+                    let mut guard = 0;
+                    while guard < 100_000 {
+                        guard += 1;
+                        let at = page_base + u64::from(p) * u64::from(seg.page_size) + slot_off;
+                        let Some(word_bytes) = bytes.get(at as usize..at as usize + 8) else {
+                            break;
+                        };
+                        let word = pgr_format::fixups::ChainWord64::new(u64::from_le_bytes(
+                            word_bytes.try_into().unwrap_or([0; 8]),
+                        ));
+                        total += 1;
+                        let next = u64::from(word.next());
+                        if next == 0 {
+                            break;
+                        }
+                        slot_off += next * 4;
+                    }
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Header-level checks.
+pub(crate) fn check_header(img: &ParsedImage<'_>, report: &mut Report) {
+    let h = img.header;
+    if h.cputype != CPU_TYPE_ARM64 {
+        report.issues.push(Issue::error(
+            Code::HeaderInvalid,
+            format!("cputype {:#x} is not CPU_TYPE_ARM64", h.cputype),
+            Some(4),
+        ));
+    }
+    if h.cpusubtype & 0x00ff_ffff != CPU_SUBTYPE_ARM64_ALL {
+        report.issues.push(Issue::warning(
+            Code::HeaderInvalid,
+            format!("unexpected cpusubtype {:#x}", h.cpusubtype),
+            Some(8),
+        ));
+    }
+    if h.reserved != 0 {
+        report.issues.push(Issue::error(
+            Code::HeaderInvalid,
+            "mach_header_64.reserved must be zero",
+            Some(28),
+        ));
+    }
+    if h.sizeofcmds == 0 && h.ncmds > 0 {
+        report.issues.push(Issue::error(
+            Code::HeaderInvalid,
+            "ncmds > 0 but sizeofcmds == 0",
+            Some(20),
+        ));
+    }
+    if MachHeader64::SIZE + h.sizeofcmds as usize > PAGE_SIZE_16K as usize {
+        report.issues.push(Issue::error(
+            Code::HeaderInvalid,
+            "header and load commands must fit the first 16 KiB page",
+            Some(20),
+        ));
+    }
+    let known = [
+        MH_OBJECT,
+        MH_EXECUTE,
+        MH_DYLIB,
+        MH_DYLINKER,
+        MH_BUNDLE,
+        MH_KEXT_BUNDLE,
+        MH_PRELOAD,
+        MH_FILESET,
+    ];
+    if !known.contains(&h.filetype) {
+        report.issues.push(Issue::warning(
+            Code::HeaderInvalid,
+            format!("unusual filetype {:#x}", h.filetype),
+            Some(12),
+        ));
+    }
+}
+
+/// Load-command region checks beyond what the iterator already rejects.
+pub(crate) fn check_load_commands(img: &ParsedImage<'_>, report: &mut Report) {
+    for cmd in &img.commands {
+        if let LoadCommandKind::Unknown(op) = cmd.kind {
+            // Unknown commands are tolerated (forward compatibility), but
+            // LC_REQ_DYLD ones would make dyld reject the image.
+            if op & pgr_format::consts::LC_REQ_DYLD != 0 {
+                report.issues.push(Issue::error(
+                    Code::LoadCommandMalformed,
+                    format!("unknown load command {op:#x} carries LC_REQ_DYLD (dyld rejects it)"),
+                    Some(cmd.offset as u64),
+                ));
+            } else {
+                report.issues.push(Issue::warning(
+                    Code::Suspicious,
+                    format!("unknown load command {op:#x}"),
+                    Some(cmd.offset as u64),
+                ));
+            }
+        }
+    }
+    // Chained fixups and classic dyld info must not coexist.
+    let has_classic = img.commands.iter().any(|c| {
+        matches!(
+            c.kind,
+            LoadCommandKind::LinkeditData(pgr_format::consts::LC_DYLD_INFO_ONLY)
+        )
+    });
+    if has_classic && img.fixups.is_some() {
+        report.issues.push(Issue::error(
+            Code::LoadCommandMalformed,
+            "LC_DYLD_INFO_ONLY and LC_DYLD_CHAINED_FIXUPS must not coexist",
+            None,
+        ));
+    }
+    if let Some(st) = &img.symtab {
+        if st.cmdsize != 24 {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                "LC_SYMTAB cmdsize must be 24",
+                None,
+            ));
+        }
+    }
+}
+
+/// The segment contract (TDD §3.6, §8; alignment diagram):
+/// 16 KiB congruence, `vmaddr = fileoff + delta`, canonical ordering,
+/// protections and file-coverage invariants.
+pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut Report) {
+    let exec = img.header.filetype == MH_EXECUTE;
+    let file_len = bytes.len() as u64;
+
+    // Canonical ordering: __PAGEZERO (exec), __TEXT, __DATA_CONST, __DATA,
+    // __LINKEDIT-last among named segments.
+    let names: Vec<&str> = img.segments.iter().filter_map(|s| s.name().ok()).collect();
+    if exec {
+        if names.first() != Some(&"__PAGEZERO") {
+            report.issues.push(Issue::error(
+                Code::SegmentLayout,
+                "executables must start with __PAGEZERO",
+                None,
+            ));
+        }
+        if !names.contains(&"__TEXT") {
+            report
+                .issues
+                .push(Issue::error(Code::SegmentLayout, "no __TEXT segment", None));
+        }
+    }
+    if !names.contains(&"__LINKEDIT") {
+        report.issues.push(Issue::error(
+            Code::SegmentLayout,
+            "no __LINKEDIT segment",
+            None,
+        ));
+    }
+
+    // __PAGEZERO / __TEXT base contract.
+    if exec {
+        if let Some(pz) = img.segments.first() {
+            if pz.name() == Ok("__PAGEZERO") {
+                if pz.vmaddr != 0 || pz.vmsize != PAGEZERO_SIZE_64 {
+                    report.issues.push(Issue::error(
+                        Code::ImageBase,
+                        format!(
+                            "__PAGEZERO must cover 4 GiB unmapped (vmaddr {:#x}, vmsize {:#x})",
+                            pz.vmaddr, pz.vmsize
+                        ),
+                        None,
+                    ));
+                }
+                if pz.fileoff != 0 || pz.filesize != 0 {
+                    report.issues.push(Issue::error(
+                        Code::ImageBase,
+                        "__PAGEZERO must not occupy file bytes",
+                        None,
+                    ));
+                }
+            }
+        }
+        if let Some(text) = img.segments.iter().find(|s| s.name() == Ok("__TEXT")) {
+            if text.vmaddr != PAGEZERO_SIZE_64 || text.fileoff != 0 {
+                report.issues.push(Issue::error(
+                    Code::ImageBase,
+                    format!(
+                        "__TEXT must start at 0x1_0000_0000 with fileoff 0 (vmaddr {:#x}, fileoff {:#x})",
+                        text.vmaddr, text.fileoff
+                    ),
+                    None,
+                ));
+            }
+        }
+    } else if let Some(text) = img.segments.iter().find(|s| s.name() == Ok("__TEXT")) {
+        if text.vmaddr != text.fileoff {
+            report.issues.push(Issue::error(
+                Code::ImageBase,
+                format!(
+                    "dylib __TEXT vmaddr {:#x} must equal fileoff {:#x}",
+                    text.vmaddr, text.fileoff
+                ),
+                None,
+            ));
+        }
+    }
+
+    // Per-segment contract.
+    let mut prev_end: Option<(u64, u64)> = None; // (fileoff_end, vmaddr_end)
+    for seg in &img.segments {
+        let name = seg.name().unwrap_or("<non-utf8>");
+        if name == "__PAGEZERO" {
+            continue;
+        }
+        // Congruence: vmaddr ≡ fileoff (mod 16 KiB). Mutated inputs can
+        // carry vmaddr < fileoff, so the subtraction must be total.
+        if seg.filesize > 0 && seg.vmaddr.wrapping_sub(seg.fileoff) % PAGE_SIZE_16K != 0 {
+            report.issues.push(Issue::error(
+                Code::SegmentContract,
+                format!(
+                    "segment {name}: vmaddr {:#x} and fileoff {:#x} differ by a non-multiple of 16 KiB",
+                    seg.vmaddr, seg.fileoff
+                ),
+                None,
+            ));
+        }
+        // Delta consistency: vmaddr - fileoff must equal the image delta
+        // (base = 0x1_0000_0000 for exec, 0 otherwise).
+        let delta = if exec { PAGEZERO_SIZE_64 } else { 0 };
+        if seg.vmaddr.checked_sub(delta) != Some(seg.fileoff) {
+            report.issues.push(Issue::error(
+                Code::SegmentContract,
+                format!(
+                    "segment {name}: vmaddr {:#x} - fileoff {:#x} != {delta:#x} (constant-delta contract)",
+                    seg.vmaddr, seg.fileoff
+                ),
+                None,
+            ));
+        }
+        // File bounds.
+        if seg.fileoff.saturating_add(seg.filesize) > file_len {
+            report.issues.push(Issue::error(
+                Code::SegmentContract,
+                format!(
+                    "segment {name}: file range [{:#x}, {:#x}) exceeds file size {:#x}",
+                    seg.fileoff,
+                    seg.fileoff + seg.filesize,
+                    file_len
+                ),
+                Some(seg.fileoff),
+            ));
+        }
+        if seg.vmsize < seg.filesize {
+            report.issues.push(Issue::error(
+                Code::SegmentContract,
+                format!(
+                    "segment {name}: vmsize {:#x} < filesize {:#x}",
+                    seg.vmsize, seg.filesize
+                ),
+                None,
+            ));
+        }
+        // Protections.
+        if seg.initprot & !seg.maxprot != 0 {
+            report.issues.push(Issue::error(
+                Code::SegmentContract,
+                format!("segment {name}: initprot has bits outside maxprot",),
+                None,
+            ));
+        }
+        if name == "__TEXT" && seg.initprot & VM_PROT_EXECUTE == 0 {
+            report.issues.push(Issue::error(
+                Code::SegmentContract,
+                "__TEXT must be executable",
+                None,
+            ));
+        }
+        if name == "__DATA" || name == "__DATA_CONST" {
+            if seg.initprot & VM_PROT_WRITE == 0 && name == "__DATA" {
+                report.issues.push(Issue::warning(
+                    Code::SegmentContract,
+                    "__DATA is usually writable",
+                    None,
+                ));
+            }
+            if seg.initprot & VM_PROT_EXECUTE != 0 {
+                report.issues.push(Issue::error(
+                    Code::SegmentContract,
+                    format!("segment {name} must not be executable"),
+                    None,
+                ));
+            }
+        }
+        // Ordering / overlap (file layout must move forward).
+        if let Some((pf, pv)) = prev_end {
+            if seg.fileoff < pf {
+                report.issues.push(Issue::error(
+                    Code::SegmentLayout,
+                    format!(
+                        "segment {name} fileoff {:#x} overlaps the previous segment's end {:#x}",
+                        seg.fileoff, pf
+                    ),
+                    Some(seg.fileoff),
+                ));
+            }
+            if seg.vmaddr < pv {
+                report.issues.push(Issue::error(
+                    Code::SegmentLayout,
+                    format!(
+                        "segment {name} vmaddr {:#x} overlaps the previous segment's end {:#x}",
+                        seg.vmaddr, pv
+                    ),
+                    Some(seg.vmaddr),
+                ));
+            }
+        }
+        prev_end = Some((
+            seg.fileoff.saturating_add(seg.filesize),
+            seg.vmaddr.saturating_add(seg.vmsize),
+        ));
+
+        // __LINKEDIT carries no sections.
+        if name == "__LINKEDIT" && seg.nsects != 0 {
+            report.issues.push(Issue::error(
+                Code::SegmentLayout,
+                "__LINKEDIT must not carry sections",
+                None,
+            ));
+        }
+
+        // Sections within the segment.
+        let cmd_off = section_table_offset(img, seg);
+        if let Ok(sects) = seg.sections(bytes, cmd_off) {
+            for s in sects {
+                let sname = s.name().unwrap_or("<non-utf8>");
+                let zerofill = s.section_type() == S_ZEROFILL
+                    || s.section_type() == S_GB_ZEROFILL
+                    || s.section_type() == S_THREAD_LOCAL_ZEROFILL;
+                if !zerofill {
+                    if s.addr.saturating_add(s.size) > seg.vmaddr.saturating_add(seg.vmsize) {
+                        report.issues.push(Issue::error(
+                            Code::SectionBounds,
+                            format!("section {sname}: vm range exceeds its segment"),
+                            Some(s.addr),
+                        ));
+                    }
+                    if s.offset as u64 >= seg.fileoff.saturating_add(seg.filesize)
+                        || s.offset.saturating_add(s.size as u32) as u64 > file_len
+                    {
+                        report.issues.push(Issue::error(
+                            Code::SectionBounds,
+                            format!("section {sname}: file range exceeds the segment or file"),
+                            Some(s.offset as u64),
+                        ));
+                    }
+                }
+                if s.align > 14 {
+                    report.issues.push(Issue::error(
+                        Code::SectionBounds,
+                        format!("section {sname}: alignment exponent {} > 14", s.align),
+                        Some(s.addr),
+                    ));
+                }
+                if s.reserved3 != 0 {
+                    report.issues.push(Issue::warning(
+                        Code::Suspicious,
+                        format!("section {sname}: reserved3 is set"),
+                        Some(s.addr),
+                    ));
+                }
+            }
+        }
+    }
+
+    // __LINKEDIT covers through EOF.
+    if let Some(le) = img.segments.iter().find(|s| s.name() == Ok("__LINKEDIT")) {
+        if le.fileoff.saturating_add(le.filesize) != file_len {
+            report.issues.push(Issue::error(
+                Code::SegmentLayout,
+                format!(
+                    "__LINKEDIT must extend to EOF (ends {:#x}, file size {:#x})",
+                    le.fileoff + le.filesize,
+                    file_len
+                ),
+                Some(le.fileoff),
+            ));
+        }
+    }
+}
+
+/// Finds the byte offset of a segment's section table within the image by
+/// re-scanning load commands (kept simple and allocation-light).
+fn section_table_offset(img: &ParsedImage<'_>, seg: &SegmentCommand64) -> usize {
+    for cmd in &img.commands {
+        if cmd.kind == LoadCommandKind::Segment64 {
+            if let Ok(candidate) = SegmentCommand64::parse(cmd.bytes, 0) {
+                if candidate.vmaddr == seg.vmaddr && candidate.fileoff == seg.fileoff {
+                    return cmd.offset + SegmentCommand64::SIZE;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Symbol-table and indirect-symbol checks.
+pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &mut Report) {
+    let file_len = bytes.len() as u64;
+    let Some(st) = img.symtab else {
+        if img.header.filetype != MH_OBJECT {
+            report.issues.push(Issue::warning(
+                Code::SymbolTable,
+                "no LC_SYMTAB (stripped image?)",
+                None,
+            ));
+        }
+        return;
+    };
+    if st.symoff as u64 + u64::from(st.nsyms) * 16 > file_len {
+        report.issues.push(Issue::error(
+            Code::SymbolTable,
+            "symbol table extends past EOF",
+            Some(st.symoff as u64),
+        ));
+        return;
+    }
+    if st.stroff as u64 + u64::from(st.strsize) > file_len {
+        report.issues.push(Issue::error(
+            Code::SymbolTable,
+            "string table extends past EOF",
+            Some(st.stroff as u64),
+        ));
+        return;
+    }
+    // The last string-table byte should be NUL (ld64 contract).
+    if st.strsize > 0 && bytes[st.stroff as usize + st.strsize as usize - 1] != 0 {
+        report.issues.push(Issue::warning(
+            Code::SymbolTable,
+            "string table does not end with NUL",
+            Some(st.stroff as u64 + u64::from(st.strsize)),
+        ));
+    }
+
+    for i in 0..st.nsyms {
+        let off = st.symoff as usize + i as usize * 16;
+        let sym: Nlist64 = match pgr_format::cursor::pod_read_unaligned_at(bytes, off) {
+            Ok(s) => s,
+            Err(e) => {
+                report.issues.push(issue_from(&e, Code::SymbolTable));
+                return;
+            }
+        };
+        if sym.is_stab() {
+            continue;
+        }
+        if sym.n_strx as u64 >= u64::from(st.strsize) && st.strsize > 0 {
+            report.issues.push(Issue::error(
+                Code::SymbolTable,
+                format!(
+                    "symbol {i}: string offset {} beyond strtab {}",
+                    sym.n_strx, st.strsize
+                ),
+                Some(off as u64),
+            ));
+        }
+        if sym.is_undefined() {
+            let ordinal = sym.library_ordinal();
+            let special = matches!(ordinal, 0 | 0xfd | 0xfe | 0xff);
+            if !special && ordinal as usize > img.dylibs.len() {
+                report.issues.push(Issue::error(
+                    Code::SymbolTable,
+                    format!(
+                        "symbol {i}: library ordinal {} exceeds the {} LC_LOAD_DYLIB commands",
+                        ordinal,
+                        img.dylibs.len()
+                    ),
+                    Some(off as u64),
+                ));
+            }
+            if sym.is_external() && sym.n_value == 0 {
+                // true undefined; fine
+            } else if sym.is_tentative() {
+                let align = pgr_format::consts::get_comm_align(sym.n_desc);
+                if align > 15 {
+                    report.issues.push(Issue::error(
+                        Code::SymbolTable,
+                        format!("symbol {i}: common alignment exponent {align} > 15"),
+                        Some(off as u64),
+                    ));
+                }
+            }
+        } else if sym.is_section_defined() && (sym.n_sect == 0 || sym.n_sect as u32 > img.nsections)
+        {
+            report.issues.push(Issue::error(
+                Code::SymbolTable,
+                format!(
+                    "symbol {i}: defining section {} outside 1..={}",
+                    sym.n_sect, img.nsections
+                ),
+                Some(off as u64),
+            ));
+        }
+    }
+
+    if let Some(dys) = img.dysymtab {
+        // Indirect symbol bounds.
+        if dys.nindirectsyms > 0 {
+            match dys.indirect_symbols(bytes) {
+                Ok(entries) => {
+                    for (i, &e) in entries.iter().enumerate() {
+                        if e == pgr_format::consts::INDIRECT_SYMBOL_LOCAL
+                            || e == pgr_format::consts::INDIRECT_SYMBOL_ABS
+                        {
+                            continue;
+                        }
+                        if e >= st.nsyms {
+                            report.issues.push(Issue::error(
+                                Code::SymbolTable,
+                                format!("indirect symbol {i}: index {e} beyond nsyms {}", st.nsyms),
+                                Some(dys.indirectsymoff as u64 + i as u64 * 4),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    report.issues.push(issue_from(&e, Code::SymbolTable));
+                }
+            }
+        }
+        // Sub-range sanity.
+        let ranges = [
+            (dys.ilocalsym, dys.nlocalsym),
+            (dys.iextdefsym, dys.nextdefsym),
+            (dys.iundefsym, dys.nundefsym),
+        ];
+        for (start, count) in ranges {
+            if u64::from(start) + u64::from(count) > u64::from(st.nsyms) {
+                report.issues.push(Issue::error(
+                    Code::SymbolTable,
+                    "dysymtab sub-range exceeds the symbol table",
+                    None,
+                ));
+            }
+        }
+    }
+}
+
+/// Re-exported for the CLI: file type classification helper.
+#[must_use]
+pub fn is_dylib_or_exec(filetype: u32) -> bool {
+    matches!(filetype, MH_EXECUTE | MH_DYLIB | MH_DYLINKER | MH_BUNDLE)
+}
