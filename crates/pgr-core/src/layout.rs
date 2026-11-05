@@ -18,14 +18,17 @@
 //! invariant under 16 KiB-aligned address shifts, so one re-run converges.
 
 use crate::LinkError;
-use crate::fixups::{FixupPlan, FixupSlot, plan_fixups};
+use crate::fixups::{FixupKind, FixupPlan, FixupSlot, plan_fixups};
 use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
 use crate::object::{InputObject, RelocKind, RelocTarget};
-use crate::resolve::{Def, Rank, Resolution};
+use crate::resolve::{Def, Rank, Resolution, UndefinedPolicy};
 use pgr_format::consts::{
-    N_ABS, N_EXT, N_SECT, N_WEAK_DEF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, S_REGULAR, S_ZEROFILL,
-    SECTION_TYPE_MASK, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
+    BIND_SPECIAL_DYLIB_FLAT_LOOKUP, INDIRECT_SYMBOL_LOCAL, MH_BINDS_TO_WEAK, MH_TWOLEVEL,
+    MH_WEAK_DEFINES, N_ABS, N_EXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K,
+    PAGEZERO_SIZE_64, REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS,
+    S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR, S_SYMBOL_STUBS, S_ZEROFILL, SECTION_TYPE_MASK,
+    STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
 };
 
 /// Link configuration the layout pass consumes (driver-derived).
@@ -48,6 +51,17 @@ pub struct LinkConfig {
     pub fixup_chains: bool,
     /// `-no_adhoc` skips the ad-hoc signature.
     pub adhoc: bool,
+    /// Input dylibs in `LC_LOAD_DYLIB` order (M2; parsed `.tbd` stubs).
+    pub dylibs: Vec<crate::resolve::Dylib>,
+    /// `-flat_namespace`: binds carry the flat-lookup ordinal and the
+    /// image drops `MH_TWOLEVEL` (M2).
+    pub flat_namespace: bool,
+    /// `-undefined error|dynamic_lookup` (M2).
+    pub undefined_policy: UndefinedPolicy,
+    /// `-rpath` entries in command order (`LC_RPATH` per entry).
+    pub rpaths: Vec<String>,
+    /// `-source_version A.B.C.D.E` (packed; `LC_SOURCE_VERSION` when set).
+    pub source_version: Option<u64>,
 }
 
 impl Default for LinkConfig {
@@ -61,6 +75,11 @@ impl Default for LinkConfig {
             dynamic_linker: true,
             fixup_chains: true,
             adhoc: true,
+            dylibs: Vec::new(),
+            flat_namespace: false,
+            undefined_policy: UndefinedPolicy::default(),
+            rpaths: Vec::new(),
+            source_version: None,
         }
     }
 }
@@ -122,8 +141,36 @@ pub struct Piece {
     pub common_name: Option<StringId>,
     /// Fully-resolved patches (piece-relative offsets).
     pub patches: Vec<PatchOp>,
-    /// Chained-fixup pointer slots: `(piece-relative offset, final value)`.
-    pub fixup_slots: Vec<(u32, u64)>,
+    /// Chained-fixup pointer slots: `(piece-relative offset, kind)`.
+    pub fixup_slots: Vec<(u32, FixupKind)>,
+    /// Synthetic content (M2 `__got`/`__stubs` slots): emit copies these
+    /// bytes instead of input data, then applies `patches`.
+    pub synth: Option<SynthPiece>,
+}
+
+/// A synthetic output piece: what it is and the exact bytes emit writes
+/// before applying `patches`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynthPiece {
+    /// The synthetic slot's identity.
+    pub kind: SynthKind,
+    /// Bytes emit copies into the output (then patches).
+    pub bytes: Vec<u8>,
+}
+
+/// A synthetic output piece's identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SynthKind {
+    /// One `__DATA_CONST,__got` slot binding `name` (or rebasing to it).
+    GotSlot {
+        /// The referenced symbol.
+        name: StringId,
+    },
+    /// One `__TEXT,__stubs` entry jumping through `name`'s GOT slot.
+    StubSlot {
+        /// The called symbol.
+        name: StringId,
+    },
 }
 
 /// An output section with its placed pieces.
@@ -194,6 +241,10 @@ pub struct LinkeditPlan {
     pub str_off: u64,
     /// String table size.
     pub str_size: usize,
+    /// Indirect symbol table file offset (0 when empty).
+    pub indirect_off: u64,
+    /// Indirect symbol table size in bytes (0 when empty).
+    pub indirect_size: usize,
     /// Byte offset of the `LC_UUID` uuid field inside the header bytes.
     pub uuid_at: u64,
     /// Code signature file offset (16-aligned).
@@ -251,12 +302,111 @@ pub struct Layout {
     pub strtab: Vec<u8>,
     /// Per-symbol `n_strx` (parallel to `symbols`).
     pub str_offsets: Vec<u32>,
-    /// Fixup plan (payload, slot words, `__chain_starts` mirror bytes).
+    /// Indirect symbol table (`__got` slots then `__stubs` slots).
+    pub indirect_syms: Vec<u32>,
+    /// Fixup plan (payload, slot words, imports, `__chain_starts` mirror).
     pub fixups: FixupPlan,
 }
 
 /// One output bucket: `(segment, name, merged flags, zerofill)`.
 type BucketTable = Vec<(String, String, u32, bool)>;
+
+/// GOT/stub synthesis needs gathered from a full reloc scan (M2).
+#[derive(Debug, Default)]
+struct SynthNeeds {
+    /// GOT slots in first-use order (one per referenced name; the slot
+    /// binds or rebases depending on the resolution).
+    got: Vec<StringId>,
+    /// Stub slots in first-use order (dylib calls).
+    stubs: Vec<StringId>,
+    /// Names every GOT slot is for (parallel to `got`, dedup helper).
+    got_set: std::collections::BTreeSet<u32>,
+    /// Names with stubs (dedup helper).
+    stub_set: std::collections::BTreeSet<u32>,
+}
+
+impl SynthNeeds {
+    fn push_got(&mut self, id: StringId) {
+        if self.got_set.insert(id.0) {
+            self.got.push(id);
+        }
+    }
+
+    fn push_stub(&mut self, id: StringId) {
+        self.push_got(id);
+        if self.stub_set.insert(id.0) {
+            self.stubs.push(id);
+        }
+    }
+}
+
+/// Scans every relocation of every input (Pass 3 step 0): classifies
+/// external references into GOT/stub synthesis needs and direct binds, and
+/// rejects the constructs a dynamic link cannot represent (direct page
+/// relocs to externals — clang emits GOT-load relocs for those).
+fn scan_needs(
+    objects: &[InputObject],
+    res: &Resolution,
+    interner: &Interner,
+) -> Result<SynthNeeds, LinkError> {
+    let mut needs = SynthNeeds::default();
+    for obj in objects {
+        for in_sect in &obj.sections {
+            for r in &in_sect.relocs {
+                let RelocTarget::Extern(id) = r.target else {
+                    continue;
+                };
+                if res.def(id).is_some() {
+                    // Locally defined: GOT-kind relocs still demand a slot
+                    // (a rebase into the slot); page/branch relocs patch
+                    // directly as at M1.
+                    match r.kind {
+                        RelocKind::GotLoadPage21 { .. }
+                        | RelocKind::GotLoadPageOff12 { .. }
+                        | RelocKind::PointerToGot => needs.push_got(id),
+                        _ => {}
+                    }
+                    continue;
+                }
+                if res.dylib_ordinal(id).is_none() && !res.is_dynamic_lookup(id) {
+                    // Unresolvable at all: reported by require_all_resolved
+                    // already; nothing to synthesize.
+                    continue;
+                }
+                match r.kind {
+                    RelocKind::Branch26 => needs.push_stub(id),
+                    RelocKind::GotLoadPage21 { .. } | RelocKind::GotLoadPageOff12 { .. } => {
+                        needs.push_got(id)
+                    }
+                    RelocKind::PointerToGot => needs.push_got(id),
+                    RelocKind::Unsigned => {} // direct bind, no slot needed
+                    RelocKind::Page21 { .. } | RelocKind::PageOff12 { .. } => {
+                        return Err(LinkError::Unsupported {
+                            file: obj.name.clone(),
+                            message: format!(
+                                "direct page relocation to external symbol \"{}\" — dynamic \
+                                 references must go through the GOT (clang emits GOT-load \
+                                 relocations for externals; ld64 rejects direct binds too)",
+                                interner.name(id)
+                            ),
+                        });
+                    }
+                    RelocKind::Subtractor { .. } => {
+                        return Err(LinkError::Unsupported {
+                            file: obj.name.clone(),
+                            message: format!(
+                                "subtractor relocation against external symbol \"{}\" \
+                                 (relative-pointer pairs must target in-image symbols)",
+                                interner.name(id)
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(needs)
+}
 
 /// Buckets input sections by `(segment, name)`; returns the bucket table,
 /// the per-file section→bucket map (`usize::MAX` = skipped) and the count
@@ -344,8 +494,31 @@ fn bucket_for(
 }
 
 /// Appends the synthesized `__chain_starts` bucket (when chains are on) and
-/// applies the canonical ordering.
-fn prepare_buckets(buckets: &mut BucketTable, bucket_of: &mut [Vec<usize>], chains_enabled: bool) {
+/// the M2 GOT/stub buckets (when synthesis is needed), then applies the
+/// canonical ordering.
+fn prepare_buckets(
+    buckets: &mut BucketTable,
+    bucket_of: &mut [Vec<usize>],
+    chains_enabled: bool,
+    needs_got: bool,
+    needs_stubs: bool,
+) {
+    if needs_got {
+        buckets.push((
+            "__DATA_CONST".into(),
+            "__got".into(),
+            S_NON_LAZY_SYMBOL_POINTERS,
+            false,
+        ));
+    }
+    if needs_stubs {
+        buckets.push((
+            "__TEXT".into(),
+            "__stubs".into(),
+            S_SYMBOL_STUBS | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
+            false,
+        ));
+    }
     if chains_enabled {
         buckets.push(("__TEXT".into(), "__chain_starts".into(), S_REGULAR, false));
     }
@@ -378,9 +551,10 @@ fn canonical_rank(segment: &str, name: &str) -> u64 {
     };
     let name: u64 = match (segment, name) {
         ("__TEXT", "__text") => 0,
-        ("__TEXT", "__const") => 1,
-        ("__TEXT", "__cstring") => 2,
-        ("__TEXT", "__chain_starts") => 3,
+        ("__TEXT", "__stubs") => 1,
+        ("__TEXT", "__const") => 2,
+        ("__TEXT", "__cstring") => 3,
+        ("__TEXT", "__chain_starts") => 4,
         ("__DATA_CONST", "__const") => 0,
         ("__DATA_CONST", "__got") => 1,
         ("__DATA", "__data") => 0,
@@ -401,6 +575,10 @@ struct PlacedState {
     addr_of: std::collections::HashMap<(u32, usize), u64>,
     /// Interned name id → output vaddr (all resolved definitions).
     def_addr: std::collections::BTreeMap<u32, u64>,
+    /// Interned name id → GOT slot vaddr (M2, in `__got` order).
+    got_slot_addr: std::collections::BTreeMap<u32, u64>,
+    /// Interned name id → stub vaddr (M2, in `__stubs` order).
+    stub_addr: std::collections::BTreeMap<u32, u64>,
 }
 
 /// One flat piece: output section, position within its piece list, absolute
@@ -428,8 +606,19 @@ pub fn layout(
 ) -> Result<Layout, LinkError> {
     // ---- bucketing ---------------------------------------------------------
     let (mut buckets, mut bucket_of, fixup_slot_count) = bucket_inputs(objects, res)?;
-    let chains_enabled = cfg.fixup_chains && fixup_slot_count > 0;
-    prepare_buckets(&mut buckets, &mut bucket_of, chains_enabled);
+    // M2: GOT/stub synthesis needs (first-use scan over every relocation).
+    let needs = scan_needs(objects, res, interner)?;
+    // The fixups payload exists when *any* slot is planned: input pointer
+    // slots (M1 rebases), synthesized GOT binds and POINTER_TO_GOT rebases.
+    let has_fixups = fixup_slot_count > 0 || !needs.got.is_empty();
+    let chains_enabled = cfg.fixup_chains && has_fixups;
+    prepare_buckets(
+        &mut buckets,
+        &mut bucket_of,
+        chains_enabled,
+        !needs.got.is_empty(),
+        !needs.stubs.is_empty(),
+    );
 
     // ---- commons (name-sorted for deterministic allocation) ----------------
     let mut commons: Vec<(StringId, &Def)> = res
@@ -450,14 +639,16 @@ pub fn layout(
             &bucket_of,
             &commons,
             chain_starts_size,
+            &needs,
+            has_fixups,
         )?;
-        resolve_all(objects, &mut state, res, interner)?;
+        resolve_all(objects, &mut state, res, interner, cfg)?;
         let mut slots: Vec<FixupSlot> = Vec::new();
         for fp in &state.flat {
-            for (off, value) in &fp.piece.fixup_slots {
+            for (off, kind) in &fp.piece.fixup_slots {
                 slots.push(FixupSlot {
                     vaddr: fp.addr + u64::from(*off),
-                    target_vaddr: *value,
+                    kind: *kind,
                 });
             }
         }
@@ -466,7 +657,7 @@ pub fn layout(
             .iter()
             .map(|s| (s.vmaddr, s.vmsize, s.fileoff))
             .collect();
-        let plan = plan_fixups(slots, &segs, PAGEZERO_SIZE_64, PAGE_SIZE_16K)?;
+        let plan = plan_fixups(slots, &segs, PAGEZERO_SIZE_64, PAGE_SIZE_16K, interner)?;
         let actual = if chains_enabled {
             plan.chain_starts.len()
         } else {
@@ -495,7 +686,7 @@ pub fn layout(
     })?;
 
     // ---- symbol table ---------------------------------------------------------
-    let symbols = build_symtab(
+    let mut symbols = build_symtab(
         objects,
         res,
         interner,
@@ -503,8 +694,90 @@ pub fn layout(
         &state.addr_of,
         &commons,
     );
+    // `__mh_execute_header`: the image's own exported header symbol (ld64
+    // and lld both emit it for executables; the M2 trie lists it).
+    // `link()` always interns the name; direct `layout()` callers without
+    // it simply skip the entry.
+    let text_vmaddr = state
+        .segments
+        .iter()
+        .find(|s| s.name == "__TEXT")
+        .map(|s| s.vmaddr)
+        .unwrap_or(PAGEZERO_SIZE_64);
+    let mh_header_sect = state
+        .sections
+        .iter()
+        .position(|s| s.seg_name == "__TEXT" && s.size > 0)
+        .map_or(1, |i| (i + 1) as u8);
+    if let Some(id) = interner.lookup(b"__mh_execute_header") {
+        symbols.push(OutputSymbol {
+            name: id,
+            n_type: N_EXT | N_SECT,
+            n_sect: mh_header_sect,
+            n_desc: REFERENCED_DYNAMICALLY,
+            value: text_vmaddr,
+            external: true,
+        });
+    }
+
+    // Undefined externals (dylib exports + dynamic lookups), in import
+    // order — the two-level ordinals live in `n_desc` (TDD §3.3).
+    let mut undef_syms: Vec<OutputSymbol> = Vec::new();
+    for imp in &fixups.imports {
+        // The import table's name pool order matches `imports`; recover the
+        // name from the pool to re-intern.
+        let name = fixups
+            .import_names
+            .get(imp.name_offset as usize..)
+            .and_then(|rest| {
+                let end = rest.iter().position(|&b| b == 0)?;
+                Some(&rest[..end])
+            })
+            .unwrap_or(b"");
+        let Some(id) = interner.lookup(name) else {
+            return Err(LinkError::Internal {
+                message: format!(
+                    "import name {} missing from the interner",
+                    String::from_utf8_lossy(name)
+                ),
+            });
+        };
+        let desc = if imp.lib_ordinal > res.dylibs().len() as u16
+            && imp.lib_ordinal < BIND_SPECIAL_DYLIB_FLAT_LOOKUP
+        {
+            return Err(LinkError::Internal {
+                message: "import ordinal outside the LC_LOAD_DYLIB list".into(),
+            });
+        } else {
+            (imp.lib_ordinal << 8) | (u16::from(imp.weak_import) * N_WEAK_REF)
+        };
+        undef_syms.push(OutputSymbol {
+            name: id,
+            n_type: N_EXT | N_UNDF,
+            n_sect: 0,
+            n_desc: desc,
+            value: 0,
+            external: true,
+        });
+    }
+    // One symtab entry per undefined name (multiple addends of one name
+    // share the entry; the first import's ordinal wins).
+    let mut undef_seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for u in &undef_syms {
+        if undef_seen.insert(u.name.0) {
+            symbols.push(u.clone());
+        }
+    }
+
     let n_locals = symbols.iter().filter(|s| !s.external).count();
-    let n_defs = symbols.iter().filter(|s| s.external).count();
+    let n_defs = symbols
+        .iter()
+        .filter(|s| s.external && s.n_type & pgr_format::consts::N_TYPE != N_UNDF)
+        .count();
+    let n_undef = symbols
+        .iter()
+        .filter(|s| s.external && s.n_type & pgr_format::consts::N_TYPE == N_UNDF)
+        .count();
 
     // ---- string table (dedup by interned name, emission order) ----------------
     let mut strtab: Vec<u8> = vec![0];
@@ -524,8 +797,27 @@ pub fn layout(
     // ---- function starts ---------------------------------------------------------
     let func_starts = build_func_starts(&state.sections, &symbols);
 
-    // ---- minimal export trie -----------------------------------------------------
-    let trie = build_minimal_trie();
+    // ---- indirect symbol table (M2): __got slots then __stubs slots ------
+    // Entries name the symtab entry each pointer slot stands for (TDD
+    // §3.3); `INDIRECT_SYMBOL_LOCAL` covers slots that only rebase.
+    let sym_index_of =
+        |id: StringId| -> Option<usize> { symbols.iter().position(|s| s.name == id) };
+    let mut indirect_syms: Vec<u32> = Vec::new();
+    for id in &needs.got {
+        match sym_index_of(*id) {
+            Some(i) => indirect_syms.push(i as u32),
+            None => indirect_syms.push(INDIRECT_SYMBOL_LOCAL),
+        }
+    }
+    for id in &needs.stubs {
+        match sym_index_of(*id) {
+            Some(i) => indirect_syms.push(i as u32),
+            None => indirect_syms.push(INDIRECT_SYMBOL_LOCAL),
+        }
+    }
+
+    // ---- export trie (M2: every defined external + __mh_execute_header) ---
+    let trie = build_trie(&symbols, interner, PAGEZERO_SIZE_64)?;
 
     // ---- entry --------------------------------------------------------------------
     let entry_id = interner
@@ -583,6 +875,7 @@ pub fn layout(
     };
     let sym_off = take(symbols.len() * 16, 8, &mut cur);
     let str_off = take(strtab.len(), 8, &mut cur);
+    let indirect_off = take(indirect_syms.len() * 4, 4, &mut cur);
     let (sig_off, sig_size, file_size) = if cfg.adhoc {
         let aligned = cur.div_ceil(16) * 16;
         let nblocks = aligned.div_ceil(4096);
@@ -614,6 +907,9 @@ pub fn layout(
         strsize: strtab.len(),
         n_locals,
         n_defs,
+        n_undef,
+        indirect_off,
+        indirect_count: indirect_syms.len(),
         fixup_off: fixup_payload_off,
         fixup_size: fixup_payload_size,
         trie_off,
@@ -623,6 +919,12 @@ pub fn layout(
         sig_off,
         sig_size,
         entryoff,
+        dylibs: cfg.dylibs.clone(),
+        rpaths: cfg.rpaths.clone(),
+        source_version: cfg.source_version,
+        flat_namespace: cfg.flat_namespace,
+        binds_to_weak: fixups.has_weak_binds || res.any_weak_bind(objects),
+        weak_defines: res.definitions().any(|(_, d)| d.weak) || cfg.dylibs.iter().any(|d| d.weak),
     };
     let (header_bytes, uuid_at, entryoff_at) =
         build_header(cfg, &state.segments, &state.sections, &header_inputs)?;
@@ -642,6 +944,8 @@ pub fn layout(
             sym_size: symbols.len() * 16,
             str_off,
             str_size: strtab.len(),
+            indirect_off,
+            indirect_size: indirect_syms.len() * 4,
             uuid_at,
             sig_off,
             sig_size,
@@ -656,6 +960,7 @@ pub fn layout(
         func_starts,
         strtab,
         str_offsets,
+        indirect_syms,
         fixups,
     })
 }
@@ -689,6 +994,7 @@ fn build_bucket_pieces(
                 common_name: None,
                 patches: Vec::new(),
                 fixup_slots: Vec::new(),
+                synth: None,
             });
         }
     }
@@ -713,12 +1019,24 @@ fn build_bucket_pieces(
             common_name: Some(*id),
             patches: Vec::new(),
             fixup_slots: Vec::new(),
+            synth: None,
         });
     }
     Ok(pieces_of_bucket)
 }
 
+/// The arm64 stub prologue before patching: `adrp x16, <page>;
+/// ldr x16, [x16, #<pageoff>]; br x16` (TDD §3.4; matches ld64's output).
+fn stub_template() -> Vec<u8> {
+    let mut b = Vec::with_capacity(STUB_SIZE_ARM64 as usize);
+    b.extend_from_slice(&0x9000_0010u32.to_le_bytes()); // adrp x16, ADRP
+    b.extend_from_slice(&0xF940_0210u32.to_le_bytes()); // ldr x16, [x16, #imm12]
+    b.extend_from_slice(&0xD61F_0200u32.to_le_bytes()); // br x16
+    b
+}
+
 /// Places every output section and packs segments (§8).
+#[allow(clippy::too_many_arguments)]
 fn place(
     cfg: &LinkConfig,
     objects: &[InputObject],
@@ -726,8 +1044,60 @@ fn place(
     bucket_of: &[Vec<usize>],
     commons: &[(StringId, &Def)],
     chain_starts_size: usize,
+    needs: &SynthNeeds,
+    has_fixups: bool,
 ) -> Result<PlacedState, LinkError> {
     let mut pieces_of_bucket = build_bucket_pieces(objects, buckets, bucket_of, commons)?;
+
+    // ---- M2 synthetic pieces: __got slots + __stubs entries ------------------
+    // First-use order (scan_needs) determines slot order, matching the
+    // import table's first-use ordinals and the indirect symbol table.
+    if let Some(bi) = buckets
+        .iter()
+        .position(|(seg, name, _, _)| seg == "__DATA_CONST" && name == "__got")
+    {
+        for id in &needs.got {
+            pieces_of_bucket[bi].push(Piece {
+                file: FileId(u32::MAX),
+                in_sect: usize::MAX,
+                in_range: 0..0,
+                offset: 0,
+                size: 8,
+                align_log2: 3,
+                zerofill: false,
+                common_name: None,
+                patches: Vec::new(),
+                fixup_slots: Vec::new(),
+                synth: Some(SynthPiece {
+                    kind: SynthKind::GotSlot { name: *id },
+                    bytes: vec![0u8; 8],
+                }),
+            });
+        }
+    }
+    if let Some(bi) = buckets
+        .iter()
+        .position(|(seg, name, _, _)| seg == "__TEXT" && name == "__stubs")
+    {
+        for id in &needs.stubs {
+            pieces_of_bucket[bi].push(Piece {
+                file: FileId(u32::MAX),
+                in_sect: usize::MAX,
+                in_range: 0..0,
+                offset: 0,
+                size: u64::from(STUB_SIZE_ARM64),
+                align_log2: 2,
+                zerofill: false,
+                common_name: None,
+                patches: Vec::new(),
+                fixup_slots: Vec::new(),
+                synth: Some(SynthPiece {
+                    kind: SynthKind::StubSlot { name: *id },
+                    bytes: stub_template(),
+                }),
+            });
+        }
+    }
 
     // ---- piece offsets within each output section --------------------------
     let mut sections: Vec<PlacedSection> = Vec::with_capacity(buckets.len());
@@ -766,8 +1136,8 @@ fn place(
     // ---- sizeofcmds (computed before placement so __TEXT starts right) -----
     // Shared with `build_header` (one formula, one source of truth).
     let nsections = sections.iter().filter(|s| s.size > 0).count();
-    let chains_on = sections.iter().any(|s| s.name == "__chain_starts");
-    let sizeofcmds = command_size(cfg, nsections, chains_on);
+    // The fixups LC follows the payload presence (not the mirror section).
+    let sizeofcmds = command_size(cfg, nsections, has_fixups);
     let header_len = 32 + sizeofcmds;
     if header_len as u64 > PAGE_SIZE_16K {
         return Err(LinkError::Layout {
@@ -865,6 +1235,8 @@ fn place(
     let mut addr_of: std::collections::HashMap<(u32, usize), u64> =
         std::collections::HashMap::new();
     let mut def_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+    let mut got_slot_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+    let mut stub_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     for (si, s) in sections.iter().enumerate() {
         for (pi, p) in s.pieces.iter().enumerate() {
             let addr = s.vm_addr + p.offset;
@@ -880,6 +1252,16 @@ fn place(
             if let Some(id) = p.common_name {
                 def_addr.insert(id.0, addr);
             }
+            if let Some(synth) = &p.synth {
+                match synth.kind {
+                    SynthKind::GotSlot { name } => {
+                        got_slot_addr.insert(name.0, addr);
+                    }
+                    SynthKind::StubSlot { name } => {
+                        stub_addr.insert(name.0, addr);
+                    }
+                }
+            }
         }
     }
     Ok(PlacedState {
@@ -888,6 +1270,8 @@ fn place(
         flat,
         addr_of,
         def_addr,
+        got_slot_addr,
+        stub_addr,
     })
 }
 
@@ -897,6 +1281,7 @@ fn resolve_all(
     state: &mut PlacedState,
     res: &Resolution,
     interner: &Interner,
+    cfg: &LinkConfig,
 ) -> Result<(), LinkError> {
     // Definition addresses: commons already resolved; add section defs.
     let mut def_addr: std::collections::BTreeMap<u32, u64> = state.def_addr.clone();
@@ -914,31 +1299,120 @@ fn resolve_all(
         }
     }
 
+    // Weak-reference flag per name (bind import weak bit; any weak-referencing
+    // site makes the import weak — dyld coalesces at runtime).
+    let mut weak_ref: std::collections::BTreeMap<u32, bool> = std::collections::BTreeMap::new();
+    for (id, _def) in res.definitions() {
+        let _ = id;
+    }
+    for obj in objects {
+        for sym in &obj.symbols {
+            if sym.external && sym.is_undefined() {
+                let v = weak_ref.entry(sym.name.0).or_insert(false);
+                *v |= sym.weak_ref;
+            }
+        }
+    }
+
+    // Pass A: every piece except stubs (stubs need the GOT slot addresses
+    // that this pass computes).
     for fp_idx in 0..state.flat.len() {
+        let synth_kind = state.flat[fp_idx].piece.synth.as_ref().map(|s| s.kind);
+        if matches!(synth_kind, Some(SynthKind::StubSlot { .. })) {
+            continue;
+        }
         let (file, in_sect_idx, addr, zerofill) = {
             let fp = &state.flat[fp_idx];
             (fp.piece.file, fp.piece.in_sect, fp.addr, fp.piece.zerofill)
         };
-        if zerofill {
-            continue;
-        }
-        let obj = objects.get(file.0 as usize).ok_or(LinkError::Internal {
-            message: "piece file missing".into(),
-        })?;
-        let in_sect = &obj.sections[in_sect_idx];
         let mut patches: Vec<PatchOp> = Vec::new();
-        let mut slots: Vec<(u32, u64)> = Vec::new();
-        let space = AddrSpace {
-            addr_of: &state.addr_of,
-            def_addr: &def_addr,
-            interner,
-        };
-        for r in &in_sect.relocs {
-            resolve_reloc(obj, in_sect, r, addr, &space, &mut patches, &mut slots)?;
+        let mut slots: Vec<(u32, FixupKind)> = Vec::new();
+        match synth_kind {
+            Some(SynthKind::GotSlot { name }) => {
+                // The GOT slot: rebase when the symbol resolves in-image,
+                // bind when it comes from a dylib / dyld lookup.
+                let kind = if let Some(v) = def_addr.get(&name.0).copied() {
+                    FixupKind::Rebase { target_vaddr: v }
+                } else {
+                    let lib = if cfg.flat_namespace {
+                        BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8
+                    } else if let Some(ord) = res.dylib_ordinal(name) {
+                        u8::try_from(ord).map_err(|_| LinkError::Internal {
+                            message: "dylib ordinal beyond 255".into(),
+                        })?
+                    } else {
+                        BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8
+                    };
+                    FixupKind::Bind {
+                        lib_ordinal: lib,
+                        name,
+                        addend: 0,
+                        weak: weak_ref.get(&name.0).copied().unwrap_or(false),
+                    }
+                };
+                slots.push((0, kind));
+            }
+            Some(SynthKind::StubSlot { .. }) => unreachable!("stubs resolved in pass B"),
+            None => {
+                if zerofill {
+                    continue;
+                }
+                let obj = objects.get(file.0 as usize).ok_or(LinkError::Internal {
+                    message: "piece file missing".into(),
+                })?;
+                let in_sect = &obj.sections[in_sect_idx];
+                let space = AddrSpace {
+                    addr_of: &state.addr_of,
+                    def_addr: &def_addr,
+                    got_slot_addr: &state.got_slot_addr,
+                    stub_addr: &state.stub_addr,
+                    interner,
+                    res,
+                    cfg,
+                };
+                for r in &in_sect.relocs {
+                    resolve_reloc(obj, in_sect, r, addr, &space, &mut patches, &mut slots)?;
+                }
+            }
         }
         state.flat[fp_idx].piece.patches = patches;
         state.flat[fp_idx].piece.fixup_slots = slots;
     }
+
+    // Pass B: stub pieces (adrp/ldr through their GOT slot).
+    for fp_idx in 0..state.flat.len() {
+        let Some(SynthPiece {
+            kind: SynthKind::StubSlot { name },
+            ..
+        }) = state.flat[fp_idx].piece.synth.as_ref()
+        else {
+            continue;
+        };
+        let slot_vaddr = state
+            .got_slot_addr
+            .get(&name.0)
+            .copied()
+            .ok_or(LinkError::Internal {
+                message: format!(
+                    "stub for \"{}\" has no GOT slot (scan/synthesis mismatch)",
+                    interner.name(*name)
+                ),
+            })?;
+        let stub_vaddr = state.flat[fp_idx].addr;
+        let page_delta = ((slot_vaddr as i64) >> 12) - ((stub_vaddr as i64) >> 12);
+        let imm12 = ((slot_vaddr & 0xFFF) >> 3) as u32; // ldr x16: /8 scale
+        state.flat[fp_idx].piece.patches = vec![
+            PatchOp::Adrp {
+                in_offset: 0,
+                page_delta,
+            },
+            PatchOp::PageOff12 {
+                in_offset: 4,
+                imm12,
+            },
+        ];
+    }
+
     // Sync the resolved state back into the section view (Pass 4 reads
     // `sections[*].pieces`).
     for fp in &state.flat {
@@ -956,11 +1430,35 @@ struct AddrSpace<'a> {
     addr_of: &'a std::collections::HashMap<(u32, usize), u64>,
     /// Interned name id → output vaddr.
     def_addr: &'a std::collections::BTreeMap<u32, u64>,
+    /// Interned name id → GOT slot vaddr (M2).
+    got_slot_addr: &'a std::collections::BTreeMap<u32, u64>,
+    /// Interned name id → stub vaddr (M2).
+    stub_addr: &'a std::collections::BTreeMap<u32, u64>,
     /// Name bytes for diagnostics.
     interner: &'a Interner,
+    /// Resolution (dylib ordinals, dynamic lookups).
+    res: &'a Resolution,
+    /// Link config (flat namespace).
+    cfg: &'a LinkConfig,
+}
+
+/// The bind library ordinal for an external reference (M2): the two-level
+/// ordinal, or a `BIND_SPECIAL_DYLIB_*` special under `-flat_namespace` /
+/// dynamic lookup.
+fn bind_lib_ordinal(id: StringId, space: &AddrSpace<'_>) -> Result<u8, LinkError> {
+    if space.cfg.flat_namespace {
+        return Ok(BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8);
+    }
+    if let Some(ord) = space.res.dylib_ordinal(id) {
+        return u8::try_from(ord).map_err(|_| LinkError::Internal {
+            message: "dylib ordinal beyond 255".into(),
+        });
+    }
+    Ok(BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8)
 }
 
 /// Resolves one relocation into a static patch or a fixup slot.
+#[allow(clippy::too_many_arguments)]
 fn resolve_reloc(
     obj: &InputObject,
     in_sect: &crate::object::InputSection,
@@ -968,20 +1466,47 @@ fn resolve_reloc(
     piece_addr: u64,
     space: &AddrSpace<'_>,
     patches: &mut Vec<PatchOp>,
-    slots: &mut Vec<(u32, u64)>,
+    slots: &mut Vec<(u32, FixupKind)>,
 ) -> Result<(), LinkError> {
     let slot_v = piece_addr + u64::from(r.offset);
     match r.kind {
         RelocKind::Unsigned => {
-            let target = lookup(obj, r.target, space)?;
             let at = in_sect.data.start as usize + r.offset as usize;
             let addend = read_slot_i64(&obj.bytes, at)?;
-            let value = (target as i64)
-                .checked_add(addend)
-                .ok_or(LinkError::Layout {
-                    message: "fixup target overflow".into(),
-                })?;
-            slots.push((r.offset, value as u64));
+            match lookup_opt(obj, r.target, space)? {
+                Some(target) => {
+                    let value = (target as i64)
+                        .checked_add(addend)
+                        .ok_or(LinkError::Layout {
+                            message: "fixup target overflow".into(),
+                        })?;
+                    slots.push((
+                        r.offset,
+                        FixupKind::Rebase {
+                            target_vaddr: value as u64,
+                        },
+                    ));
+                }
+                None => {
+                    // External (dylib export or dynamic lookup): chained
+                    // bind. The full addend travels in the import entry /
+                    // inline word per plan_fixups' split.
+                    let RelocTarget::Extern(id) = r.target else {
+                        return Err(LinkError::Internal {
+                            message: "section target without an address".into(),
+                        });
+                    };
+                    slots.push((
+                        r.offset,
+                        FixupKind::Bind {
+                            lib_ordinal: bind_lib_ordinal(id, space)?,
+                            name: id,
+                            addend,
+                            weak: false,
+                        },
+                    ));
+                }
+            }
         }
         RelocKind::Page21 { addend } => {
             let target = lookup(obj, r.target, space)?
@@ -1006,8 +1531,93 @@ fn resolve_reloc(
                 imm12: (target & 0xFFF) as u32,
             });
         }
+        RelocKind::GotLoadPage21 { .. } => {
+            let RelocTarget::Extern(id) = r.target else {
+                return Err(LinkError::Internal {
+                    message: "GOT-load relocation without an external target".into(),
+                });
+            };
+            let slot = space
+                .got_slot_addr
+                .get(&id.0)
+                .copied()
+                .ok_or(LinkError::Internal {
+                    message: format!(
+                        "GOT-load for \"{}\" without a synthesized slot",
+                        space.interner.name(id)
+                    ),
+                })?;
+            let page_delta = ((slot as i64) >> 12) - ((slot_v as i64) >> 12);
+            patches.push(PatchOp::Adrp {
+                in_offset: r.offset,
+                page_delta,
+            });
+        }
+        RelocKind::GotLoadPageOff12 { .. } => {
+            let RelocTarget::Extern(id) = r.target else {
+                return Err(LinkError::Internal {
+                    message: "GOT-load relocation without an external target".into(),
+                });
+            };
+            let slot = space
+                .got_slot_addr
+                .get(&id.0)
+                .copied()
+                .ok_or(LinkError::Internal {
+                    message: format!(
+                        "GOT-load for \"{}\" without a synthesized slot",
+                        space.interner.name(id)
+                    ),
+                })?;
+            // LDR (immediate, unsigned offset): imm12 is scaled by the
+            // access size (8 bytes for a 64-bit GOT load).
+            patches.push(PatchOp::PageOff12 {
+                in_offset: r.offset,
+                imm12: ((slot & 0xFFF) >> r.length_log2) as u32,
+            });
+        }
+        RelocKind::PointerToGot => {
+            let RelocTarget::Extern(id) = r.target else {
+                return Err(LinkError::Internal {
+                    message: "POINTER_TO_GOT without an external target".into(),
+                });
+            };
+            let slot = space
+                .got_slot_addr
+                .get(&id.0)
+                .copied()
+                .ok_or(LinkError::Internal {
+                    message: format!(
+                        "POINTER_TO_GOT for \"{}\" without a synthesized slot",
+                        space.interner.name(id)
+                    ),
+                })?;
+            // The pointer's value is the GOT slot's address: a chained
+            // rebase (ASLR shifts it with the image).
+            slots.push((r.offset, FixupKind::Rebase { target_vaddr: slot }));
+        }
         RelocKind::Branch26 => {
-            let target = lookup(obj, r.target, space)?;
+            let target = match lookup_opt(obj, r.target, space)? {
+                Some(t) => t,
+                None => {
+                    // Dylib call: branch through the synthesized stub.
+                    let RelocTarget::Extern(id) = r.target else {
+                        return Err(LinkError::Internal {
+                            message: "external branch without a name".into(),
+                        });
+                    };
+                    space
+                        .stub_addr
+                        .get(&id.0)
+                        .copied()
+                        .ok_or(LinkError::Internal {
+                            message: format!(
+                                "branch to \"{}\" without a synthesized stub",
+                                space.interner.name(id)
+                            ),
+                        })?
+                }
+            };
             let delta = (target as i64) - (slot_v as i64);
             if delta.abs() > 0x0800_0000 {
                 return Err(LinkError::Layout {
@@ -1055,27 +1665,43 @@ fn read_slot_i64(bytes: &[u8], at: usize) -> Result<i64, LinkError> {
         })
 }
 
-/// Looks up a relocation target (extern or local section).
-fn lookup(obj: &InputObject, target: RelocTarget, space: &AddrSpace<'_>) -> Result<u64, LinkError> {
+/// Looks up a relocation target (extern or local section); externs that
+/// resolve nowhere (dylib exports, dynamic lookups) yield `None` — the
+/// caller decides between the bind path and an error.
+fn lookup_opt(
+    obj: &InputObject,
+    target: RelocTarget,
+    space: &AddrSpace<'_>,
+) -> Result<Option<u64>, LinkError> {
     match target {
-        RelocTarget::Extern(id) => space.def_addr.get(&id.0).copied().ok_or(LinkError::Symbol {
-            name: space.interner.name(id),
-            message: format!(
+        RelocTarget::Extern(id) => Ok(space.def_addr.get(&id.0).copied()),
+        RelocTarget::Section(idx) => space
+            .addr_of
+            .get(&(obj.file.0, idx))
+            .copied()
+            .map(Some)
+            .ok_or(LinkError::Internal {
+                message: format!("local section {idx} of {} was not placed", obj.name),
+            }),
+    }
+}
+
+/// Looks up a relocation target that *must* resolve in-image.
+fn lookup(obj: &InputObject, target: RelocTarget, space: &AddrSpace<'_>) -> Result<u64, LinkError> {
+    lookup_opt(obj, target, space)?.ok_or(LinkError::Symbol {
+        name: match target {
+            RelocTarget::Extern(id) => space.interner.name(id),
+            RelocTarget::Section(_) => String::new(),
+        },
+        message: match target {
+            RelocTarget::Extern(id) => format!(
                 "undefined symbol \"{}\" (referenced from {})",
                 space.interner.name(id),
                 obj.name
             ),
-        }),
-        RelocTarget::Section(idx) => {
-            space
-                .addr_of
-                .get(&(obj.file.0, idx))
-                .copied()
-                .ok_or(LinkError::Internal {
-                    message: format!("local section {idx} of {} was not placed", obj.name),
-                })
-        }
-    }
+            RelocTarget::Section(_) => "local section was not placed".into(),
+        },
+    })
 }
 
 /// Builds the output symbol table: locals (file order), ext defs (file
@@ -1232,10 +1858,202 @@ pub fn uleb(mut v: u64) -> Vec<u8> {
     out
 }
 
-/// Minimal export trie: executables export `__mh_execute_header` (image
-/// offset 0).
-fn build_minimal_trie() -> Vec<u8> {
-    vec![2, 0, 0, 0]
+/// Export trie (M2): one terminal node per externally-visible defined
+/// symbol plus `__mh_execute_header`, children sorted by their first byte
+/// (TDD §3.3). Node layout: `ULEB terminal_size, [ULEB flags, ULEB
+/// address]`, `u8 child_count`, then per child `substring, 0x0, ULEB
+/// offset` (the dyld/ld64 edge form). Addresses are image-base-relative
+/// (dyld resolves `image_load_address + addr`).
+fn build_trie(
+    symbols: &[OutputSymbol],
+    interner: &Interner,
+    image_base: u64,
+) -> Result<Vec<u8>, LinkError> {
+    #[derive(Debug)]
+    struct Node {
+        /// Terminal export info (sorted-name prefix), `None` = pure prefix.
+        export: Option<(u32, u64)>, // (flags, address)
+        children: Vec<(Vec<u8>, usize)>, // (substring, child index)
+    }
+    let mut nodes: Vec<Node> = vec![Node {
+        export: None,
+        children: Vec::new(),
+    }];
+
+    // Exports in sorted-name order for a deterministic trie.
+    let mut exports: Vec<(&OutputSymbol, Vec<u8>)> = symbols
+        .iter()
+        .filter(|s| s.external && s.n_type & N_SECT != 0)
+        .map(|s| (s, interner.bytes(s.name).to_vec()))
+        .collect();
+    exports.sort_by(|a, b| a.1.cmp(&b.1));
+    exports.dedup_by(|a, b| a.1 == b.1);
+
+    for (sym, name) in exports {
+        let address = sym
+            .value
+            .checked_sub(image_base)
+            .ok_or(LinkError::Internal {
+                message: "export address below the image base".into(),
+            })?;
+        let flags = u32::from(sym.n_desc & N_WEAK_DEF != 0);
+        // Walk/build the node chain, splitting edges on common prefixes.
+        let mut cur = 0usize;
+        let mut rest = &name[..];
+        'insert: while !rest.is_empty() {
+            // Find a child edge sharing a prefix.
+            let mut advanced = false;
+            for (sub, child) in nodes[cur].children.clone() {
+                let common = sub
+                    .iter()
+                    .zip(rest.iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(sub.len().min(rest.len()));
+                if common > 0 {
+                    if common < sub.len() {
+                        // Split the edge: new intermediate node.
+                        let tail = sub[common..].to_vec();
+                        let intermediate = Node {
+                            export: None,
+                            children: vec![(tail, child)],
+                        };
+                        let inter_idx = nodes.len();
+                        nodes.push(intermediate);
+                        nodes[cur].children.retain(|(s, _)| s != &sub);
+                        nodes[cur]
+                            .children
+                            .push((sub[..common].to_vec(), inter_idx));
+                        nodes[cur].children.sort_by(|a, b| a.0.cmp(&b.0));
+                        cur = inter_idx;
+                    } else {
+                        cur = child;
+                    }
+                    rest = &rest[common..];
+                    advanced = true;
+                    break;
+                }
+            }
+            if advanced {
+                continue 'insert;
+            }
+            // New edge for the remaining prefix (one character edges keep
+            // the builder simple; ld64 uses single-char edges too).
+            let child_idx = nodes.len();
+            nodes.push(Node {
+                export: None,
+                children: Vec::new(),
+            });
+            nodes[cur].children.push((rest[..1].to_vec(), child_idx));
+            nodes[cur].children.sort_by(|a, b| a.0.cmp(&b.0));
+            cur = child_idx;
+            rest = &rest[1..];
+        }
+        if nodes[cur].export.is_some() {
+            return Err(LinkError::Internal {
+                message: "duplicate export in the trie".into(),
+            });
+        }
+        nodes[cur].export = Some((flags, address));
+    }
+
+    // Two-pass offset assignment: node offsets depend on ULEB widths, which
+    // depend on offsets (ld64's `updateOffset` fixpoint; converges fast).
+    #[derive(Debug, Clone, Default)]
+    struct Offsets {
+        offset: Vec<usize>,
+        total: usize,
+    }
+    let mut off = Offsets {
+        offset: vec![0usize; nodes.len()],
+        total: 0,
+    };
+    let mut pass = 0usize;
+    loop {
+        // Compute terminal sizes.
+        let terminal: Vec<usize> = nodes
+            .iter()
+            .map(|n| match n.export {
+                None => 0,
+                Some((flags, address)) => uleb(u64::from(flags)).len() + uleb(address).len(),
+            })
+            .collect();
+        let mut next = 0usize;
+        for i in 0..nodes.len() {
+            off.offset[i] = next;
+            let node_size = terminal[i]
+                + if terminal[i] == 0 {
+                    1
+                } else {
+                    uleb(terminal[i] as u64).len()
+                }
+                + 1
+                + nodes[i]
+                    .children
+                    .iter()
+                    .map(|(sub, child)| sub.len() + 1 + uleb(off.offset[*child] as u64).len())
+                    .sum::<usize>();
+            next += node_size;
+        }
+        if off.total == next || pass > 8 {
+            off.total = next;
+            break;
+        }
+        off.total = next;
+        pass += 1;
+    }
+
+    // Serialize.
+    let terminal: Vec<usize> = nodes
+        .iter()
+        .map(|n| match n.export {
+            None => 0,
+            Some((flags, address)) => uleb(u64::from(flags)).len() + uleb(address).len(),
+        })
+        .collect();
+    let mut out = vec![0u8; off.total];
+    for (i, n) in nodes.iter().enumerate() {
+        let mut w = off.offset[i];
+        if terminal[i] > 0 {
+            let t = uleb(terminal[i] as u64);
+            out[w..w + t.len()].copy_from_slice(&t);
+            w += t.len();
+            let (flags, address) = n.export.expect("terminal size implies export");
+            let fb = uleb(u64::from(flags));
+            out[w..w + fb.len()].copy_from_slice(&fb);
+            w += fb.len();
+            let ab = uleb(address);
+            out[w..w + ab.len()].copy_from_slice(&ab);
+            w += ab.len();
+        } else {
+            out[w] = 0;
+            w += 1;
+        }
+        out[w] = n.children.len() as u8;
+        w += 1;
+        for (sub, child) in &n.children {
+            out[w..w + sub.len()].copy_from_slice(sub);
+            w += sub.len();
+            out[w] = 0;
+            w += 1;
+            let ob = uleb(off.offset[*child] as u64);
+            out[w..w + ob.len()].copy_from_slice(&ob);
+            w += ob.len();
+        }
+        let ts = terminal[i];
+        debug_assert_eq!(
+            w,
+            off.offset[i]
+                + ts
+                + if ts == 0 { 1 } else { uleb(ts as u64).len() }
+                + 1
+                + n.children
+                    .iter()
+                    .map(|(s, c)| s.len() + 1 + uleb(off.offset[*c] as u64).len())
+                    .sum::<usize>(),
+            "node serialization must match its computed size"
+        );
+    }
+    Ok(out)
 }
 
 /// Assembles header + load commands. Returns `(bytes, uuid_at, entryoff_at)`.
@@ -1262,8 +2080,29 @@ struct HeaderInputs {
     /// LC_DYSYMTAB subranges.
     n_locals: usize,
     n_defs: usize,
+    n_undef: usize,
+    /// LC_DYSYMTAB indirect symbol table.
+    indirect_off: u64,
+    indirect_count: usize,
     /// LC_MAIN entry offset within `__TEXT`.
     entryoff: u64,
+    /// M2 load-command inputs.
+    dylibs: Vec<crate::resolve::Dylib>,
+    rpaths: Vec<String>,
+    source_version: Option<u64>,
+    flat_namespace: bool,
+    binds_to_weak: bool,
+    weak_defines: bool,
+}
+
+/// The exact `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB` command size for a name.
+fn dylib_cmd_size(install_name: &str) -> usize {
+    align8(24 + install_name.len() + 1)
+}
+
+/// The exact `LC_RPATH` command size for a path.
+fn rpath_cmd_size(path: &str) -> usize {
+    align8(12 + path.len() + 1)
 }
 
 fn build_header(
@@ -1274,6 +2113,17 @@ fn build_header(
 ) -> Result<(Vec<u8>, u64, u64), LinkError> {
     let dylinker_len = align8(12 + "/usr/lib/dyld\0".len());
     let fixup_lc = if hi.fixup_size > 0 { 16 } else { 0 };
+    let dylib_cmds: Vec<u32> = hi
+        .dylibs
+        .iter()
+        .map(|d| {
+            if d.weak {
+                pgr_format::consts::LC_LOAD_WEAK_DYLIB
+            } else {
+                pgr_format::consts::LC_LOAD_DYLIB
+            }
+        })
+        .collect();
     let ncmds: u32 = 5
         + 1
         + u32::from(cfg.dynamic_linker)
@@ -1284,7 +2134,10 @@ fn build_header(
         + 1 // LC_DYLD_EXPORTS_TRIE
         + 1 // LC_FUNCTION_STARTS
         + 1 // LC_UUID
-        + u32::from(cfg.adhoc);
+        + u32::from(cfg.adhoc)
+        + u32::try_from(hi.dylibs.len()).expect("dylib count fits u32")
+        + u32::try_from(hi.rpaths.len()).expect("rpath count fits u32")
+        + u32::from(hi.source_version.is_some());
     let nsections: usize = sections.iter().filter(|s| s.size > 0).count();
     let sizeofcmds = command_size(cfg, nsections, fixup_lc > 0);
     debug_assert_eq!(
@@ -1300,7 +2153,10 @@ fn build_header(
             + 16 // LC_DYLD_EXPORTS_TRIE
             + 16 // LC_FUNCTION_STARTS
             + 24 // LC_UUID
-            + if cfg.adhoc { 16 } else { 0 }, // LC_CODE_SIGNATURE
+            + if cfg.adhoc { 16 } else { 0 } // LC_CODE_SIGNATURE
+            + hi.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
+            + hi.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
+            + if hi.source_version.is_some() { 16 } else { 0 },
         "sizing formula drift"
     );
     let mut buf = vec![0u8; 32 + sizeofcmds];
@@ -1313,14 +2169,19 @@ fn build_header(
     w32(&mut buf, 12, pgr_format::consts::MH_EXECUTE);
     w32(&mut buf, 16, ncmds);
     w32(&mut buf, 20, sizeofcmds as u32);
-    w32(
-        &mut buf,
-        24,
-        pgr_format::consts::MH_NOUNDEFS
-            | pgr_format::consts::MH_DYLDLINK
-            | pgr_format::consts::MH_TWOLEVEL
-            | pgr_format::consts::MH_PIE,
-    );
+    let mut flags = pgr_format::consts::MH_NOUNDEFS
+        | pgr_format::consts::MH_DYLDLINK
+        | pgr_format::consts::MH_PIE;
+    if !hi.flat_namespace {
+        flags |= MH_TWOLEVEL;
+    }
+    if hi.weak_defines {
+        flags |= MH_WEAK_DEFINES;
+    }
+    if hi.binds_to_weak {
+        flags |= MH_BINDS_TO_WEAK;
+    }
+    w32(&mut buf, 24, flags);
 
     let mut lc = 32usize;
     for seg in segments {
@@ -1374,6 +2235,39 @@ fn build_header(
         buf[lc + 12..lc + 12 + "/usr/lib/dyld\0".len()].copy_from_slice(b"/usr/lib/dyld\0");
         lc += dylinker_len;
     }
+    // LC_LOAD_DYLIB / LC_LOAD_WEAK_DYLIB per input dylib, in ordinal
+    // order — the two-level namespace index base (TDD §3.3).
+    for (d, &cmd) in hi.dylibs.iter().zip(dylib_cmds.iter()) {
+        let name = d.install_name.as_bytes();
+        let cmdsize = dylib_cmd_size(&d.install_name);
+        w32(&mut buf, lc, cmd);
+        w32(&mut buf, lc + 4, cmdsize as u32);
+        w32(&mut buf, lc + 8, 24); // name lc_str offset
+        w32(&mut buf, lc + 12, 1); // timestamp (ld64 writes 1)
+        w32(&mut buf, lc + 16, d.current_version);
+        w32(&mut buf, lc + 20, d.compatibility_version);
+        buf[lc + 24..lc + 24 + name.len()].copy_from_slice(name);
+        buf[lc + 24 + name.len()] = 0;
+        lc += cmdsize;
+    }
+    // LC_RPATH per `-rpath` entry.
+    for p in &hi.rpaths {
+        let path = p.as_bytes();
+        let cmdsize = rpath_cmd_size(p);
+        w32(&mut buf, lc, pgr_format::consts::LC_RPATH);
+        w32(&mut buf, lc + 4, cmdsize as u32);
+        w32(&mut buf, lc + 8, 12); // path lc_str offset
+        buf[lc + 12..lc + 12 + path.len()].copy_from_slice(path);
+        buf[lc + 12 + path.len()] = 0;
+        lc += cmdsize;
+    }
+    // LC_SOURCE_VERSION (when configured).
+    if let Some(sv) = hi.source_version {
+        w32(&mut buf, lc, pgr_format::consts::LC_SOURCE_VERSION);
+        w32(&mut buf, lc + 4, 16);
+        w64(&mut buf, lc + 8, sv);
+        lc += 16;
+    }
     w32(&mut buf, lc, pgr_format::consts::LC_MAIN);
     w32(&mut buf, lc + 4, 24);
     let entryoff_at = lc + 8;
@@ -1394,7 +2288,11 @@ fn build_header(
     w32(&mut buf, lc + 16, hi.n_locals as u32); // iextdefsym
     w32(&mut buf, lc + 20, hi.n_defs as u32);
     w32(&mut buf, lc + 24, (hi.n_locals + hi.n_defs) as u32); // iundefsym
-    w32(&mut buf, lc + 28, 0); // nundefsym (static: none remain)
+    w32(&mut buf, lc + 28, hi.n_undef as u32);
+    // toc/modtoc/extref... legacy zeros; the indirect symbol table lives in
+    // the tail fields (off 56: indirectsymoff, off 60: nindirectsyms).
+    w32(&mut buf, lc + 56, hi.indirect_off as u32);
+    w32(&mut buf, lc + 60, hi.indirect_count as u32);
     lc += 80;
     if fixup_lc > 0 {
         w32(&mut buf, lc, pgr_format::consts::LC_DYLD_CHAINED_FIXUPS);
@@ -1436,8 +2334,8 @@ fn pad16(name: &[u8]) -> [u8; 16] {
     out
 }
 
-/// The exact `sizeofcmds` for the M1 command set — the single source of
-/// truth shared by `place` (section start math) and `build_header`.
+/// The exact `sizeofcmds` — the single source of truth shared by `place`
+/// (section start math) and `build_header`.
 fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: bool) -> usize {
     let dylinker_len = if cfg.dynamic_linker {
         align8(12 + "/usr/lib/dyld\0".len())
@@ -1448,6 +2346,9 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: bool) -> usize {
         + 80 * nsections
         + 32 // LC_BUILD_VERSION
         + dylinker_len
+        + cfg.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
+        + cfg.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
+        + usize::from(cfg.source_version.is_some()) * 16 // LC_SOURCE_VERSION
         + 24 // LC_MAIN
         + 24 // LC_SYMTAB
         + 80 // LC_DYSYMTAB
