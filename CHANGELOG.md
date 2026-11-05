@@ -4,6 +4,34 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+
+## [0.2.0] - 2026-11-05
+
+### Features
+- **driver:** M1 static hello-world link pipeline: ld64-compatible option
+  surface (`-o -arch -platform_version -e -static -fixup_chains -adhoc
+  -headerpad -segalign`), Pass 0 mapping and the Pass 1–5 driver loop
+- **core:** Passes 1–3: arm64 relocatable-object parser (pair-resolving
+  relocation decode), canonicalizing interner, Mach-O precedence resolution
+  (strong > weak > common, coalescing), §8 layout engine (16 KiB congruence,
+  constant-delta segments, `__LINKEDIT` chunk order), §7 chained-fixup
+  planner (stride-bounded packer, rebase-only payload, `__chain_starts`
+  static mirror) and the fully-resolved patch plan
+- **emit:** Passes 4–5: single-allocation output buffer, arm64 immediate
+  patching (ADRP/imm12/BR26, subtractor writes), chain-word encoding,
+  `__LINKEDIT` assembly, two-pass content-derived UUID, ad-hoc SHA-256
+  signature, atomic page-granular writer
+- **verify:** `__chain_starts` mirror-vs-payload agreement check and the
+  canonical segment-order check for executables
+- **fixtures:** deterministic arm64 relocatable-object (`MH_OBJECT`)
+  builder with clang-convention symtab grouping and relocation tables
+- **driver:** end-to-end link benchmark (small/large corpora) recorded as
+  the M4 baseline
+
+### Continuous Integration
+- Fuzz schedule extended with the `link_object` target (Pass 1 parser +
+  Pass 2/3 pipeline) and object seeds in the fuzz corpus
+
 ## [0.1.0] - 2026-11-05### Bug Fixes
 - **format:** Panic-free casts on misaligned mutated input (a5e3a4f)
 ### Continuous Integration
