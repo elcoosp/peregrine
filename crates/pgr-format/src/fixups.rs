@@ -291,8 +291,8 @@ impl ChainWord64 {
 
     /// Bind inline addend (bits 24..32, read as signed i8 by dyld).
     #[must_use]
-    pub const fn bind_addend(&self) -> i8 {
-        ((self.raw >> 24) & 0xff) as u8 as i8
+    pub const fn bind_addend(&self) -> u8 {
+        ((self.raw >> 24) & 0xff) as u8
     }
 }
 
@@ -317,7 +317,10 @@ pub fn encode_rebase_word(target: u64, high8: u8, next: u32) -> Result<u64, Form
 }
 
 /// Encodes a bind chain word: `ordinal | addend << 24 | next << 51 | 1 << 63`.
-pub fn encode_bind_word(ordinal: u32, addend: i8, next: u32) -> Result<u64, FormatError> {
+///
+/// `addend` is the 8-bit *unsigned* inline addend (`dyld_chained_ptr_64_bind.addend`);
+/// larger addends travel in the import entry (`DYLD_CHAINED_IMPORT_ADDEND`).
+pub fn encode_bind_word(ordinal: u32, addend: u8, next: u32) -> Result<u64, FormatError> {
     if ordinal >> 24 != 0 {
         return Err(FormatError::Invalid {
             offset: 0,
@@ -332,7 +335,7 @@ pub fn encode_bind_word(ordinal: u32, addend: i8, next: u32) -> Result<u64, Form
             value: next as u64,
         });
     }
-    Ok(u64::from(ordinal) | u64::from(addend as u8) << 24 | u64::from(next) << 51 | 1 << 63)
+    Ok(u64::from(ordinal) | u64::from(addend) << 24 | u64::from(next) << 51 | 1 << 63)
 }
 
 /// Parses the import table (`imports_count` entries at `imports_offset`).
@@ -414,15 +417,15 @@ mod tests {
         assert_eq!(word >> 63, 0);
     }
 
-    /// Same for the bind word: ordinal 24b, addend 8b (signed), reserved 19b,
-    /// next 12b, bind=1.
+    /// Same for the bind word: ordinal 24b, addend 8b (unsigned, LLVM
+    /// `dyld_chained_ptr_64_bind`), reserved 19b, next 12b, bind=1.
     #[test]
     fn bind_word_bit_layout() {
-        let word = encode_bind_word(0x00ff_1234, -2, 1).unwrap();
+        let word = encode_bind_word(0x00ff_1234, 0xfe, 1).unwrap();
         let w = ChainWord64::new(word);
         assert!(w.is_bind());
         assert_eq!(w.bind_ordinal(), 0x00ff_1234);
-        assert_eq!(w.bind_addend(), -2);
+        assert_eq!(w.bind_addend(), 0xfe);
         assert_eq!(w.next(), 1);
     }
 
