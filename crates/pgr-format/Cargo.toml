@@ -1,0 +1,25 @@
+[package]
+name = "pgr-format"
+description = "Peregrine format layer: zero-copy Mach-O structs, constants, cursor and codecs (M0)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pgr-fixtures = { workspace = true }
+object = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "parse"
+harness = false
+
+[lints]
+workspace = true
