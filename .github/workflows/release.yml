@@ -1,0 +1,107 @@
+name: Release
+
+# Tag-driven release: git-cliff generates the changelog/notes, binaries are
+# built for the two first-class platforms and attached to a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build-linux:
+    name: build (linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --release --locked --workspace
+      - name: Smoke: verify a built fixture with pgr-verify
+        run: |
+          cargo test --release --locked -p pgr-verify --test verify_integration
+          ./target/release/pgr --version
+      - name: Package
+        run: |
+          dir="peregrine-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "${dir}"
+          cp target/release/pgr target/release/pgr-verify "${dir}/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "${dir}/" || true
+          tar czf "${dir}.tar.gz" "${dir}"
+          sha256sum "${dir}.tar.gz" > "${dir}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+          if-no-files-found: error
+
+  build-macos:
+    name: build (macOS aarch64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --release --locked --workspace
+      - name: Smoke
+        run: |
+          cargo test --release --locked -p pgr-verify --test verify_integration
+          ./target/release/pgr --version
+      - name: Package
+        run: |
+          dir="peregrine-${GITHUB_REF_NAME}-aarch64-apple-darwin"
+          mkdir -p "${dir}"
+          cp target/release/pgr target/release/pgr-verify "${dir}/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "${dir}/" || true
+          tar czf "${dir}.tar.gz" "${dir}"
+          shasum -a 256 "${dir}.tar.gz" > "${dir}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: git-cliff changelog + GitHub Release
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Generate changelog for the tagged release
+        id: git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: -vv --latest --strip header
+        env:
+          OUTPUT: CHANGES.md
+          GITHUB_REPO: ${{ github.repository }}
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: CHANGES.md
+          files: |
+            dist/*
+          generate_release_notes: false
