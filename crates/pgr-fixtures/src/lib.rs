@@ -110,8 +110,8 @@ pub enum SlotKind {
     Bind {
         /// Index into the builder's symbol list (an `Undefined` symbol).
         sym_index: usize,
-        /// Inline addend carried in the bind word.
-        addend: i8,
+        /// Inline (unsigned 8-bit) addend carried in the bind word.
+        addend: u8,
     },
 }
 
@@ -1281,7 +1281,7 @@ mod tests {
         b.set_got(vec![
             SlotKind::Bind {
                 sym_index: undef,
-                addend: -2,
+                addend: 0xfe,
             },
             SlotKind::Rebase {
                 target: rebase_target,
@@ -1289,7 +1289,7 @@ mod tests {
         ]);
         let img = b.build().unwrap();
 
-        // Slot 0: bind word (bit 63 set), ordinal 0, inline addend -2.
+        // Slot 0: bind word (bit 63 set), ordinal 0, inline addend 0xfe.
         let got_at = img
             .map
             .sections
@@ -1301,7 +1301,7 @@ mod tests {
         let w0 = pgr_format::fixups::ChainWord64::new(slot0);
         assert!(w0.is_bind());
         assert_eq!(w0.bind_ordinal(), 0);
-        assert_eq!(w0.bind_addend(), -2);
+        assert_eq!(w0.bind_addend(), 0xfe);
         // next stride: slot 1 - slot 0 = 8 bytes = 2 strides of 4.
         assert_eq!(w0.next(), 2);
 
