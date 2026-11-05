@@ -43,20 +43,26 @@ fn copy_and_patch(
                 continue;
             }
             let dest = sect.file_off + piece.offset;
-            let src = &objects
-                .get(piece.file.0 as usize)
-                .ok_or(EmitError::Internal {
-                    message: format!("piece file {} missing", piece.file.0),
-                })?
-                .bytes;
-            let bytes = src
-                .get(piece.in_range.start as usize..piece.in_range.end as usize)
-                .ok_or(EmitError::Internal {
-                    message: format!(
-                        "piece range {}..{} leaves its input",
-                        piece.in_range.start, piece.in_range.end
-                    ),
-                })?;
+            // Synthetic pieces (__got slots, __stubs entries) carry their
+            // own bytes; input pieces copy from the object file.
+            let bytes: &[u8] = match &piece.synth {
+                Some(synth) => &synth.bytes,
+                None => {
+                    let src = &objects
+                        .get(piece.file.0 as usize)
+                        .ok_or(EmitError::Internal {
+                            message: format!("piece file {} missing", piece.file.0),
+                        })?
+                        .bytes;
+                    src.get(piece.in_range.start as usize..piece.in_range.end as usize)
+                        .ok_or(EmitError::Internal {
+                            message: format!(
+                                "piece range {}..{} leaves its input",
+                                piece.in_range.start, piece.in_range.end
+                            ),
+                        })?
+                }
+            };
             let dst = buf
                 .get_mut(dest as usize..(dest + piece.size) as usize)
                 .ok_or(EmitError::Contract {
@@ -166,6 +172,13 @@ fn write_linkedit(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     }
     put_chunk(buf, le.sym_off, &sym_bytes, "symbol table")?;
     put_chunk(buf, le.str_off, &layout.strtab, "string table")?;
+    if le.indirect_size > 0 {
+        let mut indirect = Vec::with_capacity(le.indirect_size);
+        for entry in &layout.indirect_syms {
+            indirect.extend_from_slice(&entry.to_le_bytes());
+        }
+        put_chunk(buf, le.indirect_off, &indirect, "indirect symbol table")?;
+    }
     Ok(())
 }
 
