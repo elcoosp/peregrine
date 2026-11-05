@@ -1,0 +1,12 @@
+[package]
+name = "pgr-emit"
+description = "Peregrine emit pipeline: output buffer, reloc apply, pwrite writer pool, code signature (Passes 4-5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
