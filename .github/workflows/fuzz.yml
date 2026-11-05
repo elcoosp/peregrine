@@ -1,8 +1,9 @@
 name: Fuzz
 
-# Nightly libFuzzer runs for the parser and verifier (TDD M0 gate: "fuzz
-# targets for the parsers"). Smoke-sized runs keep cost bounded; scale
-# -max_total_time up on dedicated hardware.
+# Nightly libFuzzer runs for the parsers, the verifier and the M1 link
+# pipeline (TDD §11: "a linker is a hostile-input parser; its crash is a
+# build crash"). Smoke-sized runs keep cost bounded; scale -max_total_time
+# up on dedicated hardware.
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -22,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse_any, verify_image]
+        target: [parse_any, verify_image, link_object]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
