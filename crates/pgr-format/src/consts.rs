@@ -292,6 +292,10 @@ pub const REFERENCE_FLAG_PRIVATE_UNDEFINED_LAZY: u16 = 0x5;
 /// `n_desc`: never dead-strip this symbol.
 pub const N_NO_DEAD_STRIP: u16 = 0x0020;
 /// `n_desc`: symbol is weakly referenced.
+/// `n_desc` bit: symbol is referenced dynamically (ld64 sets it on
+/// `__mh_execute_header`).
+pub const REFERENCED_DYNAMICALLY: u16 = 0x0010;
+/// `n_desc` bit: undefined symbol is weakly referenced.
 pub const N_WEAK_REF: u16 = 0x0040;
 /// `n_desc`: symbol has a weak definition.
 pub const N_WEAK_DEF: u16 = 0x0080;
