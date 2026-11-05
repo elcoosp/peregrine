@@ -1,12 +1,19 @@
 [package]
 name = "pgr-core"
-description = "Peregrine core pipeline: interner, symbol table, resolution, layout (Passes 1-3)"
+description = "Peregrine core pipeline: interner, symbol table, resolution, layout, fixups (Passes 1-3)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 publish = false
+
+[dependencies]
+pgr-format = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pgr-fixtures = { workspace = true }
 
 [lints]
 workspace = true
