@@ -13,6 +13,9 @@ libfuzzer-sys = "0.4"
 [dependencies.pgr-format]
 path = "../crates/pgr-format"
 
+[dependencies.pgr-core]
+path = "../crates/pgr-core"
+
 [dependencies.pgr-verify]
 path = "../crates/pgr-verify"
 
@@ -28,6 +31,13 @@ bench = false
 [[bin]]
 name = "verify_image"
 path = "fuzz_targets/verify_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "link_object"
+path = "fuzz_targets/link_object.rs"
 test = false
 doc = false
 bench = false
