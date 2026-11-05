@@ -145,10 +145,15 @@ pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, repor
                 let Ok(lc) = pgr_format::LinkeditDataCommand::parse(cmd.bytes) else {
                     continue;
                 };
-                if let Err(e) = lc.data(bytes) {
-                    report
-                        .issues
-                        .push(crate::issue_from(&e, Code::LinkeditPayload));
+                match lc.data(bytes) {
+                    Ok(data) => {
+                        crate::export_trie::check_export_trie(data, report);
+                    }
+                    Err(e) => {
+                        report
+                            .issues
+                            .push(crate::issue_from(&e, Code::LinkeditPayload));
+                    }
                 }
             }
             LoadCommandKind::Uuid => {
