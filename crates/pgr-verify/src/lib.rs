@@ -15,6 +15,7 @@
 //! * [`dynamic`] — the chained-fixups payload and chain-walk simulation,
 //! * [`signature`] — SuperBlob/CodeDirectory layout and page-hash recompute.
 
+pub mod chain_starts;
 pub mod dynamic;
 pub mod misc;
 pub mod signature;
@@ -209,6 +210,10 @@ pub fn verify(bytes: &[u8], opts: &Options) -> Report {
     if matches!(parsed.header.filetype, MH_EXECUTE | MH_DYLIB | MH_BUNDLE) {
         if let Some(payload) = &parsed.fixups {
             dynamic::check_fixups(bytes, &parsed, payload, &mut report);
+        }
+        if parsed.header.filetype == MH_EXECUTE {
+            // M1: the static mirror must agree with the payload (TDD §7.5).
+            chain_starts::check_chain_starts(bytes, &parsed, &mut report);
         }
         signature::check_signature(bytes, &parsed, !opts.skip_hash_recompute, &mut report);
     }
