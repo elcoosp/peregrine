@@ -6,8 +6,9 @@
 //! is required on Linux. The emitted objects follow the exact rules clang
 //! does for `-c` output:
 //!
-//! * one `LC_SEGMENT_64` per section (the relocatable convention), with
-//!   1-based section ordinals counted across the whole file,
+//! * one `LC_SEGMENT_64` carrying *all* sections (the LLVM/MC relocatable
+//!   convention: anonymous segment name, blob-relative section addresses,
+//!   1-based section ordinals counted across the whole file),
 //! * `LC_SYMTAB` with locals first, then extern defs, then undefineds,
 //! * relocation tables per section, `r_address` section-relative,
 //! * `ARM64_RELOC_ADDEND` pairs precede their `PAGE21`/`PAGEOFF12` target,
@@ -22,11 +23,13 @@
 
 use crate::pad_name;
 use pgr_format::consts::{
-    ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
-    ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED, CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64,
-    LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PLATFORM_MACOS,
-    RELOC_LENGTH_4, RELOC_LENGTH_8, S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS, S_REGULAR,
-    S_ZEROFILL, SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
+    ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
+    ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
+    ARM64_RELOC_POINTER_TO_GOT, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED,
+    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_SECT, N_UNDF,
+    N_WEAK_DEF, N_WEAK_REF, PLATFORM_MACOS, RELOC_LENGTH_4, RELOC_LENGTH_8,
+    S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS, S_REGULAR, S_ZEROFILL, SECTION_TYPE_MASK,
+    TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::cursor::pod_read_unaligned_at;
 use pgr_format::reloc::RelocationInfo;
@@ -130,6 +133,46 @@ impl ObjectReloc {
             length_log2: RELOC_LENGTH_8,
             extern_: true,
             rtype: ARM64_RELOC_SUBTRACTOR,
+        }
+    }
+
+    /// ADRP against the symbol's GOT slot (`ARM64_RELOC_GOT_LOAD_PAGE21`).
+    #[must_use]
+    pub const fn got_page21(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: true,
+            length_log2: RELOC_LENGTH_4,
+            extern_: true,
+            rtype: ARM64_RELOC_GOT_LOAD_PAGE21,
+        }
+    }
+
+    /// LDR against the symbol's GOT slot (`ARM64_RELOC_GOT_LOAD_PAGEOFF12`).
+    #[must_use]
+    pub const fn got_pageoff12(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: false,
+            length_log2: RELOC_LENGTH_4,
+            extern_: true,
+            rtype: ARM64_RELOC_GOT_LOAD_PAGEOFF12,
+        }
+    }
+
+    /// A data pointer whose value is the symbol's GOT slot address
+    /// (`ARM64_RELOC_POINTER_TO_GOT`).
+    #[must_use]
+    pub const fn pointer_to_got(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: false,
+            length_log2: RELOC_LENGTH_8,
+            extern_: true,
+            rtype: ARM64_RELOC_POINTER_TO_GOT,
         }
     }
 
@@ -271,10 +314,13 @@ pub enum ObjectSymbol {
 
 /// Deterministic arm64 relocatable-object builder.
 ///
-/// Assembles an `MH_OBJECT` image the way clang does: one `LC_SEGMENT_64`
-/// per section, `LC_SYMTAB` grouped locals → extern defs → undefineds /
-/// commons, per-section relocation tables. No clocks, no entropy: the same
-/// spec builds byte-identical objects.
+/// Assembles an `MH_OBJECT` image the way clang does: a single
+/// `LC_SEGMENT_64` carrying every section (the LLVM/MC relocatable
+/// convention — anonymous segment name, section addresses are offsets into
+/// the one section-data blob, symbol `n_value`s are blob-relative), the
+/// `LC_SYMTAB` grouped locals → extern defs → undefineds / commons, and
+/// per-section relocation tables. No clocks, no entropy: the same spec
+/// builds byte-identical objects.
 #[derive(Debug, Clone)]
 pub struct ObjectBuilder {
     /// Source file name (kept only for actionable failure messages).
@@ -330,8 +376,10 @@ impl ObjectBuilder {
     /// Assembles the relocatable object.
     ///
     /// Layout (the relocatable convention — no segments/pages, no fixups):
-    /// header | load commands | section data | relocation tables |
-    /// symtab | strtab. Zero-fill sections commit no file bytes.
+    /// header | load commands | one section-data blob | relocation tables |
+    /// symtab | strtab. Section addresses and symbol `n_value`s are
+    /// offsets into the blob; zero-fill sections advance the blob address
+    /// but commit no file bytes.
     pub fn build(&self) -> Result<Vec<u8>, String> {
         if self.sections.len() > u8::MAX as usize {
             return Err(format!("{}: too many sections", self.name));
@@ -341,44 +389,39 @@ impl ObjectBuilder {
         }
 
         // ---- load command sizing ----------------------------------------
-        let mut ncmds = 0u32;
-        let mut sizeofcmds = 0usize;
-        for _sec in &self.sections {
-            sizeofcmds += 72 + 80; // LC_SEGMENT_64 + one section_64
-            ncmds += 1;
-        }
+        let mut ncmds = 2u32; // LC_SEGMENT_64 + LC_SYMTAB
+        let mut sizeofcmds = 72 + 80 * self.sections.len() + 24;
         if self.build_version {
             sizeofcmds += 32;
             ncmds += 1;
         }
-        sizeofcmds += 24; // LC_SYMTAB
-        ncmds += 1;
         let header_len = 32 + sizeofcmds;
 
-        // ---- placement: sections, reloc tables, symtab, strtab -----------
-        let mut placed: Vec<(u64, u64)> = Vec::new(); // (fileoff, size)
-        let mut cursor = align_up(header_len as u64, 8);
+        // ---- placement: one blob of section data --------------------------
+        // LLVM convention: section `addr` values are offsets into the blob,
+        // symbol `n_value`s are blob-relative, and the blob starts right
+        // after the load commands. Zero-fill sections advance the blob
+        // cursor but commit no bytes.
+        let mut placed: Vec<(u64, u64)> = Vec::new(); // (blob addr, size)
+        let mut blob = 0u64;
         for sec in &self.sections {
-            cursor = align_up(cursor, 1u64 << sec.align_log2.min(14));
-            let zerofill = sec.flags & SECTION_TYPE_MASK == S_ZEROFILL;
+            blob = align_up(blob, 1u64 << sec.align_log2.min(14));
             let size = sec.data.len() as u64;
-            // Zero-fill sections carry no file bytes (offset stays advisory).
-            placed.push((if zerofill { 0 } else { cursor }, size));
-            if !zerofill {
-                cursor += size;
-            }
+            placed.push((blob, size));
+            blob += size;
         }
+        let blob_span = blob;
         let mut rel_offs: Vec<u64> = Vec::with_capacity(self.sections.len());
         for sec in &self.sections {
             if sec.relocs.is_empty() {
                 rel_offs.push(0);
                 continue;
             }
-            cursor = align_up(cursor, 4);
-            rel_offs.push(cursor);
-            cursor += sec.relocs.len() as u64 * 8;
+            blob = align_up(blob, 4);
+            rel_offs.push(header_len as u64 + blob);
+            blob += sec.relocs.len() as u64 * 8;
         }
-        let symoff = align_up(cursor, 8);
+        let symoff = align_up(header_len as u64 + blob, 8);
 
         // ---- symbol table (grouped: locals, defs, undefs/commons) --------
         let mut strtab: Vec<u8> = vec![0];
@@ -409,6 +452,7 @@ impl ObjectBuilder {
             } = sym
             {
                 let n_desc = if *weak { N_WEAK_DEF } else { 0 };
+                let blob_addr = placed.get(*section_index).map_or(0, |(addr, _)| *addr);
                 push_sym(
                     &mut strtab,
                     &mut entries,
@@ -416,7 +460,7 @@ impl ObjectBuilder {
                     N_EXT | N_SECT,
                     (*section_index + 1) as u8,
                     n_desc,
-                    *value,
+                    blob_addr + *value,
                 );
             }
         }
@@ -474,27 +518,38 @@ impl ObjectBuilder {
             buf[at..at + 8].copy_from_slice(&v.to_le_bytes());
         };
 
+        // Single anonymous segment carrying every section (LLVM/MC
+        // convention). `filesize` is 0 for relocatable objects; prots and
+        // flags are advisory (consumers ignore them for MH_OBJECT).
+        w32(&mut buf, lc, pgr_format::consts::LC_SEGMENT_64);
+        w32(&mut buf, lc + 4, 72 + 80 * self.sections.len() as u32);
+        // segname stays zeroed (anonymous).
+        w64(&mut buf, lc + 24, 0); // vmaddr: 0 in relocatable objects
+        w64(&mut buf, lc + 32, blob_span);
+        w64(&mut buf, lc + 40, header_len as u64); // fileoff: blob start
+        w64(&mut buf, lc + 48, 0); // filesize: 0 (relocatable)
+        w32(&mut buf, lc + 56, VM_PROT_READ | VM_PROT_WRITE);
+        w32(&mut buf, lc + 60, VM_PROT_READ);
+        w32(&mut buf, lc + 64, self.sections.len() as u32);
+        w32(&mut buf, lc + 68, 0); // flags
+        lc += 72;
         for (i, sec) in self.sections.iter().enumerate() {
-            let (fileoff, size) = placed[i];
+            let (addr, size) = placed[i];
             let zerofill = sec.flags & SECTION_TYPE_MASK == S_ZEROFILL;
-            w32(&mut buf, lc, pgr_format::consts::LC_SEGMENT_64);
-            w32(&mut buf, lc + 4, 72 + 80);
-            buf[lc + 8..lc + 24].copy_from_slice(&pad_name(sec.segment.as_bytes()));
-            w64(&mut buf, lc + 24, 0); // vmaddr: 0 in relocatable objects
-            w64(&mut buf, lc + 32, size);
-            w64(&mut buf, lc + 40, if zerofill { 0 } else { fileoff });
-            w64(&mut buf, lc + 48, if zerofill { 0 } else { size });
-            w32(&mut buf, lc + 56, VM_PROT_READ | VM_PROT_WRITE);
-            w32(&mut buf, lc + 60, VM_PROT_READ | VM_PROT_WRITE);
-            w32(&mut buf, lc + 64, 1); // nsects
-            w32(&mut buf, lc + 68, 0); // flags
-            lc += 72;
             let mut sect = [0u8; 80];
             sect[0..16].copy_from_slice(&pad_name(sec.name.as_bytes()));
             sect[16..32].copy_from_slice(&pad_name(sec.segment.as_bytes()));
-            w64(&mut sect, 32, 0); // addr: 0 in relocatable objects
+            w64(&mut sect, 32, addr); // blob-relative address
             w64(&mut sect, 40, size);
-            w32(&mut sect, 48, if zerofill { 0 } else { fileoff as u32 });
+            w32(
+                &mut sect,
+                48,
+                if zerofill {
+                    0
+                } else {
+                    (header_len as u64 + addr) as u32
+                },
+            );
             w32(&mut sect, 52, sec.align_log2);
             w32(&mut sect, 56, rel_offs[i] as u32);
             w32(&mut sect, 60, sec.relocs.len() as u32);
@@ -524,10 +579,11 @@ impl ObjectBuilder {
 
         // ---- section data --------------------------------------------------
         for (i, sec) in self.sections.iter().enumerate() {
-            let (fileoff, size) = placed[i];
+            let (addr, size) = placed[i];
             let zerofill = sec.flags & SECTION_TYPE_MASK == S_ZEROFILL;
             if !zerofill && size > 0 {
-                buf[fileoff as usize..fileoff as usize + size as usize].copy_from_slice(&sec.data);
+                let at = header_len + addr as usize;
+                buf[at..at + size as usize].copy_from_slice(&sec.data);
             }
         }
 
@@ -819,14 +875,13 @@ mod tests {
             weak: false,
         });
         let bytes = b.build().unwrap();
-        let (sect, seg_fileoff) = read_section(&bytes, 0).unwrap();
+        let (sect, _seg_fileoff) = read_section(&bytes, 0).unwrap();
         assert_eq!(sect.size, 64);
         assert_eq!(
             sect.flags & pgr_format::consts::SECTION_TYPE_MASK,
             S_ZEROFILL
         );
-        assert_eq!(seg_fileoff, 0, "zerofill commits no file bytes");
-        assert!(sect.offset == 0);
+        assert_eq!(sect.offset, 0, "zerofill section carries no file offset");
     }
 
     #[test]
