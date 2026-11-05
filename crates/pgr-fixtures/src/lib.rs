@@ -1192,7 +1192,13 @@ fn page_hashes(
     out
 }
 
-fn pad_name(name: &[u8]) -> [u8; 16] {
+pub mod object;
+
+pub use object::{
+    ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol, read_relocs, read_section, read_sym,
+};
+
+pub(crate) fn pad_name(name: &[u8]) -> [u8; 16] {
     let mut out = [0u8; 16];
     let n = name.len().min(16);
     out[..n].copy_from_slice(&name[..n]);
