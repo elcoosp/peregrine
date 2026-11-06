@@ -332,3 +332,70 @@ full export trie over every defined external:
   D7 remains open for the M6 incremental work (insertion-stable ordinals).
 * M4 follow-ups for the P0 rig: writer-count/block-size sweep (S1 matrix),
   P-core pool sizing (S4), PGO build, and the G1 parallel-efficiency gate.
+## Recorded baseline (M6, scale & ecosystem — ICF/veneers/legacy fixups/Stage A caches)
+
+The M6 milestone (architecture doc §10.3 row M6) lands the in-tree scope:
+branch veneers + the verifier branch-range checker, the `LC_DYLD_INFO_ONLY`
+legacy fallback, `-icf=safe|all` (color refinement), the Stage A POI +
+frozen-`.tbd` caches, and LTO/ObjC/Swift pass-through gates. New benches
+(`cargo bench -p pgr-driver`):
+
+### ICF (`pgr-driver/link_icf`, the "ICF ≤ 25% added wall" gate)
+
+Corpus: 32 objects × 512 identical 12-byte functions (16,384 atoms, all
+foldable; `MH_SUBSECTIONS_VIA_SYMBOLS` splitting; ~0.8 MiB of inputs).
+
+| Bench | Median | Notes |
+|---|---|---|
+| `link_icf/large_32x512_off` | **17.29 ms** | fold-off (the M5 pipeline shape) |
+| `link_icf/large_32x512_safe` | **19.37 ms** | `-icf=safe`: full fold (16,383 atoms folded, ~192 KiB of duplicate text removed) |
+| **Δ** | **+12.0%** | the ≤ 25% gate holds; the refinement's byte hashing runs on the shared pool |
+
+### Stage A POI cache (`pgr-driver/link_cache`, the §7.1 relink gate)
+
+Corpus: 16 objects × 4,096 symbols × 4 KiB text (parse-heavy: ~64K symbols,
+128K relocations; ~1.6 MiB of inputs). Cold = fresh cache directory per
+iteration (parse + store + link); warm = every input is a cache hit.
+
+| Bench | Median | Notes |
+|---|---|---|
+| `link_cache/medium_16_objects_cold` | **177.8 ms** | Pass 1 parse + store |
+| `link_cache/medium_16_objects_warm` | **172.8 ms** | Pass 1 replaced by the POI decode |
+| **Δ** | **−2.8%** | the corpus is Pass 2/3-bound (64K-symbol resolution dominates); the POI cache removes Pass 1 exactly, which bounds the wall gain on this shape. The §10.3 "relink ≥ 2× ld-prime" gate compares against ld-prime on the P0 rig |
+
+Honesty note (§7.1's own framing): the POI cache is a Pass 0/1 elimination.
+Where the wall is dominated by resolution/layout (this corpus), the gain is
+bounded by Pass 1's share; Stage B/C (resident state, incremental relink)
+address the rest.
+
+### Frozen `.tbd` (`pgr-driver/tbd`, the "`.tbd` startup cost < 1 ms" gate)
+
+Unit: parse-or-decode of one 256-export stub (`libBench.tbd`).
+
+| Bench | Median | Notes |
+|---|---|---|
+| `tbd/libbench_text_parse` | **35.8 µs** | the M2 YAML text path |
+| `tbd/libbench_frozen_load` | **19.9 µs** | the M6 frozen export-set decode (1.8×; both far below the 1 ms gate) |
+
+### M4/M5 gates re-measured with M6 in the pipeline
+
+The veneer scan (a per-iteration `Branch26` patch walk), the `FixupLc`
+command-size dispatch and the fold-empty fast path are all active in every
+link now:
+
+| Bench | M5 record | M6 re-measure | Gate |
+|---|---|---|---|
+| `pgr-driver/link/large_32_objects` | 174–176 ms | **175.7 ms** | holds |
+| `pgr-driver/link_dead_strip/large_32_objects_off` | 255 ms | **259.0 ms** | holds |
+| `pgr-driver/link_dead_strip/large_32_objects_on` | 134 ms | **136.0 ms** | 1.90× vs off |
+
+### Not benched (with reasons)
+
+* **Veneer insertion** — the triggering corpus is a >128 MiB text (~4 s of
+  SHA-256 per iteration); the feature is correctness-gated instead (the
+  branch-range checker + determinism tests) and its steady-state cost is
+  the per-iteration overflow scan already covered by the re-measured gates.
+* **Legacy `LC_DYLD_INFO_ONLY` streams** — stream encoding is O(slots)
+  with ULEB writes; at M6 scale the chained/classic split costs nothing
+  measurable (the slot list is built once either way). The verifier's
+  stream walk is gated for correctness, not speed.
