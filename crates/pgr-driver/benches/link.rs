@@ -247,11 +247,220 @@ fn bench_link_outputs(c: &mut Criterion) {
     group.finish();
 }
 
+/// M5/S7 archive-liveness corpus: one member per seed, each defining its
+/// own symbols and referencing the previous member (so a member is only
+/// pulled transitively). `referenced` members are referenced from `main`;
+/// the rest stay un-pulled under the lazy (default) archive strategy.
+fn bench_archive_corpus(members: usize, symbols: usize, text_kib: usize) -> Vec<u8> {
+    let mut arch = pgr_fixtures::ArchiveBuilder::new("libbench_archive.a");
+    for seed in 1..=members as u64 {
+        let obj = bench_object(seed, symbols, text_kib).set_subsections_via_symbols(true);
+        arch.add_member(&format!("m{seed}.o"), obj.build().unwrap());
+    }
+    arch.build()
+}
+
+/// M5/S7: the archive-heavy link. The lazy (default) path parses only the
+/// members the pull fixpoint selects; `-all_load` is the eager baseline the
+/// S7 decision rule compares against (adopt lazy if ≥ 20% faster).
+fn bench_link_archive(c: &mut Criterion) {
+    let dir = std::env::temp_dir().join("pgr_bench_link_archive");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 64 members × 32 KiB: ~2 MiB archive, 8 referenced transitively.
+    let archive = bench_archive_corpus(64, 256, 32);
+    let archive_len = archive.len();
+    let archive_path = dir.join("libbench_archive.a");
+    std::fs::write(&archive_path, archive).unwrap();
+
+    // main.o references member 1's symbols (transitive pull of the chain).
+    let mut main = ObjectBuilder::new("main.o");
+    let text = main.add_section(ObjectSection::text(
+        "__text",
+        vec![0u8; 4 * 1024],
+        (0..256)
+            .map(|i| ObjectReloc::branch26(i).at(i * 8 % (4 * 1024)))
+            .collect(),
+    ));
+    main.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: text,
+        value: 0,
+        weak: false,
+    });
+    for i in 0..256 {
+        main.add_symbol(ObjectSymbol::Undefined {
+            name: format!("_bench_fn_1_{i}"),
+            weak_ref: false,
+        });
+    }
+    let main_path = dir.join("main.o");
+    std::fs::write(&main_path, main.build().unwrap()).unwrap();
+
+    let mut group = c.benchmark_group("pgr-driver/link_archive");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(4));
+
+    for (name, all_load) in [("archive_64_lazy", false), ("archive_64_all_load", true)] {
+        let opts = pgr_driver::opts::Options {
+            inputs: vec![
+                main_path.display().to_string(),
+                archive_path.display().to_string(),
+            ],
+            all_load,
+            config: pgr_core::layout::LinkConfig {
+                ident: name.into(),
+                ..pgr_core::layout::LinkConfig::default()
+            },
+            ..pgr_driver::opts::Options::default()
+        };
+        group.throughput(Throughput::Bytes(archive_len as u64 + 4 * 1024));
+        group.bench_function(name.to_string(), |b| {
+            b.iter(|| {
+                let image = pgr_driver::link_to_bytes(&opts).unwrap();
+                std::hint::black_box(image.len());
+            })
+        });
+    }
+    group.finish();
+}
+
+/// M5/D12 dead-strip gate corpus: 32 subsections objects where half the
+/// symbols are referenced and half are dead weight (each object defines its
+/// symbols twice — a live half and an unreferenced half).
+fn bench_strip_object(seed: u64, symbols: usize, text_kib: usize) -> ObjectBuilder {
+    let mut b = bench_object(seed, symbols, text_kib).set_subsections_via_symbols(true);
+    // Dead weight: a second symbol set nothing references, spread over the
+    // same __text (the atomizer splits at the boundaries; dead-strip drops
+    // the atoms).
+    let text_kib = text_kib as u64;
+    for i in 0..symbols {
+        b.add_symbol(ObjectSymbol::Defined {
+            name: format!("_bench_dead_{seed}_{i}"),
+            section_index: 0,
+            value: ((i * 8) as u64 % (text_kib * 1024 - 8)) + 4,
+            weak: false,
+        });
+    }
+    b
+}
+
+fn bench_link_dead_strip(c: &mut Criterion) {
+    let dir = std::env::temp_dir().join("pgr_bench_link_strip");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut group = c.benchmark_group("pgr-driver/link_dead_strip");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(4));
+
+    let (files, total): (Vec<Vec<u8>>, usize) = {
+        let mut files = Vec::new();
+        let mut total = 0;
+        for seed in 1..=32u64 {
+            let bytes = bench_strip_object(seed, 2_048, 32).build().unwrap();
+            total += bytes.len();
+            files.push(bytes);
+        }
+        (files, total)
+    };
+
+    for (name, dead_strip) in [
+        ("large_32_objects_off", false),
+        ("large_32_objects_on", true),
+    ] {
+        let mut opts = pgr_driver::opts::Options::default();
+        for (i, bytes) in files.iter().enumerate() {
+            let p = dir.join(format!("strip_{i}.o"));
+            std::fs::write(&p, bytes).unwrap();
+            opts.inputs.push(p.display().to_string());
+        }
+        opts.config.dead_strip = dead_strip;
+        opts.config.ident = name.into();
+        group.throughput(Throughput::Bytes(total as u64));
+        group.bench_function(name.to_string(), |b| {
+            b.iter(|| {
+                let image = pgr_driver::link_to_bytes(&opts).unwrap();
+                std::hint::black_box(image.len());
+            })
+        });
+    }
+    group.finish();
+}
+
+/// M5/D4 cstring-merge corpus: objects whose `__cstring` sections carry a
+/// shared pool (duplicated across every object) plus a private tail — the
+/// merged link places the shared pool once.
+fn bench_cstring_object(seed: u64, strings: usize) -> ObjectBuilder {
+    let mut b = ObjectBuilder::new(&format!("cstr_{seed}.o"));
+    let text = b.add_section(ObjectSection::text(
+        "__text",
+        vec![0xC0u8, 0x03, 0x5F, 0xD6],
+        Vec::new(),
+    ));
+    if seed == 1 {
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_main".into(),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+    }
+    let mut data = String::new();
+    // The shared pool: identical in every object (dedup collapses these).
+    for i in 0..strings / 2 {
+        data.push_str(&format!("shared literal {i} the same everywhere\n"));
+    }
+    // The private tail: unique per object.
+    for i in 0..strings / 2 {
+        data.push_str(&format!("private literal {seed}_{i}\n"));
+    }
+    b.add_section(ObjectSection::cstring(&data));
+    b
+}
+
+fn bench_link_cstring(c: &mut Criterion) {
+    let dir = std::env::temp_dir().join("pgr_bench_link_cstring");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut group = c.benchmark_group("pgr-driver/link_cstring");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(4));
+
+    let (files, total): (Vec<Vec<u8>>, usize) = {
+        let mut files = Vec::new();
+        let mut total = 0;
+        for seed in 1..=16u64 {
+            let bytes = bench_cstring_object(seed, 1_024).build().unwrap();
+            total += bytes.len();
+            files.push(bytes);
+        }
+        (files, total)
+    };
+    let mut opts = pgr_driver::opts::Options::default();
+    for (i, bytes) in files.iter().enumerate() {
+        let p = dir.join(format!("cstr_{i}.o"));
+        std::fs::write(&p, bytes).unwrap();
+        opts.inputs.push(p.display().to_string());
+    }
+    opts.config.ident = "cstring_merge".into();
+    group.throughput(Throughput::Bytes(total as u64));
+    group.bench_function("cstring_16_objects", |b| {
+        b.iter(|| {
+            let image = pgr_driver::link_to_bytes(&opts).unwrap();
+            std::hint::black_box(image.len());
+        })
+    });
+    group.finish();
+}
+
 /// Bench entry point (macro-free so the workspace `missing_docs` lint holds).
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     bench_link(&mut criterion);
     bench_link_dylib(&mut criterion);
     bench_link_outputs(&mut criterion);
+    bench_link_archive(&mut criterion);
+    bench_link_dead_strip(&mut criterion);
+    bench_link_cstring(&mut criterion);
     criterion.final_summary();
 }
