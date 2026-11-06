@@ -29,6 +29,8 @@ pub(crate) struct ParsedImage<'a> {
     pub dysymtab: Option<DysymtabCommand>,
     /// `LC_DYLD_CHAINED_FIXUPS` payload command.
     pub fixups: Option<LinkeditDataCommand>,
+    /// M6: the classic `LC_DYLD_INFO(_ONLY)` command (legacy fallback).
+    pub dyld_info: Option<pgr_format::DyldInfoCommand>,
     /// `LC_CODE_SIGNATURE` payload command.
     pub code_signature: Option<LinkeditDataCommand>,
     /// `LC_MAIN` payload command.
@@ -58,6 +60,7 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
     let mut symtab = None;
     let mut dysymtab = None;
     let mut fixups = None;
+    let mut dyld_info = None;
     let mut code_signature = None;
     let mut main = None;
     let mut build_version = None;
@@ -94,6 +97,11 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
                 if let Ok(lc) = LinkeditDataCommand::parse(cmd.bytes) {
                     fixup_slot_count = count_fixup_slots(bytes, &lc, segments.len());
                     fixups = Some(lc);
+                }
+            }
+            LoadCommandKind::LinkeditData(op) if crate::dyld_info::is_dyld_info_cmd(op) => {
+                if dyld_info.is_none() {
+                    dyld_info = crate::dyld_info::parse_command(cmd.bytes, cmd.offset);
                 }
             }
             LoadCommandKind::LinkeditData(pgr_format::consts::LC_CODE_SIGNATURE) => {
@@ -147,6 +155,7 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
         symtab,
         dysymtab,
         fixups,
+        dyld_info,
         code_signature,
         main,
         build_version,
@@ -694,7 +703,7 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
 
 /// Finds the byte offset of a segment's section table within the image by
 /// re-scanning load commands (kept simple and allocation-light).
-fn section_table_offset(img: &ParsedImage<'_>, seg: &SegmentCommand64) -> usize {
+pub(crate) fn section_table_offset(img: &ParsedImage<'_>, seg: &SegmentCommand64) -> usize {
     for cmd in &img.commands {
         if cmd.kind == LoadCommandKind::Segment64 {
             if let Ok(candidate) = SegmentCommand64::parse(cmd.bytes, 0) {
