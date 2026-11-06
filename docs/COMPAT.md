@@ -24,8 +24,9 @@ each flag has a fixture".
 | `LC_CODE_SIGNATURE` (ad-hoc, arm64 mandatory) | ✅ | M0 | `signature::check_signature` |
 | `LC_RPATH` (`-rpath`) | ✅ | M2 | `e2e::m2_rpath_and_source_version_commands_land` |
 | `LC_SOURCE_VERSION` (`-source_version A.B.C.D.E`) | ✅ | M2 | `e2e::m2_rpath_and_source_version_commands_land` |
-| `LC_ID_DYLIB` | ❌ | M3 (dylib outputs) | — |
-| `LC_REEXPORT_DYLIB`, `-reexport_library` | ❌ | M3 | — |
+| `LC_ID_DYLIB` (`-install_name`, `-current_version`, `-compatibility_version`) | ✅ | M3 | `e2e::m3_dylib_output_passes_verifier_strict` |
+| `LC_REEXPORT_DYLIB` (`-reexport_library`) + trie REEXPORT nodes | ✅ | M3 | `e2e::m3_reexport_library_lands_in_the_trie` |
+| `MH_DYLIB` / `MH_BUNDLE` outputs (`-dylib` / `-bundle`) | ✅ | M3 | `e2e::m3_dylib_output_passes_verifier_strict`, `e2e::m3_bundle_output_passes_verifier` |
 | `__init_offsets` / `-init_offsets` | ❌ | later (newer deployment targets) | — |
 | `LC_ENCRYPTION_INFO` | ❌ | won't support (iOS App Store path) | — |
 
@@ -46,9 +47,18 @@ each flag has a fixture".
 | `-u <symbol>` (in-image definition required) | ✅ | M2 | `driver::link_to_image` force-load check |
 | `-weak_library <path>` | ✅ | M2 | `Dylib.weak` → `LC_LOAD_WEAK_DYLIB` |
 | `-source_version A.B.C.D.E` | ✅ | M2 | `opts::tests::m2_flags_shape_the_config` |
-| `-framework` / `-weak_framework` / `-lazy_framework` / `-lazy_library` | ❌ (rejected, actionable) | M3 | `opts::LATER_FLAGS` |
-| `-filelist` | ❌ (rejected) | M3 | `opts::LATER_FLAGS` |
-| `-dylib` / `-bundle` / `-dylinker` / `-install_name` | ❌ (rejected) | M3 | `opts::LATER_FLAGS` |
+| `-dylib` / `-bundle` | ✅ | M3 | `opts::tests::m3_dylib_flags_shape_the_config`, `e2e::m3_bundle_output_passes_verifier` |
+| `-install_name` (dylibs; defaults to the output path) | ✅ | M3 | `opts::tests::m3_dylib_flags_shape_the_config` |
+| `-current_version` / `-compatibility_version` (dylibs) | ✅ | M3 | `opts::tests::m3_dylib_flags_shape_the_config` |
+| `-reexport_library <path>` | ✅ | M3 | `opts::tests::m3_reexport_library_records_the_input`, `e2e::m3_reexport_library_lands_in_the_trie` |
+| `-exported_symbols_list <file>` (exact-name subset; globs are a later milestone) | ✅ | M3 | `e2e::m3_export_filters_shape_trie_and_symtab` |
+| `-unexported_symbols_list <file>` (exact-name subset) | ✅ | M3 | `e2e::m3_export_filters_shape_trie_and_symtab` (N_PEXT semantics) |
+| `-mark_dead_strippable_dylib` | ✅ | M3 | `opts::tests::m3_dylib_flags_shape_the_config` |
+| Mach-O dylib inputs (`.dylib` scan: install name + trie/symtab exports) | ✅ | M3 | `pgr_driver::scan_dylib`, `e2e::m3_exec_against_pgr_dylib_passes_the_pair_gate` |
+| `-framework` / `-weak_framework` / `-lazy_framework` / `-lazy_library` | ❌ (rejected, actionable) | later | `opts::LATER_FLAGS` |
+| `-filelist` | ❌ (rejected) | M5 | `opts::LATER_FLAGS` |
+| `-dylinker` (MH_DYLINKER outputs) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
+| `-sub_umbrella` / `-sub_library` (umbrella re-exports) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-dead_strip` / `-order_file` | ❌ (rejected) | M5 | `opts::LATER_FLAGS` |
 
 ## Linking semantics
@@ -62,6 +72,10 @@ each flag has a fixture".
 | Weak imports (`N_WEAK_REF` → weak binds, `MH_BINDS_TO_WEAK`) | ✅ | M2 | dynamic lookups and weak dylibs |
 | `-flat_namespace` (flat-lookup ordinal `0xFE`, no `MH_TWOLEVEL`) | ✅ | M2 | |
 | Minimal export trie (`__mh_execute_header` + all defined externs) | ✅ | M2 | dyld walk verified by `pgr-verify` |
+| Full export trie for dylibs + re-export nodes (`flags & 0x08`) | ✅ | M3 | `e2e::m3_reexport_library_lands_in_the_trie`; verifier walk validates ordinals/strings |
+| Dylib/bundle output contract (`__TEXT.vmaddr == fileoff`, no `LC_MAIN`/dylinker) | ✅ | M3 | `pgr-verify::check_dylib_contract`, `e2e::m3_dylib_output_passes_verifier_strict` |
+| Dylib + executable pair gate (two-level binds vs the dylib's trie) | ✅ | M3 | `pgr_verify::pair::verify_dylib_pair`, `e2e::m3_exec_against_pgr_dylib_passes_the_pair_gate` |
+| Export filters (`N_PEXT` symtab marking, trie exclusion) | ✅ | M3 | `e2e::m3_export_filters_shape_trie_and_symtab` |
 | Indirect symbol table (`__got`/`__stubs` slots) | ✅ | M2 | `INDIRECT_SYMBOL_LOCAL` for unnamed rebases |
 | Direct page reloc to an external symbol | ❌ **rejected** (ld64/lld both reject or mis-link) | M2 | error message points at GOT-load relocs |
 | Archive members (`-all_load`, `-ObjC`, ranlib liveness) | ❌ | M3 | rank 3/4 in resolve |
