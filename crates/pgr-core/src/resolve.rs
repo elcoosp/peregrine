@@ -41,8 +41,8 @@ pub enum Rank {
     DylibExport = 6,
 }
 
-/// One input dylib (`LC_LOAD_DYLIB`): a parsed `.tbd` (M2) or a Mach-O
-/// dylib scan (M3).
+/// One input dylib (`LC_LOAD_DYLIB`/`LC_REEXPORT_DYLIB`): a parsed `.tbd`
+/// (M2) or a Mach-O dylib scan (M3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dylib {
     /// Install name — the two-level namespace key and the `LC_LOAD_DYLIB`
@@ -58,6 +58,9 @@ pub struct Dylib {
     /// `-weak_library`: the whole dylib loads weakly (`LC_LOAD_WEAK_DYLIB`)
     /// and every bind to it is weak.
     pub weak: bool,
+    /// M3 `-reexport_library`: the dylib loads as `LC_REEXPORT_DYLIB` and
+    /// its exports join this image's export trie as REEXPORT nodes.
+    pub reexport: bool,
 }
 
 /// What to do with references no input and no dylib resolves.
