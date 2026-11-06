@@ -9,6 +9,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+sha2 = { workspace = true }
 pgr-format = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
