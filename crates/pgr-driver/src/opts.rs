@@ -39,6 +39,19 @@ pub struct Options {
     pub exported_list_path: Option<String>,
     /// Path of the `-unexported_symbols_list` file (read by the driver).
     pub unexported_list_path: Option<String>,
+    /// M5 `-all_load`: pull every archive member regardless of liveness.
+    pub all_load: bool,
+    /// M5 `-force_load <archive>`: pull every member of the named archive.
+    pub force_load_archives: Vec<String>,
+    /// M5 `-filelist <path>[,<dir>]`: newline-separated input paths,
+    /// resolved against the optional base directory.
+    pub filelists: Vec<(String, Option<String>)>,
+    /// M5 `-framework <name>` (searched via `-F` dirs).
+    pub frameworks: Vec<String>,
+    /// M5 `-F <dir>`: framework search directories.
+    pub framework_dirs: Vec<String>,
+    /// M5 `-sectcreate <seg> <sect> <file>`: section contents from a file.
+    pub sectcreate: Vec<(String, String, String)>,
 }
 
 impl Default for Options {
@@ -56,6 +69,12 @@ impl Default for Options {
             reexport_library_inputs: Vec::new(),
             exported_list_path: None,
             unexported_list_path: None,
+            all_load: false,
+            force_load_archives: Vec::new(),
+            filelists: Vec::new(),
+            frameworks: Vec::new(),
+            framework_dirs: Vec::new(),
+            sectcreate: Vec::new(),
         }
     }
 }
@@ -109,15 +128,15 @@ const NOOP_FLAGS: [&str; 5] = [
 ];
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
-const LATER_FLAGS: [(&str, &str); 12] = [
+const LATER_FLAGS: [(&str, &str); 9] = [
     ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
-    ("-dead_strip", "M5 scope"),
-    ("-framework", "framework bundles are a later milestone"),
     ("-weak_framework", "framework bundles are a later milestone"),
     ("-lazy_framework", "framework bundles are a later milestone"),
     ("-lazy_library", "later milestone"),
-    ("-filelist", "M5 scope (real-world link surface)"),
-    ("-order_file", "M5 scope"),
+    (
+        "-order_file",
+        "M5 scope (symbol-boundary ordering lands with the atomizer)",
+    ),
     ("-U", "later milestone (make-undefined)"),
     ("-pagezero_size", "later milestone"),
     (
@@ -336,6 +355,36 @@ fn apply_flag(
             opts.unexported_list_path = Some(v);
         }
         "-mark_dead_strippable_dylib" => opts.config.dead_strippable = true,
+        "-dead_strip" => opts.config.dead_strip = true,
+        "-no_dead_strip" => opts.config.dead_strip = false,
+        "-all_load" => opts.all_load = true,
+        "-force_load" => {
+            let v = next_value(args, i, arg)?;
+            opts.force_load_archives.push(v);
+        }
+        "-filelist" => {
+            let v = next_value(args, i, arg)?;
+            // `path[,dir]`: entries resolve against the optional directory.
+            let (path, dir) = match v.split_once(',') {
+                Some((p, d)) => (p.to_string(), Some(d.to_string())),
+                None => (v, None),
+            };
+            opts.filelists.push((path, dir));
+        }
+        "-framework" => {
+            let v = next_value(args, i, arg)?;
+            opts.frameworks.push(v);
+        }
+        "-F" => {
+            let v = next_value(args, i, arg)?;
+            opts.framework_dirs.push(v);
+        }
+        "-sectcreate" => {
+            let seg = next_value(args, i, arg)?;
+            let sect = next_value(args, i, arg)?;
+            let file = next_value(args, i, arg)?;
+            opts.sectcreate.push((seg, sect, file));
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -544,12 +593,69 @@ mod tests {
 
     #[test]
     fn later_milestone_flags_are_rejected_actionably() {
-        let err = parse(&args(&["-o", "out", "-dead_strip", "a.o"])).unwrap_err();
+        let err = parse(&args(&["-o", "out", "-order_file", "f.txt", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("M5"), "{err}");
-        let err = parse(&args(&["-o", "out", "-framework", "Foo", "a.o"])).unwrap_err();
+        let err = parse(&args(&["-o", "out", "-weak_framework", "Foo", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("framework"), "{err}");
         let err = parse(&args(&["-o", "out", "--wat", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"), "{err}");
+    }
+
+    #[test]
+    fn m5_flags_shape_the_config() {
+        let o = parse(&args(&[
+            "-o",
+            "out",
+            "-dead_strip",
+            "-all_load",
+            "-force_load",
+            "/libs/liba.a",
+            "-filelist",
+            "objs.txt,objdir",
+            "-framework",
+            "Foundation",
+            "-F",
+            "/sdks/MacOSX.sdk/System/Library/Frameworks",
+            "-sectcreate",
+            "__DATA",
+            "__plist",
+            "info.plist",
+            "-u",
+            "_forced",
+            "a.o",
+        ]))
+        .unwrap();
+        assert!(o.config.dead_strip);
+        assert!(o.all_load);
+        assert_eq!(o.force_load_archives, ["/libs/liba.a"]);
+        assert_eq!(
+            o.filelists,
+            vec![("objs.txt".to_string(), Some("objdir".to_string()))]
+        );
+        assert_eq!(o.frameworks, ["Foundation"]);
+        assert_eq!(
+            o.framework_dirs,
+            ["/sdks/MacOSX.sdk/System/Library/Frameworks"]
+        );
+        assert_eq!(
+            o.sectcreate,
+            vec![(
+                "__DATA".to_string(),
+                "__plist".to_string(),
+                "info.plist".to_string()
+            )]
+        );
+        assert_eq!(o.force_load, ["_forced"]);
+        // `-no_dead_strip` overrides (last wins).
+        let o = parse(&args(&[
+            "-o",
+            "out",
+            "-dead_strip",
+            "-no_dead_strip",
+            "a.o",
+        ]))
+        .unwrap();
+        assert!(!o.config.dead_strip);
     }
 
     #[test]
