@@ -18,6 +18,7 @@ pub mod layout;
 pub mod link;
 pub mod object;
 pub mod resolve;
+pub mod trie;
 
 pub use fixups::{FixupPlan, MAX_CHAIN_STRIDE_BYTES, pack_page};
 pub use ids::{FileId, StringId};
@@ -26,6 +27,7 @@ pub use layout::{Layout, LinkConfig, OutputSymbol, PatchOp, Piece, PlacedSection
 pub use link::{LinkInput, LinkResult, link};
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use resolve::{Def, Rank, Resolution};
+pub use trie::{Export, ExportInfo};
 
 /// A fatal link error (M1 surface: inputs, symbols, layout, encoding).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
