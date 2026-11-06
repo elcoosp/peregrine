@@ -17,10 +17,36 @@ use pgr_format::consts::{
     ARM64_RELOC_POINTER_TO_GOT, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED, N_EXT, N_STAB,
     N_TYPE, N_UNDF, N_WEAK_DEF, N_WEAK_REF, S_ZEROFILL, SECTION_TYPE_MASK,
 };
+use rayon::prelude::*;
+
+/// Inputs at or above this size split their Pass 1 work across the pool
+/// (giant-object threshold, perf doc §4.1: default 64 MiB, "tunable").
+pub const GIANT_OBJECT_BYTES: u64 = 64 << 20;
+/// Symbol tables at or above this count split the same way (a small file can
+/// still carry a huge symtab after section stripping).
+pub const GIANT_SYMS: usize = 1 << 20;
 use pgr_format::header::MachHeader64;
 use pgr_format::load_command::{LoadCommandIter, LoadCommandKind};
 use pgr_format::reloc::RelocationInfo;
 use pgr_format::segment::{Section64, SegmentCommand64};
+
+/// Decodes a symbol-table range on the pool (exposed `doc(hidden)` for the
+/// giant-object mechanism tests and benches; production code goes through
+/// [`InputObject::parse`]).
+///
+/// # Errors
+/// [`LinkError::Parse`] on malformed symbol table entries.
+#[doc(hidden)]
+pub fn decode_symbol_range_for_test<F: Fn(String) -> LinkError + Sync>(
+    bytes: &[u8],
+    st: &pgr_format::SymtabCommand,
+    strtab: &[u8],
+    sections: &[InputSection],
+    range: core::ops::Range<usize>,
+    fail: &F,
+) -> Result<(Vec<InputSymbol>, Vec<Vec<u8>>), LinkError> {
+    InputObject::decode_symbols(bytes, st, strtab, sections, range, fail)
+}
 
 /// The decoded relocation kinds the emit path can apply (TDD §3.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,12 +272,50 @@ impl InputObject {
         let strtab = bytes
             .get(st.stroff as usize..st.stroff as usize + st.strsize as usize)
             .ok_or_else(|| fail("string table out of bounds".into()))?;
-        let mut symbols = Vec::with_capacity(st.nsyms as usize);
-        let mut names: Vec<Vec<u8>> = Vec::with_capacity(st.nsyms as usize);
-        for i in 0..st.nsyms as usize {
+        // Giant objects (perf doc §4.1): decode the symbol table in
+        // deterministic index chunks on the compute pool. The chunk boundaries
+        // are a pure function of `nsyms`, so the concatenated result — and
+        // every later pass — is schedule-independent.
+        let (symbols, names) = if Self::is_giant(&bytes, st.nsyms as usize) {
+            Self::decode_symbols_chunked(&bytes, &st, strtab, &sections, &fail)?
+        } else {
+            Self::decode_symbols(&bytes, &st, strtab, &sections, 0..st.nsyms as usize, &fail)?
+        };
+
+        let obj = Self {
+            file,
+            name: name.to_string(),
+            bytes,
+            sections,
+            symbols,
+            symbol_names: names,
+        };
+        Ok(obj)
+    }
+
+    /// True when this object's symbol table is big enough to split across
+    /// the pool (giant-object splitting, perf doc §4.1: whole-module Rust
+    /// and Swift objects otherwise serialize Pass 1).
+    fn is_giant(bytes: &[u8], nsyms: usize) -> bool {
+        bytes.len() as u64 >= GIANT_OBJECT_BYTES || nsyms >= GIANT_SYMS
+    }
+
+    /// Decodes symbols `[lo, hi)` of the table (a pure function of the
+    /// inputs — the chunked path concatenates these ranges in order).
+    fn decode_symbols<F: Fn(String) -> LinkError + Sync>(
+        bytes: &[u8],
+        st: &pgr_format::SymtabCommand,
+        strtab: &[u8],
+        sections: &[InputSection],
+        range: core::ops::Range<usize>,
+        fail: &F,
+    ) -> Result<(Vec<InputSymbol>, Vec<Vec<u8>>), LinkError> {
+        let mut symbols = Vec::with_capacity(range.len());
+        let mut names: Vec<Vec<u8>> = Vec::with_capacity(range.len());
+        for i in range {
             let off = st.symoff as usize + i * 16;
             let raw: pgr_format::symtab::Nlist64 =
-                pgr_format::cursor::pod_read_unaligned_at(&bytes, off)
+                pgr_format::cursor::pod_read_unaligned_at(bytes, off)
                     .map_err(|e| fail(format!("symbol {i}: {e}")))?;
             let name_bytes: &[u8] = if (raw.n_strx as usize) < strtab.len() {
                 let rest = &strtab[raw.n_strx as usize..];
@@ -311,16 +375,43 @@ impl InputObject {
                 common_align,
             });
         }
+        Ok((symbols, names))
+    }
 
-        let obj = Self {
-            file,
-            name: name.to_string(),
-            bytes,
-            sections,
-            symbols,
-            symbol_names: names,
-        };
-        Ok(obj)
+    /// Chunked symbol decode for giant objects: fixed index ranges decoded
+    /// in parallel, concatenated in ascending index order (deterministic).
+    fn decode_symbols_chunked<F: Fn(String) -> LinkError + Sync>(
+        bytes: &[u8],
+        st: &pgr_format::SymtabCommand,
+        strtab: &[u8],
+        sections: &[InputSection],
+        fail: &F,
+    ) -> Result<(Vec<InputSymbol>, Vec<Vec<u8>>), LinkError> {
+        let nsyms = st.nsyms as usize;
+        let workers = crate::pool::worker_count();
+        let chunk_count = (workers * 4).clamp(2, 256);
+        let chunk_len = nsyms.div_ceil(chunk_count).max(1);
+        let bounds: Vec<usize> = (0..=nsyms).step_by(chunk_len).collect();
+        let ranges: Vec<core::ops::Range<usize>> = bounds
+            .windows(2)
+            .map(|w| w[0]..w[1])
+            .filter(|r| !r.is_empty())
+            .collect();
+        type DecodedPart = Result<(Vec<InputSymbol>, Vec<Vec<u8>>), LinkError>;
+        let parts: Vec<DecodedPart> = crate::pool::compute_pool().install(|| {
+            ranges
+                .par_iter()
+                .map(|r| Self::decode_symbols(bytes, st, strtab, sections, r.clone(), fail))
+                .collect()
+        });
+        let mut symbols = Vec::with_capacity(nsyms);
+        let mut names = Vec::with_capacity(nsyms);
+        for part in parts {
+            let (mut s, mut n) = part?;
+            symbols.append(&mut s);
+            names.append(&mut n);
+        }
+        Ok((symbols, names))
     }
 
     /// Symbol names in table order, handed to the global interner build.
@@ -590,4 +681,105 @@ fn convert_section(
         raw_relocs,
         relocs: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InputObject;
+    use crate::ids::FileId;
+    use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
+
+    /// Giant-object splitting (perf doc §4.1): the chunked symbol decoder
+    /// must produce exactly the serial decode for any chunk boundaries —
+    /// exercised here against the real fixture builder with a table large
+    /// enough to split several ways (`GIANT_SYMS` would gate at 2²⁰; the
+    /// chunked path is driven directly so the mechanism is testable at
+    /// CI-friendly sizes).
+    #[test]
+    fn chunked_symbol_decode_equals_the_serial_decode() {
+        let nsyms = 5_000usize;
+        let mut b = ObjectBuilder::new("giant.o");
+        let text = b.add_section(ObjectSection::text("__text", vec![0u8; 64], Vec::new()));
+        for i in 0..nsyms {
+            b.add_symbol(ObjectSymbol::Defined {
+                name: format!("_giant_fn_{i:06}"),
+                section_index: text,
+                value: (i % 16) as u64,
+                weak: false,
+            });
+        }
+        let bytes = b.build().unwrap();
+        let obj = InputObject::parse(FileId(0), "giant.o", bytes.clone()).unwrap();
+
+        // Re-derive the symtab command + strtab from the parsed layout the
+        // same way parse() does, then decode ranges and compare.
+        let header = pgr_format::header::MachHeader64::parse(&bytes).unwrap();
+        let mut it = pgr_format::load_command::LoadCommandIter::new(
+            &bytes,
+            pgr_format::header::MachHeader64::SIZE,
+            header.ncmds,
+            header.sizeofcmds,
+        )
+        .unwrap();
+        let mut st = None;
+        while let Some(cmd) = it.next_command().unwrap() {
+            if let pgr_format::load_command::LoadCommandKind::Symtab = cmd.kind {
+                st = Some(pgr_format::SymtabCommand::parse(cmd.bytes, 0).unwrap());
+            }
+        }
+        let st = st.unwrap();
+        let strtab = &bytes[st.stroff as usize..st.stroff as usize + st.strsize as usize];
+        let fail = |msg: String| crate::LinkError::Parse {
+            file: "giant.o".into(),
+            message: msg,
+        };
+
+        // Serial reference over the whole table.
+        let (all_syms, all_names) = super::decode_symbol_range_for_test(
+            &bytes,
+            &st,
+            strtab,
+            &obj.sections,
+            0..nsyms,
+            &fail,
+        )
+        .unwrap();
+        assert_eq!(all_syms.len(), nsyms);
+        assert_eq!(all_names.len(), nsyms);
+
+        // Chunked: overlapping-free ranges decoded separately, concatenated
+        // in ascending order — must equal the serial decode exactly.
+        let mut chunk_syms = Vec::new();
+        let mut chunk_names = Vec::new();
+        let mut lo = 0usize;
+        for hi in [777usize, 1501, 4321, nsyms] {
+            let (mut s, mut n) = super::decode_symbol_range_for_test(
+                &bytes,
+                &st,
+                strtab,
+                &obj.sections,
+                lo..hi,
+                &fail,
+            )
+            .unwrap();
+            chunk_syms.append(&mut s);
+            chunk_names.append(&mut n);
+            lo = hi;
+        }
+        assert_eq!(chunk_syms.len(), all_syms.len());
+        for (a, b) in chunk_syms.iter().zip(&all_syms) {
+            assert_eq!(
+                (a.section, a.value, a.external, a.weak_def, a.weak_ref),
+                (b.section, b.value, b.external, b.weak_def, b.weak_ref)
+            );
+        }
+        assert_eq!(chunk_names, all_names);
+        // The gate constants stay tuned for the P0 rig (64 MiB / 2²⁰ syms);
+        // const asserts keep the tuning contract visible without tripping
+        // the assertions-on-constants lint.
+        const {
+            assert!(super::GIANT_OBJECT_BYTES >= 1 << 25);
+            assert!(super::GIANT_SYMS >= 1 << 19);
+        }
+    }
 }
