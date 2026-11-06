@@ -15,9 +15,13 @@
 //! * [`dynamic`] — the chained-fixups payload and chain-walk simulation,
 //! * [`signature`] — SuperBlob/CodeDirectory layout and page-hash recompute,
 //! * [`pair`] — the M3 dylib + executable pair gate (two-level ordinals vs
-//!   the dylib's export trie).
+//!   the dylib's export trie),
+//! * [`branch_range`] — the M6 `B`/`BL` decode pass backing the veneer
+//!   (thunk) placement gate.
 
+pub mod branch_range;
 pub mod chain_starts;
+pub mod dyld_info;
 pub mod dynamic;
 pub mod export_trie;
 pub mod misc;
@@ -79,6 +83,12 @@ pub enum Code {
     LinkeditPayload,
     /// The export trie is malformed, unsorted or unreadable by dyld.
     ExportTrie,
+    /// A `B`/`BL` target leaves the executable span or is mis-aligned
+    /// (M6 veneer-placement gate).
+    BranchRange,
+    /// The classic `LC_DYLD_INFO` opcode streams are malformed or name an
+    /// import outside the load-dylib list (M6 legacy fallback).
+    DyldInfoStreams,
     /// Suspicious but non-fatal condition.
     Suspicious,
 }
@@ -103,6 +113,8 @@ impl Code {
             Code::SignatureHashMismatch => "signature_hash_mismatch",
             Code::LinkeditPayload => "linkedit_payload",
             Code::ExportTrie => "export_trie",
+            Code::BranchRange => "branch_range",
+            Code::DyldInfoStreams => "dyld_info_streams",
             Code::Suspicious => "suspicious",
         }
     }
@@ -223,6 +235,10 @@ pub fn verify(bytes: &[u8], opts: &Options) -> Report {
             // M1: the static mirror must agree with the payload (TDD §7.5).
             chain_starts::check_chain_starts(bytes, &parsed, &mut report);
         }
+        // M6: the branch-range gate (veneers included).
+        branch_range::check_branch_range(bytes, &parsed, &mut report);
+        // M6: the classic `LC_DYLD_INFO(_ONLY)` opcode-stream walk.
+        dyld_info::check_dyld_info(bytes, &parsed, &mut report);
         signature::check_signature(bytes, &parsed, !opts.skip_hash_recompute, &mut report);
     }
     if report.issues.iter().any(|i| i.severity == Severity::Error) {
