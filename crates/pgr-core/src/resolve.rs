@@ -7,20 +7,24 @@
 //! |---|---|
 //! | 1 | strong `N_SECT\|N_EXT` definition |
 //! | 2 | weak definition (`N_WEAK_DEF`) |
+//! | 3 | strong definition in an archive member (M5) |
+//! | 4 | weak definition in an archive member (M5) |
 //! | 5 | tentative/common (`N_UNDF`, `n_value != 0`) — coalesce to max size/align |
 //! | 7 | undefined (only valid if some definition exists elsewhere) |
 //!
-//! Ranks 3/4 (archive members) and 6 (dylib exports) are M2/M5 scope — M1
-//! links direct `.o` inputs only. Ties within a rank: lower file index wins
-//! (command-line order); the comparison is a pure function of
+//! Rank 6 (dylib exports) is M2 scope. Archive members only reach the table
+//! once pulled (S7 liveness), so ranks 3/4 matter when a pulled member
+//! collides with a direct definition — the direct object wins without a
+//! duplicate error, exactly ld64's behavior. Ties within a rank: lower file
+//! index wins (command-line order); the comparison is a pure function of
 //! `(rank, file)`, so the M4 CAS key packs exactly these two fields and the
 //! winner stays schedule-independent.
 //!
 //! M2 adds rank 6 (dylib exports): an undefined reference resolves against
 //! the first `LC_LOAD_DYLIB` (in command order) that exports the name —
 //! two-level namespace — or, under `-flat_namespace`, stays ordinal-free
-//! (dyld looks it up at launch). Liveness: every command-line object is
-//! live (archives are M3+).
+//! (dyld looks it up at launch). Liveness: direct objects are live; archive
+//! members are pulled by the S7 fixpoint (M5).
 
 use crate::LinkError;
 use crate::ids::{FileId, StringId};
@@ -35,6 +39,10 @@ pub enum Rank {
     Strong = 1,
     /// Weak definition (`N_WEAK_DEF`).
     WeakDef = 2,
+    /// Strong definition in a pulled archive member (M5).
+    ArchiveStrong = 3,
+    /// Weak definition in a pulled archive member (M5).
+    ArchiveWeak = 4,
     /// Tentative/common symbol.
     Common = 5,
     /// Dylib export (rank 6: any definition in this image beats a dylib).
@@ -127,16 +135,23 @@ impl Resolution {
                 }
                 let key = sym.name.0;
                 if sym.is_defined() {
+                    let rank = if obj.from_archive {
+                        if sym.weak_def {
+                            Rank::ArchiveWeak
+                        } else {
+                            Rank::ArchiveStrong
+                        }
+                    } else if sym.weak_def {
+                        Rank::WeakDef
+                    } else {
+                        Rank::Strong
+                    };
                     self.install_sect_def(
                         key,
                         Def {
                             file: obj.file,
                             sym: sym_i,
-                            rank: if sym.weak_def {
-                                Rank::WeakDef
-                            } else {
-                                Rank::Strong
-                            },
+                            rank,
                             weak: sym.weak_def,
                             value: sym.value,
                             section: sym.section,
@@ -171,7 +186,10 @@ impl Resolution {
                     Ok(())
                 }
                 core::cmp::Ordering::Equal => {
-                    if def.rank == Rank::Strong {
+                    // Two pulled members or two direct objects claiming the
+                    // same strong symbol: a genuine duplicate. Direct vs
+                    // archive never reaches Equal (ranks 1/2 < 3/4).
+                    if def.rank == Rank::Strong || def.rank == Rank::ArchiveStrong {
                         Err(LinkError::Symbol {
                             name: String::new(),
                             message: format!(
