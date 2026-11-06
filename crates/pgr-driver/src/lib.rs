@@ -1,11 +1,14 @@
 //! The `pgr` driver library (TDD §5 Pass 0 + the driver loop): option
 //! parsing, input mapping, and the Pass 1–5 orchestration.
 //!
-//! The M2 loop: map inputs (`.o` objects and `.tbd` dylib stubs, plus the
-//! `-l` library search) → parse/intern/resolve/layout (`pgr-core`) → emit
-//! bytes (`pgr-emit`) → flush. Determinism is an end-to-end property (§4.3):
-//! linking the same corpus twice in separate calls produces byte-identical
-//! images, asserted in the integration tests.
+//! The M4 loop: map inputs (`.o` objects and `.tbd`/`.dylib` dylib stubs,
+//! plus the `-l` library search) → parse/intern/resolve/layout (`pgr-core`:
+//! LPT-parallel Pass 1, D8 `resolved[]`, copy-run coalescing) → **fused tile
+//! emit** (`pgr-emit::build_image_fused`, perf doc §4.4) → pooled flush.
+//! Determinism is an end-to-end property (§4.3): linking the same corpus
+//! twice in separate calls produces byte-identical images, and the fused
+//! emit is byte-identical to the preserved pre-fusion reference
+//! (`link_reference_bytes`) — both asserted in the integration tests.
 
 pub mod opts;
 
@@ -296,11 +299,40 @@ pub fn resolve_lib(
 }
 
 /// Links the option inputs into image bytes (no filesystem). Exposed for
-/// tests, benchmarks and the verifier pipeline.
+/// tests, benchmarks and the verifier pipeline. Runs the M4 pipeline: the
+/// parallel Pass 1–3 front half plus the fused tile emit.
 ///
 /// # Errors
 /// [`DriverError`] on option, link, emit, tbd or I/O failures.
 pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> {
+    let result = link_inputs_for_emit(opts)?;
+    let image = pgr_emit::build_image_fused(&result.layout, &result.objects)?;
+    Ok(ImageAndPlan {
+        entryoff: result.layout.entryoff,
+        fixup_slots: result.layout.fixups.slot_count,
+        image,
+    })
+}
+
+/// Links the option inputs through the **pre-fusion reference emit** (the
+/// M1–M3 Pass 4 body, kept verbatim). The M4 correctness gate compares this
+/// byte-for-byte against [`link_to_image`]; benches use it as the baseline.
+///
+/// # Errors
+/// [`DriverError`] on option, link, emit, tbd or I/O failures.
+pub fn link_reference_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> {
+    let result = link_inputs_for_emit(opts)?;
+    let image = pgr_emit::build_image(&result.layout, &result.objects)?;
+    Ok(ImageAndPlan {
+        entryoff: result.layout.entryoff,
+        fixup_slots: result.layout.fixups.slot_count,
+        image,
+    })
+}
+
+/// Runs Passes 0–3 for the option inputs and returns the emit plan (the
+/// shared front half of [`link_to_image`] and [`link_reference_image`]).
+fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, DriverError> {
     let mut inputs = Vec::with_capacity(opts.inputs.len());
     let mut dylibs: Vec<Dylib> = Vec::new();
     for (i, path) in opts.inputs.iter().enumerate() {
@@ -402,22 +434,24 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
             });
         }
     }
-
-    let image = pgr_emit::build_image(&result.layout, &result.objects)?;
-    Ok(ImageAndPlan {
-        entryoff: result.layout.entryoff,
-        fixup_slots: result.layout.fixups.slot_count,
-        image,
-    })
+    Ok(result)
 }
-
 /// Links `inputs` into image bytes (no filesystem). Kept for callers that
-/// only need the bytes.
+/// only need the bytes (the M4 fused pipeline).
 ///
 /// # Errors
 /// [`DriverError`] on option, link or emit failures.
 pub fn link_to_bytes(opts: &opts::Options) -> Result<Vec<u8>, DriverError> {
     Ok(link_to_image(opts)?.image)
+}
+
+/// Links `inputs` into image bytes through the pre-fusion reference emit.
+/// The M4 gate's baseline (see [`link_reference_image`]).
+///
+/// # Errors
+/// [`DriverError`] on option, link or emit failures.
+pub fn link_reference_bytes(opts: &opts::Options) -> Result<Vec<u8>, DriverError> {
+    Ok(link_reference_image(opts)?.image)
 }
 
 /// Runs the full driver: link and write the output file.
