@@ -10,7 +10,8 @@
 
 use criterion::{Criterion, Throughput};
 use pgr_fixtures::{
-    ImageBuilder, ImportsFormat, SectionSpec, SegmentSpec, SlotKind, SymbolSpec, filler,
+    ImageBuilder, ImportsFormat, ObjectBuilder, ObjectSection, ObjectSymbol, SectionSpec,
+    SegmentSpec, SlotKind, SymbolSpec, filler,
 };
 use pgr_format::consts::{
     S_ATTR_PURE_INSTRUCTIONS, S_REGULAR, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
@@ -108,9 +109,56 @@ fn bench_parse(c: &mut Criterion) {
     group.finish();
 }
 
+/// Builds a deterministic archive of `members` object files (each a small
+/// synthetic `MH_OBJECT`) with a name-sorted ranlib table — the M5 archive
+/// parse baseline (S7: the Pass 0 cost of the lazy-pull index).
+fn bench_archive(members: usize) -> Vec<u8> {
+    let mut arch = pgr_fixtures::ArchiveBuilder::new("libbench.a");
+    for seed in 0..members {
+        let mut b = ObjectBuilder::new(&format!("m{seed}.o"));
+        let text = b.add_section(ObjectSection::text(
+            "__text",
+            [0xC0u8, 0x03, 0x5F, 0xD6].repeat(64),
+            Vec::new(),
+        ));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: format!("_bench_archive_fn_{seed}"),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+        for i in 0..32 {
+            b.add_symbol(ObjectSymbol::Undefined {
+                name: format!("_bench_archive_undef_{seed}_{i}"),
+                weak_ref: false,
+            });
+        }
+        arch.add_member(&format!("m{seed}.o"), b.build().unwrap());
+    }
+    arch.build()
+}
+
+fn bench_archive_parse(c: &mut Criterion) {
+    let archive = bench_archive(64);
+    let total = archive.len() as u64;
+
+    let mut group = c.benchmark_group("pgr-format/parse_archive");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(4));
+    group.throughput(Throughput::Bytes(total));
+    group.bench_function("archive_64_members", |b| {
+        b.iter(|| {
+            let a = pgr_format::parse_archive(std::hint::black_box(&archive)).unwrap();
+            std::hint::black_box((a.members.len(), a.index.len()));
+        })
+    });
+    group.finish();
+}
+
 /// Bench entry point (macro-free so the workspace `missing_docs` lint holds).
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     bench_parse(&mut criterion);
+    bench_archive_parse(&mut criterion);
     criterion.final_summary();
 }
