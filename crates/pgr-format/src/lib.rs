@@ -27,6 +27,7 @@ pub mod segment;
 pub mod signature;
 pub mod symtab;
 pub mod tbd;
+pub mod trie;
 
 pub use commands::{
     BuildToolVersion, BuildVersionCommand, DataInCodeEntry, DylibCommand, DylinkerCommand,
@@ -40,6 +41,7 @@ pub use segment::{Section64, SegmentCommand64};
 pub use signature::{CodeDirectory, SuperBlob};
 pub use symtab::{DysymtabCommand, Nlist64, SymtabCommand};
 pub use tbd::{Tbd, TbdSymbol, parse_tbd};
+pub use trie::{TrieExport, exports as exports_trie};
 
 use consts::LC_DYLD_CHAINED_FIXUPS;
 use cursor::Cursor;
