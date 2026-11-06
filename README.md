@@ -198,6 +198,60 @@ cargo +nightly fuzz run link_object -- -max_total_time=120
       The roadmap's real-project correctness gate (ripgrep, C++, ObjC,
       Rust links *running* on Apple Silicon) formally closes on the P0 rig
 
+## M6 gate checklist (architecture doc §10.3 row M6 — scale & ecosystem, in-tree scope)
+
+- [x] **Branch thunks/veneers (BR26 overflow)**: out-of-range `B`/`BL`
+      sites (±128 MiB arm64 reach) get a 3-instruction veneer
+      (`adrp x16/add x16/br x16`, ±4 GiB ADRP window) inserted into the
+      same output section right after the site's piece, inside the layout
+      fixed point; determinism-gated (double-link layout equality), and
+      giant-atom sites (single atom > 128 MiB) fail with ld64-style
+      diagnostics instead of mis-linking
+- [x] **Branch-range checker in `pgr-verify`**: every `B`/`BL` in the
+      executable sections is decoded; targets must land back inside the
+      `__TEXT` span, 4-byte aligned (`Code::BranchRange`) — the M6 gate
+      "thunk placement verified by a branch-range checker"
+- [x] **`LC_DYLD_INFO` legacy fallback**: chained fixups are a macOS ≥ 12
+      format (TDD §3.6 invariant 3), so `minos < 12.0.0` and
+      `-no_fixup_chains` emit classic `LC_DYLD_INFO_ONLY` rebase/bind
+      opcode streams instead — slot bytes stay zero (dyld writes them),
+      no `__chain_starts`; `pgr-format` owns the opcode encoders/decoders
+      (round-trip + malformed battery), `pgr-core::dyld_info` plans the
+      streams from the same slot list, and the verifier walks both
+      streams entry-by-entry (`Code::DyldInfoStreams`)
+- [x] **ICF (identical code folding)**: `-icf=safe` / `-icf=all` /
+      `-no_icf` (ld64 vocabulary, default `none`); Hopcroft-style color
+      refinement over per-atom `(content, ordered relocation
+      fingerprints)` signatures, byte hashing on the shared pool,
+      deterministic class ids (TDD §4.3); `-icf=safe` never folds
+      address-taken atoms, weak defs never fold, section-relative targets
+      never fold (unredirectable); folded aliases keep their symtab names
+      at the canonical address; composes with `-dead_strip`
+- [x] **ICF determinism + perf gates**: identical layouts across
+      `Parallelism::Serial`/`Auto` and repeated runs; every ICF output is
+      verifier-clean; the wall overhead on the fully-foldable corpus is
+      **+12.0%** (gate: ≤ 25%) while removing ~192 KiB of duplicate text
+- [x] **Stage A caches (§7.1): POI + frozen `.tbd`**: content-addressed
+      (`sha256(input || flags)`), checksum-framed, atomically written,
+      corruption- and version-tolerant (silent re-parse); `-cache <dir>`
+      / `PGR_CACHE_DIR` / `-no_cache` (opt-in); **cached vs uncached
+      output byte-identical** (the roadmap gate), warm links skip Pass 1
+      entirely; frozen `.tbd` startup **19.9 µs** vs 35.8 µs text parse
+      (gate: < 1 ms)
+- [x] **LTO pass-through scope**: LLVM bitcode inputs (raw `BC\xC0\xDE`
+      and `0x0B17C0DE` wrapper) are detected up front and diagnosed
+      clearly (rebuild with `-fno-lto`) instead of failing deep in the
+      Mach-O parser; the full LTO backend joins a later milestone
+- [x] **ObjC/Swift section pass-through gates**: `__objc_classrefs` /
+      `__objc_selrefs` / `__swift5_types` corpora place, chain-rebase
+      their pointers, verify strictly and double-link deterministically
+- [ ] **Deferred with reasons** (the rest of the M6 row): ObjC stub
+      synthesis and selector/class *semantics* (needs real ObjC corpora
+      and the P0 rig to validate against dyld), Swift flags
+      (`-swift_version` etc.), LTO object *execution* (LLVM backend
+      integration), and the D7 insertion-stable import order (Stage C
+      incremental work). The relink-vs-ld-prime gate closes on the P0 rig
+
 ## M4 gate checklist (architecture doc §10.3 row M4)
 
 - [x] **Fused tile emit** (perf doc §4.4): parallel 16 KiB tiles copy the
