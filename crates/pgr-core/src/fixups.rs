@@ -12,8 +12,11 @@
 //! canonical `(lib, name, addend)` order to unblock tile-fused emit; spike
 //! S6 (empirical, M2) showed `ld64.lld` assigns first-use order over the
 //! address-sorted slot stream — dyld accepts any order, so Peregrine keeps
-//! first-use for golden compatibility and revisits canonical order with the
-//! M4 tile scheduler.
+//! first-use for golden compatibility. *M4 update:* the tile scheduler
+//! shipped without needing D7 — the import table is built here, in Pass 3,
+//! and Pass 4's tiles only **read** the encoded slot words, so no
+//! cross-tile mutation exists; D7 (insertion-stable ordinals) stays open
+//! for the M6 incremental work.
 //!
 //! Addend split (mirrors ld64/lld): an addend in `0..=255` travels inline in
 //! the bind word's 8-bit field with a zero import addend; any other addend
