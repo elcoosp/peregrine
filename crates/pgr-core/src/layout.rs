@@ -30,6 +30,7 @@ use pgr_format::consts::{
     S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR, S_SYMBOL_STUBS, S_ZEROFILL, SECTION_TYPE_MASK,
     STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
 };
+use rayon::prelude::*;
 
 /// The output image kind (M3): `-static`/dynamic executables, `-dylib`
 /// dylibs and `-bundle` bundles. The kind drives the file type, the image
@@ -386,6 +387,43 @@ pub struct Layout {
     pub indirect_syms: Vec<u32>,
     /// Fixup plan (payload, slot words, imports, `__chain_starts` mirror).
     pub fixups: FixupPlan,
+    /// Coalesced copy runs covering every byte-carrying input piece (M4,
+    /// perf doc §4.3) — the fused tile emit's copy list, sorted by `dst`.
+    pub runs: Vec<CopyRun>,
+    /// Per-file D8 resolution tables (M4, perf doc §3 D8), parallel to the
+    /// input objects (empty when `layout()` ran without objects).
+    pub resolved: Vec<ResolvedFile>,
+}
+
+/// One coalesced copy (M4, perf doc §4.3 "copy-run coalescing"): contiguous
+/// input bytes from one object landing at one contiguous output range.
+/// Pass 3 emits the run list alongside the pieces; the fused tile emit
+/// (pgr-emit Pass 4 v2) copies runs instead of walking pieces, turning
+/// millions of small `memcpy`s into thousands of large ones. Runs never
+/// cover synthetic or zero-fill pieces (those stay zero / carry their own
+/// bytes) and never overlap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyRun {
+    /// Owning input file.
+    pub file: FileId,
+    /// Byte range in the input object.
+    pub src: core::ops::Range<u64>,
+    /// Absolute output file offset.
+    pub dst: u64,
+}
+
+/// Per-file flat resolution table (M4, perf doc §3 D8): the final output
+/// vaddr of every input symbol and input section, materialized once after
+/// placement and read by the relocation scan — one file-local array load
+/// replaces the map walks of M1–M3. Emit's patch stream carries absolute
+/// operands already, so this table is the *only* resolution de-indirection
+/// the pipeline needs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedFile {
+    /// Input symbol index → output vaddr (0 when not an in-image definition).
+    pub syms: Box<[u64]>,
+    /// Input section index → output vaddr (0 when unplaced or zero-fill).
+    pub sects: Box<[u64]>,
 }
 
 /// One output bucket: `(segment, name, merged flags, zerofill)`.
@@ -1084,6 +1122,11 @@ pub fn layout(
     let (header_bytes, uuid_at, entryoff_at) =
         build_header(cfg, &state.segments, &state.sections, &header_inputs)?;
 
+    // The coalescing + D8 tables read the placed state before it moves into
+    // the Layout.
+    let runs = coalesce_runs(&state.sections);
+    let resolved = build_resolved_tables(objects, &state.addr_of, &state.def_addr, res);
+
     Ok(Layout {
         ident: cfg.ident.clone(),
         filetype: cfg.filetype.filetype(),
@@ -1119,7 +1162,95 @@ pub fn layout(
         str_offsets,
         indirect_syms,
         fixups,
+        runs,
+        resolved,
     })
+}
+
+/// Copy-run coalescing (M4, perf doc §4.3): merge consecutive byte-carrying
+/// pieces that are adjacent in *both* the input object and the output image
+/// into one [`CopyRun`]. Without dead-strip or ordering (M5) a whole input
+/// section is already one piece, so runs stay section-granular; the merge
+/// pays off as soon as pieces multiply (commons adjacency, M5 splits).
+fn coalesce_runs(sections: &[PlacedSection]) -> Vec<CopyRun> {
+    let mut runs: Vec<CopyRun> = Vec::new();
+    for s in sections {
+        if s.zerofill {
+            continue;
+        }
+        for p in &s.pieces {
+            if p.zerofill || p.synth.is_some() || p.in_range.is_empty() {
+                continue;
+            }
+            let dst = s.file_off + p.offset;
+            match runs.last_mut() {
+                Some(last)
+                    if last.file == p.file
+                        && last.src.end == p.in_range.start
+                        && last.dst + (last.src.end - last.src.start) == dst =>
+                {
+                    last.src.end = p.in_range.end;
+                }
+                _ => runs.push(CopyRun {
+                    file: p.file,
+                    src: p.in_range.clone(),
+                    dst,
+                }),
+            }
+        }
+    }
+    // Sections arrive in file order, so `runs` is already dst-sorted; sort
+    // anyway to keep the invariant local to this function.
+    runs.sort_by_key(|r| r.dst);
+    runs
+}
+
+/// Materializes the per-file D8 resolution tables (perf doc §3 D8): a
+/// sequential, prefetch-friendly parallel pass over the objects writing the
+/// final vaddr of every input symbol and section. The relocation scan then
+/// reads one file-local array instead of walking global maps. Commons
+/// (which carry no input section) resolve through the placed `__common`
+/// piece addresses in `def_addr`.
+fn build_resolved_tables(
+    objects: &[InputObject],
+    addr_of: &std::collections::HashMap<(u32, usize), u64>,
+    def_addr: &std::collections::BTreeMap<u32, u64>,
+    res: &Resolution,
+) -> Vec<ResolvedFile> {
+    // Commons resolve through the `__common` pieces; carry their final
+    // addresses per (file, sym) so the flat tables cover every definition.
+    let mut common_addr: Vec<Vec<(usize, u64)>> = vec![Vec::new(); objects.len()];
+    for (id, def) in res.definitions() {
+        if def.rank == Rank::Common && def.section.is_none() {
+            if let Some(&addr) = def_addr.get(&id.0) {
+                common_addr[def.file.0 as usize].push((def.sym, addr));
+            }
+        }
+    }
+    objects
+        .par_iter()
+        .zip(common_addr)
+        .map(|(obj, commons)| {
+            let mut syms: Vec<u64> = vec![0; obj.symbols.len()];
+            for (i, sym) in obj.symbols.iter().enumerate() {
+                if let Some(sect) = sym.section {
+                    if let Some(&base) = addr_of.get(&(obj.file.0, sect)) {
+                        syms[i] = base + sym.value;
+                    }
+                }
+            }
+            for (sym_idx, addr) in commons {
+                syms[sym_idx] = addr;
+            }
+            let sects: Vec<u64> = (0..obj.sections.len())
+                .map(|idx| addr_of.get(&(obj.file.0, idx)).copied().unwrap_or(0))
+                .collect();
+            ResolvedFile {
+                syms: syms.into_boxed_slice(),
+                sects: sects.into_boxed_slice(),
+            }
+        })
+        .collect()
 }
 
 /// Builds the per-bucket piece lists (offsets assigned later by `place`).
@@ -1476,6 +1607,12 @@ fn resolve_all(
         }
     }
 
+    // ---- D8: materialize the per-file resolved[] tables (M4, perf doc
+    // §3 D8). The relocation scan below reads these flat arrays instead of
+    // walking `addr_of`/`def_addr` maps per relocation — one file-local
+    // load replaces the three dependent map hops.
+    let resolved = build_resolved_tables(objects, &state.addr_of, &def_addr, res);
+
     // Pass A: every piece except stubs (stubs need the GOT slot addresses
     // that this pass computes).
     for fp_idx in 0..state.flat.len() {
@@ -1524,13 +1661,12 @@ fn resolve_all(
                 })?;
                 let in_sect = &obj.sections[in_sect_idx];
                 let space = AddrSpace {
-                    addr_of: &state.addr_of,
-                    def_addr: &def_addr,
                     got_slot_addr: &state.got_slot_addr,
                     stub_addr: &state.stub_addr,
                     interner,
                     res,
                     cfg,
+                    resolved: &resolved,
                 };
                 for r in &in_sect.relocs {
                     resolve_reloc(obj, in_sect, r, addr, &space, &mut patches, &mut slots)?;
@@ -1588,10 +1724,6 @@ fn resolve_all(
 
 /// Borrowed view of the address space resolution reads (Pass 3 scratch).
 struct AddrSpace<'a> {
-    /// (file, input section) → output vaddr base.
-    addr_of: &'a std::collections::HashMap<(u32, usize), u64>,
-    /// Interned name id → output vaddr.
-    def_addr: &'a std::collections::BTreeMap<u32, u64>,
     /// Interned name id → GOT slot vaddr (M2).
     got_slot_addr: &'a std::collections::BTreeMap<u32, u64>,
     /// Interned name id → stub vaddr (M2).
@@ -1602,6 +1734,10 @@ struct AddrSpace<'a> {
     res: &'a Resolution,
     /// Link config (flat namespace).
     cfg: &'a LinkConfig,
+    /// Per-file D8 resolution tables (M4): the flat arrays the relocation
+    /// scan reads for every symbol/section target — the M1–M3 map walks
+    /// (`addr_of`/`def_addr`) are gone from this hot path.
+    resolved: &'a [ResolvedFile],
 }
 
 /// The bind library ordinal for an external reference (M2): the two-level
@@ -1830,21 +1966,46 @@ fn read_slot_i64(bytes: &[u8], at: usize) -> Result<i64, LinkError> {
 /// Looks up a relocation target (extern or local section); externs that
 /// resolve nowhere (dylib exports, dynamic lookups) yield `None` — the
 /// caller decides between the bind path and an error.
+///
+/// M4 (D8): reads the file-local `resolved[]` array — `res.def(id)` gives
+/// the defining `(file, sym)` hop, then one indexed load — instead of a
+/// global map walk per relocation.
 fn lookup_opt(
     obj: &InputObject,
     target: RelocTarget,
     space: &AddrSpace<'_>,
 ) -> Result<Option<u64>, LinkError> {
     match target {
-        RelocTarget::Extern(id) => Ok(space.def_addr.get(&id.0).copied()),
-        RelocTarget::Section(idx) => space
-            .addr_of
-            .get(&(obj.file.0, idx))
-            .copied()
-            .map(Some)
-            .ok_or(LinkError::Internal {
-                message: format!("local section {idx} of {} was not placed", obj.name),
-            }),
+        RelocTarget::Extern(id) => match space.res.def(id) {
+            Some(d) => space
+                .resolved
+                .get(d.file.0 as usize)
+                .and_then(|t| t.syms.get(d.sym))
+                .copied()
+                .map(Some)
+                .ok_or_else(|| LinkError::Internal {
+                    message: format!(
+                        "definition of \"{}\" missing from the resolved[] table",
+                        space.interner.name(id)
+                    ),
+                }),
+            None => Ok(None),
+        },
+        RelocTarget::Section(idx) => {
+            match space
+                .resolved
+                .get(obj.file.0 as usize)
+                .and_then(|t| t.sects.get(idx))
+                .copied()
+            {
+                // Zero marks unplaced (zero-fill) sections — the M1–M3 map
+                // lookup returned an error for those too.
+                Some(v) if v != 0 => Ok(Some(v)),
+                _ => Err(LinkError::Internal {
+                    message: format!("local section {idx} of {} was not placed", obj.name),
+                }),
+            }
+        }
     }
 }
 
