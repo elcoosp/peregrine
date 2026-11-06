@@ -4,19 +4,24 @@ An ultra-fast Mach-O linker for **arm64-apple-darwin**, written in Rust,
 cross-linking from Linux — developed verifier-first so correctness gates ship
 before the fast paths.
 
-> **Status: M2 ("dynamic executable") shipped.** The repository now links
-> dynamic executables against text-based dylib stubs:
-> `pgr -o out hello.o libSystem.tbd` produces a valid arm64 MH_EXECUTE with
-> `LC_LOAD_DYLIB` ordinals, two-level namespace resolution, synthesized
-> `__TEXT,__stubs` + `__DATA_CONST,__got`, chained fixups with a real import
-> table (rebase **and** bind), indirect symbols, the minimal export trie
-> (`__mh_execute_header` + defined externs), `-flat_namespace`,
-> `-undefined dynamic_lookup`, `-rpath`, `-source_version` and weak dylibs —
-> all passing the full verifier gate (dyld chain-walk simulation over binds
-> + imports, trie walk, signature recompute). The M2 **slot-for-slot golden
-> gate** compares our fixup values against `ld64.lld` on the same corpus
-> (skips gracefully when lld is absent; CI installs it). M0/M1 foundations
-> are unchanged; dylib *outputs* and archives start at M3 (see the
+> **Status: M3 ("dylibs & bundles") shipped.** Building on the M2 dynamic
+> executables, Peregrine now emits **dylibs and bundles**:
+> `pgr -dylib -install_name @rpath/libfoo.dylib -o libfoo.dylib foo.o
+> libSystem.tbd` produces a valid arm64 MH_DYLIB with `LC_ID_DYLIB` (+
+> `-current_version`/`-compatibility_version`), the **full export trie**
+> (compressed, re-export aware: `-reexport_library` emits `LC_REEXPORT_DYLIB`
+> plus REEXPORT trie nodes with the dylib ordinal), `-exported_symbols_list`
+> / `-unexported_symbols_list` (hidden externals become `N_PEXT` locals),
+> `-mark_dead_strippable_dylib`, and `-bundle` (MH_BUNDLE) outputs — no
+> `LC_MAIN`, no `LC_LOAD_DYLINKER`, image base 0 (`__TEXT.vmaddr == fileoff`),
+> verifier-validated. Clients link against **Mach-O dylib binaries directly**
+> (install name + exports scanned from the image), and the M3 **pair gate**
+> (`pgr_verify::pair::verify_dylib_pair`) replays the executable's binds the
+> way dyld does and proves every two-level ordinal resolves to a name the
+> dylib's trie actually exports. The export trie builder was rewritten as a
+> range-partition build (8–11× the M2 builder; see
+> [BENCHMARKS](docs/BENCHMARKS.md) for the 10⁵-export gate numbers). M0–M2
+> foundations are unchanged; archives and `-dead_strip` start at M5 (see the
 > [roadmap](docs/peregrine-performance-architecture-and-roadmap.md), the
 > [TDD](docs/TDD.md) and the [compat checklist](docs/COMPAT.md)).
 
@@ -24,11 +29,11 @@ before the fast paths.
 
 | Crate | Role | Threading |
 |---|---|---|
-| `pgr-driver` | `pgr` CLI (ld64-compatible M2 surface: M1 flags + `-l -L -rpath -flat_namespace -undefined -u -weak_library -source_version`, `.tbd` inputs, library search) + Pass 0 | single |
-| `pgr-format` | raw `#[repr(C)]` Mach-O structs, constants, cursor, chained-fixup & signature codecs, `.tbd` v3/v4 parser | pure |
-| `pgr-core` | Passes 1–3: object parser (incl. GOT-load relocs), interner, two-level resolution, layout + `__got`/`__stubs` synthesis, import-table & export-trie planning (single-threaded; M4-parallel-ready shapes) | single (M1/M2) |
-| `pgr-emit` | Passes 4–5: output buffer, reloc apply, chain words (rebase + bind), `__LINKEDIT` build (symtab + indirect symbols + trie), ad-hoc signature, atomic writer | single (M1/M2) |
-| `pgr-verify` | read-side verifier + `pgr-verify` CLI (structural, segment contract, chain-walk simulation over binds/imports, export-trie walk, signature recompute, `__chain_starts` mirror checks) | single |
+| `pgr-driver` | `pgr` CLI (ld64-compatible M3 surface: M2 flags + `-dylib -bundle -install_name -current_version -compatibility_version -reexport_library -exported/unexported_symbols_list -mark_dead_strippable_dylib`, `.tbd` **and `.dylib`** inputs, library search) + Pass 0 | single |
+| `pgr-format` | raw `#[repr(C)]` Mach-O structs, constants, cursor, chained-fixup & signature codecs, `.tbd` v3/v4 parser, total export-trie walker | pure |
+| `pgr-core` | Passes 1–3: object parser (incl. GOT-load relocs), interner, two-level resolution, layout + `__got`/`__stubs` synthesis, import-table planning, range-partition export-trie builder (single-threaded; M4-parallel-ready shapes) | single (M1–M3) |
+| `pgr-emit` | Passes 4–5: output buffer, reloc apply, chain words (rebase + bind), `__LINKEDIT` build (symtab + indirect symbols + trie), ad-hoc signature, atomic writer | single (M1–M3) |
+| `pgr-verify` | read-side verifier + `pgr-verify` CLI (structural, segment contract, dylib/bundle contract, chain-walk simulation over binds/imports, export-trie walk incl. REEXPORT nodes, signature recompute, `__chain_starts` mirror checks, **dylib+executable pair gate**) | single |
 | `pgr-fixtures` | deterministic Mach-O image **and relocatable-object** builders (LLVM single-segment object convention — `ld64.lld`-compatible) shared by tests, benches and the fuzz corpus | test-support |
 
 ## Engineering gates
@@ -51,8 +56,9 @@ before the fast paths.
 
 ```sh
 cargo build --release --locked
-cargo test --workspace --locked          # 140+ tests: units, e2e gate, proptests, cross-checks
+cargo test --workspace --locked          # 220+ tests: units, e2e gate, proptests, cross-checks
 cargo bench -p pgr-format                # parser GB/s baseline (docs/BENCHMARKS.md)
+cargo bench -p pgr-core --bench trie     # export-trie build gate (docs/BENCHMARKS.md)
 cargo bench -p pgr-driver                # end-to-end link baseline (docs/BENCHMARKS.md)
 
 # Link a dynamic executable against a .tbd stub (M2):
@@ -61,6 +67,13 @@ cargo bench -p pgr-driver                # end-to-end link baseline (docs/BENCHM
 # Flat namespace / dynamic lookup / rpath:
 ./target/release/pgr -o hi printf_main.o libSystem.tbd \
     -flat_namespace -undefined dynamic_lookup -rpath @executable_path/../lib
+
+# Link a dylib (M3) and build an executable against the dylib binary:
+./target/release/pgr -dylib -install_name @rpath/libfoo.dylib \
+    -current_version 1.2.0 -compatibility_version 1.0.0 \
+    -o libfoo.dylib foo.o libSystem.tbd
+./target/release/pgr -o main main.o libfoo.dylib
+./target/release/pgr -bundle -o plug.bundle plugin.o libSystem.tbd
 
 # Cross-check the fixup values against ld64.lld (the M2 golden gate):
 PGR_LLD64=$(which ld64.lld) cargo test -p pgr-driver --test e2e
@@ -118,6 +131,36 @@ cargo +nightly fuzz run link_object -- -max_total_time=120
 - [x] `llvm-otool -l` diff vs ld64 goldens — **deferred**: requires
       `ld64.lld`/macOS hardware (CI skeleton exists; the verifier +
       `object`-crate crosscheck is the Linux stand-in, as at M0)
+
+## M3 gate checklist (architecture doc §10.3 row M3)
+
+- [x] `-dylib` output: `MH_DYLIB`, `LC_ID_DYLIB` (`-install_name`,
+      `-current_version`, `-compatibility_version`; install name defaults to
+      the output path), no `LC_MAIN`/`LC_LOAD_DYLINKER`, image base 0 —
+      verifier-validated (`pgr-verify` grew `check_dylib_contract`)
+- [x] `-bundle` output: `MH_BUNDLE`, no `LC_ID_DYLIB`
+- [x] Full export trie: compressed range-partition builder (8–11× the M2
+      builder; bench-recorded), weak-definition flags, deterministic bytes
+- [x] Re-exports: `-reexport_library` → `LC_REEXPORT_DYLIB` + REEXPORT trie
+      nodes (ordinal + imported name); verifier walk validates ordinals and
+      strings; local definitions shadow re-exports
+- [x] `-exported_symbols_list` / `-unexported_symbols_list` (exact-name
+      subset; hidden externals become `N_PEXT` locals and leave the trie)
+- [x] `-mark_dead_strippable_dylib` → `MH_DEAD_STRIPPABLE_DYLIB`
+- [x] Mach-O dylib inputs: `.dylib` scan (install name + exports from the
+      trie, symtab fallback) for direct inputs and `-l` search
+- [x] **Correctness gate: dylib + executable pair** —
+      `pgr_verify::pair::verify_dylib_pair` verifies both images, replays the
+      exec's chained binds like dyld, and asserts every two-level bind into
+      the dylib resolves to a name its trie exports (the R4 mitigation);
+      `e2e::m3_exec_against_pgr_dylib_passes_the_pair_gate` links the pair
+      end-to-end through the scanned dylib binary
+- [x] Trie diff vs ld64 goldens runs through the M2 lld harness (skips when
+      lld is absent; CI installs it)
+- [x] Perf gate: trie build 31.5 ms for 10⁵ exports on the 2-core dev
+      sandbox (legacy M2 builder: 363 ms) — ≈ 8–12 ms on P-core-class
+      hardware; formally closes on the P0 rig
+      (`docs/BENCHMARKS.md`)
 
 ## M2 gate checklist (architecture doc §10.3 row M2)
 
