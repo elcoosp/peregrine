@@ -48,6 +48,8 @@ pub enum LoadCommandKind {
     Dysymtab,
     /// `LC_LOAD_DYLIB` (and its weak/upward variants, same layout).
     LoadDylib,
+    /// `LC_REEXPORT_DYLIB` (same layout; M3 re-export surface).
+    ReexportDylib,
     /// `LC_ID_DYLIB`.
     IdDylib,
     /// `LC_LOAD_DYLINKER`.
@@ -81,6 +83,7 @@ impl LoadCommandKind {
             LC_SYMTAB => Self::Symtab,
             LC_DYSYMTAB => Self::Dysymtab,
             LC_LOAD_DYLIB => Self::LoadDylib,
+            crate::consts::LC_REEXPORT_DYLIB => Self::ReexportDylib,
             LC_ID_DYLIB => Self::IdDylib,
             LC_LOAD_DYLINKER => Self::LoadDylinker,
             LC_MAIN => Self::Main,
