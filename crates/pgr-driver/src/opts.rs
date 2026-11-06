@@ -52,6 +52,11 @@ pub struct Options {
     pub framework_dirs: Vec<String>,
     /// M5 `-sectcreate <seg> <sect> <file>`: section contents from a file.
     pub sectcreate: Vec<(String, String, String)>,
+    /// M6 `-cache <dir>` / `PGR_CACHE_DIR`: the Stage A POI + frozen-`.tbd`
+    /// cache directory (opt-in; `None` disables caching).
+    pub cache_dir: Option<String>,
+    /// M6 `-no_cache`: force caching off even when a directory is set.
+    pub no_cache: bool,
 }
 
 impl Default for Options {
@@ -75,6 +80,8 @@ impl Default for Options {
             frameworks: Vec::new(),
             framework_dirs: Vec::new(),
             sectcreate: Vec::new(),
+            cache_dir: None,
+            no_cache: false,
         }
     }
 }
@@ -357,6 +364,28 @@ fn apply_flag(
         "-mark_dead_strippable_dylib" => opts.config.dead_strippable = true,
         "-dead_strip" => opts.config.dead_strip = true,
         "-no_dead_strip" => opts.config.dead_strip = false,
+        "-icf" => {
+            // ld64 separates flag and value: `-icf safe`. The attached form
+            // (`-icf=safe`) is matched below.
+            let v = next_value(args, i, arg)?;
+            opts.config.icf = parse_icf_level(&v).ok_or_else(|| OptsError::InvalidValue {
+                flag: "-icf".into(),
+                value: v.clone(),
+            })?;
+        }
+        a if a.starts_with("-icf=") => {
+            let v = &a[5..];
+            opts.config.icf = parse_icf_level(v).ok_or_else(|| OptsError::InvalidValue {
+                flag: "-icf".into(),
+                value: v.to_string(),
+            })?;
+        }
+        "-no_icf" => opts.config.icf = pgr_core::icf::IcfMode::None,
+        "-cache" => {
+            let v = next_value(args, i, arg)?;
+            opts.cache_dir = Some(v);
+        }
+        "-no_cache" => opts.no_cache = true,
         "-all_load" => opts.all_load = true,
         "-force_load" => {
             let v = next_value(args, i, arg)?;
@@ -480,6 +509,17 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
         }
     }
     Ok(opts.clone())
+}
+
+/// Parses the `-icf` level (ld64's `none|safe|all` vocabulary).
+#[must_use]
+pub fn parse_icf_level(v: &str) -> Option<pgr_core::icf::IcfMode> {
+    match v {
+        "none" => Some(pgr_core::icf::IcfMode::None),
+        "safe" => Some(pgr_core::icf::IcfMode::Safe),
+        "all" => Some(pgr_core::icf::IcfMode::All),
+        _ => None,
+    }
 }
 
 /// Parses `X.Y.Z` into the packed `(X<<16)|(Y<<8)|Z` version.
