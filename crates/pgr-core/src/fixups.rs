@@ -189,6 +189,77 @@ pub struct FixupPlan {
     pub has_weak_binds: bool,
 }
 
+/// One import dedup key (first-use insertion order = the chained bind
+/// ordinal space).
+pub(crate) struct ImportKey {
+    pub lib_ordinal: u8,
+    pub name: Vec<u8>,
+    pub outlined_addend: i64,
+    pub weak: bool,
+}
+
+/// Builds the import table (first-use order over address-sorted slots):
+/// `(imports, name pool, has_weak, dedup keys)`. Shared by the chained path
+/// (`plan_fixups`) and the M6 classic path (`dyld_info`) — the symtab and
+/// indirect-symbol-table construction reads the same metadata either way.
+pub(crate) fn build_import_table(
+    slots: &[FixupSlot],
+    interner: &Interner,
+) -> (Vec<Import>, Vec<u8>, bool, Vec<ImportKey>) {
+    let mut bind_keys: Vec<ImportKey> = Vec::new();
+    let mut seen: std::collections::HashSet<(u8, Vec<u8>, i64, bool)> =
+        std::collections::HashSet::new();
+    let mut has_weak_binds = false;
+    for slot in slots {
+        let FixupKind::Bind {
+            lib_ordinal,
+            name,
+            addend,
+            weak,
+        } = slot.kind
+        else {
+            continue;
+        };
+        let outlined = if (0..=255).contains(&addend) {
+            0
+        } else {
+            addend
+        };
+        let key = (lib_ordinal, interner.bytes(name).to_vec(), outlined, weak);
+        if seen.insert(key.clone()) {
+            bind_keys.push(ImportKey {
+                lib_ordinal,
+                name: key.1.clone(),
+                outlined_addend: outlined,
+                weak,
+            });
+        }
+        if weak {
+            has_weak_binds = true;
+        }
+    }
+    let mut imports: Vec<Import> = bind_keys
+        .iter()
+        .map(|k| Import {
+            lib_ordinal: u16::from(k.lib_ordinal),
+            weak_import: k.weak,
+            name_offset: 0, // patched below once the pool exists
+            addend: k.outlined_addend,
+        })
+        .collect();
+    let mut import_names: Vec<u8> = Vec::new();
+    let mut name_offsets: Vec<u32> = Vec::with_capacity(bind_keys.len());
+    for k in &bind_keys {
+        name_offsets.push(import_names.len() as u32);
+        import_names.extend_from_slice(&k.name);
+        import_names.push(0);
+    }
+    for (imp, off) in imports.iter_mut().zip(name_offsets.iter()) {
+        imp.name_offset = *off;
+    }
+    (imports, import_names, has_weak_binds, bind_keys)
+}
+
 /// Plans all fixups (rebases and binds) for the image.
 ///
 /// `segments` are the image's `LC_SEGMENT_64` entries in command order as
@@ -220,66 +291,7 @@ pub fn plan_fixups(
     // addend: 0..=255 inline in the word, everything else in the import
     // entry; only one side is ever nonzero, so dedup keys on the outlined
     // half.
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct BindKey {
-        lib_ordinal: u8,
-        name: Vec<u8>,
-        outlined_addend: i64,
-        weak: bool,
-    }
-    // Seen-set dedup: O(1) per slot keeps the import build linear (the
-    // M4 shapes sort this table canonically afterwards).
-    let mut bind_keys: Vec<BindKey> = Vec::new();
-    let mut seen: std::collections::HashSet<BindKey> = std::collections::HashSet::new();
-    let mut has_weak_binds = false;
-    for slot in &slots {
-        let FixupKind::Bind {
-            lib_ordinal,
-            name,
-            addend,
-            weak,
-        } = slot.kind
-        else {
-            continue;
-        };
-        let outlined = if (0..=255).contains(&addend) {
-            0
-        } else {
-            addend
-        };
-        let key = BindKey {
-            lib_ordinal,
-            name: interner.bytes(name).to_vec(),
-            outlined_addend: outlined,
-            weak,
-        };
-        if seen.insert(key.clone()) {
-            bind_keys.push(key);
-        }
-        if weak {
-            has_weak_binds = true;
-        }
-    }
-    let imports: Vec<Import> = bind_keys
-        .iter()
-        .map(|k| Import {
-            lib_ordinal: u16::from(k.lib_ordinal),
-            weak_import: k.weak,
-            name_offset: 0, // patched below once the pool exists
-            addend: k.outlined_addend,
-        })
-        .collect();
-    let mut import_names: Vec<u8> = Vec::new();
-    let mut name_offsets: Vec<u32> = Vec::with_capacity(bind_keys.len());
-    for k in &bind_keys {
-        name_offsets.push(import_names.len() as u32);
-        import_names.extend_from_slice(&k.name);
-        import_names.push(0);
-    }
-    let mut imports = imports;
-    for (imp, off) in imports.iter_mut().zip(name_offsets.iter()) {
-        imp.name_offset = *off;
-    }
+    let (imports, import_names, has_weak_binds, bind_keys) = build_import_table(&slots, interner);
 
     // ---- group slots per segment ----------------------------------------
     let mut per_segment: Vec<Vec<FixupSlot>> = vec![Vec::new(); segments.len()];
@@ -470,7 +482,7 @@ pub fn plan_fixups(
         let at = imports_offset + i * 8;
         let packed = u32::from(imp.lib_ordinal & 0xff)
             | u32::from(imp.weak_import) << 8
-            | (name_offsets[i] & 0x7f_ffff) << 9;
+            | (imp.name_offset & 0x7f_ffff) << 9;
         payload[at..at + 4].copy_from_slice(&packed.to_le_bytes());
         payload[at + 4..at + 8].copy_from_slice(&(imp.addend as i32).to_le_bytes());
     }
