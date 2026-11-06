@@ -15,6 +15,7 @@
 //! * constants are mirrored (not imported) and cross-checked against
 //!   `object::macho` in `tests/constants_crosscheck.rs`.
 
+pub mod archive;
 pub mod commands;
 pub mod consts;
 pub mod cursor;
@@ -29,6 +30,7 @@ pub mod symtab;
 pub mod tbd;
 pub mod trie;
 
+pub use archive::{Archive, ArchiveIndexEntry, ArchiveMember, is_archive, parse_archive};
 pub use commands::{
     BuildToolVersion, BuildVersionCommand, DataInCodeEntry, DylibCommand, DylinkerCommand,
     EntryPointCommand, LinkeditDataCommand, SourceVersionCommand, UuidCommand,
