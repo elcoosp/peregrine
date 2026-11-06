@@ -13,8 +13,11 @@
 //! section order); nothing reads hash iteration order. Parallel schedules
 //! change who computes a result, never the result — gated in tests.
 
+pub mod cache;
 pub mod deadstrip;
+pub mod dyld_info;
 pub mod fixups;
+pub mod icf;
 pub mod ids;
 pub mod interner;
 pub mod layout;
@@ -22,8 +25,11 @@ pub mod link;
 pub mod object;
 pub mod pool;
 pub mod resolve;
+pub mod thunks;
 pub mod trie;
 
+pub use cache::PoiCache;
+pub use dyld_info::DyldInfoPlan;
 pub use fixups::{FixupKind, FixupPlan, MAX_CHAIN_STRIDE_BYTES, pack_page};
 pub use ids::{FileId, StringId};
 pub use interner::Interner;
@@ -32,7 +38,8 @@ pub use layout::{
     SegmentPlan,
 };
 pub use link::{
-    LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, link, link_with,
+    LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, link, link_cached,
+    link_with,
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use resolve::{Def, Rank, Resolution};
