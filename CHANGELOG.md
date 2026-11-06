@@ -4,6 +4,53 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.5.0] - 2026-11-06### Features
+- **emit:** M4 fused tile emit (`build_image_fused`) — parallel 16 KiB
+  tiles copy coalesced runs, apply relocations, encode chained-fixup
+  words, place the `__LINKEDIT` chunks and hash the 4 KiB signature pages
+  in one pass (perf doc §4.4, D14); UUID derives from the fused hash
+  table, only page 0 re-hashes; parallel pre-fault of the zero-page-backed
+  output buffer (D10); the pre-fusion M1–M3 body stays verbatim as the
+  reference (`build_image`)
+- **core:** M4 Pass 1 — LPT-scheduled parallel parse (longest input first
+  on the shared compute pool) with giant-object splitting (inputs ≥ 64 MiB
+  or ≥ 2²⁰ symbols decode their symtab in deterministic index chunks) and
+  the parallel canonicalizing interner sort; `Parallelism::Serial` keeps
+  the M1–M3 reference path (perf doc §4.1)
+- **core:** D8 `resolved[]` de-indirection — per-file flat
+  `ResolvedFile { syms, sects }` tables written once per layout fixed-point
+  iteration; the relocation scan reads the file-local array and the M1–M3
+  `addr_of`/`def_addr` map walks leave the hot path
+- **core:** copy-run coalescing (perf doc §4.3) — `Layout.runs` merges
+  pieces contiguous in input and output into one `memcpy`; coverage and
+  disjointness gated
+- **core:** shared compute pool (D9) — one process-wide rayon pool sized
+  `PGR_JOBS` → `available_parallelism` (the macOS P-core default joins
+  with the P0 rig, spike S4)
+- **emit:** S1 writer pool — extent preallocation (`set_len`) plus a
+  4-writer `pwrite` pool over disjoint 8 MiB blocks; fresh-vnode + fsync +
+  atomic-rename contract unchanged
+- **driver:** the fused pipeline becomes the default (`link_to_bytes`);
+  `link_reference_bytes`/`link_reference_image` expose the pre-fusion
+  reference for the M4 byte-identity gate and benches
+### Performance
+- **bench:** `pgr-emit/emit` gate — fused tile emit 1.59 ms vs reference
+  2.18 ms for ~0.94 MiB signed images (1.37×, 605 vs 441 MiB/s) on the
+  2-core dev sandbox; full-pipeline benches record fused vs reference on
+  all corpora (bind-path links 1.10–1.11×; resolution-heavy static corpus
+  is Pass 2/3-bound as before); `PGR_JOBS=1` scaling recorded
+### Tests
+- **emit:** ten fused-vs-reference byte-identity gates over every M3
+  corpus shape (executables, dylibs, bundles, re-exports, export filters,
+  flat namespace, `-no_fixup_chains`, `-no_adhoc`, wide multi-tile
+  corpora); pooled-writer byte-exactness across 8 MiB block boundaries
+- **core:** copy-run coverage/partition gates, parallel-vs-serial layout
+  fingerprint equality, `resolved[]` table checks, giant-object chunked
+  decode vs serial decode
+- **driver:** M4 e2e gates — byte-identity with the reference pipeline,
+  strict verifier + bundle/dylib contracts on fused outputs, fused
+  double-link determinism
+
 ## [0.4.0] - 2026-11-06### Features
 - **driver:** M3 CLI — `-dylib`/`-bundle` outputs, `-install_name`,
   `-current_version`/`-compatibility_version`, `-reexport_library`,
