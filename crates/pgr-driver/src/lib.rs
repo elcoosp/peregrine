@@ -69,6 +69,16 @@ pub enum DriverError {
         /// What failed.
         message: String,
     },
+    /// An input is an LLVM bitcode object (LTO): the M6 scope detects it
+    /// and diagnoses clearly instead of failing deep in the Mach-O parser.
+    #[error(
+        "{path}: LLVM bitcode object (LTO) is not supported by this linker; \
+         rebuild with -fno-lto or link the LTO backend's output instead"
+    )]
+    LtoObject {
+        /// The bitcode input path.
+        path: String,
+    },
     /// A `-exported_symbols_list`/`-unexported_symbols_list` file could not
     /// be read or parsed.
     #[error("{flag} {path}: {message}")]
@@ -251,11 +261,34 @@ fn looks_like_tbd(bytes: &[u8]) -> bool {
 /// # Errors
 /// [`DriverError::Tbd`] on parse failures, [`DriverError::Io`] on reads.
 pub fn tbd_to_dylib(path: &str, bytes: &[u8], weak: bool) -> Result<Dylib, DriverError> {
+    tbd_to_dylib_cached(path, bytes, weak, None)
+}
+
+/// The M6 frozen-`.tbd` path (Stage A): the YAML parse is cached under the
+/// stub's content hash; a hit decodes the frozen export set instead of
+/// parsing text (the `.tbd` startup gate). `weak` stays a caller property.
+///
+/// # Errors
+/// [`DriverError::Tbd`] on malformed stubs.
+pub fn tbd_to_dylib_cached(
+    path: &str,
+    bytes: &[u8],
+    weak: bool,
+    cache: Option<&pgr_core::cache::PoiCache>,
+) -> Result<Dylib, DriverError> {
+    if let Some(cache) = cache {
+        let key = pgr_core::cache::PoiCache::content_key(bytes, false);
+        if let Some(frozen) = cache.load_dylib(&key) {
+            let mut d: Dylib = frozen.into();
+            d.weak = weak;
+            return Ok(d);
+        }
+    }
     let tbd = pgr_format::parse_tbd(bytes).map_err(|e| DriverError::Tbd {
         path: path.to_string(),
         source: e,
     })?;
-    Ok(Dylib {
+    let dylib = Dylib {
         install_name: tbd.install_name,
         current_version: tbd.current_version,
         compatibility_version: tbd.compatibility_version,
@@ -266,7 +299,12 @@ pub fn tbd_to_dylib(path: &str, bytes: &[u8], weak: bool) -> Result<Dylib, Drive
             .collect(),
         weak,
         reexport: false,
-    })
+    };
+    if let Some(cache) = cache {
+        let key = pgr_core::cache::PoiCache::content_key(bytes, false);
+        cache.store_dylib(&key, &pgr_core::cache::FrozenDylib::from(&dylib));
+    }
+    Ok(dylib)
 }
 
 /// Resolves `-l<name>` against the `-L` search dirs (then the default
@@ -371,6 +409,16 @@ pub fn link_reference_image(opts: &opts::Options) -> Result<ImageAndPlan, Driver
 /// Runs Passes 0–3 for the option inputs and returns the emit plan (the
 /// shared front half of [`link_to_image`] and [`link_reference_image`]).
 fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, DriverError> {
+    // M6 Stage A caches: opt-in via `-cache <dir>` / `PGR_CACHE_DIR`;
+    // `-no_cache` always wins. A cache failure never fails the link.
+    let cache = if opts.no_cache {
+        None
+    } else {
+        opts.cache_dir
+            .clone()
+            .or_else(|| std::env::var("PGR_CACHE_DIR").ok())
+            .and_then(|dir| pgr_core::cache::PoiCache::open(std::path::Path::new(&dir)).ok())
+    };
     let mut inputs = Vec::with_capacity(opts.inputs.len());
     let mut archives: Vec<LinkArchive> = Vec::new();
     let mut dylibs: Vec<Dylib> = Vec::new();
@@ -400,10 +448,26 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
     // Expanded filelist entries carry no `-weak_library`/`-reexport_library`
     // markers (those flags push onto `opts.inputs` directly).
     for path in &expanded_inputs {
-        map_input(path, None, opts, &mut inputs, &mut archives, &mut dylibs)?;
+        map_input(
+            path,
+            None,
+            opts,
+            cache.as_ref(),
+            &mut inputs,
+            &mut archives,
+            &mut dylibs,
+        )?;
     }
     for (i, path) in opts.inputs.iter().enumerate() {
-        map_input(path, Some(i), opts, &mut inputs, &mut archives, &mut dylibs)?;
+        map_input(
+            path,
+            Some(i),
+            opts,
+            cache.as_ref(),
+            &mut inputs,
+            &mut archives,
+            &mut dylibs,
+        )?;
     }
     // `-l` library search: `.tbd` stubs (M2), Mach-O dylib binaries (M3),
     // static archives (M5).
@@ -411,13 +475,15 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
         match resolve_lib(name, &opts.lib_dirs)? {
             Some((path, bytes)) => {
                 if looks_like_tbd(&bytes) {
-                    dylibs.push(tbd_to_dylib(&path, &bytes, false)?);
+                    dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
                 } else if pgr_format::MachHeader64::parse(&bytes)
                     .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
                 {
                     dylibs.push(scan_dylib(&path, &bytes)?);
                 } else if pgr_format::is_archive(&bytes) {
                     push_archive(&mut archives, &path, bytes, opts)?;
+                } else if is_llvm_bitcode(&bytes) {
+                    return Err(DriverError::LtoObject { path });
                 } else {
                     return Err(DriverError::Tbd {
                         path,
@@ -442,7 +508,7 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
         match resolve_framework(name, &opts.framework_dirs)? {
             Some((path, bytes)) => {
                 if looks_like_tbd(&bytes) {
-                    dylibs.push(tbd_to_dylib(&path, &bytes, false)?);
+                    dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
                 } else if pgr_format::MachHeader64::parse(&bytes)
                     .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
                 {
@@ -505,7 +571,13 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
     if let Some(path) = &opts.unexported_list_path {
         config.unexported = read_symbol_list("-unexported_symbols_list", path)?;
     }
-    let result = pgr_core::link(&inputs, &archives, &config)?;
+    let result = pgr_core::link_cached(
+        &inputs,
+        &archives,
+        &config,
+        pgr_core::Parallelism::Auto,
+        cache.as_ref(),
+    )?;
 
     // `-u <symbol>`: the symbol must resolve to an in-image definition. The
     // name also seeds the archive pull loop, so a member defining it is
@@ -527,6 +599,13 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
     Ok(result)
 }
 
+/// Detects LLVM bitcode: raw bitcode files start with `BC\xC0\xDE`, the
+/// wrapper format with `0x0B17C0DE` (little-endian bytes `DE C0 17 0B`).
+#[must_use]
+pub fn is_llvm_bitcode(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"BC\xC0\xDE") || bytes.starts_with(&[0xDE, 0xC0, 0x17, 0x0B])
+}
+
 /// Classifies and maps one input path: `.tbd`/dylib → [`Dylib`], archive →
 /// [`LinkArchive`] (lazy members), anything else → a [`LinkInput`] object.
 /// `opts_index` carries the `-weak_library`/`-reexport_library` marker index
@@ -535,6 +614,7 @@ fn map_input(
     path: &str,
     opts_index: Option<usize>,
     opts: &opts::Options,
+    cache: Option<&pgr_core::cache::PoiCache>,
     inputs: &mut Vec<LinkInput>,
     archives: &mut Vec<LinkArchive>,
     dylibs: &mut Vec<Dylib>,
@@ -545,7 +625,7 @@ fn map_input(
     })?;
     if looks_like_tbd(&bytes) {
         let weak = opts_index.is_some_and(|i| opts.weak_library_inputs.contains(&i));
-        let mut dylib = tbd_to_dylib(path, &bytes, weak)?;
+        let mut dylib = tbd_to_dylib_cached(path, &bytes, weak, cache)?;
         dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
@@ -572,6 +652,13 @@ fn map_input(
             source: pgr_format::FormatError::Malformed {
                 what: "-reexport_library input is not a dylib (.tbd or Mach-O)".into(),
             },
+        });
+    }
+    // M6 LTO pass-through scope: bitcode objects are detected up front and
+    // diagnosed (the roadmap's LTO backend integration is a later item).
+    if is_llvm_bitcode(&bytes) {
+        return Err(DriverError::LtoObject {
+            path: path.to_string(),
         });
     }
     let i = opts_index.unwrap_or(usize::MAX);
