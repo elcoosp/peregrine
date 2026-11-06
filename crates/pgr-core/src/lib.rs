@@ -13,6 +13,7 @@
 //! section order); nothing reads hash iteration order. Parallel schedules
 //! change who computes a result, never the result — gated in tests.
 
+pub mod deadstrip;
 pub mod fixups;
 pub mod ids;
 pub mod interner;
@@ -30,7 +31,9 @@ pub use layout::{
     CopyRun, Layout, LinkConfig, OutputSymbol, PatchOp, Piece, PlacedSection, ResolvedFile,
     SegmentPlan,
 };
-pub use link::{LinkInput, LinkResult, Parallelism, link, link_with};
+pub use link::{
+    LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, link, link_with,
+};
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use resolve::{Def, Rank, Resolution};
 pub use trie::{Export, ExportInfo};
