@@ -836,7 +836,7 @@ fn m2_links_printf_from_tbd() {
             .any(|i| i.severity == pgr_verify::Severity::Error),
         "{report:?}"
     );
-    let names: Vec<_> = exports.entries.iter().map(|(n, _, _)| n.clone()).collect();
+    let names: Vec<_> = exports.entries.iter().map(|e| e.name.clone()).collect();
     assert!(
         names.contains(&"__mh_execute_header".to_string()),
         "{names:?}"
@@ -1182,4 +1182,440 @@ fn m2_lld_golden_binds_slot_for_slot() {
             .collect()
     };
     assert_eq!(imports_of(&pgr_image), imports_of(&lld_image));
+}
+
+// ---------------------------------------------------------------------------
+// M3 — dylibs and bundles (roadmap §10.3 M3 row; TDD §12 M3 gate)
+// ---------------------------------------------------------------------------
+
+/// foo.o: the dylib body — exports `_foo_add` (text) and `_foo_value`
+/// (data), keeps a private local `_secret`, imports `_printf` from
+/// libSystem (stub + GOT bind through the tbd).
+fn foo_object() -> Vec<u8> {
+    let mut b = ObjectBuilder::new("foo.o");
+    let text = b.add_section(ObjectSection::text(
+        "__text",
+        [
+            0xF940_0000u32, // ldr x0, [x0, _printf@GOTPAGEOFF]
+            0xD61F_0200u32, // br x0 (tail call)
+            0xD65F_03C0u32, // ret
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect(),
+        Vec::new(),
+    ));
+    let data = b.add_section(ObjectSection::data(
+        "__data",
+        0x2Au8.to_le_bytes().to_vec(),
+        vec![],
+    ));
+    b.add_section(ObjectSection::cstring("foo\n"));
+    let add_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_foo_add".into(),
+        section_index: text,
+        value: 8,
+        weak: false,
+    });
+    let value_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_foo_value".into(),
+        section_index: data,
+        value: 0,
+        weak: false,
+    });
+    let secret_sym = b.add_symbol(ObjectSymbol::Local("_secret".into()));
+    let printf_sym = b.add_symbol(ObjectSymbol::Undefined {
+        name: "_printf".into(),
+        weak_ref: false,
+    });
+    b.section_mut(text).relocs = vec![
+        ObjectReloc::got_pageoff12(printf_sym as u32).at(0),
+        ObjectReloc::branch26(printf_sym as u32).at(4),
+    ];
+    let _ = (add_sym, value_sym, secret_sym);
+    b.build().unwrap()
+}
+
+/// foo_main.o: the client — calls `_foo_add` (stub), loads `_foo_value`
+/// through the GOT.
+fn foo_main_object() -> Vec<u8> {
+    let text: Vec<u8> = [
+        0x9000_0000u32, // adrp x0, _foo_add@GOTPAGE
+        0xF940_0000u32, // ldr x0, [x0, _foo_add@GOTPAGEOFF]
+        0xD63F_0000u32, // blr x0
+        0x9000_0000u32, // adrp x1, _foo_value@GOTPAGE
+        0xF940_0021u32, // ldr x1, [x1, _foo_value@GOTPAGEOFF]
+        0x5280_0000u32, // mov w0, #0
+        0xD65F_03C0u32, // ret
+    ]
+    .iter()
+    .flat_map(|w| w.to_le_bytes())
+    .collect();
+    let mut b = ObjectBuilder::new("foo_main.o");
+    let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
+    let add = b.add_symbol(ObjectSymbol::Undefined {
+        name: "_foo_add".into(),
+        weak_ref: false,
+    });
+    let value = b.add_symbol(ObjectSymbol::Undefined {
+        name: "_foo_value".into(),
+        weak_ref: false,
+    });
+    let main_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: sect,
+        value: 0,
+        weak: false,
+    });
+    let _ = main_sym;
+    b.section_mut(sect).relocs = vec![
+        ObjectReloc::got_page21(add as u32).at(0),
+        ObjectReloc::got_pageoff12(add as u32).at(4),
+        ObjectReloc::branch26(add as u32).at(8),
+        ObjectReloc::got_page21(value as u32).at(12),
+        ObjectReloc::got_pageoff12(value as u32).at(16),
+    ];
+    b.build().unwrap()
+}
+
+/// A bar `.tbd` whose export is re-exported by the built dylib.
+fn bar_tbd() -> &'static str {
+    "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: /usr/lib/libbar.dylib\ncurrent-version: 2.0.0\ncompatibility-version: 2.0.0\nexports:\n  - targets: [ arm64-macos ]\n    symbols: [ _bar_api ]\n...\n"
+}
+
+fn verify_strict(bytes: &[u8]) -> pgr_verify::Report {
+    pgr_verify::verify(
+        bytes,
+        &pgr_verify::Options {
+            strict_warnings: true,
+            skip_hash_recompute: false,
+        },
+    )
+}
+
+/// Links the M3 dylib corpus: foo.o (+ optional bar re-export tbd) into
+/// `@rpath/libfoo.dylib`.
+fn link_foo_dylib_in(
+    dir: std::path::PathBuf,
+    tweak: impl FnOnce(&mut Options),
+) -> (Vec<u8>, pgr_driver::ImageAndPlan) {
+    let obj = dir.join("foo.o");
+    std::fs::write(&obj, foo_object()).unwrap();
+    let tbd = dir.join("libSystem.tbd");
+    std::fs::write(&tbd, libsystem_tbd()).unwrap();
+    let mut opts = Options::default();
+    opts.inputs.push(obj.display().to_string());
+    opts.inputs.push(tbd.display().to_string());
+    opts.config.ident = "peregrine-m3-dylib".into();
+    opts.config.filetype = pgr_core::layout::OutputType::Dylib;
+    opts.config.install_name = Some("@rpath/libfoo.dylib".into());
+    opts.config.current_version = (1 << 16) | (2 << 8);
+    opts.config.compatibility_version = 1 << 16;
+    tweak(&mut opts);
+    let linked = pgr_driver::link_to_image(&opts).unwrap();
+    (linked.image.clone(), linked)
+}
+
+#[test]
+fn m3_dylib_output_passes_verifier_strict() {
+    let (image, _) = link_foo_dylib_in(unique_dir("m3dylib"), |_| {});
+    let report = verify_strict(&image);
+    assert!(
+        report.is_ok(&pgr_verify::Options::default()),
+        "dylib verifier issues: {report:?}"
+    );
+
+    // File type and flags.
+    let header = MachHeader64::parse(&image).unwrap();
+    assert_eq!(header.filetype, pgr_format::consts::MH_DYLIB);
+    let hflags = u32::from_le_bytes(image[24..28].try_into().unwrap());
+    assert!(hflags & pgr_format::consts::MH_TWOLEVEL != 0);
+    assert!(
+        hflags & pgr_format::consts::MH_PIE == 0,
+        "dylibs are not PIE"
+    );
+    assert!(
+        hflags & pgr_format::consts::MH_NO_REEXPORTED_DYLIBS != 0,
+        "no re-exports in this link"
+    );
+
+    // No LC_MAIN, no LC_LOAD_DYLINKER; exactly one LC_ID_DYLIB with the
+    // install name and versions.
+    let cmds = load_commands(&image);
+    assert!(
+        !cmds
+            .iter()
+            .any(|(k, _)| *k == pgr_format::LoadCommandKind::Main),
+        "dylibs carry no LC_MAIN"
+    );
+    assert!(
+        !cmds
+            .iter()
+            .any(|(k, _)| *k == pgr_format::LoadCommandKind::LoadDylinker),
+        "dylibs carry no LC_LOAD_DYLINKER"
+    );
+    let id_cmds: Vec<&Vec<u8>> = cmds
+        .iter()
+        .filter(|(k, _)| *k == pgr_format::LoadCommandKind::IdDylib)
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(id_cmds.len(), 1, "exactly one LC_ID_DYLIB");
+    let id = pgr_format::DylibCommand::parse(id_cmds[0]).unwrap();
+    assert_eq!(id.name(id_cmds[0]).unwrap(), b"@rpath/libfoo.dylib");
+    assert_eq!(id.current_version, (1 << 16) | (2 << 8));
+    assert_eq!(id.compatibility_version, 1 << 16);
+
+    // Dylib base contract: __TEXT.vmaddr == fileoff (no 4 GiB delta), and
+    // the fixups chain-walk with the 0 base.
+    let text = cmds
+        .iter()
+        .find_map(|(_k, b)| {
+            pgr_format::SegmentCommand64::parse(b, 0)
+                .ok()
+                .filter(|s| s.name() == Ok("__TEXT"))
+        })
+        .expect("__TEXT segment");
+    assert_eq!(text.vmaddr, text.fileoff, "dylib __TEXT at the 0 base");
+    assert_eq!(text.fileoff, 0);
+
+    // The full export trie lists the defined externs (+ the header symbol);
+    // the private local is absent.
+    let trie = find_trie(&image);
+    let mut report = pgr_verify::Report::default();
+    let exports = pgr_verify::export_trie::check_export_trie(&trie, &mut report);
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|i| i.severity == pgr_verify::Severity::Error)
+    );
+    let names: Vec<_> = exports.entries.iter().map(|e| e.name.clone()).collect();
+    for expected in ["_foo_add", "_foo_value", "__mh_execute_header"] {
+        assert!(names.contains(&expected.to_string()), "{names:?}");
+    }
+    assert!(!names.iter().any(|n| n == "_secret"), "{names:?}");
+}
+
+#[test]
+fn m3_exec_against_pgr_dylib_passes_the_pair_gate() {
+    let dir = unique_dir("m3pair");
+    let lib_dir = dir.join("lib");
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    let (lib, _) = link_foo_dylib_in(lib_dir, |_| {});
+    let lib_path = dir.join("libfoo.dylib");
+    std::fs::write(&lib_path, &lib).unwrap();
+
+    // The client links against the Mach-O dylib binary directly (M3 scan:
+    // install name + exports read from the image).
+    let main_path = dir.join("foo_main.o");
+    std::fs::write(&main_path, foo_main_object()).unwrap();
+    let mut opts = Options::default();
+    opts.inputs.push(main_path.display().to_string());
+    opts.inputs.push(lib_path.display().to_string());
+    opts.config.ident = "peregrine-m3-main".into();
+    let exec = pgr_driver::link_to_image(&opts).unwrap();
+    let exec_report = verify_strict(&exec.image);
+    assert!(
+        exec_report.is_ok(&pgr_verify::Options::default()),
+        "exec verifier issues: {exec_report:?}"
+    );
+
+    // The pair gate: both images verify and every two-level bind into the
+    // dylib resolves against its trie (R4 mitigation).
+    let pair =
+        pgr_verify::pair::verify_dylib_pair(&exec.image, &lib, &pgr_verify::Options::default());
+    assert!(
+        pair.is_ok(&pgr_verify::Options::default()),
+        "pair: {pair:?}"
+    );
+    assert_eq!(pair.error_count(), 0, "{pair:?}");
+
+    // The exec's symtab carries the two-level ordinals for both imports.
+    let cmds = load_commands(&exec.image);
+    let dylib_cmd = cmds
+        .iter()
+        .find(|(k, _)| matches!(k, pgr_format::LoadCommandKind::LoadDylib))
+        .expect("LC_LOAD_DYLIB");
+    let name = pgr_format::DylibCommand::parse(&dylib_cmd.1)
+        .unwrap()
+        .name(&dylib_cmd.1)
+        .unwrap();
+    assert_eq!(name, b"@rpath/libfoo.dylib", "scanned install name");
+}
+
+#[test]
+fn m3_bundle_output_passes_verifier() {
+    let dir = unique_dir("m3bundle");
+    let obj = dir.join("foo.o");
+    std::fs::write(&obj, foo_object()).unwrap();
+    let tbd = dir.join("libSystem.tbd");
+    std::fs::write(&tbd, libsystem_tbd()).unwrap();
+    let mut opts = Options::default();
+    opts.inputs.push(obj.display().to_string());
+    opts.inputs.push(tbd.display().to_string());
+    opts.config.ident = "peregrine-m3-bundle".into();
+    opts.config.filetype = pgr_core::layout::OutputType::Bundle;
+    let image = pgr_driver::link_to_image(&opts).unwrap().image;
+
+    let report = verify_strict(&image);
+    assert!(
+        report.is_ok(&pgr_verify::Options::default()),
+        "bundle verifier issues: {report:?}"
+    );
+    let header = MachHeader64::parse(&image).unwrap();
+    assert_eq!(header.filetype, pgr_format::consts::MH_BUNDLE);
+    let cmds = load_commands(&image);
+    assert!(
+        !cmds
+            .iter()
+            .any(|(k, _)| *k == pgr_format::LoadCommandKind::IdDylib),
+        "bundles carry no LC_ID_DYLIB"
+    );
+    assert!(
+        !cmds
+            .iter()
+            .any(|(k, _)| *k == pgr_format::LoadCommandKind::Main),
+        "bundles carry no LC_MAIN"
+    );
+}
+
+#[test]
+fn m3_reexport_library_lands_in_the_trie() {
+    let dir = unique_dir("m3reexport");
+    let bar = dir.join("libbar.tbd");
+    std::fs::write(&bar, bar_tbd()).unwrap();
+    let (image, _) = link_foo_dylib_in(dir, |o| {
+        o.inputs.push(bar.display().to_string());
+        o.reexport_library_inputs.push(2); // third input: bar.tbd
+    });
+
+    // LC_REEXPORT_DYLIB carries the bar install name.
+    let cmds = load_commands(&image);
+    let reexport = cmds
+        .iter()
+        .find(|(k, _)| *k == pgr_format::LoadCommandKind::ReexportDylib)
+        .expect("LC_REEXPORT_DYLIB present");
+    let name = pgr_format::DylibCommand::parse(&reexport.1)
+        .unwrap()
+        .name(&reexport.1)
+        .unwrap();
+    assert_eq!(name, b"/usr/lib/libbar.dylib");
+
+    // The trie lists _bar_api as a re-export of ordinal 1.
+    let trie = find_trie(&image);
+    let mut report = pgr_verify::Report::default();
+    let exports = pgr_verify::export_trie::check_export_trie(&trie, &mut report);
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|i| i.severity == pgr_verify::Severity::Error)
+    );
+    let bar_entry = exports
+        .entries
+        .iter()
+        .find(|e| e.name == "_bar_api")
+        .expect("re-exported name in the trie");
+    // libSystem is ordinal 1, so bar.tbd re-exports from ordinal 2.
+    assert_eq!(bar_entry.reexport_ordinal, Some(2));
+    assert_eq!(bar_entry.address, None, "re-exports carry no address");
+
+    // Strict verification stays clean (REEXPORT nodes are supported, and
+    // the image drops MH_NO_REEXPORTED_DYLIBS).
+    let report = verify_strict(&image);
+    assert!(report.is_ok(&pgr_verify::Options::default()), "{report:?}");
+    let hflags = u32::from_le_bytes(image[24..28].try_into().unwrap());
+    assert!(
+        hflags & pgr_format::consts::MH_NO_REEXPORTED_DYLIBS == 0,
+        "re-exports clear the flag"
+    );
+}
+
+#[test]
+fn m3_export_filters_shape_trie_and_symtab() {
+    // -unexported_symbols_list hides _foo_value: out of the trie, private
+    // (N_PEXT) in the symtab.
+    let dir = unique_dir("m3unexported");
+    let (image, _) = link_foo_dylib_in(dir, |o| {
+        o.config.unexported = vec![b"_foo_value".to_vec()];
+    });
+    let trie = find_trie(&image);
+    let exports =
+        pgr_verify::export_trie::check_export_trie(&trie, &mut pgr_verify::Report::default());
+    let names: Vec<_> = exports.entries.iter().map(|e| e.name.clone()).collect();
+    assert!(!names.contains(&"_foo_value".to_string()), "{names:?}");
+    assert!(names.contains(&"_foo_add".to_string()), "{names:?}");
+    // The symtab entry survives as a private external local.
+    let (n_type, _) = find_output_symbol(&image, "_foo_value").expect("_foo_value in the symtab");
+    assert_eq!(
+        n_type & pgr_format::consts::N_TYPE,
+        pgr_format::consts::N_SECT,
+        "still a section symbol"
+    );
+    assert_eq!(n_type & pgr_format::consts::N_EXT, 0, "no longer external");
+    assert!(n_type & pgr_format::consts::N_PEXT != 0, "marked private");
+    let report = verify_strict(&image);
+    assert!(report.is_ok(&pgr_verify::Options::default()), "{report:?}");
+
+    // -exported_symbols_list whitelists: only _foo_add (+ the header
+    // symbol) exports.
+    let dir2 = unique_dir("m3exported");
+    let (image2, _) = link_foo_dylib_in(dir2, |o| {
+        o.config.exported_only = Some(vec![b"_foo_add".to_vec(), b"__mh_execute_header".to_vec()]);
+    });
+    let trie2 = find_trie(&image2);
+    let exports2 =
+        pgr_verify::export_trie::check_export_trie(&trie2, &mut pgr_verify::Report::default());
+    let names2: Vec<_> = exports2.entries.iter().map(|e| e.name.clone()).collect();
+    assert!(names2.contains(&"_foo_add".to_string()), "{names2:?}");
+    assert!(!names2.contains(&"_foo_value".to_string()), "{names2:?}");
+}
+
+#[test]
+fn m3_dylib_link_is_deterministic() {
+    let (a, _) = link_foo_dylib_in(unique_dir("m3det1"), |_| {});
+    let (b, _) = link_foo_dylib_in(unique_dir("m3det2"), |_| {});
+    assert_eq!(a, b, "double link must be byte-identical (TDD §4.3)");
+}
+
+#[test]
+fn m3_driver_scans_dylib_exports_for_client_links() {
+    // The scan path is covered by the pair test; here the export surface
+    // itself: the scanned dylib must satisfy the client's undefined refs.
+    let dir = unique_dir("m3scan");
+    let lib_dir = dir.join("lib");
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    let (lib, _) = link_foo_dylib_in(lib_dir, |_| {});
+    let lib_path = dir.join("libfoo.dylib");
+    std::fs::write(&lib_path, &lib).unwrap();
+    let scanned =
+        pgr_driver::scan_dylib(&lib_path.display().to_string(), &lib).expect("scan clean");
+    assert_eq!(scanned.install_name, "@rpath/libfoo.dylib");
+    assert!(scanned.exports.iter().any(|n| n == b"_foo_add"));
+    assert!(scanned.exports.iter().any(|n| n == b"_foo_value"));
+    assert!(!scanned.weak && !scanned.reexport);
+}
+
+/// Finds an output symbol by name: `(n_type, n_value)`.
+fn find_output_symbol(image: &[u8], name: &str) -> Option<(u8, u64)> {
+    let cmds = load_commands(image);
+    let (_, st_bytes) = cmds
+        .iter()
+        .find(|(k, _)| *k == pgr_format::LoadCommandKind::Symtab)?;
+    let st = pgr_format::SymtabCommand::parse(st_bytes, 0).ok()?;
+    for i in 0..st.nsyms as usize {
+        let sym: pgr_format::symtab::Nlist64 =
+            pgr_format::cursor::pod_read_unaligned_at(image, st.symoff as usize + i * 16).ok()?;
+        let strx = sym.n_strx as usize;
+        let end = image[st.stroff as usize + strx..]
+            .iter()
+            .position(|&b| b == 0)?;
+        let found = String::from_utf8_lossy(
+            &image[st.stroff as usize + strx..st.stroff as usize + strx + end],
+        );
+        if found == name {
+            return Some((sym.n_type, sym.n_value));
+        }
+    }
+    None
 }
