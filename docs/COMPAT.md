@@ -27,6 +27,7 @@ each flag has a fixture".
 | `LC_ID_DYLIB` (`-install_name`, `-current_version`, `-compatibility_version`) | ✅ | M3 | `e2e::m3_dylib_output_passes_verifier_strict` |
 | `LC_REEXPORT_DYLIB` (`-reexport_library`) + trie REEXPORT nodes | ✅ | M3 | `e2e::m3_reexport_library_lands_in_the_trie` |
 | `MH_DYLIB` / `MH_BUNDLE` outputs (`-dylib` / `-bundle`) | ✅ | M3 | `e2e::m3_dylib_output_passes_verifier_strict`, `e2e::m3_bundle_output_passes_verifier` |
+| `LC_DYLD_INFO_ONLY` (classic rebase/bind opcode streams; `minos < 12.0.0` and `-no_fixup_chains`) | ✅ | M6 | `m6_legacy::*` (stream decode + verifier walk `dyld_info::check_dyld_info`) |
 | `__init_offsets` / `-init_offsets` | ❌ | later (newer deployment targets) | — |
 | `LC_ENCRYPTION_INFO` | ❌ | won't support (iOS App Store path) | — |
 
@@ -90,8 +91,16 @@ each flag has a fixture".
 | Direct page reloc to an external symbol | ❌ **rejected** (ld64/lld both reject or mis-link) | M2 | error message points at GOT-load relocs |
 | Archive members (`-all_load`, `-ObjC`, ranlib liveness) | ❌ | M3 | rank 3/4 in resolve |
 | Full export tries for dylibs, re-exports | ❌ | M3 | trie walker already handles re-export nodes (warns) |
-| `-dead_strip`, `-order_file`, ICF, thunks | ❌ | M5 | D12 |
+| `-dead_strip` | ✅ | M5 | D12 |
+| ICF (`-icf=safe`/`-icf=all`) | ✅ | M6 | `m6_icf::*`, `pgr-core::icf` tests |
+| Branch veneers/thunks for `BR26` overflow (> 128 MiB text) | ✅ | M6 | `pgr-core::thunks` tests, `pgr-verify::branch_range` |
+| `-order_file` | ❌ | later (needs the D1 ordering pass) | — |
 | TLV (`__thread_vars`, `tlv_bootstrap`) | ❌ | M5 | reloc types parsed and rejected today |
+
+| `-icf=safe` / `-icf=all` / `-no_icf` (identical code folding) | ✅ | M6 | `pgr-core::icf` tests, `m6_icf::*` |
+| `-cache <dir>` / `PGR_CACHE_DIR` / `-no_cache` (Stage A POI + frozen `.tbd`) | ✅ | M6 | `pgr-core::cache` tests, `m6_cache::*` |
+| LLVM bitcode (LTO) object detection + diagnostic | ✅ (diagnose-only) | M6 | `m6_ecosystem::m6_lto_bitcode_objects_are_detected_and_diagnosed` |
+| ObjC `__objc_classrefs`/`__objc_selrefs`, Swift `__swift5_*` section pass-through | ✅ (pass-through) | M6 | `m6_ecosystem::m6_objc_and_swift_sections_pass_through_and_verify` |
 
 ## Golden cross-validation
 
@@ -102,3 +111,4 @@ compares the dyld-simulation semantics **slot-for-slot**: every bind slot's
 match the golden linker's. The test skips with a log line when `ld64.lld`
 is not installed; set `PGR_LLD64=/path/to/ld64.lld` or install the `lld`
 package (CI does).
+
