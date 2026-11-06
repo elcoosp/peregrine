@@ -4,6 +4,69 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.6.0] - 2026-11-06### Features
+- **format:** M5 `!<arch>` archive parser — Apple `__.SYMDEF`/`__.SYMDEF_64`
+  and GNU `/` ranlib tables (32/64-bit entries), BSD `#1/<len>` and GNU `//`
+  long-name tables, ranlib member-offset resolution (header offset first,
+  data-offset fallback); total parser (typed errors, never panics), fuzz-
+  and proptest-gated
+- **core:** M5/S7 archive liveness — the pull fixpoint walks the ranlib
+  index in command order and parses only the members that resolve an
+  unresolved name (weak references never pull; `-u` names seed the loop;
+  `-all_load`/`-force_load` short-circuit to eager); ranks 3/4
+  (`ArchiveStrong`/`ArchiveWeak`) keep direct definitions winning without
+  duplicate errors — ld64 semantics; pull order a pure function of the
+  inputs (FileIds continue after direct inputs in pull order)
+- **core:** D1 atomization — `MH_SUBSECTIONS_VIA_SYMBOLS` sections split at
+  symbol boundaries (`N_ALT_ENTRY` merges into the preceding atom;
+  `S_CSTRING_LITERALS` sections split at NUL terminators); deterministic
+  per-section atom tables, borrowed throughout (no per-call clones)
+- **core:** D12 `-dead_strip` — mark-sweep liveness over the D1 atoms
+  (roots: entry, `-u` names, all extern defs for dylibs/bundles,
+  `__mod_init_func`, `S_ATTR_NO_DEAD_STRIP`); dead atoms leave the layout,
+  symtab and trie; edge graph built in one pass per section (relocations
+  bucketed into atoms), liveness queries O(log atoms)
+- **core:** D4 `__cstring` merging (ld64-default-on) — cross-input dedup of
+  `S_CSTRING_LITERALS` via a hash-map pass over string atoms; the first
+  live instance is canonical; symbol- and section-relative references remap
+  to the single copy through the M5 containment tables; cooperates with
+  dead-strip (unreferenced literals strip)
+- **driver:** M5 flag surface — `.a` inputs (ranlib pre-parsed, members
+  lazy), `.a` in `-l` search after dylib candidates, `-all_load`,
+  `-force_load <archive>`, `-u` member pull, `-dead_strip`/
+  `-no_dead_strip`, `-filelist <path>[,<dir>]`, `-framework`/`-F` (`.tbd`/
+  dylib payloads), `-sectcreate <seg> <sect> <file>` (synthetic
+  single-section object); stale M2/M3 force-load message replaced
+- **fixtures:** `ArchiveBuilder` (deterministic libtool-style archives,
+  name-sorted ranlib table from the member symtabs),
+  `set_subsections_via_symbols`/`set_alt_entry`, section-relative reloc
+  ctors (`unsigned_sect`, `page21_sect`, `pageoff12_sect`)
+### Performance
+- **bench:** `pgr-format/parse_archive` — 11.9 GiB/s structural archive
+  parse (64 members + ranlib index)
+- **bench:** `pgr-driver/link_archive` — S7 decision recorded: lazy pull
+  4.02 ms vs `-all_load` 49.06 ms on the 64-member corpus (12.2×; the
+  adoption rule was ≥ 20%)
+- **bench:** `pgr-driver/link_dead_strip` — 134 ms with `-dead_strip` vs
+  255 ms without on the 50%-dead corpus (gate was ≤ 30% overhead; the first
+  mark-sweep draft measured 911 ms and was closed by O(log atoms) liveness
+  queries + one-pass-per-section edge bucketing + borrowed atom tables)
+- **bench:** `pgr-driver/link_cstring` — 1.69 ms for the 16-object shared-
+  pool corpus (deduped); M4 gates re-measured and holding (emit 1.39× the
+  reference, full-pipeline parity within noise)
+### Tests
+- **format:** archive round-trips (libtool/GNU/BSD shapes, `__.SYMDEF_64`),
+  malformed-input battery, mutation/arbitrary-byte proptests
+- **core:** atom-boundary and `N_ALT_ENTRY` gates, dead-strip closure
+  (transitive roots, dylib export surface, `__mod_init_func`,
+  `S_ATTR_NO_DEAD_STRIP`, `-u` roots), schedule-independence with
+  dead-strip on
+- **driver:** `m5_archives` (pull/no-pull/order/all_load/force_load/-u/-l/
+  weak-ref/collision/determinism), `m5_deadstrip` (strip on/off byte
+  checks, byte-identity, `-u` roots, dylib exports, archive transitive
+  closure), `m5_cstring` (dedup + symbol remap + dyld-simulated
+  section-relative pointer remap + dead-strip cooperation), `m5_flags`
+  (filelist/framework/sectcreate/search order)
 ## [0.5.0] - 2026-11-06### Features
 - **emit:** M4 fused tile emit (`build_image_fused`) — parallel 16 KiB
   tiles copy coalesced runs, apply relocations, encode chained-fixup
