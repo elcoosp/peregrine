@@ -19,6 +19,7 @@ pub mod archive;
 pub mod commands;
 pub mod consts;
 pub mod cursor;
+pub mod dyld_info;
 pub mod error;
 pub mod fixups;
 pub mod header;
@@ -29,6 +30,8 @@ pub mod signature;
 pub mod symtab;
 pub mod tbd;
 pub mod trie;
+
+pub use dyld_info::{BindEntry, BindOrdinal, DyldInfoCommand, RebaseEntry};
 
 pub use archive::{Archive, ArchiveIndexEntry, ArchiveMember, is_archive, parse_archive};
 pub use commands::{
