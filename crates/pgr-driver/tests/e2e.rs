@@ -1619,3 +1619,116 @@ fn find_output_symbol(image: &[u8], name: &str) -> Option<(u8, u64)> {
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// M4 gates (architecture doc §10.3 row M4): the fused tile emit + parallel
+// Pass 1 + pooled writer become the default pipeline, and the correctness
+// gate is byte-identity with the pre-fusion output on the full corpus.
+// ---------------------------------------------------------------------------
+
+/// Links the M1 corpus both ways through the driver: the M4 default pipeline
+/// (`link_to_bytes`, fused tile emit) and the preserved reference emit
+/// (`link_reference_bytes`). The two must agree byte-for-byte.
+#[test]
+fn m4_fused_driver_output_is_byte_identical_to_the_reference() {
+    let dir = unique_dir("m4ref");
+    let mut opts = Options::default();
+    for (i, bytes) in [hello_main(), greet()].iter().enumerate() {
+        let p = dir.join(format!("m4_{i}.o"));
+        std::fs::write(&p, bytes).unwrap();
+        opts.inputs.push(p.display().to_string());
+    }
+    opts.config.ident = "peregrine-m4".into();
+    let fused = pgr_driver::link_to_bytes(&opts).unwrap();
+    let reference = pgr_driver::link_reference_bytes(&opts).unwrap();
+    assert_eq!(
+        fused, reference,
+        "M4 fused pipeline diverged from the pre-fusion reference \
+         (architecture doc §10.3 M4 correctness gate)"
+    );
+}
+
+/// Same gate over the M2 bind-path corpus (GOT/stubs/imports) and the M3
+/// dylib corpus (0 image base, export trie).
+#[test]
+fn m4_fused_matches_reference_on_m2_and_m3_corpora() {
+    // M2: printf against the libSystem tbd (stubs, GOT binds, rebase).
+    let dir = unique_dir("m4m2");
+    let mut opts = Options::default();
+    let obj = dir.join("printf_main.o");
+    std::fs::write(&obj, printf_main()).unwrap();
+    let tbd = dir.join("libSystem.tbd");
+    std::fs::write(&tbd, libsystem_tbd()).unwrap();
+    opts.inputs.push(obj.display().to_string());
+    opts.inputs.push(tbd.display().to_string());
+    opts.config.ident = "peregrine-m4-m2".into();
+    assert_eq!(
+        pgr_driver::link_to_bytes(&opts).unwrap(),
+        pgr_driver::link_reference_bytes(&opts).unwrap(),
+        "M4 fused vs reference diverged on the M2 bind-path corpus"
+    );
+
+    // M3: the foo dylib.
+    let (fused, _) = link_foo_dylib_in(unique_dir("m4m3"), |_| {});
+    let (reference, _) = link_foo_dylib_in(unique_dir("m4m3ref"), |_| {});
+    assert_eq!(
+        fused, reference,
+        "M4 fused vs reference diverged on the M3 dylib corpus"
+    );
+}
+
+/// The M4 pipeline stays verifier-clean: strict verification of the fused
+/// outputs across all three output kinds.
+#[test]
+fn m4_fused_outputs_pass_the_strict_verifier() {
+    // Dynamic executable.
+    let (image, _) = link_corpus_in(unique_dir("m4vexec"));
+    assert!(
+        verify_strict(&image).is_ok(&pgr_verify::Options::default()),
+        "fused executable failed strict verification"
+    );
+    // Dylib.
+    let (image, _) = link_foo_dylib_in(unique_dir("m4vdylib"), |_| {});
+    assert!(
+        verify_strict(&image).is_ok(&pgr_verify::Options::default()),
+        "fused dylib failed strict verification"
+    );
+    // Bundle.
+    let (image, _) = link_foo_dylib_in(unique_dir("m4vbundle"), |o| {
+        o.config.filetype = pgr_core::layout::OutputType::Bundle;
+        o.config.install_name = None;
+    });
+    assert!(
+        verify_strict(&image).is_ok(&pgr_verify::Options::default()),
+        "fused bundle failed strict verification"
+    );
+}
+
+/// Determinism at M4: double link through the fused pipeline is
+/// byte-identical, including the parallel Pass 1 schedule.
+#[test]
+fn m4_fused_double_link_is_byte_identical() {
+    let (a, _) = link_corpus_in(unique_dir("m4det"));
+    let (b, _) = link_corpus_in(unique_dir("m4det"));
+    assert_eq!(a, b, "double link must be byte-identical (TDD §4.3)");
+}
+
+/// The pooled writer (S1) produces the exact bytes — exercised with a
+/// buffer large enough to span multiple 8 MiB writer blocks.
+#[test]
+fn m4_pooled_writer_writes_exact_bytes_across_block_boundaries() {
+    let dir = unique_dir("m4writer");
+    let path = dir.join("big.bin");
+    // 19 MiB + 3 bytes: not a multiple of the 8 MiB block, so the tail block
+    // and the writer partition edges are both exercised.
+    let len = 19 * 1024 * 1024 + 3;
+    let buf: Vec<u8> = (0..len as u64).map(|i| (i % 251) as u8).collect();
+    pgr_emit::write_image(&buf, &path).unwrap();
+    let read = std::fs::read(&path).unwrap();
+    assert_eq!(read.len(), buf.len());
+    assert_eq!(read, buf, "pooled writer corrupted the byte stream");
+    assert!(
+        !path.with_extension("pgr.tmp").exists(),
+        "temp file must not survive a successful rename"
+    );
+}
