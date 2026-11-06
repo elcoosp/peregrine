@@ -35,8 +35,13 @@ pub(crate) struct ParsedImage<'a> {
     pub main: Option<pgr_format::EntryPointCommand>,
     /// `LC_BUILD_VERSION` payload command.
     pub build_version: Option<pgr_format::BuildVersionCommand>,
-    /// Dependent dylib install names (`LC_LOAD_DYLIB`, in ordinal order).
+    /// Dependent dylib install names (`LC_LOAD_DYLIB`,
+    /// `LC_LOAD_WEAK_DYLIB` and `LC_REEXPORT_DYLIB`, in ordinal order).
     pub dylibs: Vec<String>,
+    /// The `LC_ID_DYLIB` payload (dylibs only), when present.
+    pub id_dylib: Option<pgr_format::DylibCommand>,
+    /// Install names of `LC_REEXPORT_DYLIB` commands (M3 re-exports).
+    pub reexport_dylibs: Vec<String>,
     /// Number of chained-fixup slots counted during the pre-pass walk.
     pub fixup_slot_count: u64,
     /// Total virtual span of the image (LINKEDIT vmaddr + vmsize).
@@ -57,6 +62,8 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
     let mut main = None;
     let mut build_version = None;
     let mut dylibs = Vec::new();
+    let mut id_dylib = None;
+    let mut reexport_dylibs = Vec::new();
     let mut fixup_slot_count = 0u64;
 
     let mut it = LoadCommandIter::new(bytes, MachHeader64::SIZE, header.ncmds, header.sizeofcmds)
@@ -111,6 +118,18 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
                     }
                 }
             }
+            LoadCommandKind::ReexportDylib => {
+                if let Ok(d) = pgr_format::DylibCommand::parse(cmd.bytes) {
+                    if let Ok(name) = d.name(cmd.bytes) {
+                        // Re-exports share the load-dylib ordinal space.
+                        dylibs.push(String::from_utf8_lossy(name).into_owned());
+                        reexport_dylibs.push(String::from_utf8_lossy(name).into_owned());
+                    }
+                }
+            }
+            LoadCommandKind::IdDylib if id_dylib.is_none() => {
+                id_dylib = pgr_format::DylibCommand::parse(cmd.bytes).ok();
+            }
             _ => {}
         }
     }
@@ -132,6 +151,8 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
         main,
         build_version,
         dylibs,
+        id_dylib,
+        reexport_dylibs,
         fixup_slot_count,
         total_vmsize,
     })
@@ -305,6 +326,82 @@ pub(crate) fn check_load_commands(img: &ParsedImage<'_>, report: &mut Report) {
                 None,
             ));
         }
+    }
+}
+
+/// The M3 dylib/bundle contract: `LC_ID_DYLIB` presence per file type,
+/// header flag sanity and install-name version ordering.
+pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
+    let n_id = img
+        .commands
+        .iter()
+        .filter(|c| c.kind == LoadCommandKind::IdDylib)
+        .count();
+    match img.header.filetype {
+        MH_DYLIB => {
+            if n_id == 0 {
+                report.issues.push(Issue::error(
+                    Code::LoadCommandMalformed,
+                    "dylibs require exactly one LC_ID_DYLIB (the install name)",
+                    None,
+                ));
+            } else if n_id > 1 {
+                report.issues.push(Issue::error(
+                    Code::LoadCommandMalformed,
+                    format!("dylib carries {n_id} LC_ID_DYLIB commands (exactly one allowed)"),
+                    None,
+                ));
+            }
+            if img.header.flags & pgr_format::consts::MH_PIE != 0 {
+                report.issues.push(Issue::warning(
+                    Code::HeaderInvalid,
+                    "MH_PIE is only meaningful for executables",
+                    Some(24),
+                ));
+            }
+            if let Some(id) = &img.id_dylib {
+                if id.current_version < id.compatibility_version {
+                    report.issues.push(Issue::warning(
+                        Code::LinkeditPayload,
+                        format!(
+                            "LC_ID_DYLIB current_version {:#x} < compatibility_version {:#x}",
+                            id.current_version, id.compatibility_version
+                        ),
+                        None,
+                    ));
+                }
+            }
+            // Re-exported trie entries need LC_REEXPORT_DYLIB commands; the
+            // pair check validates the names against the trie.
+            if img.reexport_dylibs.is_empty()
+                && img.header.flags & pgr_format::consts::MH_NO_REEXPORTED_DYLIBS == 0
+            {
+                // ld64 sets MH_NO_REEXPORTED_DYLIBS on dylibs without
+                // re-exports; missing it is only a convention deviation.
+                report.issues.push(Issue::warning(
+                    Code::Suspicious,
+                    "dylib without re-exports does not set MH_NO_REEXPORTED_DYLIBS",
+                    Some(24),
+                ));
+            }
+        }
+        MH_BUNDLE => {
+            if n_id > 0 {
+                report.issues.push(Issue::error(
+                    Code::LoadCommandMalformed,
+                    "LC_ID_DYLIB is only valid in dylibs (bundles are dlopen-able objects)",
+                    None,
+                ));
+            }
+            if img.header.flags & pgr_format::consts::MH_PIE != 0 {
+                report.issues.push(Issue::warning(
+                    Code::HeaderInvalid,
+                    "MH_PIE is only meaningful for executables",
+                    Some(24),
+                ));
+            }
+        }
+        _ => {}
     }
 }
 
