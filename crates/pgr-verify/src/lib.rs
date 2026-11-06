@@ -13,12 +13,15 @@
 //!   and the misc `__LINKEDIT` payloads (function starts, data-in-code,
 //!   build version, `LC_MAIN`, export trie bounds),
 //! * [`dynamic`] — the chained-fixups payload and chain-walk simulation,
-//! * [`signature`] — SuperBlob/CodeDirectory layout and page-hash recompute.
+//! * [`signature`] — SuperBlob/CodeDirectory layout and page-hash recompute,
+//! * [`pair`] — the M3 dylib + executable pair gate (two-level ordinals vs
+//!   the dylib's export trie).
 
 pub mod chain_starts;
 pub mod dynamic;
 pub mod export_trie;
 pub mod misc;
+pub mod pair;
 pub mod signature;
 pub mod structural;
 
@@ -207,6 +210,7 @@ pub fn verify(bytes: &[u8], opts: &Options) -> Report {
 
     structural::check_header(&parsed, &mut report);
     structural::check_load_commands(&parsed, &mut report);
+    structural::check_dylib_contract(&parsed, &mut report);
     structural::check_segments(bytes, &parsed, &mut report);
     structural::check_symbol_table(bytes, &parsed, &mut report);
     misc::check_entry_and_version(bytes, &parsed, &mut report);
