@@ -4,27 +4,29 @@ An ultra-fast Mach-O linker for **arm64-apple-darwin**, written in Rust,
 cross-linking from Linux — developed verifier-first so correctness gates ship
 before the fast paths.
 
-> **Status: M4 ("the speed pass") shipped.** Building on the M3 dylibs and
-> bundles, Peregrine's emit pipeline now runs as the **fused tile emit**
-> (perf doc §4.4): the output is processed in parallel 16 KiB tiles that copy
-> the coalesced runs, apply relocations, encode chained-fixup words, place
-> the `__LINKEDIT` chunks and **hash the 4 KiB signature pages in the same
-> pass** — one pass over each byte instead of five. Pass 1 parses
-> **LPT-scheduled in parallel** with giant-object splitting (§4.1), the
-> interner sorts on the shared compute pool (D9), Pass 3 materializes the
-> per-file `resolved[]` de-indirection tables (D8) and the **copy-run
-> coalescing** (§4.3), and Pass 5 flushes through a **4-writer `pwrite` pool**
-> with extent preallocation (S1). The M4 correctness gate is byte-identity
-> with the pre-fusion pipeline, which stays in the tree as the reference
+> **Status: M5 core shipped (archives, `-dead_strip`, `__cstring` merging,
+> real-world flags).** Building on the M4 fused tile emit, M5 lands the
+> roadmap's real-world-link engine: **static archives** with the S7 decision
+> taken (ranlib-guided **lazy member pull** — 12.2× the eager path on the
+> archive-heavy bench), **`-dead_strip`** (D12 mark-sweep over D1
+> symbol-boundary atoms — 1.9× *faster* than the unstripped link at 50%
+> dead weight, gate was ≤ 30% overhead), **`__cstring` merging** (D4,
+> ld64-default-on, with symbol- and section-relative remaps), and the
+> driver flags `-filelist`, `-framework`/`-F`, `-sectcreate`,
+> `-all_load`/`-force_load`. The M4 correctness gate is byte-identity with
+> the pre-fusion pipeline, which stays in the tree as the reference
 > (`pgr-emit::build_image` / `pgr_driver::link_reference_bytes`): every
 > corpus shape — executables, dylibs, bundles, re-exports, export filters,
-> flat namespace, `-no_fixup_chains`, `-no_adhoc` — emits identical bytes
-> through both paths, and the fused output passes the strict verifier and
-> the M3 pair gate. Pass 4 measures **1.37× the reference emit** on the
-> 2-core dev sandbox (bind-path links 1.10–1.11×; see [BENCHMARKS](
-> docs/BENCHMARKS.md) for the recorded numbers and the hardware-gated G1
-> half of the gate). M0–M3 foundations are unchanged; archives and
-> `-dead_strip` start at M5 (see the
+> flat namespace, `-no_fixup_chains`, `-no_adhoc`, and the new M5 shapes
+> (archive-pulled links, dead-stripped links, merged-cstring links) — emits
+> identical bytes through both paths, and every fused output passes the
+> strict verifier. The M4 perf gates hold with M5 on (emit 1.39× the
+> reference; full-pipeline parity within noise; see [BENCHMARKS]
+> (docs/BENCHMARKS.md) for the recorded numbers). M0–M4 foundations are
+> unchanged; the remaining M5 row items — compact-unwind synthesis (D2),
+> the stabs/debug map (D3) and `-order_file` — are deferred with reasons
+> (they gate on macOS hardware: C++ exceptions, lldb, and the D1 ordering
+> pass respectively; see the
 > [roadmap](docs/peregrine-performance-architecture-and-roadmap.md), the
 > [TDD](docs/TDD.md) and the [compat checklist](docs/COMPAT.md)).
 
@@ -32,9 +34,9 @@ before the fast paths.
 
 | Crate | Role | Threading |
 |---|---|---|
-| `pgr-driver` | `pgr` CLI (ld64-compatible M3 flag surface, `.tbd` **and `.dylib`** inputs, library search) + Pass 0 + the M4 driver loop (fused emit default, reference emit kept for the byte-identity gate) | single + pooled Passes 1/4/5 |
-| `pgr-format` | raw `#[repr(C)]` Mach-O structs, constants, cursor, chained-fixup & signature codecs, `.tbd` v3/v4 parser, total export-trie walker | pure |
-| `pgr-core` | Passes 1–3: object parser (GOT-load relocs, giant-object chunked symbol decode), interner (parallel canonicalizing sort), two-level resolution, layout + `__got`/`__stubs` synthesis, import-table planning, range-partition export-trie builder, D8 `resolved[]` tables + copy-run coalescing, shared compute pool (D9) | Pass 1 parallel (LPT), Pass 2/3 single |
+| `pgr-driver` | `pgr` CLI (ld64-compatible M5 flag surface: `.tbd` **and `.dylib`** inputs, **`.a` archives**, library/framework search, `-filelist`, `-sectcreate`) + Pass 0 + the M5 driver loop (fused emit default, reference emit kept for the byte-identity gate) | single + pooled Passes 1/4/5 |
+| `pgr-format` | raw `#[repr(C)]` Mach-O structs, constants, cursor, chained-fixup & signature codecs, `.tbd` v3/v4 parser, **`!<arch>` parser (BSD/GNU long names, ranlib indexes)**, total export-trie walker | pure |
+| `pgr-core` | Passes 1–3: object parser (GOT-load relocs, giant-object chunked symbol decode), interner (parallel canonicalizing sort), two-level resolution, **archive liveness (S7 pull fixpoint, ranks 3/4)**, layout + `__got`/`__stubs` synthesis, **D1 atomization**, **`-dead_strip` mark-sweep (D12)**, **`__cstring` merging (D4)**, import-table planning, range-partition export-trie builder, D8 `resolved[]` tables + copy-run coalescing, shared compute pool (D9) | Pass 1 parallel (LPT), Pass 2/3 single, mark pass single (deterministic) |
 | `pgr-emit` | Passes 4–5: **fused tile emit** (16 KiB tiles: copy runs → patches → chain words → `__LINKEDIT` placement → fused 4 KiB page hashing, D14), pre-fault (D10), reference Pass 4 kept verbatim, ad-hoc signature, **4-writer `pwrite` pool** (S1) | Pass 4 parallel (tiles), Pass 5 4 writers |
 | `pgr-verify` | read-side verifier + `pgr-verify` CLI (structural, segment contract, dylib/bundle contract, chain-walk simulation over binds/imports, export-trie walk incl. REEXPORT nodes, signature recompute, `__chain_starts` mirror checks, **dylib+executable pair gate**) | single |
 | `pgr-fixtures` | deterministic Mach-O image **and relocatable-object** builders (LLVM single-segment object convention — `ld64.lld`-compatible) shared by tests, benches and the fuzz corpus | test-support |
@@ -61,11 +63,11 @@ before the fast paths.
 
 ```sh
 cargo build --release --locked
-cargo test --workspace --locked          # 240+ tests: units, e2e gate, proptests, cross-checks, M4 byte-identity gates
+cargo test --workspace --locked          # 280+ tests: units, e2e gate, proptests, cross-checks, M4/M5 byte-identity gates
 cargo bench -p pgr-format                # parser GB/s baseline (docs/BENCHMARKS.md)
 cargo bench -p pgr-core --bench trie     # export-trie build gate (docs/BENCHMARKS.md)
 cargo bench -p pgr-emit --bench emit     # fused-tile vs reference Pass 4 (docs/BENCHMARKS.md)
-cargo bench -p pgr-driver                # end-to-end link baseline (docs/BENCHMARKS.md)
+cargo bench -p pgr-driver                # end-to-end link baseline + M5 archive/dead-strip/cstring groups
 
 # Link a dynamic executable against a .tbd stub (M2):
 ./target/release/pgr -o hi printf_main.o -l System -L /path/to/stubs \
@@ -81,13 +83,23 @@ cargo bench -p pgr-driver                # end-to-end link baseline (docs/BENCHM
 ./target/release/pgr -o main main.o libfoo.dylib
 ./target/release/pgr -bundle -o plug.bundle plugin.o libSystem.tbd
 
+# Link against a static archive (M5): members are pulled lazily via the
+# ranlib table — only the members the link needs are ever parsed.
+./target/release/pgr -o hi main.o -lgreet -L /path/to/libs
+# Dead-strip (M5) + cstring merging (default) + a synthetic section:
+./target/release/pgr -o hi main.o libutil.a -dead_strip \
+    -sectcreate __TEXT __info_plist Info.plist
+# Real-world surface (M5): -filelist, -framework/-F, -all_load/-force_load:
+./target/release/pgr -o hi -filelist objs.txt,objdir -framework Foundation \
+    -F /sdks/MacOSX.sdk/System/Library/Frameworks -platform_version macos 12.0 14.0
+
 # Cross-check the fixup values against ld64.lld (the M2 golden gate):
 PGR_LLD64=$(which ld64.lld) cargo test -p pgr-driver --test e2e
 
 # Verify any Mach-O image against the Peregrine contract:
 ./target/release/pgr-verify hi --strict
 
-# Run the M4 pipeline single-threaded (determinism/debugging):
+# Run the M5 pipeline single-threaded (determinism/debugging):
 PGR_JOBS=1 ./target/release/pgr -o hi printf_main.o -l System -L /path/to/stubs
 
 # Seed + run the fuzzers (nightly):
@@ -140,6 +152,51 @@ cargo +nightly fuzz run link_object -- -max_total_time=120
 - [x] `llvm-otool -l` diff vs ld64 goldens — **deferred**: requires
       `ld64.lld`/macOS hardware (CI skeleton exists; the verifier +
       `object`-crate crosscheck is the Linux stand-in, as at M0)
+
+## M5 gate checklist (architecture doc §10.3 row M5 — core engine shipped)
+
+- [x] **Archives (S7)**: `pgr-format::archive` total `!<arch>` parser (Apple
+      `__.SYMDEF`/`__.SYMDEF_64`, GNU `/`, BSD `#1/` + GNU `//` long names;
+      typed errors, fuzz/proptest-gated) + `pgr-fixtures::ArchiveBuilder`;
+      the **S7 decision is taken: lazy adopted** — the pull fixpoint walks
+      the ranlib index in command order and parses only needed members
+      (12.2× the `-all_load` baseline on the archive-heavy bench, gate was
+      ≥ 20%); ranks 3/4 (archive strong/weak) keep direct definitions
+      winning without duplicate errors, exactly ld64
+- [x] Archive semantics gated: undefined→pull, order-insensitivity,
+      weak references never pull, `-all_load`/`-force_load`/`-u` roots,
+      `.a` in `-l` search after dylib candidates, double-link determinism,
+      byte-identity with the reference emit, strict verifier clean
+- [x] **D1 atomization**: `MH_SUBSECTIONS_VIA_SYMBOLS` sections split at
+      symbol boundaries (`N_ALT_ENTRY` merges; cstring sections split at
+      NULs), deterministic atom tables, parallel-vs-serial equality
+- [x] **`-dead_strip` (D12)**: mark-sweep liveness — roots = entry, `-u`
+      names, all extern defs for dylibs/bundles, `__mod_init_func`,
+      `S_ATTR_NO_DEAD_STRIP`; dead atoms leave layout, symtab and trie;
+      `__cstring` strings strip at literal granularity
+- [x] **Perf gate**: "dead-strip adds ≤ 30% to the link" — measured
+      **1.9× faster** on the 50%-dead corpus (134 ms vs 255 ms); the
+      bench-driven optimization trail (3.5× → 1.9×) is recorded in
+      docs/BENCHMARKS.md
+- [x] **`__cstring` merging (D4)**: cross-input dedup of
+      `S_CSTRING_LITERALS` (ld64-default-on), first-live-instance
+      canonical, symbol- and section-relative references remap to the
+      single copy (dyld-simulation-gated); cooperates with dead-strip
+- [x] **Driver flags**: `-filelist <path>[,<dir>]`, `-framework`/`-F`
+      (`.tbd`/dylib payloads), `-sectcreate`, `-all_load`, `-force_load`,
+      `-dead_strip`/`-no_dead_strip`; `-u` pulls members; usage text
+      updated (see docs/COMPAT.md for the fixture list)
+- [x] **Correctness gates**: every new corpus shape emits byte-identical
+      output through fused and reference emits, passes `pgr-verify
+      --strict`, and double-links deterministically (282 workspace tests,
+      zero `#[allow]` in the tree)
+- [ ] **Deferred with reasons** (the rest of the M5 row): compact-unwind
+      synthesis (D2) and the stabs/debug map (D3) gate on macOS hardware
+      (C++ exceptions / lldb validation — the in-tree verifier cannot
+      replay unwind tables or dwarf); `-order_file` waits for the D1
+      ordering pass; `-ObjC` member pull joins M6's ObjC class handling.
+      The roadmap's real-project correctness gate (ripgrep, C++, ObjC,
+      Rust links *running* on Apple Silicon) formally closes on the P0 rig
 
 ## M4 gate checklist (architecture doc §10.3 row M4)
 
