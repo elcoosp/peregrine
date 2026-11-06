@@ -1,17 +1,42 @@
-//! The M1 driver-side pipeline: Pass 0 (inputs) → Pass 1 (parse & intern) →
+//! The driver-side pipeline: Pass 0 (inputs) → Pass 1 (parse & intern) →
 //! Pass 2 (resolve) → Pass 3 (layout). The returned [`Layout`] is the plan
 //! Pass 4/5 (`pgr-emit`) turn into bytes.
 //!
-//! Single-threaded at M1 by design ("passes 0–5 minimal", TDD §12); the
-//! per-pass structures are shaped so the M4 parallel bodies swap in without
-//! changing the plan types.
+//! M4 (architecture doc §10.3 row M4): Pass 1 parses in parallel —
+//! **LPT-scheduled** (longest input first, perf doc §4.1) on the shared
+//! compute pool ([`crate::pool`]) — with giant objects split across threads
+//! (symbol decode runs in deterministic index chunks). [`Parallelism::Serial`]
+//! forces the M1–M3 single-threaded shape; both paths produce identical
+//! layouts (determinism policy §4.3) and the equality is gated in tests.
 
 use crate::LinkError;
 use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
 use crate::layout::{Layout, LinkConfig, layout};
 use crate::object::InputObject;
+use crate::pool;
 use crate::resolve::Resolution;
+use rayon::prelude::*;
+
+/// Pass 1 scheduling policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Parallelism {
+    /// Use the shared compute pool: LPT-ordered parse, giant objects split
+    /// across threads, parallel interner sort (the M4 default).
+    #[default]
+    Auto,
+    /// Force the M1–M3 single-threaded pass bodies (reference path for the
+    /// determinism gates and benches).
+    Serial,
+}
+
+impl Parallelism {
+    /// True when the parallel pass bodies should run.
+    #[must_use]
+    pub const fn is_parallel(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
 
 /// One link input: a file name and its bytes (Pass 0 mapped them).
 #[derive(Debug, Clone)]
@@ -34,19 +59,31 @@ pub struct LinkResult {
     pub interner: Interner,
 }
 
-/// Runs Passes 1–3 over the inputs, producing the emit plan.
+/// Runs Passes 1–3 over the inputs, producing the emit plan (M4 default:
+/// parallel Pass 1 — see [`link_with`] for the serial reference path).
 ///
 /// # Errors
 /// [`LinkError`] on malformed inputs, unresolvable/duplicate symbols, or
 /// layout contract violations.
 pub fn link(inputs: &[LinkInput], cfg: &LinkConfig) -> Result<LinkResult, LinkError> {
+    link_with(inputs, cfg, Parallelism::Auto)
+}
+
+/// Runs Passes 1–3 with an explicit scheduling policy.
+///
+/// # Errors
+/// [`LinkError`] on malformed inputs, unresolvable/duplicate symbols, or
+/// layout contract violations.
+pub fn link_with(
+    inputs: &[LinkInput],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+) -> Result<LinkResult, LinkError> {
     // ---- Pass 1: parse & collect names for the interner --------------------
-    let mut objects: Vec<InputObject> = Vec::with_capacity(inputs.len());
+    let mut objects = parse_inputs(inputs, parallel)?;
     let mut names: Vec<Vec<u8>> = Vec::new();
-    for (i, input) in inputs.iter().enumerate() {
-        let mut obj = InputObject::parse(FileId(i as u32), &input.name, input.bytes.clone())?;
+    for obj in &mut objects {
         names.append(&mut obj.take_symbol_names());
-        objects.push(obj);
     }
     // Dylib export names join the interner batch *after* the object symbol
     // stream, so the object id slices stay stable (M2 two-level namespace).
@@ -61,7 +98,7 @@ pub fn link(inputs: &[LinkInput], cfg: &LinkConfig) -> Result<LinkResult, LinkEr
     names.push(b"__mh_execute_header".to_vec());
     let header_symbol_slot = 1usize;
 
-    let (interner, ids) = Interner::build(&names);
+    let (interner, ids) = Interner::build_with(&names, parallel.is_parallel());
     let mut cursor = 0usize;
     for obj in &mut objects {
         let take = obj.symbols.len();
@@ -89,6 +126,48 @@ pub fn link(inputs: &[LinkInput], cfg: &LinkConfig) -> Result<LinkResult, LinkEr
         objects,
         interner,
     })
+}
+
+/// Pass 1 over the input files. `Auto` schedules **LPT** (longest input
+/// first — perf doc §4.1) on the shared pool; the results land at their
+/// command-line indices either way, and errors surface in command-line
+/// order, so the schedule never changes the outcome.
+fn parse_inputs(
+    inputs: &[LinkInput],
+    parallel: Parallelism,
+) -> Result<Vec<InputObject>, LinkError> {
+    let mut objects: Vec<Option<InputObject>> = (0..inputs.len()).map(|_| None).collect();
+    if parallel.is_parallel() && inputs.len() > 1 {
+        // LPT: biggest file first so the pool tail is filled by small files.
+        let mut order: Vec<usize> = (0..inputs.len()).collect();
+        order.sort_by(|&a, &b| {
+            inputs[b]
+                .bytes
+                .len()
+                .cmp(&inputs[a].bytes.len())
+                .then(a.cmp(&b))
+        });
+        let parsed: Vec<Result<InputObject, LinkError>> = pool::compute_pool().install(|| {
+            order
+                .par_iter()
+                .map(|&i| {
+                    InputObject::parse(FileId(i as u32), &inputs[i].name, inputs[i].bytes.clone())
+                })
+                .collect()
+        });
+        for (slot, obj) in order.iter().zip(parsed) {
+            objects[*slot] = Some(obj?);
+        }
+    } else {
+        for (i, input) in inputs.iter().enumerate() {
+            objects[i] = Some(InputObject::parse(
+                FileId(i as u32),
+                &input.name,
+                input.bytes.clone(),
+            )?);
+        }
+    }
+    Ok(objects.into_iter().map(Option::unwrap).collect())
 }
 
 #[cfg(test)]
