@@ -32,6 +32,13 @@ pub struct Options {
     pub force_load: Vec<String>,
     /// Indices into `inputs` loaded weakly (`-weak_library`).
     pub weak_library_inputs: Vec<usize>,
+    /// Indices into `inputs` loaded as `LC_REEXPORT_DYLIB`
+    /// (`-reexport_library`, M3).
+    pub reexport_library_inputs: Vec<usize>,
+    /// Path of the `-exported_symbols_list` file (read by the driver).
+    pub exported_list_path: Option<String>,
+    /// Path of the `-unexported_symbols_list` file (read by the driver).
+    pub unexported_list_path: Option<String>,
 }
 
 impl Default for Options {
@@ -46,6 +53,9 @@ impl Default for Options {
             libs: Vec::new(),
             force_load: Vec::new(),
             weak_library_inputs: Vec::new(),
+            reexport_library_inputs: Vec::new(),
+            exported_list_path: None,
+            unexported_list_path: None,
         }
     }
 }
@@ -99,27 +109,25 @@ const NOOP_FLAGS: [&str; 5] = [
 ];
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
-const LATER_FLAGS: [(&str, &str); 20] = [
-    ("-dylib", "M3 scope (dylibs and bundles)"),
-    ("-bundle", "M3 scope (dylibs and bundles)"),
-    ("-dylinker", "M3 scope (dylibs and bundles)"),
+const LATER_FLAGS: [(&str, &str); 12] = [
+    ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
     ("-dead_strip", "M5 scope"),
-    ("-framework", "M3 scope (framework bundles)"),
-    ("-weak_framework", "M3 scope (framework bundles)"),
-    ("-lazy_framework", "M3 scope (framework bundles)"),
-    ("-lazy_library", "M3 scope"),
-    ("-filelist", "M3 scope"),
+    ("-framework", "framework bundles are a later milestone"),
+    ("-weak_framework", "framework bundles are a later milestone"),
+    ("-lazy_framework", "framework bundles are a later milestone"),
+    ("-lazy_library", "later milestone"),
+    ("-filelist", "M5 scope (real-world link surface)"),
     ("-order_file", "M5 scope"),
-    ("-install_name", "M3 scope"),
-    ("-U", "M3 scope (make-undefined)"),
+    ("-U", "later milestone (make-undefined)"),
     ("-pagezero_size", "later milestone"),
-    ("-sub_library", "M3 scope"),
-    ("-sub_umbrella", "M3 scope"),
-    ("-reexport_library", "M3 scope"),
-    ("-compatibility_version", "M3 scope"),
-    ("-current_version", "M3 scope"),
-    ("-mark_dead_strippable_dylib", "M3 scope"),
-    ("-cache_path_limiter", "later milestone"),
+    (
+        "-sub_library",
+        "umbrella re-exports beyond -reexport_library are a later milestone",
+    ),
+    (
+        "-sub_umbrella",
+        "umbrella re-exports beyond -reexport_library are a later milestone",
+    ),
 ];
 
 /// Parses argv (without the program name).
@@ -266,6 +274,68 @@ fn apply_flag(
             opts.inputs.push(v);
             opts.weak_library_inputs.push(opts.inputs.len() - 1);
         }
+        "-dylib" => {
+            if opts.config.filetype != pgr_core::layout::OutputType::Execute {
+                return Err(OptsError::Repeated {
+                    message: "-dylib and -bundle are mutually exclusive".into(),
+                });
+            }
+            opts.config.filetype = pgr_core::layout::OutputType::Dylib;
+        }
+        "-bundle" => {
+            if opts.config.filetype != pgr_core::layout::OutputType::Execute {
+                return Err(OptsError::Repeated {
+                    message: "-dylib and -bundle are mutually exclusive".into(),
+                });
+            }
+            opts.config.filetype = pgr_core::layout::OutputType::Bundle;
+        }
+        "-install_name" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.install_name = Some(v);
+        }
+        "-current_version" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.current_version =
+                parse_version(&v).ok_or_else(|| OptsError::InvalidValue {
+                    flag: arg.into(),
+                    value: format!("{v} (X.Y.Z)"),
+                })?;
+        }
+        "-compatibility_version" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.compatibility_version =
+                parse_version(&v).ok_or_else(|| OptsError::InvalidValue {
+                    flag: arg.into(),
+                    value: format!("{v} (X.Y.Z)"),
+                })?;
+        }
+        "-reexport_library" => {
+            // Loads the dylib as LC_REEXPORT_DYLIB and re-exports its
+            // symbols through this image's trie (M3).
+            let v = next_value(args, i, arg)?;
+            opts.inputs.push(v);
+            opts.reexport_library_inputs.push(opts.inputs.len() - 1);
+        }
+        "-exported_symbols_list" => {
+            let v = next_value(args, i, arg)?;
+            if opts.exported_list_path.is_some() {
+                return Err(OptsError::Repeated {
+                    message: "-exported_symbols_list given more than once".into(),
+                });
+            }
+            opts.exported_list_path = Some(v);
+        }
+        "-unexported_symbols_list" => {
+            let v = next_value(args, i, arg)?;
+            if opts.unexported_list_path.is_some() {
+                return Err(OptsError::Repeated {
+                    message: "-unexported_symbols_list given more than once".into(),
+                });
+            }
+            opts.unexported_list_path = Some(v);
+        }
+        "-mark_dead_strippable_dylib" => opts.config.dead_strippable = true,
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -307,7 +377,8 @@ fn apply_flag(
     Ok(())
 }
 
-/// Post-conditions: an output path and at least one input.
+/// Post-conditions: an output path, at least one input, and the M3 flag
+/// combinations consistent with the output kind.
 fn finish(opts: &Options) -> Result<Options, OptsError> {
     if opts.output.is_empty() {
         return Err(OptsError::Missing {
@@ -318,6 +389,46 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
         return Err(OptsError::Missing {
             message: "no input object files".into(),
         });
+    }
+    match opts.config.filetype {
+        pgr_core::layout::OutputType::Execute => {
+            if opts.config.install_name.is_some() {
+                return Err(OptsError::InvalidValue {
+                    flag: "-install_name".into(),
+                    value: "only valid with -dylib".into(),
+                });
+            }
+            if opts.config.current_version != 0 {
+                return Err(OptsError::InvalidValue {
+                    flag: "-current_version".into(),
+                    value: "only valid with -dylib".into(),
+                });
+            }
+            if opts.config.compatibility_version != 0 {
+                return Err(OptsError::InvalidValue {
+                    flag: "-compatibility_version".into(),
+                    value: "only valid with -dylib".into(),
+                });
+            }
+            if opts.config.dead_strippable {
+                return Err(OptsError::InvalidValue {
+                    flag: "-mark_dead_strippable_dylib".into(),
+                    value: "only valid with -dylib".into(),
+                });
+            }
+        }
+        pgr_core::layout::OutputType::Bundle => {
+            if opts.config.install_name.is_some() {
+                return Err(OptsError::InvalidValue {
+                    flag: "-install_name".into(),
+                    value: "only valid with -dylib".into(),
+                });
+            }
+        }
+        pgr_core::layout::OutputType::Dylib => {
+            // ld64 defaults the install name to the output path; the driver
+            // applies the default before linking.
+        }
     }
     Ok(opts.clone())
 }
@@ -436,9 +547,101 @@ mod tests {
         let err = parse(&args(&["-o", "out", "-dead_strip", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("M5"), "{err}");
         let err = parse(&args(&["-o", "out", "-framework", "Foo", "a.o"])).unwrap_err();
-        assert!(err.to_string().contains("M3"), "{err}");
+        assert!(err.to_string().contains("framework"), "{err}");
         let err = parse(&args(&["-o", "out", "--wat", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"), "{err}");
+    }
+
+    #[test]
+    fn m3_dylib_flags_shape_the_config() {
+        let o = parse(&args(&[
+            "-o",
+            "libfoo.dylib",
+            "-dylib",
+            "-install_name",
+            "@rpath/libfoo.dylib",
+            "-current_version",
+            "1.2.0",
+            "-compatibility_version",
+            "1.0.0",
+            "-mark_dead_strippable_dylib",
+            "-exported_symbols_list",
+            "/tmp/exports.txt",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(o.config.filetype, pgr_core::layout::OutputType::Dylib);
+        assert_eq!(
+            o.config.install_name.as_deref(),
+            Some("@rpath/libfoo.dylib")
+        );
+        assert_eq!(o.config.current_version, (1 << 16) | (2 << 8));
+        assert_eq!(o.config.compatibility_version, 1 << 16);
+        assert!(o.config.dead_strippable);
+        assert_eq!(o.exported_list_path.as_deref(), Some("/tmp/exports.txt"));
+    }
+
+    #[test]
+    fn m3_bundle_flag_shapes_the_config() {
+        let o = parse(&args(&["-o", "plug.bundle", "-bundle", "a.o"])).unwrap();
+        assert_eq!(o.config.filetype, pgr_core::layout::OutputType::Bundle);
+    }
+
+    #[test]
+    fn m3_flag_combinations_are_validated() {
+        // dylib + bundle are mutually exclusive.
+        assert!(parse(&args(&["-o", "x", "-dylib", "-bundle", "a.o"])).is_err());
+        // install_name only with -dylib.
+        assert!(
+            parse(&args(&["-o", "x", "-install_name", "@rpath/x", "a.o"])).is_err(),
+            "install_name without -dylib"
+        );
+        assert!(
+            parse(&args(&[
+                "-o",
+                "x",
+                "-bundle",
+                "-install_name",
+                "@rpath/x",
+                "a.o"
+            ]))
+            .is_err(),
+            "install_name with -bundle"
+        );
+        // versions only with -dylib.
+        assert!(
+            parse(&args(&["-o", "x", "-current_version", "1.0.0", "a.o"])).is_err(),
+            "current_version without -dylib"
+        );
+        assert!(
+            parse(&args(&[
+                "-o",
+                "x",
+                "-dylib",
+                "-current_version",
+                "1.2.3.4",
+                "a.o"
+            ]))
+            .is_err(),
+            "bad version value"
+        );
+    }
+
+    #[test]
+    fn m3_reexport_library_records_the_input() {
+        let o = parse(&args(&[
+            "-o",
+            "x",
+            "-reexport_library",
+            "libbar.tbd",
+            "-weak_library",
+            "libw.tbd",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(o.inputs, ["libbar.tbd", "libw.tbd", "a.o"]);
+        assert_eq!(o.reexport_library_inputs, [0]);
+        assert_eq!(o.weak_library_inputs, [1]);
     }
 
     #[test]
