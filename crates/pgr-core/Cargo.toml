@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 pgr-format = { workspace = true }
 thiserror = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 pgr-fixtures = { workspace = true }
