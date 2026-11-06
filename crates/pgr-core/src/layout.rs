@@ -138,6 +138,9 @@ pub struct LinkConfig {
     /// seed the archive pull loop (a member defining one of these is
     /// pulled even when nothing references it).
     pub load_symbols: Vec<Vec<u8>>,
+    /// M6 `-icf`: identical-code-folding level (default `None`, ld64's
+    /// documented default; see [`crate::icf`]).
+    pub icf: crate::icf::IcfMode,
 }
 
 impl Default for LinkConfig {
@@ -165,6 +168,7 @@ impl Default for LinkConfig {
             dead_strippable: false,
             dead_strip: false,
             load_symbols: Vec::new(),
+            icf: crate::icf::IcfMode::default(),
         }
     }
 }
@@ -256,6 +260,15 @@ pub enum SynthKind {
         /// The called symbol.
         name: StringId,
     },
+    /// M6 branch veneer: `adrp x16/add x16/br x16` reaching `target`
+    /// through ADRP's ±4 GiB window, inserted right after the branch site
+    /// `(file, input section, reloc offset)` (see [`crate::thunks`]).
+    Veneer {
+        /// The branch site this veneer serves (identity + redirect key).
+        site: (u32, usize, u32),
+        /// What the original branch referenced.
+        target: RelocTarget,
+    },
 }
 
 /// An output section with its placed pieces.
@@ -336,6 +349,14 @@ pub struct LinkeditPlan {
     pub sig_off: u64,
     /// Code signature size.
     pub sig_size: u64,
+    /// Classic rebase stream file offset (0 when absent — M6 legacy).
+    pub dyld_rebase_off: u64,
+    /// Classic rebase stream size.
+    pub dyld_rebase_size: usize,
+    /// Classic bind stream file offset (0 when absent — M6 legacy).
+    pub dyld_bind_off: u64,
+    /// Classic bind stream size.
+    pub dyld_bind_size: usize,
 }
 
 /// One output symbol-table entry.
@@ -371,6 +392,9 @@ pub struct Layout {
     pub sections: Vec<PlacedSection>,
     /// `__LINKEDIT` chunk plan.
     pub linkedit: LinkeditPlan,
+    /// M6 legacy fixups: the classic `LC_DYLD_INFO_ONLY` opcode streams
+    /// (`None` when the image uses chained fixups or carries no slots).
+    pub dyld_info: Option<crate::dyld_info::DyldInfoPlan>,
     /// Header + load-command bytes (the UUID field is zeroed; emit patches
     /// it after hashing).
     pub header_bytes: Vec<u8>,
@@ -550,6 +574,59 @@ fn scan_needs(
     Ok(needs)
 }
 
+/// Scans every placed `Branch26` patch for an out-of-range delta and plans
+/// one veneer per new overflow site (M6). A site that already carries a
+/// veneer and still overflows means its atom alone spans more than the
+/// arm64 branch range — unrecoverable without splitting input atoms, so
+/// the link fails with a diagnostic (ld64 reports the same condition).
+fn scan_branch_overflow(
+    objects: &[InputObject],
+    state: &PlacedState,
+    planned: &[crate::thunks::VeneerSpec],
+) -> Result<Vec<crate::thunks::VeneerSpec>, LinkError> {
+    let mut specs: Vec<crate::thunks::VeneerSpec> = Vec::new();
+    for fp in &state.flat {
+        for op in &fp.piece.patches {
+            let PatchOp::Branch26 {
+                in_offset, delta, ..
+            } = op
+            else {
+                continue;
+            };
+            if delta.abs() <= crate::thunks::BRANCH26_RANGE {
+                continue;
+            }
+            let site = (fp.piece.file.0, fp.piece.in_sect, *in_offset);
+            if planned.iter().any(|v| v.site == site) || specs.iter().any(|v| v.site == site) {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "branch site {site:?} is out of arm64 branch range even with a veneer \
+                         — a single atom spans more than ±128 MiB"
+                    ),
+                });
+            }
+            // The veneer targets what the original relocation named.
+            let obj = objects
+                .get(fp.piece.file.0 as usize)
+                .ok_or(LinkError::Internal {
+                    message: "overflow site file missing".into(),
+                })?;
+            let reloc = obj
+                .sections
+                .get(fp.piece.in_sect)
+                .and_then(|s| s.relocs.iter().find(|r| r.offset == *in_offset))
+                .ok_or(LinkError::Internal {
+                    message: "overflow site relocation missing".into(),
+                })?;
+            specs.push(crate::thunks::VeneerSpec {
+                site,
+                target: reloc.target,
+            });
+        }
+    }
+    Ok(specs)
+}
+
 /// Buckets input sections by `(segment, name)`; returns the bucket table,
 /// the per-file section→bucket map (`usize::MAX` = skipped) and the count
 /// of chained-fixup pointer slots.
@@ -725,6 +802,10 @@ struct PlacedState {
     got_slot_addr: std::collections::BTreeMap<u32, u64>,
     /// Interned name id → stub vaddr (M2, in `__stubs` order).
     stub_addr: std::collections::BTreeMap<u32, u64>,
+    /// M6: branch site `(file, in_sect, reloc offset)` → veneer vaddr.
+    /// The relocation scan redirects out-of-range branches through this
+    /// table instead of erroring.
+    veneer_addr_of: std::collections::HashMap<(u32, usize, u32), u64>,
 }
 
 /// One flat piece: output section, position within its piece list, absolute
@@ -736,6 +817,11 @@ struct FlatPiece {
     addr: u64,
     piece: Piece,
 }
+
+/// Chained fixups require macOS ≥ 12 (TDD §3.6 invariant 3); older
+/// deployment targets and `-no_fixup_chains` fall back to the classic
+/// `LC_DYLD_INFO_ONLY` streams (M6).
+pub const CHAINED_FIXUPS_MIN_MINOS: u32 = 0x000C_0000;
 
 /// Lays out the image (Pass 3). See the module docs for the fixed-point
 /// structure.
@@ -749,21 +835,51 @@ pub fn layout(
     res: &Resolution,
     interner: &Interner,
     cfg: &LinkConfig,
+    live: &crate::deadstrip::LiveSet,
+    fold: &crate::icf::FoldPlan,
 ) -> Result<Layout, LinkError> {
     // Constant-delta base: `__PAGEZERO` vmsize for executables, 0 for
     // dylibs/bundles (M3). Every address math derives from this.
     let image_base = cfg.filetype.image_base();
-    // M5/D12: the mark-sweep liveness (only with `-dead_strip`; identity is
-    // the `atoms_of` table, so atomization is implicit here).
-    let live = crate::deadstrip::compute(objects, res, interner, cfg);
     // ---- bucketing ---------------------------------------------------------
     let (mut buckets, mut bucket_of, fixup_slot_count) = bucket_inputs(objects, res)?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
-    let needs = scan_needs(objects, res, interner, &live)?;
+    let needs = scan_needs(objects, res, interner, live)?;
     // The fixups payload exists when *any* slot is planned: input pointer
     // slots (M1 rebases), synthesized GOT binds and POINTER_TO_GOT rebases.
     let has_fixups = fixup_slot_count > 0 || !needs.got.is_empty();
-    let chains_enabled = cfg.fixup_chains && has_fixups;
+    let use_chains = cfg.fixup_chains && has_fixups && cfg.minos >= CHAINED_FIXUPS_MIN_MINOS;
+    let chains_enabled = use_chains;
+    if std::env::var("PGR_DEBUG_LAYOUT").is_ok() {
+        eprintln!(
+            "[layout] fixup_chains={} has_fixups={} slot_count={} got={} minos={:#x} use_chains={}",
+            cfg.fixup_chains,
+            has_fixups,
+            fixup_slot_count,
+            needs.got.len(),
+            cfg.minos,
+            use_chains
+        );
+        for (i, o) in objects.iter().enumerate() {
+            if std::env::var("PGR_DEBUG_LAYOUT").is_ok() {
+                eprintln!(
+                    "[layout] obj {i} {} relocs {:?}",
+                    o.name,
+                    o.sections
+                        .iter()
+                        .map(|s| s.relocs.len())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+    let fixup_lc_kind = if use_chains {
+        FixupLc::Chained
+    } else if has_fixups {
+        FixupLc::DyldInfo
+    } else {
+        FixupLc::None
+    };
     prepare_buckets(
         &mut buckets,
         &mut bucket_of,
@@ -780,10 +896,16 @@ pub fn layout(
     commons.sort_by(|a, b| interner.bytes(a.0).cmp(interner.bytes(b.0)));
 
     // ---- placement fixed-point loop -----------------------------------------
+    // Two convergence conditions: the `__chain_starts` size assumption (M2)
+    // and the M6 veneer set — an out-of-range `Branch26` patch adds a veneer
+    // spec, the next iteration places it, and the loop re-resolves. Both
+    // converge fast (chain size twice; veneers typically one extra round).
     let mut chain_starts_size = 8usize;
+    let mut veneers: Vec<crate::thunks::VeneerSpec> = Vec::new();
     let mut converged: Option<PlacedState> = None;
     let mut final_plan: Option<FixupPlan> = None;
-    for _ in 0..4 {
+    let mut final_dyld_info: Option<crate::dyld_info::DyldInfoPlan> = None;
+    for _ in 0..16 {
         let mut state = place(
             cfg,
             objects,
@@ -792,10 +914,14 @@ pub fn layout(
             &commons,
             chain_starts_size,
             &needs,
-            has_fixups,
-            &live,
+            fixup_lc_kind,
+            live,
+            fold,
+            &veneers,
         )?;
-        resolve_all(objects, &mut state, res, interner, cfg)?;
+        resolve_all(objects, &mut state, res, interner, cfg, fold)?;
+        // M6 veneer scan: every out-of-range branch site plans one veneer.
+        let new_specs = scan_branch_overflow(objects, &state, &veneers)?;
         let mut slots: Vec<FixupSlot> = Vec::new();
         for fp in &state.flat {
             for (off, kind) in &fp.piece.fixup_slots {
@@ -810,13 +936,49 @@ pub fn layout(
             .iter()
             .map(|s| (s.vmaddr, s.vmsize, s.fileoff))
             .collect();
-        let plan = plan_fixups(slots, &segs, image_base, PAGE_SIZE_16K, interner)?;
+        let plan = if !has_fixups {
+            // No pointer slots at all: no fixup metadata of either kind.
+            FixupPlan {
+                payload: Vec::new(),
+                payload_off: 0,
+                slot_words: Vec::new(),
+                chain_starts: Vec::new(),
+                slot_count: 0,
+                imports: Vec::new(),
+                import_names: Vec::new(),
+                has_weak_binds: false,
+            }
+        } else if chains_enabled {
+            plan_fixups(slots, &segs, image_base, PAGE_SIZE_16K, interner)?
+        } else {
+            // M6 legacy: the classic opcode streams replace the chained
+            // payload (no `__chain_starts`; slot bytes stay zero). The
+            // import metadata (symtab/indirect construction reads it) is
+            // built identically to the chained path.
+            slots.sort_by_key(|s| s.vaddr);
+            let (imports, import_names, has_weak, _keys) =
+                crate::fixups::build_import_table(&slots, interner);
+            let info = crate::dyld_info::plan_dyld_info(slots, &segs, interner)?;
+            if info.is_present() {
+                final_dyld_info = Some(info.clone());
+            }
+            FixupPlan {
+                payload: Vec::new(),
+                payload_off: 0,
+                slot_words: Vec::new(),
+                chain_starts: Vec::new(),
+                slot_count: 0,
+                imports,
+                import_names,
+                has_weak_binds: has_weak || info.has_weak_binds,
+            }
+        };
         let actual = if chains_enabled {
             plan.chain_starts.len()
         } else {
             0
         };
-        if actual == chain_starts_size {
+        if actual == chain_starts_size && new_specs.is_empty() {
             // Converged: patch the section size (it equals the assumption).
             if let Some(cs) = state
                 .sections
@@ -830,13 +992,17 @@ pub fn layout(
             break;
         }
         chain_starts_size = actual;
+        veneers.extend(new_specs);
     }
     let mut state = converged.ok_or(LinkError::Internal {
-        message: "layout fixed point did not converge in 4 iterations".into(),
+        message: "layout fixed point did not converge in 16 iterations".into(),
     })?;
     let fixups = final_plan.ok_or(LinkError::Internal {
         message: "fixup plan missing after convergence".into(),
     })?;
+    // `None` for the chained path *and* for slot-less links; `Some` only
+    // when classic streams carry bytes.
+    let dyld_info = final_dyld_info;
 
     // ---- export visibility (M3) ------------------------------------------------
     // `-exported_symbols_list` restricts the surface to the listed names;
@@ -857,7 +1023,8 @@ pub fn layout(
         sections: &state.sections,
         addr_of: &state.addr_of,
         atom_addr: &state.atom_addr,
-        live: &live,
+        live,
+        fold,
     };
     let mut symbols = build_symtab(objects, res, interner, &commons, &visible, &symtab_ctx);
     // `__mh_execute_header`: the image's own exported header symbol (ld64
@@ -1060,11 +1227,21 @@ pub fn layout(
     };
 
     // ---- __LINKEDIT chunks + signature sizing --------------------------------------
-    let fixup_payload_size = if fixups.slot_count > 0 && cfg.fixup_chains {
+    let fixup_payload_size = if fixups.slot_count > 0 && chains_enabled {
         fixups.payload.len()
     } else {
         0
     };
+    let dyld_rebase_size = dyld_info.as_ref().map_or(0, |d| {
+        if d.rebase.is_empty() {
+            0
+        } else {
+            d.rebase.len()
+        }
+    });
+    let dyld_bind_size = dyld_info
+        .as_ref()
+        .map_or(0, |d| if d.bind.is_empty() { 0 } else { d.bind.len() });
     let le_idx = state
         .segments
         .iter()
@@ -1081,6 +1258,17 @@ pub fn layout(
     };
     let fixup_payload_off = if fixup_payload_size > 0 {
         take(fixup_payload_size, 8, &mut cur)
+    } else {
+        0
+    };
+    // M6 classic streams occupy the fixup payload's LINKEDIT slot.
+    let dyld_rebase_off = if dyld_rebase_size > 0 {
+        take(dyld_rebase_size, 8, &mut cur)
+    } else {
+        0
+    };
+    let dyld_bind_off = if dyld_bind_size > 0 {
+        take(dyld_bind_size, 8, &mut cur)
     } else {
         0
     };
@@ -1130,6 +1318,10 @@ pub fn layout(
         indirect_count: indirect_syms.len(),
         fixup_off: fixup_payload_off,
         fixup_size: fixup_payload_size,
+        dyld_rebase_off,
+        dyld_rebase_size,
+        dyld_bind_off,
+        dyld_bind_size,
         trie_off,
         trie_len: trie.len(),
         func_off,
@@ -1161,6 +1353,7 @@ pub fn layout(
         &state.def_addr,
         res,
         &state.atom_addr,
+        fold,
     );
 
     Ok(Layout {
@@ -1185,7 +1378,12 @@ pub fn layout(
             uuid_at,
             sig_off,
             sig_size,
+            dyld_rebase_off,
+            dyld_rebase_size,
+            dyld_bind_off,
+            dyld_bind_size,
         },
+        dyld_info,
         header_bytes,
         entryoff_at,
         file_size,
@@ -1253,6 +1451,7 @@ fn build_resolved_tables(
     def_addr: &std::collections::BTreeMap<u32, u64>,
     res: &Resolution,
     atom_addr: &std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
+    fold: &crate::icf::FoldPlan,
 ) -> Vec<ResolvedFile> {
     // Commons resolve through the `__common` pieces; carry their final
     // addresses per (file, sym) so the flat tables cover every definition.
@@ -1271,10 +1470,11 @@ fn build_resolved_tables(
             let mut syms: Vec<u64> = vec![0; obj.symbols.len()];
             for (i, sym) in obj.symbols.iter().enumerate() {
                 if let Some(sect) = sym.section {
-                    // M5/D1: atom-aware when the section split into pieces.
-                    if let Some(vaddr) =
-                        atom_or_section_addr(atom_addr, addr_of, obj.file.0, sect, sym.value)
-                    {
+                    // M5/D1: atom-aware when the section split into pieces;
+                    // M6 ICF: folded atoms redirect to the canonical copy.
+                    if let Some(vaddr) = fold_aware_addr(
+                        fold, objects, atom_addr, addr_of, obj.file.0, sect, sym.value,
+                    ) {
                         syms[i] = vaddr;
                     }
                 }
@@ -1291,6 +1491,50 @@ fn build_resolved_tables(
             }
         })
         .collect()
+}
+
+/// The containing atom's start of `off` (None for un-atomized lookups).
+fn containing_atom_start(obj: &InputObject, sect: usize, off: u64) -> Option<u64> {
+    let ranges = obj.atoms_of(sect);
+    if ranges.is_empty() {
+        return None;
+    }
+    let idx = ranges.partition_point(|r| r.start <= off).saturating_sub(1);
+    ranges.get(idx).map(|r| r.start)
+}
+
+/// M6 ICF: the address of `(file, sect, value)`. Symbols inside folded
+/// atoms resolve to the canonical copy's address with the in-atom offset
+/// preserved; everything else takes the plain atom/section path.
+fn fold_aware_addr(
+    fold: &crate::icf::FoldPlan,
+    objects: &[InputObject],
+    atom_addr: &std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
+    addr_of: &std::collections::HashMap<(u32, usize), u64>,
+    file: u32,
+    sect: usize,
+    value: u64,
+) -> Option<u64> {
+    if !fold.is_empty()
+        && let Some(obj) = objects.get(file as usize)
+        && let Some(atom_start) = containing_atom_start(obj, sect, value)
+        && let Some((cf, cs, cstart)) = fold.canonical_of(file, sect, atom_start)
+    {
+        if let Some(atoms) = atom_addr.get(&(cf, cs)) {
+            let idx = atoms
+                .partition_point(|(start, _)| *start <= cstart)
+                .saturating_sub(1);
+            if let Some(&(start, out)) = atoms.get(idx)
+                && start == cstart
+            {
+                return Some(out + (value - atom_start));
+            }
+        }
+        // The canonical atom is missing from placement: a folded atom whose
+        // canonical copy was not placed — a resolution bug upstream.
+        return None;
+    }
+    atom_or_section_addr(atom_addr, addr_of, file, sect, value)
 }
 
 /// One `__cstring` literal instance (D4): a string atom of one input
@@ -1325,6 +1569,7 @@ fn build_bucket_pieces(
     bucket_of: &[Vec<usize>],
     commons: &[(StringId, &Def)],
     live: &crate::deadstrip::LiveSet,
+    fold: &crate::icf::FoldPlan,
 ) -> Result<(Vec<Vec<Piece>>, Vec<(usize, Vec<CStringInstance>)>), LinkError> {
     let mut pieces_of_bucket: Vec<Vec<Piece>> = vec![Vec::new(); buckets.len()];
     let mut cstring_instances: Vec<(usize, Vec<CStringInstance>)> = Vec::new();
@@ -1414,7 +1659,11 @@ fn build_bucket_pieces(
             // Zero-fill inputs keep the M1–M4 whole-section piece (their
             // bucket is S_ZEROFILL; nothing is copied — only the size
             // matters). Atomization is a content-section concern.
-            if in_sect.zerofill || !live.is_active() {
+            // M6 ICF: text sections go piece-granular when folding may
+            // remove atoms (dead-strip already implies the atom path).
+            let atom_granular = live.is_active()
+                || (!fold.is_empty() && in_sect.flags & S_ATTR_PURE_INSTRUCTIONS != 0);
+            if in_sect.zerofill || !atom_granular {
                 pieces_of_bucket[bi].push(Piece {
                     file: obj.file,
                     in_sect: si,
@@ -1431,9 +1680,13 @@ fn build_bucket_pieces(
                 continue;
             }
             // Atom granularity: one piece per live atom (D1 splits at
-            // symbol boundaries; other objects stay whole-section).
+            // symbol boundaries; other objects stay whole-section). M6 ICF:
+            // folded atoms leave the layout; their symbols resolve to the
+            // canonical copy through the fold map.
             for range in obj.atoms_of(si) {
-                if live.is_atom_dead(obj.file.0, si, range.start) {
+                if live.is_atom_dead(obj.file.0, si, range.start)
+                    || fold.is_folded(obj.file.0, si, range.start)
+                {
                     continue;
                 }
                 pieces_of_bucket[bi].push(Piece {
@@ -1503,11 +1756,13 @@ fn place(
     commons: &[(StringId, &Def)],
     chain_starts_size: usize,
     needs: &SynthNeeds,
-    has_fixups: bool,
+    fixup_lc: FixupLc,
     live: &crate::deadstrip::LiveSet,
+    fold: &crate::icf::FoldPlan,
+    veneers: &[crate::thunks::VeneerSpec],
 ) -> Result<PlacedState, LinkError> {
     let (mut pieces_of_bucket, cstring_instances) =
-        build_bucket_pieces(objects, buckets, bucket_of, commons, live)?;
+        build_bucket_pieces(objects, buckets, bucket_of, commons, live, fold)?;
 
     // ---- M2 synthetic pieces: __got slots + __stubs entries ------------------
     // First-use order (scan_needs) determines slot order, matching the
@@ -1559,6 +1814,13 @@ fn place(
         }
     }
 
+    // ---- M6 veneer pieces: one per planned out-of-range branch site -------
+    // Inserted into the site's own bucket right after its piece, so the
+    // site's redirected `B`/`BL` is always within the ±128 MiB reach.
+    if !veneers.is_empty() {
+        crate::thunks::insert_veneer_pieces(objects, &mut pieces_of_bucket, veneers);
+    }
+
     // ---- piece offsets within each output section --------------------------
     let mut sections: Vec<PlacedSection> = Vec::with_capacity(buckets.len());
     for (bi, (seg_name, name, flags, zerofill)) in buckets.iter().enumerate() {
@@ -1597,7 +1859,7 @@ fn place(
     // Shared with `build_header` (one formula, one source of truth).
     let nsections = sections.iter().filter(|s| s.size > 0).count();
     // The fixups LC follows the payload presence (not the mirror section).
-    let sizeofcmds = command_size(cfg, nsections, has_fixups);
+    let sizeofcmds = command_size(cfg, nsections, fixup_lc);
     let header_len = 32 + sizeofcmds;
     if header_len as u64 > PAGE_SIZE_16K {
         return Err(LinkError::Layout {
@@ -1707,6 +1969,8 @@ fn place(
     let mut def_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut got_slot_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut stub_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+    let mut veneer_addr_of: std::collections::HashMap<(u32, usize, u32), u64> =
+        std::collections::HashMap::new();
     for (si, s) in sections.iter().enumerate() {
         let is_cstring = s.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
         for (pi, p) in s.pieces.iter().enumerate() {
@@ -1736,7 +2000,7 @@ fn place(
                         ),
                         addr,
                     );
-                } else if live.is_active() {
+                } else if live.is_active() || !fold.is_empty() {
                     // Atom identity: section-relative input start → output
                     // vaddr. The containment lookups (defs, section-target
                     // relocs) read this table.
@@ -1756,6 +2020,9 @@ fn place(
                     }
                     SynthKind::StubSlot { name } => {
                         stub_addr.insert(name.0, addr);
+                    }
+                    SynthKind::Veneer { site, .. } => {
+                        veneer_addr_of.insert(site, addr);
                     }
                 }
             }
@@ -1792,6 +2059,7 @@ fn place(
         def_addr,
         got_slot_addr,
         stub_addr,
+        veneer_addr_of,
     })
 }
 
@@ -1802,6 +2070,7 @@ fn resolve_all(
     res: &Resolution,
     interner: &Interner,
     cfg: &LinkConfig,
+    fold: &crate::icf::FoldPlan,
 ) -> Result<(), LinkError> {
     // Definition addresses: commons already resolved; add section defs.
     // M5/D1: when the defining section split into atom pieces, the def's
@@ -1810,7 +2079,9 @@ fn resolve_all(
     let mut def_addr: std::collections::BTreeMap<u32, u64> = state.def_addr.clone();
     for (id, def) in res.definitions() {
         if let Some(sect) = def.section
-            && let Some(vaddr) = atom_or_section_addr(
+            && let Some(vaddr) = fold_aware_addr(
+                fold,
+                objects,
                 &state.atom_addr,
                 &state.addr_of,
                 def.file.0,
@@ -1841,7 +2112,14 @@ fn resolve_all(
     // §3 D8). The relocation scan below reads these flat arrays instead of
     // walking `addr_of`/`def_addr` maps per relocation — one file-local
     // load replaces the three dependent map hops.
-    let resolved = build_resolved_tables(objects, &state.addr_of, &def_addr, res, &state.atom_addr);
+    let resolved = build_resolved_tables(
+        objects,
+        &state.addr_of,
+        &def_addr,
+        res,
+        &state.atom_addr,
+        fold,
+    );
 
     // Pass A: every piece except stubs (stubs need the GOT slot addresses
     // that this pass computes).
@@ -1882,6 +2160,61 @@ fn resolve_all(
                 slots.push((0, kind));
             }
             Some(SynthKind::StubSlot { .. }) => unreachable!("stubs resolved in pass B"),
+            Some(SynthKind::Veneer { target, .. }) => {
+                // M6: `adrp x16, target@page` + `add x16, x16,
+                // target@pageoff` — the `br x16` needs no patch. The target
+                // resolves exactly like the original branch did (in-image
+                // def, or the dylib call's synthesized stub).
+                let obj = objects.get(file.0 as usize).ok_or(LinkError::Internal {
+                    message: "veneer owner file missing".into(),
+                })?;
+                let space = AddrSpace {
+                    got_slot_addr: &state.got_slot_addr,
+                    stub_addr: &state.stub_addr,
+                    interner,
+                    res,
+                    cfg,
+                    resolved: &resolved,
+                    atom_addr: &state.atom_addr,
+                    veneer_of: &state.veneer_addr_of,
+                };
+                let target_addr = match lookup_opt(obj, target, 0, &space)? {
+                    Some(t) => t,
+                    None => {
+                        let RelocTarget::Extern(id) = target else {
+                            return Err(LinkError::Internal {
+                                message: "veneer without an external target".into(),
+                            });
+                        };
+                        space
+                            .stub_addr
+                            .get(&id.0)
+                            .copied()
+                            .ok_or(LinkError::Internal {
+                                message: format!(
+                                    "branch veneer to \"{}\" without a synthesized stub",
+                                    space.interner.name(id)
+                                ),
+                            })?
+                    }
+                };
+                let page_delta = ((target_addr as i64) >> 12) - ((addr as i64) >> 12);
+                if page_delta.unsigned_abs() > 0xF_FFFF {
+                    return Err(LinkError::Layout {
+                        message: format!(
+                            "veneer at {addr:#x} to {target_addr:#x} exceeds the \n                            ±4 GiB ADRP range (image larger than 4 GiB of text)"
+                        ),
+                    });
+                }
+                patches.push(PatchOp::Adrp {
+                    in_offset: 0,
+                    page_delta,
+                });
+                patches.push(PatchOp::PageOff12 {
+                    in_offset: 4,
+                    imm12: (target_addr & 0xFFF) as u32,
+                });
+            }
             None => {
                 if zerofill {
                     continue;
@@ -1898,9 +2231,19 @@ fn resolve_all(
                     cfg,
                     resolved: &resolved,
                     atom_addr: &state.atom_addr,
+                    veneer_of: &state.veneer_addr_of,
                 };
                 for r in &in_sect.relocs {
-                    resolve_reloc(obj, in_sect, r, addr, &space, &mut patches, &mut slots)?;
+                    resolve_reloc(
+                        obj,
+                        in_sect_idx,
+                        in_sect,
+                        r,
+                        addr,
+                        &space,
+                        &mut patches,
+                        &mut slots,
+                    )?;
                 }
             }
         }
@@ -1973,6 +2316,9 @@ struct AddrSpace<'a> {
     /// tables. Empty when no atomization happened — the hot path stays
     /// map-free for the M1–M4 shapes.
     atom_addr: &'a std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
+    /// M6: branch site `(file, in_sect, reloc offset)` → veneer vaddr.
+    /// Non-empty only while the veneer fixed point runs.
+    veneer_of: &'a std::collections::HashMap<(u32, usize, u32), u64>,
 }
 
 /// The bind library ordinal for an external reference (M2): the two-level
@@ -2017,6 +2363,7 @@ fn atom_or_section_addr(
 #[allow(clippy::too_many_arguments)]
 fn resolve_reloc(
     obj: &InputObject,
+    in_sect_idx: usize,
     in_sect: &crate::object::InputSection,
     r: &crate::object::DecodedReloc,
     piece_addr: u64,
@@ -2153,36 +2500,41 @@ fn resolve_reloc(
             slots.push((r.offset, FixupKind::Rebase { target_vaddr: slot }));
         }
         RelocKind::Branch26 => {
-            let target = match lookup_opt(obj, r.target, 0, space)? {
-                Some(t) => t,
-                None => {
-                    // Dylib call: branch through the synthesized stub.
-                    let RelocTarget::Extern(id) = r.target else {
-                        return Err(LinkError::Internal {
-                            message: "external branch without a name".into(),
-                        });
-                    };
-                    space
-                        .stub_addr
-                        .get(&id.0)
-                        .copied()
-                        .ok_or(LinkError::Internal {
-                            message: format!(
-                                "branch to \"{}\" without a synthesized stub",
-                                space.interner.name(id)
-                            ),
-                        })?
+            // M6: a planned veneer takes over the site's target — the branch
+            // reaches the veneer (always within ±128 MiB: the veneer sits at
+            // the site's piece end) and the veneer reaches the final target
+            // through ADRP's ±4 GiB window.
+            let target = if let Some(&veneer_vaddr) =
+                space.veneer_of.get(&(obj.file.0, in_sect_idx, r.offset))
+            {
+                veneer_vaddr
+            } else {
+                match lookup_opt(obj, r.target, 0, space)? {
+                    Some(t) => t,
+                    None => {
+                        // Dylib call: branch through the synthesized stub.
+                        let RelocTarget::Extern(id) = r.target else {
+                            return Err(LinkError::Internal {
+                                message: "external branch without a name".into(),
+                            });
+                        };
+                        space
+                            .stub_addr
+                            .get(&id.0)
+                            .copied()
+                            .ok_or(LinkError::Internal {
+                                message: format!(
+                                    "branch to \"{}\" without a synthesized stub",
+                                    space.interner.name(id)
+                                ),
+                            })?
+                    }
                 }
             };
             let delta = (target as i64) - (slot_v as i64);
-            if delta.abs() > 0x0800_0000 {
-                return Err(LinkError::Layout {
-                    message: format!(
-                        "branch at {slot_v:#x} to {target:#x} exceeds the ±128 MiB arm64 \
-                         range by {delta:#x} (veneers arrive at M5)"
-                    ),
-                });
-            }
+            // Out-of-range deltas are legal *mid-fixpoint* only: the layout
+            // loop scans them and inserts a veneer before anything emits.
+            // The 4-alignment contract still holds unconditionally.
             if delta % 4 != 0 {
                 return Err(LinkError::Internal {
                     message: "branch target not 4-aligned".into(),
@@ -2319,12 +2671,14 @@ fn lookup(
 }
 
 /// The tables the symtab builder reads: the placed sections and the M5
-/// address/liveness structures (D1/D4 containment, D12 filtering).
+/// address/liveness structures (D1/D4 containment, D12 filtering) plus the
+/// M6 fold map.
 struct SymtabContext<'a> {
     sections: &'a [PlacedSection],
     addr_of: &'a std::collections::HashMap<(u32, usize), u64>,
     atom_addr: &'a std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
     live: &'a crate::deadstrip::LiveSet,
+    fold: &'a crate::icf::FoldPlan,
 }
 
 /// Builds the output symbol table: locals (file order), ext defs (file
@@ -2340,7 +2694,8 @@ fn build_symtab(
     visible: &dyn Fn(&[u8]) -> bool,
     ctx: &SymtabContext<'_>,
 ) -> Vec<OutputSymbol> {
-    let (sections, addr_of, atom_addr, live) = (ctx.sections, ctx.addr_of, ctx.atom_addr, ctx.live);
+    let (sections, addr_of, atom_addr, live, fold) =
+        (ctx.sections, ctx.addr_of, ctx.atom_addr, ctx.live, ctx.fold);
     // Output section lookup by (file, input section): (index, base).
     let mut sect_of: std::collections::HashMap<(u32, usize), usize> =
         std::collections::HashMap::new();
@@ -2353,8 +2708,9 @@ fn build_symtab(
     }
     // M5/D1+D4: atom- and cstring-aware address of a symbol (containment in
     // the live/merged piece tables; the section base plus value otherwise).
+    // M6 ICF: folded atoms redirect to the canonical copy.
     let sym_addr = |obj: &InputObject, sect: usize, value: u64| -> Option<u64> {
-        atom_or_section_addr(atom_addr, addr_of, obj.file.0, sect, value)
+        fold_aware_addr(fold, objects, atom_addr, addr_of, obj.file.0, sect, value)
     };
     // Symbol-liveness (M5/D12): a section-defined symbol dies with its
     // containing atom (O(log atoms) containment).
@@ -2376,6 +2732,21 @@ fn build_symtab(
     let mut hidden: Vec<((u32, u32), OutputSymbol)> = Vec::new();
     let mut out: Vec<OutputSymbol> = Vec::new();
 
+    // M6 ICF: a symbol inside a folded atom reports the canonical copy's
+    // output section (its own piece is not placed).
+    let osect_of = |file: u32, sect: usize, value: u64| -> usize {
+        let key = if !fold.is_empty() {
+            objects
+                .get(file as usize)
+                .and_then(|obj| containing_atom_start(obj, sect, value))
+                .and_then(|start| fold.canonical_of(file, sect, start))
+                .map_or((file, sect), |(cf, cs, _)| (cf, cs))
+        } else {
+            (file, sect)
+        };
+        sect_of.get(&key).copied().unwrap_or(usize::MAX)
+    };
+
     // Locals: file order, symbol order; stabs skipped; non-section locals
     // pass through as absolute.
     for obj in objects {
@@ -2390,7 +2761,7 @@ fn build_symtab(
                 Some(value) => {
                     let osect = sym
                         .section
-                        .and_then(|sect| sect_of.get(&(obj.file.0, sect)).copied());
+                        .map(|sect| osect_of(obj.file.0, sect, sym.value));
                     locals.push((
                         (obj.file.0, sym_i as u32),
                         OutputSymbol {
@@ -2438,10 +2809,7 @@ fn build_symtab(
         let Some(value) = sym_addr(obj, sect, def.value) else {
             continue;
         };
-        let osect = sect_of
-            .get(&(def.file.0, sect))
-            .copied()
-            .unwrap_or(usize::MAX);
+        let osect = osect_of(def.file.0, sect, def.value);
         let entry = OutputSymbol {
             name: id,
             n_type: N_EXT | N_SECT,
@@ -2568,6 +2936,29 @@ pub fn uleb(mut v: u64) -> Vec<u8> {
     out
 }
 
+/// Which fixup load command the header carries (M6: the classic
+/// `LC_DYLD_INFO_ONLY` joined the chained command as the legacy fallback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixupLc {
+    /// No fixup metadata (no pointer slots).
+    None,
+    /// `LC_DYLD_CHAINED_FIXUPS` (macOS ≥ 12 default).
+    Chained,
+    /// `LC_DYLD_INFO_ONLY` classic opcode streams.
+    DyldInfo,
+}
+
+impl FixupLc {
+    /// The command's byte size (0 when absent).
+    const fn size(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Chained => 16,
+            Self::DyldInfo => 48,
+        }
+    }
+}
+
 /// Assembles header + load commands. Returns `(bytes, uuid_at, entryoff_at)`.
 /// `__LINKEDIT` chunk positions the header references.
 struct HeaderInputs {
@@ -2582,6 +2973,11 @@ struct HeaderInputs {
     /// LC_DYLD_CHAINED_FIXUPS payload (0 size = absent).
     fixup_off: u64,
     fixup_size: usize,
+    /// M6 classic `LC_DYLD_INFO_ONLY` streams (0 size = absent).
+    dyld_rebase_off: u64,
+    dyld_rebase_size: usize,
+    dyld_bind_off: u64,
+    dyld_bind_size: usize,
     /// LC_DYLD_EXPORTS_TRIE.
     trie_off: u64,
     trie_len: usize,
@@ -2638,7 +3034,13 @@ fn build_header(
     let is_exec = hi.filetype.is_executable();
     let dylinker_len = align8(12 + "/usr/lib/dyld\0".len());
     let emit_dylinker = is_exec && cfg.dynamic_linker;
-    let fixup_lc = if hi.fixup_size > 0 { 16 } else { 0 };
+    let fixup_lc = if hi.fixup_size > 0 {
+        FixupLc::Chained
+    } else if hi.dyld_rebase_size > 0 || hi.dyld_bind_size > 0 {
+        FixupLc::DyldInfo
+    } else {
+        FixupLc::None
+    };
     let dylib_cmds: Vec<u32> = hi
         .dylibs
         .iter()
@@ -2660,7 +3062,7 @@ fn build_header(
         + u32::from(hi.filetype == OutputType::Dylib) // LC_ID_DYLIB
         + 1 // LC_SYMTAB
         + 1 // LC_DYSYMTAB
-        + u32::from(fixup_lc > 0)
+        + u32::from(!matches!(fixup_lc, FixupLc::None))
         + 1 // LC_DYLD_EXPORTS_TRIE
         + 1 // LC_FUNCTION_STARTS
         + 1 // LC_UUID
@@ -2673,7 +3075,7 @@ fn build_header(
         })?
         + u32::from(hi.source_version.is_some());
     let nsections: usize = sections.iter().filter(|s| s.size > 0).count();
-    let sizeofcmds = command_size(cfg, nsections, fixup_lc > 0);
+    let sizeofcmds = command_size(cfg, nsections, fixup_lc);
     debug_assert_eq!(
         32 + sizeofcmds,
         32 + 72 * segments.len()
@@ -2688,7 +3090,7 @@ fn build_header(
             }
             + 24 // LC_SYMTAB
             + 80 // LC_DYSYMTAB
-            + fixup_lc
+            + fixup_lc.size()
             + 16 // LC_DYLD_EXPORTS_TRIE
             + 16 // LC_FUNCTION_STARTS
             + 24 // LC_UUID
@@ -2867,12 +3269,29 @@ fn build_header(
     w32(&mut buf, lc + 56, hi.indirect_off as u32);
     w32(&mut buf, lc + 60, hi.indirect_count as u32);
     lc += 80;
-    if fixup_lc > 0 {
+    if fixup_lc == FixupLc::Chained {
         w32(&mut buf, lc, pgr_format::consts::LC_DYLD_CHAINED_FIXUPS);
         w32(&mut buf, lc + 4, 16);
         w32(&mut buf, lc + 8, hi.fixup_off as u32);
         w32(&mut buf, lc + 12, hi.fixup_size as u32);
         lc += 16;
+    } else if fixup_lc == FixupLc::DyldInfo {
+        // M6 legacy fallback: the classic opcode streams (no lazy/weak
+        // split — weak rides the bind stream's flags; exports live in
+        // LC_DYLD_EXPORTS_TRIE).
+        w32(&mut buf, lc, pgr_format::consts::LC_DYLD_INFO_ONLY);
+        w32(&mut buf, lc + 4, 48);
+        w32(&mut buf, lc + 8, hi.dyld_rebase_off as u32);
+        w32(&mut buf, lc + 12, hi.dyld_rebase_size as u32);
+        w32(&mut buf, lc + 16, hi.dyld_bind_off as u32);
+        w32(&mut buf, lc + 20, hi.dyld_bind_size as u32);
+        w32(&mut buf, lc + 24, 0); // weak_bind_off
+        w32(&mut buf, lc + 28, 0); // weak_bind_size
+        w32(&mut buf, lc + 32, 0); // lazy_bind_off
+        w32(&mut buf, lc + 36, 0); // lazy_bind_size
+        w32(&mut buf, lc + 40, 0); // export_off
+        w32(&mut buf, lc + 44, 0); // export_size
+        lc += 48;
     }
     w32(&mut buf, lc, pgr_format::consts::LC_DYLD_EXPORTS_TRIE);
     w32(&mut buf, lc + 4, 16);
@@ -2909,7 +3328,7 @@ fn pad16(name: &[u8]) -> [u8; 16] {
 
 /// The exact `sizeofcmds` — the single source of truth shared by `place`
 /// (section start math) and `build_header`.
-fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: bool) -> usize {
+fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc) -> usize {
     let is_exec = cfg.filetype.is_executable();
     let emit_dylinker = is_exec && cfg.dynamic_linker;
     let dylinker_len = if emit_dylinker {
@@ -2934,7 +3353,8 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: bool) -> usize {
         + usize::from(is_exec) * 24 // LC_MAIN
         + 24 // LC_SYMTAB
         + 80 // LC_DYSYMTAB
-        + usize::from(fixup_lc) * 16 // LC_DYLD_CHAINED_FIXUPS
+        + usize::from(fixup_lc == FixupLc::Chained) * 16 // LC_DYLD_CHAINED_FIXUPS
+        + usize::from(fixup_lc == FixupLc::DyldInfo) * 48 // LC_DYLD_INFO_ONLY
         + 16 // LC_DYLD_EXPORTS_TRIE
         + 16 // LC_FUNCTION_STARTS
         + 24 // LC_UUID
