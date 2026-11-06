@@ -11,7 +11,10 @@
 //! (`link_reference_bytes`) — both asserted in the integration tests.
 
 pub mod opts;
+pub mod synth;
 
+use pgr_core::LinkArchive;
+use pgr_core::LinkArchiveMember;
 use pgr_core::LinkInput;
 use pgr_core::resolve::Dylib;
 use pgr_emit::write_image;
@@ -267,7 +270,8 @@ pub fn tbd_to_dylib(path: &str, bytes: &[u8], weak: bool) -> Result<Dylib, Drive
 }
 
 /// Resolves `-l<name>` against the `-L` search dirs (then the default
-/// `/usr/lib`) to a `.tbd` stub or a Mach-O dylib binary (M3).
+/// `/usr/lib`) to a `.tbd` stub, a Mach-O dylib binary, or — M5 — a static
+/// archive (dylib candidates win, matching ld64's search order).
 ///
 /// # Errors
 /// [`DriverError::Io`] when the file exists but cannot be read.
@@ -280,12 +284,46 @@ pub fn resolve_lib(
         name.to_owned() + ".tbd",
         "lib".to_owned() + name + ".dylib",
         name.to_owned() + ".dylib",
+        "lib".to_owned() + name + ".a",
+        name.to_owned() + ".a",
     ];
     let mut dirs: Vec<&str> = lib_dirs.iter().map(String::as_str).collect();
     dirs.push("/usr/lib");
     for dir in &dirs {
         for cand in &candidates {
             let p = Path::new(dir).join(cand);
+            if p.is_file() {
+                let bytes = std::fs::read(&p).map_err(|source| DriverError::Io {
+                    path: p.display().to_string(),
+                    source,
+                })?;
+                return Ok(Some((p.display().to_string(), bytes)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Resolves `-framework <name>` against the `-F` dirs (then Apple's default
+/// framework directories) to a `.tbd` stub or a Mach-O dylib binary:
+/// `<dir>/<Name>.framework/<Name>` (+ `.tbd`).
+///
+/// # Errors
+/// [`DriverError::Io`] when the file exists but cannot be read.
+pub fn resolve_framework(
+    name: &str,
+    framework_dirs: &[String],
+) -> Result<Option<(String, Vec<u8>)>, DriverError> {
+    let mut dirs: Vec<String> = framework_dirs.to_vec();
+    dirs.push("/System/Library/Frameworks".into());
+    dirs.push("/Library/Frameworks".into());
+    let stems = [
+        format!("{name}.framework/{name}.tbd"),
+        format!("{name}.framework/{name}"),
+    ];
+    for dir in &dirs {
+        for stem in &stems {
+            let p = Path::new(dir).join(stem);
             if p.is_file() {
                 let bytes = std::fs::read(&p).map_err(|source| DriverError::Io {
                     path: p.display().to_string(),
@@ -334,43 +372,41 @@ pub fn link_reference_image(opts: &opts::Options) -> Result<ImageAndPlan, Driver
 /// shared front half of [`link_to_image`] and [`link_reference_image`]).
 fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, DriverError> {
     let mut inputs = Vec::with_capacity(opts.inputs.len());
+    let mut archives: Vec<LinkArchive> = Vec::new();
     let mut dylibs: Vec<Dylib> = Vec::new();
-    for (i, path) in opts.inputs.iter().enumerate() {
-        let bytes = std::fs::read(path).map_err(|source| DriverError::Io {
+
+    // M5 `-filelist`: expand newline-separated paths (each relative to the
+    // optional base dir) ahead of the command-line inputs — the expansion
+    // order is the command-line order.
+    let mut expanded_inputs: Vec<String> = Vec::new();
+    for (path, dir) in &opts.filelists {
+        let text = std::fs::read_to_string(path).map_err(|source| DriverError::Io {
             path: path.clone(),
             source,
         })?;
-        if looks_like_tbd(&bytes) {
-            let weak = opts.weak_library_inputs.contains(&i);
-            let mut dylib = tbd_to_dylib(path, &bytes, weak)?;
-            dylib.reexport = opts.reexport_library_inputs.contains(&i);
-            dylibs.push(dylib);
-            continue;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let resolved = match dir {
+                Some(d) => Path::new(d).join(line).display().to_string(),
+                None => line.to_string(),
+            };
+            expanded_inputs.push(resolved);
         }
-        // M3: Mach-O dylib binaries are linkable inputs (install name +
-        // exports scanned from the image).
-        if pgr_format::MachHeader64::parse(&bytes)
-            .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
-        {
-            let mut dylib = scan_dylib(path, &bytes)?;
-            dylib.reexport = opts.reexport_library_inputs.contains(&i);
-            dylibs.push(dylib);
-            continue;
-        }
-        if opts.reexport_library_inputs.contains(&i) {
-            return Err(DriverError::Tbd {
-                path: path.clone(),
-                source: pgr_format::FormatError::Malformed {
-                    what: "-reexport_library input is not a dylib (.tbd or Mach-O)".into(),
-                },
-            });
-        }
-        inputs.push(LinkInput {
-            name: format!("{path} (input {i})"),
-            bytes,
-        });
     }
-    // `-l` library search: `.tbd` stubs (M2) and Mach-O dylib binaries (M3).
+
+    // Expanded filelist entries carry no `-weak_library`/`-reexport_library`
+    // markers (those flags push onto `opts.inputs` directly).
+    for path in &expanded_inputs {
+        map_input(path, None, opts, &mut inputs, &mut archives, &mut dylibs)?;
+    }
+    for (i, path) in opts.inputs.iter().enumerate() {
+        map_input(path, Some(i), opts, &mut inputs, &mut archives, &mut dylibs)?;
+    }
+    // `-l` library search: `.tbd` stubs (M2), Mach-O dylib binaries (M3),
+    // static archives (M5).
     for name in &opts.libs {
         match resolve_lib(name, &opts.lib_dirs)? {
             Some((path, bytes)) => {
@@ -380,11 +416,13 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
                     .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
                 {
                     dylibs.push(scan_dylib(&path, &bytes)?);
+                } else if pgr_format::is_archive(&bytes) {
+                    push_archive(&mut archives, &path, bytes, opts)?;
                 } else {
                     return Err(DriverError::Tbd {
                         path,
                         source: pgr_format::FormatError::Malformed {
-                            what: "not a .tbd stub or Mach-O dylib".into(),
+                            what: "not a .tbd stub, Mach-O dylib or static archive".into(),
                         },
                     });
                 }
@@ -399,8 +437,59 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
             }
         }
     }
+    // M5 `-framework` search.
+    for name in &opts.frameworks {
+        match resolve_framework(name, &opts.framework_dirs)? {
+            Some((path, bytes)) => {
+                if looks_like_tbd(&bytes) {
+                    dylibs.push(tbd_to_dylib(&path, &bytes, false)?);
+                } else if pgr_format::MachHeader64::parse(&bytes)
+                    .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
+                {
+                    dylibs.push(scan_dylib(&path, &bytes)?);
+                } else {
+                    return Err(DriverError::Tbd {
+                        path,
+                        source: pgr_format::FormatError::Malformed {
+                            what: "framework payload is not a .tbd stub or Mach-O dylib".into(),
+                        },
+                    });
+                }
+            }
+            None => {
+                return Err(DriverError::Tbd {
+                    path: format!("{name}.framework/{name}"),
+                    source: pgr_format::FormatError::Malformed {
+                        what: "framework not found (searched -F dirs)".into(),
+                    },
+                });
+            }
+        }
+    }
+    // M5 `-sectcreate`: section contents from a file, carried as a synthetic
+    // single-section object (no symbols — placed by the bucketing pass).
+    for (seg, sect, file) in &opts.sectcreate {
+        let data = std::fs::read(file).map_err(|source| DriverError::Io {
+            path: file.clone(),
+            source,
+        })?;
+        let obj = synth::section_object(seg, sect, &data).map_err(|message| DriverError::Tbd {
+            path: file.clone(),
+            source: pgr_format::FormatError::Malformed { what: message },
+        })?;
+        inputs.push(LinkInput {
+            name: format!("-sectcreate {seg},{sect} ({file})"),
+            bytes: obj,
+        });
+    }
+
     let mut config = opts.config.clone();
     config.dylibs = dylibs;
+    config.load_symbols = opts
+        .force_load
+        .iter()
+        .map(|s| s.as_bytes().to_vec())
+        .collect();
     // M3 dylib defaults: the install name defaults to the output path
     // (ld64 behavior); dylibs/bundles never load a dylinker.
     if config.filetype == pgr_core::layout::OutputType::Dylib && config.install_name.is_none() {
@@ -416,10 +505,11 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
     if let Some(path) = &opts.unexported_list_path {
         config.unexported = read_symbol_list("-unexported_symbols_list", path)?;
     }
-    let result = pgr_core::link(&inputs, &config)?;
+    let result = pgr_core::link(&inputs, &archives, &config)?;
 
-    // `-u <symbol>`: the symbol must resolve to an in-image definition
-    // (force-loading archive members is M3; the check is the M2 shape).
+    // `-u <symbol>`: the symbol must resolve to an in-image definition. The
+    // name also seeds the archive pull loop, so a member defining it is
+    // pulled even when nothing else references it (ld64 `-u` semantics).
     for sym in &opts.force_load {
         let defined = result.layout.symbols.iter().any(|s| {
             s.external
@@ -429,12 +519,105 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
         if !defined {
             return Err(DriverError::ForceLoad {
                 symbol: sym.clone(),
-                message: "not defined by any object input (force-loading archive members                           arrives at M3)"
+                message: "not defined by any input (direct objects or pulled archive members)"
                     .into(),
             });
         }
     }
     Ok(result)
+}
+
+/// Classifies and maps one input path: `.tbd`/dylib → [`Dylib`], archive →
+/// [`LinkArchive`] (lazy members), anything else → a [`LinkInput`] object.
+/// `opts_index` carries the `-weak_library`/`-reexport_library` marker index
+/// (`None` for filelist-expanded paths).
+fn map_input(
+    path: &str,
+    opts_index: Option<usize>,
+    opts: &opts::Options,
+    inputs: &mut Vec<LinkInput>,
+    archives: &mut Vec<LinkArchive>,
+    dylibs: &mut Vec<Dylib>,
+) -> Result<(), DriverError> {
+    let bytes = std::fs::read(path).map_err(|source| DriverError::Io {
+        path: path.to_string(),
+        source,
+    })?;
+    if looks_like_tbd(&bytes) {
+        let weak = opts_index.is_some_and(|i| opts.weak_library_inputs.contains(&i));
+        let mut dylib = tbd_to_dylib(path, &bytes, weak)?;
+        dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
+        dylibs.push(dylib);
+        return Ok(());
+    }
+    // M3: Mach-O dylib binaries are linkable inputs (install name + exports
+    // scanned from the image).
+    if pgr_format::MachHeader64::parse(&bytes)
+        .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
+    {
+        let mut dylib = scan_dylib(path, &bytes)?;
+        dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
+        dylibs.push(dylib);
+        return Ok(());
+    }
+    // M5: static archives carry their members lazily — the ranlib index
+    // drives the pull fixpoint (S7).
+    if pgr_format::is_archive(&bytes) {
+        push_archive(archives, path, bytes, opts)?;
+        return Ok(());
+    }
+    if opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i)) {
+        return Err(DriverError::Tbd {
+            path: path.to_string(),
+            source: pgr_format::FormatError::Malformed {
+                what: "-reexport_library input is not a dylib (.tbd or Mach-O)".into(),
+            },
+        });
+    }
+    let i = opts_index.unwrap_or(usize::MAX);
+    inputs.push(LinkInput {
+        name: format!("{path} (input {i})"),
+        bytes,
+    });
+    Ok(())
+}
+
+/// Builds a [`LinkArchive`] from raw archive bytes and pushes it (the `-l`
+/// path; force-load matching is by resolved path).
+fn push_archive(
+    archives: &mut Vec<LinkArchive>,
+    path: &str,
+    bytes: Vec<u8>,
+    opts: &opts::Options,
+) -> Result<(), DriverError> {
+    let parsed = pgr_format::parse_archive(&bytes).map_err(|e| DriverError::Tbd {
+        path: path.to_string(),
+        source: e,
+    })?;
+    let force = opts
+        .force_load_archives
+        .iter()
+        .any(|f| Path::new(f) == Path::new(path));
+    archives.push(LinkArchive {
+        name: path.to_string(),
+        bytes,
+        index: parsed
+            .index
+            .iter()
+            .map(|e| (e.name.clone().into_bytes(), e.member))
+            .collect(),
+        members: parsed
+            .members
+            .iter()
+            .map(|m| LinkArchiveMember {
+                name: m.name.clone(),
+                offset: m.offset,
+                size: m.size,
+            })
+            .collect(),
+        all_load: opts.all_load || force,
+    });
+    Ok(())
 }
 /// Links `inputs` into image bytes (no filesystem). Kept for callers that
 /// only need the bytes (the M4 fused pipeline).
@@ -515,8 +698,10 @@ pub fn usage() -> String {
     s.push_str("  -segalign <n>                0x1000 or 0x4000 (default 0x4000)\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
-    s.push_str("Archives (.a), -framework, -dead_strip and -order_file arrive at\n");
-    s.push_str("M5 (TDD §12 roadmap).\n");
+    s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
+    s.push_str("member pull (S7), -dead_strip, -all_load/-force_load, -filelist,\n");
+    s.push_str("-framework/-F, -sectcreate, __cstring merging. -order_file stays\n");
+    s.push_str("roadmap-gated.\n");
     s
 }
 
