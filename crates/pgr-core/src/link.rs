@@ -122,10 +122,28 @@ pub fn link_with(
     cfg: &LinkConfig,
     parallel: Parallelism,
 ) -> Result<LinkResult, LinkError> {
+    link_cached(inputs, archives, cfg, parallel, None)
+}
+
+/// Runs Passes 1–3 through the M6 Stage A POI cache: unchanged inputs skip
+/// Pass 1's Mach-O walk entirely (architecture doc §7.1). A cache hit must
+/// produce byte-identical results to a fresh parse — the equality is gated
+/// in [`crate::cache`] and the driver's M6 tests.
+///
+/// # Errors
+/// [`LinkError`] on malformed inputs, unresolvable/duplicate symbols, or
+/// layout contract violations.
+pub fn link_cached(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    cache: Option<&crate::cache::PoiCache>,
+) -> Result<LinkResult, LinkError> {
     // ---- Pass 1: parse & collect names for the interner --------------------
-    let mut objects = parse_inputs(inputs, parallel, cfg.dead_strip)?;
+    let mut objects = parse_inputs(inputs, parallel, cfg.dead_strip, cache)?;
     // ---- S7 archive liveness (M5): pull only referenced members ------------
-    let pulled = pull_archive_members(&objects, archives, cfg)?;
+    let pulled = pull_archive_members(&objects, archives, cfg, cache)?;
     for obj in pulled {
         objects.push(obj);
     }
@@ -168,8 +186,12 @@ pub fn link_with(
     res.install_dylibs(&cfg.dylibs, &export_ids);
     res.require_all_resolved(&interner, &objects, cfg.undefined_policy)?;
 
+    // ---- M5/D12 liveness, then M6 ICF over the live text atoms --------------
+    let live = crate::deadstrip::compute(&objects, &res, &interner, cfg);
+    let fold = crate::icf::fold(&objects, &res, &interner, cfg, &live)?;
+
     // ---- Pass 3: layout -------------------------------------------------------
-    let layout = layout(&objects, &res, &interner, cfg)?;
+    let layout = layout(&objects, &res, &interner, cfg, &live, &fold)?;
     Ok(LinkResult {
         layout,
         objects,
@@ -185,7 +207,13 @@ fn parse_inputs(
     inputs: &[LinkInput],
     parallel: Parallelism,
     split_symbols: bool,
+    cache: Option<&crate::cache::PoiCache>,
 ) -> Result<Vec<InputObject>, LinkError> {
+    // M6 Stage A: the cache key is per-input content + the parse flag.
+    let keys: Vec<[u8; 32]> = inputs
+        .iter()
+        .map(|i| crate::cache::PoiCache::content_key(&i.bytes, split_symbols))
+        .collect();
     let mut objects: Vec<Option<InputObject>> = (0..inputs.len()).map(|_| None).collect();
     if parallel.is_parallel() && inputs.len() > 1 {
         // LPT: biggest file first so the pool tail is filled by small files.
@@ -201,7 +229,25 @@ fn parse_inputs(
             order
                 .par_iter()
                 .map(|&i| {
-                    InputObject::parse(FileId(i as u32), &inputs[i].name, inputs[i].bytes.clone())
+                    if let Some(cache) = cache
+                        && let Some(hit) = cache.load(
+                            &keys[i],
+                            FileId(i as u32),
+                            &inputs[i].name,
+                            inputs[i].bytes.clone(),
+                        )
+                    {
+                        return Ok(hit);
+                    }
+                    let obj = InputObject::parse(
+                        FileId(i as u32),
+                        &inputs[i].name,
+                        inputs[i].bytes.clone(),
+                    )?;
+                    if let Some(cache) = cache {
+                        cache.store(&keys[i], &obj);
+                    }
+                    Ok(obj)
                 })
                 .collect()
         });
@@ -210,11 +256,18 @@ fn parse_inputs(
         }
     } else {
         for (i, input) in inputs.iter().enumerate() {
-            objects[i] = Some(InputObject::parse(
-                FileId(i as u32),
-                &input.name,
-                input.bytes.clone(),
-            )?);
+            if let Some(cache) = cache
+                && let Some(hit) =
+                    cache.load(&keys[i], FileId(i as u32), &input.name, input.bytes.clone())
+            {
+                objects[i] = Some(hit);
+                continue;
+            }
+            let obj = InputObject::parse(FileId(i as u32), &input.name, input.bytes.clone())?;
+            if let Some(cache) = cache {
+                cache.store(&keys[i], &obj);
+            }
+            objects[i] = Some(obj);
         }
     }
     // M5/D1+D4: fill the atom tables (cstring sections always split for
@@ -237,6 +290,7 @@ fn pull_archive_members(
     direct: &[InputObject],
     archives: &[LinkArchive],
     cfg: &LinkConfig,
+    cache: Option<&crate::cache::PoiCache>,
 ) -> Result<Vec<InputObject>, LinkError> {
     if archives.is_empty() {
         return Ok(Vec::new());
@@ -283,6 +337,7 @@ fn pull_archive_members(
                 member,
                 base_file + pulled.len() as u32,
                 cfg.dead_strip,
+                cache,
             )?;
             record_names(&obj, &mut defined, &mut undefined);
             pulled.push(obj);
@@ -316,6 +371,7 @@ fn pull_archive_members(
                     member,
                     base_file + pulled.len() as u32,
                     cfg.dead_strip,
+                    cache,
                 )?;
                 record_names(&obj, &mut defined, &mut undefined);
                 pulled.push(obj);
@@ -335,6 +391,7 @@ fn parse_member(
     member: &LinkArchiveMember,
     file: u32,
     split_symbols: bool,
+    cache: Option<&crate::cache::PoiCache>,
 ) -> Result<InputObject, LinkError> {
     let start = member.offset as usize;
     let end = start
@@ -352,14 +409,23 @@ fn parse_member(
             ),
         })?
         .to_vec();
-    let mut obj = InputObject::parse(
-        FileId(file),
-        &format!("{}({})", arch.name, member.name),
-        bytes,
-    )?;
+    let name = format!("{}({})", arch.name, member.name);
+    if let Some(cache) = cache {
+        let key = crate::cache::PoiCache::content_key(&bytes, split_symbols);
+        if let Some(mut hit) = cache.load(&key, FileId(file), &name, bytes.clone()) {
+            hit.from_archive = true;
+            hit.archive_name = arch.name.clone();
+            return Ok(hit);
+        }
+    }
+    let mut obj = InputObject::parse(FileId(file), &name, bytes)?;
     obj.from_archive = true;
     obj.archive_name = arch.name.clone();
     obj.compute_atoms(split_symbols);
+    if let Some(cache) = cache {
+        let key = crate::cache::PoiCache::content_key(&obj.bytes, split_symbols);
+        cache.store(&key, &obj);
+    }
     Ok(obj)
 }
 
