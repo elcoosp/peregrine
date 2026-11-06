@@ -55,11 +55,21 @@ each flag has a fixture".
 | `-unexported_symbols_list <file>` (exact-name subset) | ✅ | M3 | `e2e::m3_export_filters_shape_trie_and_symtab` (N_PEXT semantics) |
 | `-mark_dead_strippable_dylib` | ✅ | M3 | `opts::tests::m3_dylib_flags_shape_the_config` |
 | Mach-O dylib inputs (`.dylib` scan: install name + trie/symtab exports) | ✅ | M3 | `pgr_driver::scan_dylib`, `e2e::m3_exec_against_pgr_dylib_passes_the_pair_gate` |
-| `-framework` / `-weak_framework` / `-lazy_framework` / `-lazy_library` | ❌ (rejected, actionable) | later | `opts::LATER_FLAGS` |
-| `-filelist` | ❌ (rejected) | M5 | `opts::LATER_FLAGS` |
+| `.a` archives (ranlib `__.SYMDEF`/`/`/`__.SYMDEF_64`, BSD `#1/` + GNU `//` long names; lazy member pull) | ✅ | M5 | `pgr_format::archive` tests + proptests, `m5_archives::*` |
+| `-l <name>` finds static archives (`.a` after the dylib candidates) | ✅ | M5 | `m5_flags::m5_l_search_prefers_dylibs_over_archives`, `m5_archives::m5_l_search_finds_static_archives` |
+| `-all_load` | ✅ | M5 | `m5_archives::m5_all_load_pulls_every_member` |
+| `-force_load <archive>` | ✅ | M5 | `m5_archives::m5_force_load_pulls_only_the_named_archive` |
+| `-u <symbol>` pulls the archive member defining it | ✅ | M5 | `m5_archives::m5_u_symbol_pulls_its_member` |
+| `-dead_strip` / `-no_dead_strip` (D12 mark-sweep over D1 atoms) | ✅ | M5 | `m5_deadstrip::*` (e2e) + `pgr-core/tests/m5_deadstrip.rs` (roots: entry, `-u`, dylib exports, `__mod_init_func`, `S_ATTR_NO_DEAD_STRIP`) |
+| `__cstring` merging (D4; ld64-default-on) | ✅ | M5 | `m5_cstring::*` (symbol remap, section-relative pointer remap, dead-strip cooperation) |
+| `-filelist <path>[,<dir>]` | ✅ | M5 | `m5_flags::m5_filelist_expands_inputs_in_order` |
+| `-framework <name>` / `-F <dir>` (`.tbd`/dylib payloads) | ✅ | M5 | `m5_flags::m5_framework_search_finds_stub_dylibs` |
+| `-sectcreate <seg> <sect> <file>` | ✅ | M5 | `m5_flags::m5_sectcreate_places_file_contents` |
+| `-weak_framework` / `-lazy_framework` / `-lazy_library` | ❌ (rejected, actionable) | later | `opts::LATER_FLAGS` |
+| `-order_file` | ❌ (rejected) | M5 deferral (needs D1 ordering pass; flagged with the atomizer) | `opts::LATER_FLAGS` |
 | `-dylinker` (MH_DYLINKER outputs) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-sub_umbrella` / `-sub_library` (umbrella re-exports) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
-| `-dead_strip` / `-order_file` | ❌ (rejected) | M5 | `opts::LATER_FLAGS` |
+| `-ObjC` (archive member class pull) | ❌ | M6 (ObjC class/selector handling) | — |
 
 ## Linking semantics
 
