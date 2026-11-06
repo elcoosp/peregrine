@@ -1,8 +1,9 @@
-# Peregrine Benchmarks — M0/M1/M2/M3 Baselines
+# Peregrine Benchmarks — M0/M1/M2/M3/M4 Baselines
 
-Status: **M0–M3 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
+Status: **M0–M4 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
 end-to-end link baseline + architecture doc §10.3 M2 dynamic-link baseline +
-M3 export-trie gate "trie build < 10 ms for 10⁵ exports").
+M3 export-trie gate "trie build < 10 ms for 10⁵ exports" + M4 fused-emit
+byte-identity gate and its sandbox perf half).
 
 These numbers are **dev-sandbox baselines**, not Apple Silicon results. They
 exist to (a) prove the benchmark harness works end-to-end from day one and
@@ -34,6 +35,74 @@ do honest work.
 
 ```sh
 cargo bench -p pgr-driver
+```
+
+## Recorded baseline (M4, the speed pass — fused tile emit)
+
+The M4 milestone (architecture doc §10.3 row M4) rewrote Pass 4 as the
+**fused tile emit** (perf doc §4.4): parallel 16 KiB tiles copy the coalesced
+runs, apply relocations, encode chain words, place the `__LINKEDIT` chunks
+and hash the 4 KiB signature pages in **one pass over each byte**, where the
+reference body made five. The pre-fusion body stays in the tree verbatim
+(`build_image`); every bench records both, and the byte-identity gate
+(fused == reference) is asserted at bench setup and in the test suite.
+
+### Pass 4 isolated (`pgr-emit/emit`, new bench)
+
+Corpus: 16 objects × 512 symbols × 32 KiB text with branch + pointer-slot
+relocations; output ≈ 0.94 MiB, signed (page hashes included in the emit).
+
+| Bench | Median | Throughput | Notes |
+|---|---|---|---|
+| `pgr-emit/emit/reference_pass4` | **2.18 ms** | 441 MiB/s | the M1–M3 body: copy+patch, chains, chain-starts, `__LINKEDIT`, then **two** full-image SHA-256 passes (UUID derivation + final hashes) |
+| `pgr-emit/emit/fused_tile_pass4` | **1.59 ms** | 605 MiB/s | M4: tiles fuse copy+patch+chains+`__LINKEDIT`+hashing; only page 0 re-hashes after the UUID lands |
+| **Δ** | **1.37×** | | on 2 threads of a 2-core KVM guest; tile parallelism + one-pass-over-bytes scale with P-core count on the P0 rig |
+
+### Full pipeline (`pgr-driver`, fused vs reference on the same corpora)
+
+| Bench | Fused (M4) | Reference (pre-fusion) | Δ |
+|---|---|---|---|
+| `pgr-driver/link/small_4_objects` | 2.34 ms | 2.45 ms | 1.05× |
+| `pgr-driver/link/large_32_objects` | 172.1 ms | 174.7 ms | 1.01× |
+| `pgr-driver/link_dylib/small_4_objects_dylib` | 1.98 ms | 2.19 ms | 1.10× |
+| `pgr-driver/link_dylib/large_32_objects_dylib` | 33.8 ms | 37.3 ms | **1.11×** |
+| `pgr-driver/link_outputs/dylib_8_objects` | 18.1 ms | 18.1 ms | ~1× |
+| `pgr-driver/link_outputs/bundle_8_objects` | 17.9 ms | 18.1 ms | ~1× |
+
+How to read the M4 numbers:
+
+1. **Pass 4 is the milestone's unit of work** and it shows the full fusion
+   win (1.37×). The *full-pipeline* rows are dominated by serial Pass 2/3
+   (resolution + layout, deliberately unchanged at M4), which is why the
+   resolution-heavy static corpus (large_32: 4 096 external references per
+   object) moves only 1% — its wall time is Pass 2/3, not emit. The
+   bind-path corpora (65 536 chained bind slots per link) lean on Pass 4
+   and gain 10–11%.
+2. **Parallelism is observable but hardware-bound**: `PGR_JOBS=1` on the
+   large static corpus measures 179.0 ms vs 172.1 ms at the default
+   (2 threads) — Pass 1 + tile emit already beat the serial schedule on
+   two cores. The G1 gate (≥ 5× vs `ld64.lld` at 16 threads, ≥ 1.5× vs
+   ld-prime, single-threaded fraction ≤ 15% except flush, RSS ≤ 2.5×
+   output) needs the P0 rig; 2 threads cannot exhibit 16-thread scaling,
+   exactly like the M0–M3 hardware-bound numbers.
+3. **Byte-identity is the gate, not a hope**: `m4_fused_driver_output_is
+   _byte_identical_to_the_reference`, `m4_fused_matches_reference_on_m2_and
+   _m3_corpora`, the ten `pgr-emit/tests/m4_fused.rs` corpus shapes, and the
+   bench-setup assertions all compare the fused bytes against the preserved
+   reference emit — equality failures fail the build.
+4. **S1 writer pool** (4 writers, 8 MiB blocks, `set_len` extent
+   preallocation, file-order `pwrite`) replaced the single-writer flush;
+   byte-exactness is gated across block boundaries. The sandbox's writes
+   land in the page cache, so a wall-clock writer number would measure the
+   host, not the pool — the writer sweep (spike S1's writer-count/block-size
+   matrix) runs on the P0 rig against real storage.
+5. **D9/D10** land as measured defaults: the shared pool (`PGR_JOBS`
+   override, else `available_parallelism` on Linux hosts — the macOS
+   P-core default joins with the P0 rig, spike S4) and the parallel
+   pre-fault of the zero-page-backed output buffer.
+
+```sh
+cargo bench -p pgr-emit --bench emit
 ```
 
 ## Recorded baseline (M0, commit at v0.1.0)
@@ -174,4 +243,9 @@ full export trie over every defined external:
   flags of a small `xtask` so nightly runs can sweep corpus shapes.
 * Import-table canonical order (D7) can replace first-use order when the
   M4 tile scheduler needs it — the planner isolates that decision (see
-  `pgr-core/src/fixups.rs` module docs).
+  `pgr-core/src/fixups.rs` module docs). *Update, M4:* the tile scheduler
+  shipped without needing D7 — the import table is built in Pass 3 and the
+  chain words are read-only in Pass 4, so no cross-tile mutation exists;
+  D7 remains open for the M6 incremental work (insertion-stable ordinals).
+* M4 follow-ups for the P0 rig: writer-count/block-size sweep (S1 matrix),
+  P-core pool sizing (S4), PGO build, and the G1 parallel-efficiency gate.
