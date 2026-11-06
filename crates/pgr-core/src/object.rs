@@ -150,6 +150,49 @@ impl InputSection {
                 .unwrap_or(&[])
         }
     }
+
+    /// The raw relocation table (pre-pair-decode; M6 POI cache access).
+    pub(crate) fn raw_relocs(&self) -> &[RelocationInfo] {
+        &self.raw_relocs
+    }
+
+    /// Rebuilds a section from its decoded parts (M6 POI cache path).
+    pub(crate) fn from_parts(p: SectionParts) -> Self {
+        Self {
+            name: p.name,
+            segment: p.segment,
+            flags: p.flags,
+            align_log2: p.align_log2,
+            addr: p.addr,
+            data: p.data,
+            size: p.size,
+            zerofill: p.zerofill,
+            raw_relocs: p.raw_relocs,
+            relocs: Vec::new(),
+        }
+    }
+}
+
+/// The decoded parts of one input section (the POI cache's rebuild shape).
+pub(crate) struct SectionParts {
+    /// Section name.
+    pub name: String,
+    /// Owning segment name.
+    pub segment: String,
+    /// `S_*` flags.
+    pub flags: u32,
+    /// Alignment exponent.
+    pub align_log2: u32,
+    /// Section `addr` (LLVM single-segment convention).
+    pub addr: u64,
+    /// Byte range within the object.
+    pub data: core::ops::Range<u64>,
+    /// Virtual size.
+    pub size: u64,
+    /// True for `S_ZEROFILL`.
+    pub zerofill: bool,
+    /// Raw relocation table.
+    pub raw_relocs: Vec<RelocationInfo>,
 }
 
 /// One symbol table entry of a relocatable object, typed once (Pass 1).
@@ -195,6 +238,28 @@ impl InputSymbol {
     }
 }
 
+/// The decoded parts of one parsed object (the POI cache's rebuild shape).
+pub(crate) struct ObjectParts {
+    /// Command-line identity.
+    pub file: FileId,
+    /// File name.
+    pub name: String,
+    /// Input sections (raw relocations included).
+    pub sections: Vec<InputSection>,
+    /// Symbol table.
+    pub symbols: Vec<InputSymbol>,
+    /// Symbol names in table order.
+    pub symbol_names: Vec<Vec<u8>>,
+    /// D1 atom ranges per section.
+    pub atoms: Vec<Vec<core::ops::Range<u64>>>,
+    /// `MH_SUBSECTIONS_VIA_SYMBOLS`.
+    pub subsections_via_symbols: bool,
+    /// True for archive members.
+    pub from_archive: bool,
+    /// The archive the member came from.
+    pub archive_name: String,
+}
+
 /// A parsed relocatable object (Pass 1 arena).
 #[derive(Debug, Clone)]
 pub struct InputObject {
@@ -227,6 +292,24 @@ pub struct InputObject {
 }
 
 impl InputObject {
+    /// Rebuilds a parsed object from cached parts (M6 POI cache path).
+    /// The section tables carry their raw relocations; `finish` re-runs
+    /// exactly as on a fresh parse.
+    pub(crate) fn from_parts(p: ObjectParts) -> Self {
+        Self {
+            file: p.file,
+            name: p.name,
+            bytes: Vec::new(),
+            sections: p.sections,
+            symbols: p.symbols,
+            symbol_names: p.symbol_names,
+            from_archive: p.from_archive,
+            archive_name: p.archive_name,
+            subsections_via_symbols: p.subsections_via_symbols,
+            atoms: p.atoms,
+        }
+    }
+
     /// Parses one relocatable object.
     ///
     /// # Errors
