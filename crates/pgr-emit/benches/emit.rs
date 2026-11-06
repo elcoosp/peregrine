@@ -80,7 +80,7 @@ fn main() {
         ident: "pgr-emit-bench".into(),
         ..LinkConfig::default()
     };
-    let result = link(&inputs, &cfg).unwrap();
+    let result = link(&inputs, &[], &cfg).unwrap();
 
     // The gate precondition, asserted once at bench setup: fused == reference.
     let reference = pgr_emit::build_image(&result.layout, &result.objects).unwrap();
