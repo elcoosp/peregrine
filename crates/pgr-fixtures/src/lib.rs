@@ -1192,8 +1192,10 @@ fn page_hashes(
     out
 }
 
+pub mod archive;
 pub mod object;
 
+pub use archive::ArchiveBuilder;
 pub use object::{
     ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol, read_relocs, read_section, read_sym,
 };
