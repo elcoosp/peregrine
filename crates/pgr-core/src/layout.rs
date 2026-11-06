@@ -27,8 +27,8 @@ use pgr_format::consts::{
     BIND_SPECIAL_DYLIB_FLAT_LOOKUP, INDIRECT_SYMBOL_LOCAL, MH_BINDS_TO_WEAK, MH_TWOLEVEL,
     MH_WEAK_DEFINES, N_ABS, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K,
     PAGEZERO_SIZE_64, REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS,
-    S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR, S_SYMBOL_STUBS, S_ZEROFILL, SECTION_TYPE_MASK,
-    STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
+    S_CSTRING_LITERALS, S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR, S_SYMBOL_STUBS, S_ZEROFILL,
+    SECTION_TYPE_MASK, STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use rayon::prelude::*;
 
@@ -130,6 +130,14 @@ pub struct LinkConfig {
     pub unexported: Vec<Vec<u8>>,
     /// M3 `-mark_dead_strippable_dylib`: sets `MH_DEAD_STRIPPABLE_DYLIB`.
     pub dead_strippable: bool,
+    /// M5 `-dead_strip`: drop unreferenced atoms (D12; roots are the entry,
+    /// `-u` load symbols, all extern defs for dylibs/bundles,
+    /// `__mod_init_func` and `S_ATTR_NO_DEAD_STRIP` sections).
+    pub dead_strip: bool,
+    /// M5 `-u`/`-load` symbol names (raw bytes): liveness roots that also
+    /// seed the archive pull loop (a member defining one of these is
+    /// pulled even when nothing references it).
+    pub load_symbols: Vec<Vec<u8>>,
 }
 
 impl Default for LinkConfig {
@@ -155,6 +163,8 @@ impl Default for LinkConfig {
             exported_only: None,
             unexported: Vec::new(),
             dead_strippable: false,
+            dead_strip: false,
+            load_symbols: Vec::new(),
         }
     }
 }
@@ -466,11 +476,25 @@ fn scan_needs(
     objects: &[InputObject],
     res: &Resolution,
     interner: &Interner,
+    live: &crate::deadstrip::LiveSet,
 ) -> Result<SynthNeeds, LinkError> {
     let mut needs = SynthNeeds::default();
     for obj in objects {
-        for in_sect in &obj.sections {
+        for (si, in_sect) in obj.sections.iter().enumerate() {
             for r in &in_sect.relocs {
+                // Dead atoms contribute nothing (M5/D12): their references
+                // synthesize no slots and reject nothing. O(log atoms).
+                if live.is_active() {
+                    let ranges = obj.atoms_of(si);
+                    if !ranges.is_empty() {
+                        let idx = ranges
+                            .partition_point(|range| range.start <= u64::from(r.offset))
+                            .saturating_sub(1);
+                        if live.is_atom_dead(obj.file.0, si, ranges[idx].start) {
+                            continue;
+                        }
+                    }
+                }
                 let RelocTarget::Extern(id) = r.target else {
                     continue;
                 };
@@ -691,6 +715,10 @@ struct PlacedState {
     flat: Vec<FlatPiece>,
     /// (file, input section) → output vaddr base.
     addr_of: std::collections::HashMap<(u32, usize), u64>,
+    /// M5/D1: (file, input section) → sorted `(section-relative start,
+    /// output vaddr)` per atom piece. Empty when no atomization happened;
+    /// the resolution paths consult it for containment lookups.
+    atom_addr: std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
     /// Interned name id → output vaddr (all resolved definitions).
     def_addr: std::collections::BTreeMap<u32, u64>,
     /// Interned name id → GOT slot vaddr (M2, in `__got` order).
@@ -725,10 +753,13 @@ pub fn layout(
     // Constant-delta base: `__PAGEZERO` vmsize for executables, 0 for
     // dylibs/bundles (M3). Every address math derives from this.
     let image_base = cfg.filetype.image_base();
+    // M5/D12: the mark-sweep liveness (only with `-dead_strip`; identity is
+    // the `atoms_of` table, so atomization is implicit here).
+    let live = crate::deadstrip::compute(objects, res, interner, cfg);
     // ---- bucketing ---------------------------------------------------------
     let (mut buckets, mut bucket_of, fixup_slot_count) = bucket_inputs(objects, res)?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
-    let needs = scan_needs(objects, res, interner)?;
+    let needs = scan_needs(objects, res, interner, &live)?;
     // The fixups payload exists when *any* slot is planned: input pointer
     // slots (M1 rebases), synthesized GOT binds and POINTER_TO_GOT rebases.
     let has_fixups = fixup_slot_count > 0 || !needs.got.is_empty();
@@ -762,6 +793,7 @@ pub fn layout(
             chain_starts_size,
             &needs,
             has_fixups,
+            &live,
         )?;
         resolve_all(objects, &mut state, res, interner, cfg)?;
         let mut slots: Vec<FixupSlot> = Vec::new();
@@ -821,15 +853,13 @@ pub fn layout(
     };
 
     // ---- symbol table ---------------------------------------------------------
-    let mut symbols = build_symtab(
-        objects,
-        res,
-        interner,
-        &state.sections,
-        &state.addr_of,
-        &commons,
-        &visible,
-    );
+    let symtab_ctx = SymtabContext {
+        sections: &state.sections,
+        addr_of: &state.addr_of,
+        atom_addr: &state.atom_addr,
+        live: &live,
+    };
+    let mut symbols = build_symtab(objects, res, interner, &commons, &visible, &symtab_ctx);
     // `__mh_execute_header`: the image's own exported header symbol (ld64
     // and lld both emit it; the M2 trie lists it).
     // `link()` always interns the name; direct `layout()` callers without
@@ -1125,7 +1155,13 @@ pub fn layout(
     // The coalescing + D8 tables read the placed state before it moves into
     // the Layout.
     let runs = coalesce_runs(&state.sections);
-    let resolved = build_resolved_tables(objects, &state.addr_of, &state.def_addr, res);
+    let resolved = build_resolved_tables(
+        objects,
+        &state.addr_of,
+        &state.def_addr,
+        res,
+        &state.atom_addr,
+    );
 
     Ok(Layout {
         ident: cfg.ident.clone(),
@@ -1216,6 +1252,7 @@ fn build_resolved_tables(
     addr_of: &std::collections::HashMap<(u32, usize), u64>,
     def_addr: &std::collections::BTreeMap<u32, u64>,
     res: &Resolution,
+    atom_addr: &std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
 ) -> Vec<ResolvedFile> {
     // Commons resolve through the `__common` pieces; carry their final
     // addresses per (file, sym) so the flat tables cover every definition.
@@ -1234,8 +1271,11 @@ fn build_resolved_tables(
             let mut syms: Vec<u64> = vec![0; obj.symbols.len()];
             for (i, sym) in obj.symbols.iter().enumerate() {
                 if let Some(sect) = sym.section {
-                    if let Some(&base) = addr_of.get(&(obj.file.0, sect)) {
-                        syms[i] = base + sym.value;
+                    // M5/D1: atom-aware when the section split into pieces.
+                    if let Some(vaddr) =
+                        atom_or_section_addr(atom_addr, addr_of, obj.file.0, sect, sym.value)
+                    {
+                        syms[i] = vaddr;
                     }
                 }
             }
@@ -1253,14 +1293,48 @@ fn build_resolved_tables(
         .collect()
 }
 
+/// One `__cstring` literal instance (D4): a string atom of one input
+/// section, with the canonical instance it resolves to (itself when no
+/// earlier live copy exists). The piece list carries only canonical
+/// instances; every instance gets an `atom_addr` remap entry so references
+/// into duplicates land on the single output copy.
+#[derive(Debug, Clone)]
+pub struct CStringInstance {
+    /// Owning input file.
+    pub file: u32,
+    /// Input section index.
+    pub sect: usize,
+    /// Section-relative start of the string (the atom start).
+    pub start: u64,
+    /// Section-relative end (past the NUL).
+    pub end: u64,
+    /// Index of the canonical instance in the same vector.
+    pub canonical: usize,
+}
+
 /// Builds the per-bucket piece lists (offsets assigned later by `place`).
+/// With dead-strip active (M5/D12), every live atom becomes one piece and
+/// dead atoms are dropped; without it the M1–M4 shape (one piece per input
+/// section) is preserved byte-for-byte. `S_CSTRING_LITERALS` buckets always
+/// take the D4 path: one piece per unique string (first live instance
+/// canonical), every instance recorded for the remap table.
+#[allow(clippy::type_complexity)]
 fn build_bucket_pieces(
     objects: &[InputObject],
     buckets: &BucketTable,
     bucket_of: &[Vec<usize>],
     commons: &[(StringId, &Def)],
-) -> Result<Vec<Vec<Piece>>, LinkError> {
+    live: &crate::deadstrip::LiveSet,
+) -> Result<(Vec<Vec<Piece>>, Vec<(usize, Vec<CStringInstance>)>), LinkError> {
     let mut pieces_of_bucket: Vec<Vec<Piece>> = vec![Vec::new(); buckets.len()];
+    let mut cstring_instances: Vec<(usize, Vec<CStringInstance>)> = Vec::new();
+    // D4 dedup: per cstring bucket, content → canonical instance index.
+    // Hash-map lookup keeps the pass linear (the M4 discipline: no O(n²)
+    // scans).
+    let mut cstring_dedup: std::collections::HashMap<
+        usize,
+        std::collections::HashMap<Vec<u8>, usize>,
+    > = std::collections::HashMap::new();
     for obj in objects {
         for (si, in_sect) in obj.sections.iter().enumerate() {
             let bi = bucket_of
@@ -1271,23 +1345,119 @@ fn build_bucket_pieces(
             if bi == usize::MAX {
                 continue;
             }
-            pieces_of_bucket[bi].push(Piece {
-                file: obj.file,
-                in_sect: si,
-                in_range: in_sect.data.clone(),
-                offset: 0,
-                size: in_sect.size,
-                align_log2: in_sect.align_log2,
-                zerofill: false,
-                common_name: None,
-                patches: Vec::new(),
-                fixup_slots: Vec::new(),
-                synth: None,
-            });
+            let is_cstring =
+                !in_sect.zerofill && in_sect.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
+            if is_cstring {
+                // D4: collect this section's string instances; the bucket's
+                // pieces are the canonical (first live) copy of each unique
+                // string. Deterministic: files in FileId order, strings in
+                // offset order.
+                let bucket = &mut pieces_of_bucket[bi];
+                if !cstring_instances.iter().any(|(b, _)| *b == bi) {
+                    cstring_instances.push((bi, Vec::new()));
+                }
+                let Some((_, list)) = cstring_instances.iter_mut().find(|(b, _)| *b == bi) else {
+                    unreachable!("cstring instance list was just inserted");
+                };
+                for range in obj.atoms_of(si) {
+                    if live.is_active() && live.is_atom_dead(obj.file.0, si, range.start) {
+                        list.push(CStringInstance {
+                            file: obj.file.0,
+                            sect: si,
+                            start: range.start,
+                            end: range.end,
+                            canonical: usize::MAX, // dead: no canonical
+                        });
+                        continue;
+                    }
+                    let content = obj.bytes[in_sect.data.start as usize + range.start as usize
+                        ..in_sect.data.start as usize + range.end as usize]
+                        .to_vec();
+                    let per_bucket = cstring_dedup.entry(bi).or_default();
+                    match per_bucket.get(&content).copied() {
+                        Some(ci) => list.push(CStringInstance {
+                            file: obj.file.0,
+                            sect: si,
+                            start: range.start,
+                            end: range.end,
+                            canonical: ci,
+                        }),
+                        None => {
+                            // New unique string: emit the canonical piece.
+                            per_bucket.insert(content, list.len());
+                            list.push(CStringInstance {
+                                file: obj.file.0,
+                                sect: si,
+                                start: range.start,
+                                end: range.end,
+                                canonical: list.len(),
+                            });
+                            bucket.push(Piece {
+                                file: obj.file,
+                                in_sect: si,
+                                in_range: in_sect.data.start + range.start
+                                    ..in_sect.data.start + range.end,
+                                offset: 0,
+                                size: range.end - range.start,
+                                align_log2: in_sect.align_log2,
+                                zerofill: false,
+                                common_name: None,
+                                patches: Vec::new(),
+                                fixup_slots: Vec::new(),
+                                synth: None,
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+            // Zero-fill inputs keep the M1–M4 whole-section piece (their
+            // bucket is S_ZEROFILL; nothing is copied — only the size
+            // matters). Atomization is a content-section concern.
+            if in_sect.zerofill || !live.is_active() {
+                pieces_of_bucket[bi].push(Piece {
+                    file: obj.file,
+                    in_sect: si,
+                    in_range: in_sect.data.clone(),
+                    offset: 0,
+                    size: in_sect.size,
+                    align_log2: in_sect.align_log2,
+                    zerofill: false,
+                    common_name: None,
+                    patches: Vec::new(),
+                    fixup_slots: Vec::new(),
+                    synth: None,
+                });
+                continue;
+            }
+            // Atom granularity: one piece per live atom (D1 splits at
+            // symbol boundaries; other objects stay whole-section).
+            for range in obj.atoms_of(si) {
+                if live.is_atom_dead(obj.file.0, si, range.start) {
+                    continue;
+                }
+                pieces_of_bucket[bi].push(Piece {
+                    file: obj.file,
+                    in_sect: si,
+                    in_range: in_sect.data.start + range.start..in_sect.data.start + range.end,
+                    offset: 0,
+                    size: range.end - range.start,
+                    align_log2: in_sect.align_log2,
+                    zerofill: false,
+                    common_name: None,
+                    patches: Vec::new(),
+                    fixup_slots: Vec::new(),
+                    synth: None,
+                });
+            }
         }
     }
-    // Commons as zero-fill pieces (caller passes name-sorted order).
+    // Commons as zero-fill pieces (caller passes name-sorted order); dead
+    // commons (M5) are dropped.
     for (id, def) in commons {
+        if live.is_common_dead(*id) {
+            continue;
+        }
         let Some(bi) = buckets
             .iter()
             .position(|(seg, name, _, _)| seg == "__DATA" && name == "__common")
@@ -1310,7 +1480,7 @@ fn build_bucket_pieces(
             synth: None,
         });
     }
-    Ok(pieces_of_bucket)
+    Ok((pieces_of_bucket, cstring_instances))
 }
 
 /// The arm64 stub prologue before patching: `adrp x16, <page>;
@@ -1334,8 +1504,10 @@ fn place(
     chain_starts_size: usize,
     needs: &SynthNeeds,
     has_fixups: bool,
+    live: &crate::deadstrip::LiveSet,
 ) -> Result<PlacedState, LinkError> {
-    let mut pieces_of_bucket = build_bucket_pieces(objects, buckets, bucket_of, commons)?;
+    let (mut pieces_of_bucket, cstring_instances) =
+        build_bucket_pieces(objects, buckets, bucket_of, commons, live)?;
 
     // ---- M2 synthetic pieces: __got slots + __stubs entries ------------------
     // First-use order (scan_needs) determines slot order, matching the
@@ -1527,10 +1699,16 @@ fn place(
     let mut flat: Vec<FlatPiece> = Vec::new();
     let mut addr_of: std::collections::HashMap<(u32, usize), u64> =
         std::collections::HashMap::new();
+    let mut atom_addr: std::collections::HashMap<(u32, usize), Vec<(u64, u64)>> =
+        std::collections::HashMap::new();
+    // D4: canonical cstring piece addresses, keyed (file, sect, start).
+    let mut cstring_out: std::collections::HashMap<(u32, usize, u64), u64> =
+        std::collections::HashMap::new();
     let mut def_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut got_slot_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut stub_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     for (si, s) in sections.iter().enumerate() {
+        let is_cstring = s.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
         for (pi, p) in s.pieces.iter().enumerate() {
             let addr = s.vm_addr + p.offset;
             flat.push(FlatPiece {
@@ -1539,8 +1717,34 @@ fn place(
                 addr,
                 piece: p.clone(),
             });
-            if !p.zerofill {
-                addr_of.insert((p.file.0, p.in_sect), addr);
+            if !p.zerofill && p.synth.is_none() && p.in_sect != usize::MAX {
+                // First piece wins: `addr_of` stays the section base even
+                // when the section split into atom pieces (M5/D1).
+                addr_of.entry((p.file.0, p.in_sect)).or_insert(addr);
+                let data_start = objects
+                    .get(p.file.0 as usize)
+                    .and_then(|o| o.sections.get(p.in_sect))
+                    .map(|sect| sect.data.start)
+                    .unwrap_or(0);
+                if is_cstring {
+                    // D4: the canonical instance's output address.
+                    cstring_out.insert(
+                        (
+                            p.file.0,
+                            p.in_sect,
+                            p.in_range.start.saturating_sub(data_start),
+                        ),
+                        addr,
+                    );
+                } else if live.is_active() {
+                    // Atom identity: section-relative input start → output
+                    // vaddr. The containment lookups (defs, section-target
+                    // relocs) read this table.
+                    atom_addr
+                        .entry((p.file.0, p.in_sect))
+                        .or_default()
+                        .push((p.in_range.start.saturating_sub(data_start), addr));
+                }
             }
             if let Some(id) = p.common_name {
                 def_addr.insert(id.0, addr);
@@ -1557,11 +1761,34 @@ fn place(
             }
         }
     }
+    // D4 remap entries: every live cstring instance resolves to its
+    // canonical copy's address plus the in-string offset.
+    for (_bi, instances) in &cstring_instances {
+        for inst in instances {
+            if inst.canonical == usize::MAX {
+                continue; // dead under dead-strip: nothing references it
+            }
+            let canon = &instances[inst.canonical];
+            let Some(&canon_addr) = cstring_out.get(&(canon.file, canon.sect, canon.start)) else {
+                return Err(LinkError::Internal {
+                    message: "cstring canonical piece missing from placement".into(),
+                });
+            };
+            atom_addr
+                .entry((inst.file, inst.sect))
+                .or_default()
+                .push((inst.start, canon_addr + (inst.start - canon.start)));
+        }
+    }
+    for entries in atom_addr.values_mut() {
+        entries.sort_unstable_by_key(|(start, _)| *start);
+    }
     Ok(PlacedState {
         sections,
         segments,
         flat,
         addr_of,
+        atom_addr,
         def_addr,
         got_slot_addr,
         stub_addr,
@@ -1577,18 +1804,21 @@ fn resolve_all(
     cfg: &LinkConfig,
 ) -> Result<(), LinkError> {
     // Definition addresses: commons already resolved; add section defs.
+    // M5/D1: when the defining section split into atom pieces, the def's
+    // address is its containing atom's output address plus the inner offset
+    // (dead atoms carry no entry — nothing live references them).
     let mut def_addr: std::collections::BTreeMap<u32, u64> = state.def_addr.clone();
     for (id, def) in res.definitions() {
-        if let Some(sect) = def.section {
-            let base =
-                state
-                    .addr_of
-                    .get(&(def.file.0, sect))
-                    .copied()
-                    .ok_or(LinkError::Internal {
-                        message: "defining section was not placed".into(),
-                    })?;
-            def_addr.insert(id.0, base + def.value);
+        if let Some(sect) = def.section
+            && let Some(vaddr) = atom_or_section_addr(
+                &state.atom_addr,
+                &state.addr_of,
+                def.file.0,
+                sect,
+                def.value,
+            )
+        {
+            def_addr.insert(id.0, vaddr);
         }
     }
 
@@ -1611,7 +1841,7 @@ fn resolve_all(
     // §3 D8). The relocation scan below reads these flat arrays instead of
     // walking `addr_of`/`def_addr` maps per relocation — one file-local
     // load replaces the three dependent map hops.
-    let resolved = build_resolved_tables(objects, &state.addr_of, &def_addr, res);
+    let resolved = build_resolved_tables(objects, &state.addr_of, &def_addr, res, &state.atom_addr);
 
     // Pass A: every piece except stubs (stubs need the GOT slot addresses
     // that this pass computes).
@@ -1667,6 +1897,7 @@ fn resolve_all(
                     res,
                     cfg,
                     resolved: &resolved,
+                    atom_addr: &state.atom_addr,
                 };
                 for r in &in_sect.relocs {
                     resolve_reloc(obj, in_sect, r, addr, &space, &mut patches, &mut slots)?;
@@ -1738,6 +1969,10 @@ struct AddrSpace<'a> {
     /// scan reads for every symbol/section target — the M1–M3 map walks
     /// (`addr_of`/`def_addr`) are gone from this hot path.
     resolved: &'a [ResolvedFile],
+    /// M5/D1: per-(file, section) atom `((section-relative start, vaddr)`
+    /// tables. Empty when no atomization happened — the hot path stays
+    /// map-free for the M1–M4 shapes.
+    atom_addr: &'a std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
 }
 
 /// The bind library ordinal for an external reference (M2): the two-level
@@ -1753,6 +1988,29 @@ fn bind_lib_ordinal(id: StringId, space: &AddrSpace<'_>) -> Result<u8, LinkError
         });
     }
     Ok(BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8)
+}
+
+/// The output vaddr of `value` inside `(file, sect)`: atom containment when
+/// the section split into atom pieces (M5/D1), the section base plus value
+/// otherwise. `None` when the section was not placed or (under atomization)
+/// the containing atom is dead.
+fn atom_or_section_addr(
+    atom_addr: &std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
+    addr_of: &std::collections::HashMap<(u32, usize), u64>,
+    file: u32,
+    sect: usize,
+    value: u64,
+) -> Option<u64> {
+    if let Some(atoms) = atom_addr.get(&(file, sect)) {
+        // Containment with clamping (references into padding keep the tail
+        // atom alive — the same rule the mark phase applies).
+        let idx = atoms
+            .partition_point(|(start, _)| *start <= value)
+            .saturating_sub(1);
+        let (start, out) = atoms.get(idx).copied()?;
+        return Some(out + (value - start));
+    }
+    addr_of.get(&(file, sect)).map(|base| base + value)
 }
 
 /// Resolves one relocation into a static patch or a fixup slot.
@@ -1771,7 +2029,7 @@ fn resolve_reloc(
         RelocKind::Unsigned => {
             let at = in_sect.data.start as usize + r.offset as usize;
             let addend = read_slot_i64(&obj.bytes, at)?;
-            match lookup_opt(obj, r.target, space)? {
+            match lookup_opt(obj, r.target, addend, space)? {
                 Some(target) => {
                     let value = (target as i64)
                         .checked_add(addend)
@@ -1807,7 +2065,7 @@ fn resolve_reloc(
             }
         }
         RelocKind::Page21 { addend } => {
-            let target = lookup(obj, r.target, space)?
+            let target = lookup(obj, r.target, addend, space)?
                 .checked_add_signed(addend)
                 .ok_or(LinkError::Internal {
                     message: "page21 target overflow".into(),
@@ -1819,7 +2077,7 @@ fn resolve_reloc(
             });
         }
         RelocKind::PageOff12 { addend } => {
-            let target = lookup(obj, r.target, space)?
+            let target = lookup(obj, r.target, addend, space)?
                 .checked_add_signed(addend)
                 .ok_or(LinkError::Internal {
                     message: "pageoff12 target overflow".into(),
@@ -1895,7 +2153,7 @@ fn resolve_reloc(
             slots.push((r.offset, FixupKind::Rebase { target_vaddr: slot }));
         }
         RelocKind::Branch26 => {
-            let target = match lookup_opt(obj, r.target, space)? {
+            let target = match lookup_opt(obj, r.target, 0, space)? {
                 Some(t) => t,
                 None => {
                     // Dylib call: branch through the synthesized stub.
@@ -1937,8 +2195,8 @@ fn resolve_reloc(
             });
         }
         RelocKind::Subtractor { minuend } => {
-            let minuend_v = lookup(obj, minuend, space)?;
-            let subtrahend_v = lookup(obj, r.target, space)?;
+            let minuend_v = lookup(obj, minuend, 0, space)?;
+            let subtrahend_v = lookup(obj, r.target, 0, space)?;
             let at = in_sect.data.start as usize + r.offset as usize;
             let addend = read_slot_i64(&obj.bytes, at)?;
             patches.push(PatchOp::Write64 {
@@ -1967,12 +2225,18 @@ fn read_slot_i64(bytes: &[u8], at: usize) -> Result<i64, LinkError> {
 /// resolve nowhere (dylib exports, dynamic lookups) yield `None` — the
 /// caller decides between the bind path and an error.
 ///
+/// `addend` is the relocation's in-section target offset: for section
+/// targets under M5 atomization the containing atom of `addend` supplies
+/// the base (its output address minus its input start), so the caller's
+/// `+ addend` lands on the compacted address.
+///
 /// M4 (D8): reads the file-local `resolved[]` array — `res.def(id)` gives
 /// the defining `(file, sym)` hop, then one indexed load — instead of a
 /// global map walk per relocation.
 fn lookup_opt(
     obj: &InputObject,
     target: RelocTarget,
+    addend: i64,
     space: &AddrSpace<'_>,
 ) -> Result<Option<u64>, LinkError> {
     match target {
@@ -1992,6 +2256,28 @@ fn lookup_opt(
             None => Ok(None),
         },
         RelocTarget::Section(idx) => {
+            if let Some(atoms) = space.atom_addr.get(&(obj.file.0, idx)) {
+                // Atom containment (M5/D1): the base compensates for the
+                // dead atoms stripped before this one.
+                let off = u64::try_from(addend).map_err(|_| LinkError::Layout {
+                    message: format!(
+                        "negative addend ({addend}) into an atomized section of {}",
+                        obj.name
+                    ),
+                })?;
+                let at = atoms
+                    .partition_point(|(start, _)| *start <= off)
+                    .saturating_sub(1);
+                if let Some((start, out)) = atoms.get(at) {
+                    return Ok(Some(out.wrapping_sub(*start)));
+                }
+                return Err(LinkError::Internal {
+                    message: format!(
+                        "local reference into a dead-stripped region of {} (section {idx}, \n                         offset {off:#x})",
+                        obj.name
+                    ),
+                });
+            }
             match space
                 .resolved
                 .get(obj.file.0 as usize)
@@ -2010,8 +2296,13 @@ fn lookup_opt(
 }
 
 /// Looks up a relocation target that *must* resolve in-image.
-fn lookup(obj: &InputObject, target: RelocTarget, space: &AddrSpace<'_>) -> Result<u64, LinkError> {
-    lookup_opt(obj, target, space)?.ok_or(LinkError::Symbol {
+fn lookup(
+    obj: &InputObject,
+    target: RelocTarget,
+    addend: i64,
+    space: &AddrSpace<'_>,
+) -> Result<u64, LinkError> {
+    lookup_opt(obj, target, addend, space)?.ok_or(LinkError::Symbol {
         name: match target {
             RelocTarget::Extern(id) => space.interner.name(id),
             RelocTarget::Section(_) => String::new(),
@@ -2027,6 +2318,15 @@ fn lookup(obj: &InputObject, target: RelocTarget, space: &AddrSpace<'_>) -> Resu
     })
 }
 
+/// The tables the symtab builder reads: the placed sections and the M5
+/// address/liveness structures (D1/D4 containment, D12 filtering).
+struct SymtabContext<'a> {
+    sections: &'a [PlacedSection],
+    addr_of: &'a std::collections::HashMap<(u32, usize), u64>,
+    atom_addr: &'a std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
+    live: &'a crate::deadstrip::LiveSet,
+}
+
 /// Builds the output symbol table: locals (file order), ext defs (file
 /// order), commons (name order); `n_sect` remapped to output sections.
 /// M3: hidden externals (export filters) become private externals
@@ -2036,11 +2336,11 @@ fn build_symtab(
     objects: &[InputObject],
     res: &Resolution,
     interner: &Interner,
-    sections: &[PlacedSection],
-    addr_of: &std::collections::HashMap<(u32, usize), u64>,
     commons: &[(StringId, &Def)],
     visible: &dyn Fn(&[u8]) -> bool,
+    ctx: &SymtabContext<'_>,
 ) -> Vec<OutputSymbol> {
+    let (sections, addr_of, atom_addr, live) = (ctx.sections, ctx.addr_of, ctx.atom_addr, ctx.live);
     // Output section lookup by (file, input section): (index, base).
     let mut sect_of: std::collections::HashMap<(u32, usize), usize> =
         std::collections::HashMap::new();
@@ -2051,6 +2351,26 @@ fn build_symtab(
             }
         }
     }
+    // M5/D1+D4: atom- and cstring-aware address of a symbol (containment in
+    // the live/merged piece tables; the section base plus value otherwise).
+    let sym_addr = |obj: &InputObject, sect: usize, value: u64| -> Option<u64> {
+        atom_or_section_addr(atom_addr, addr_of, obj.file.0, sect, value)
+    };
+    // Symbol-liveness (M5/D12): a section-defined symbol dies with its
+    // containing atom (O(log atoms) containment).
+    let sym_live = |obj: &InputObject, sym: &crate::object::InputSymbol| -> bool {
+        !live.is_active()
+            || sym.section.is_none_or(|sect| {
+                let ranges = obj.atoms_of(sect);
+                if ranges.is_empty() {
+                    return true;
+                }
+                let idx = ranges
+                    .partition_point(|r| r.start <= sym.value)
+                    .saturating_sub(1);
+                !live.is_atom_dead(obj.file.0, sect, ranges[idx].start)
+            })
+    };
     // Locals with their (file, sym) order key (hidden extdefs merge in).
     let mut locals: Vec<((u32, u32), OutputSymbol)> = Vec::new();
     let mut hidden: Vec<((u32, u32), OutputSymbol)> = Vec::new();
@@ -2063,11 +2383,11 @@ fn build_symtab(
             if sym.stab || sym.external {
                 continue;
             }
-            match sym
-                .section
-                .and_then(|sect| addr_of.get(&(obj.file.0, sect)).copied())
-            {
-                Some(base) => {
+            if !sym_live(obj, sym) {
+                continue;
+            }
+            match sym.section.and_then(|sect| sym_addr(obj, sect, sym.value)) {
+                Some(value) => {
                     let osect = sym
                         .section
                         .and_then(|sect| sect_of.get(&(obj.file.0, sect)).copied());
@@ -2078,7 +2398,7 @@ fn build_symtab(
                             n_type: N_SECT,
                             n_sect: osect.map_or(0, |i| (i + 1) as u8),
                             n_desc: 0,
-                            value: base + sym.value,
+                            value,
                             external: false,
                         },
                     ));
@@ -2106,7 +2426,16 @@ fn build_symtab(
     defs.sort_by_key(|(d, _)| (d.file, d.sym));
     for (def, id) in defs {
         let Some(sect) = def.section else { continue };
-        let Some(&base) = addr_of.get(&(def.file.0, sect)) else {
+        let Some(obj) = objects.get(def.file.0 as usize) else {
+            continue;
+        };
+        // Dead definitions (M5/D12) leave the symtab and the trie.
+        if let Some(sym) = obj.symbols.get(def.sym)
+            && !sym_live(obj, sym)
+        {
+            continue;
+        }
+        let Some(value) = sym_addr(obj, sect, def.value) else {
             continue;
         };
         let osect = sect_of
@@ -2122,7 +2451,7 @@ fn build_symtab(
                 (osect + 1) as u8
             },
             n_desc: if def.weak { N_WEAK_DEF } else { 0 },
-            value: base + def.value,
+            value,
             external: true,
         };
         if visible(interner.bytes(id)) {
