@@ -12,7 +12,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -28,6 +28,7 @@ sha2 = "0.10"
 object = { version = "0.37", default-features = false, features = ["read"] }
 proptest = "1"
 criterion = { version = "0.7", default-features = false, features = ["html_reports"] }
+rayon = "1"
 
 # Workspace-wide lint policy (Peregrine hot-path rules, perf doc §5):
 #   * `unsafe` is forbidden everywhere at M0. When `pgr-emit`/`pgr-format` later
