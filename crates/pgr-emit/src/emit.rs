@@ -3,6 +3,15 @@
 //! relocations in place, then the chained-fixup words land in their slots
 //! and the `__LINKEDIT` chunks are assembled. Deterministic by construction:
 //! the whole image is a pure function of the plan and the inputs.
+//!
+//! Two bodies share this module's chunk builders:
+//!
+//! * [`build_image`] — the M1–M3 **reference**: five serial sub-passes over
+//!   the buffer. Kept verbatim: the M4 correctness gate is byte-identity
+//!   against this function (architecture doc §10.3 row M4).
+//! * `pgr_emit::tile::build_image_fused` — the M4 **fused tile emit**: one
+//!   parallel pass over 16 KiB tiles (copy runs → patches → chain words →
+//!   blobs → page hashes), perf doc §4.4.
 
 use crate::EmitError;
 use crate::reloc;
@@ -142,6 +151,31 @@ fn put_chunk(buf: &mut [u8], at: u64, data: &[u8], what: &str) -> Result<(), Emi
     Ok(())
 }
 
+/// The output symbol-table chunk bytes (`n_strx` from the per-symbol
+/// offsets table). One builder shared by the reference emit and the fused
+/// tile emit — the M4 byte-identity gate depends on the two never diverging.
+pub(crate) fn symtab_bytes(layout: &Layout) -> Vec<u8> {
+    let mut sym_bytes = Vec::with_capacity(layout.symbols.len() * 16);
+    for (sym, strx) in layout.symbols.iter().zip(&layout.str_offsets) {
+        sym_bytes.extend_from_slice(&strx.to_le_bytes());
+        sym_bytes.push(sym.n_type);
+        sym_bytes.push(sym.n_sect);
+        sym_bytes.extend_from_slice(&sym.n_desc.to_le_bytes());
+        sym_bytes.extend_from_slice(&sym.value.to_le_bytes());
+    }
+    sym_bytes
+}
+
+/// The indirect symbol table chunk bytes (shared builder, see
+/// [`symtab_bytes`]).
+pub(crate) fn indirect_bytes(layout: &Layout) -> Vec<u8> {
+    let mut indirect = Vec::with_capacity(layout.indirect_syms.len() * 4);
+    for entry in &layout.indirect_syms {
+        indirect.extend_from_slice(&entry.to_le_bytes());
+    }
+    indirect
+}
+
 /// Assembles the `__LINKEDIT` chunks in the fixed §8.2 order.
 fn write_linkedit(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     let le = &layout.linkedit;
@@ -162,23 +196,15 @@ fn write_linkedit(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
             "function starts",
         )?;
     }
-    // Symbol table: n_strx comes from the per-symbol offsets table.
-    let mut sym_bytes = Vec::with_capacity(layout.symbols.len() * 16);
-    for (sym, strx) in layout.symbols.iter().zip(&layout.str_offsets) {
-        sym_bytes.extend_from_slice(&strx.to_le_bytes());
-        sym_bytes.push(sym.n_type);
-        sym_bytes.push(sym.n_sect);
-        sym_bytes.extend_from_slice(&sym.n_desc.to_le_bytes());
-        sym_bytes.extend_from_slice(&sym.value.to_le_bytes());
-    }
-    put_chunk(buf, le.sym_off, &sym_bytes, "symbol table")?;
+    put_chunk(buf, le.sym_off, &symtab_bytes(layout), "symbol table")?;
     put_chunk(buf, le.str_off, &layout.strtab, "string table")?;
     if le.indirect_size > 0 {
-        let mut indirect = Vec::with_capacity(le.indirect_size);
-        for entry in &layout.indirect_syms {
-            indirect.extend_from_slice(&entry.to_le_bytes());
-        }
-        put_chunk(buf, le.indirect_off, &indirect, "indirect symbol table")?;
+        put_chunk(
+            buf,
+            le.indirect_off,
+            &indirect_bytes(layout),
+            "indirect symbol table",
+        )?;
     }
     Ok(())
 }
