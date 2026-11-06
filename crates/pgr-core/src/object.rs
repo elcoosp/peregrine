@@ -171,6 +171,8 @@ pub struct InputSymbol {
     pub weak_ref: bool,
     /// Common-symbol alignment exponent (`GET_COMM_ALIGN`) when tentative.
     pub common_align: Option<u32>,
+    /// `N_ALT_ENTRY` (n_desc): merges into the preceding atom (M5/D1).
+    pub alt_entry: bool,
 }
 
 impl InputSymbol {
@@ -208,6 +210,20 @@ pub struct InputObject {
     pub symbols: Vec<InputSymbol>,
     /// Symbol names in table order (drained into the global interner).
     symbol_names: Vec<Vec<u8>>,
+    /// M5: true when this object is an archive member (its definitions rank
+    /// as [`crate::resolve::Rank::ArchiveStrong`]/[`crate::resolve::Rank::ArchiveWeak`]
+    /// and lose to direct command-line objects).
+    pub from_archive: bool,
+    /// The archive this member came from (diagnostics only; empty for
+    /// direct inputs).
+    pub archive_name: String,
+    /// `MH_SUBSECTIONS_VIA_SYMBOLS` (D1): sections split at symbol
+    /// boundaries.
+    pub subsections_via_symbols: bool,
+    /// D1 atom table: per input section, the atom ranges (section-relative,
+    /// sorted). Empty when [`Self::compute_atoms`] was not run or the header
+    /// flag is absent.
+    pub atoms: Vec<Vec<core::ops::Range<u64>>>,
 }
 
 impl InputObject {
@@ -289,8 +305,83 @@ impl InputObject {
             sections,
             symbols,
             symbol_names: names,
+            from_archive: false,
+            archive_name: String::new(),
+            subsections_via_symbols: header.flags & pgr_format::consts::MH_SUBSECTIONS_VIA_SYMBOLS
+                != 0,
+            atoms: Vec::new(),
         };
         Ok(obj)
+    }
+
+    /// D1 atomization (M5): fills the atom table for every section —
+    /// `S_CSTRING_LITERALS` sections split at their NUL terminators (D4),
+    /// `MH_SUBSECTIONS_VIA_SYMBOLS` sections at symbol boundaries (D1,
+    /// `N_ALT_ENTRY` merges into the preceding atom; only when the link
+    /// dead-strips — merging needs only the string split), everything else
+    /// stays one whole-section atom. A pure function of the parsed input.
+    pub fn compute_atoms(&mut self, split_symbols: bool) {
+        self.atoms = Vec::with_capacity(self.sections.len());
+        for sect in self.sections.iter() {
+            if sect.zerofill || sect.size == 0 {
+                self.atoms.push(Vec::new());
+                continue;
+            }
+            if sect.flags & pgr_format::consts::SECTION_TYPE_MASK
+                == pgr_format::consts::S_CSTRING_LITERALS
+            {
+                // D4: one atom per NUL-terminated literal (an unterminated
+                // tail forms one string — malformed input stays linkable).
+                let data = &self.bytes[sect.data.start as usize..sect.data.end as usize];
+                let mut ranges: Vec<core::ops::Range<u64>> = Vec::new();
+                let mut i = 0u64;
+                while i < sect.size {
+                    let end = data[i as usize..]
+                        .iter()
+                        .position(|&b| b == 0)
+                        .map_or(sect.size, |p| i + p as u64 + 1);
+                    if end > i {
+                        ranges.push(i..end);
+                    }
+                    i = end;
+                }
+                self.atoms.push(ranges);
+                continue;
+            }
+            if !self.subsections_via_symbols || !split_symbols {
+                self.atoms.push(core::iter::once(0..sect.size).collect());
+                continue;
+            }
+            let mut starts: Vec<u64> = vec![0];
+            for sym in &self.symbols {
+                if sym.alt_entry || sym.stab {
+                    continue;
+                }
+                if sym.section == Some(self.atoms.len()) && sym.value > 0 && sym.value < sect.size {
+                    starts.push(sym.value);
+                }
+            }
+            starts.sort_unstable();
+            starts.dedup();
+            let mut ranges: Vec<core::ops::Range<u64>> = Vec::with_capacity(starts.len());
+            for (i, &s) in starts.iter().enumerate() {
+                let end = starts.get(i + 1).copied().unwrap_or(sect.size);
+                if end > s {
+                    ranges.push(s..end);
+                }
+            }
+            if ranges.is_empty() {
+                ranges.push(0..sect.size);
+            }
+            self.atoms.push(ranges);
+        }
+    }
+
+    /// The atom ranges of one section (borrowed — the table is always
+    /// materialized by [`Self::compute_atoms`]).
+    #[must_use]
+    pub fn atoms_of(&self, sect: usize) -> &[core::ops::Range<u64>] {
+        self.atoms.get(sect).map_or(&[][..], Vec::as_slice)
     }
 
     /// True when this object's symbol table is big enough to split across
@@ -373,6 +464,7 @@ impl InputObject {
                 weak_def: raw.n_desc & N_WEAK_DEF != 0,
                 weak_ref: raw.n_desc & N_WEAK_REF != 0,
                 common_align,
+                alt_entry: raw.n_desc & pgr_format::consts::N_ALT_ENTRY != 0,
             });
         }
         Ok((symbols, names))
@@ -420,6 +512,15 @@ impl InputObject {
     #[doc(hidden)]
     pub fn take_symbol_names(&mut self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.symbol_names)
+    }
+
+    /// Borrows the raw symbol names (pre-intern). The S7 pull fixpoint reads
+    /// them without draining ([`InputObject::take_symbol_names`] hands the
+    /// batch to the interner later).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn peek_symbol_names(&self) -> &[Vec<u8>] {
+        &self.symbol_names
     }
 
     /// Patches interned ids and decodes relocation pairs (Pass 1 phase C).
