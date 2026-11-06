@@ -1,15 +1,17 @@
-//! Peregrine core pipeline (M1): input parsing, interning, resolution,
+//! Peregrine core pipeline: input parsing, interning, resolution,
 //! layout and fixup planning — TDD §5 Passes 1–3 and §6/§7 data structures.
 //!
-//! M1 scope ("static hello-world"): direct `.o` inputs only, single-threaded
-//! pass bodies with the *API shape* the M4 parallel machinery will drive —
-//! the per-pass arenas and total-ordered sorts are already in place, so the
-//! hash-bin interner (§6.1), CAS symbol table (§6.2) and two-level prefix
-//! scan (§6.4) swap in without touching callers.
+//! M1 scope ("static hello-world") grew through M3 (dynamic executables,
+//! dylibs, bundles). M4 (architecture doc §10.3 row M4) makes the pipeline
+//! **performance-shaped end to end**: Pass 1 parses LPT-scheduled in
+//! parallel with giant-object splitting, the interner sorts on the pool,
+//! Pass 3 materializes the D8 `resolved[]` de-indirection tables and the
+//! copy-run coalescing the fused tile emit (pgr-emit, Pass 4 v2) consumes.
 //!
 //! Determinism policy (§4.3): every ordering input is total-ordered
 //! (command-line file order, symbol order within a file, canonical output
-//! section order); nothing reads hash iteration order.
+//! section order); nothing reads hash iteration order. Parallel schedules
+//! change who computes a result, never the result — gated in tests.
 
 pub mod fixups;
 pub mod ids;
@@ -17,14 +19,18 @@ pub mod interner;
 pub mod layout;
 pub mod link;
 pub mod object;
+pub mod pool;
 pub mod resolve;
 pub mod trie;
 
-pub use fixups::{FixupPlan, MAX_CHAIN_STRIDE_BYTES, pack_page};
+pub use fixups::{FixupKind, FixupPlan, MAX_CHAIN_STRIDE_BYTES, pack_page};
 pub use ids::{FileId, StringId};
 pub use interner::Interner;
-pub use layout::{Layout, LinkConfig, OutputSymbol, PatchOp, Piece, PlacedSection, SegmentPlan};
-pub use link::{LinkInput, LinkResult, link};
+pub use layout::{
+    CopyRun, Layout, LinkConfig, OutputSymbol, PatchOp, Piece, PlacedSection, ResolvedFile,
+    SegmentPlan,
+};
+pub use link::{LinkInput, LinkResult, Parallelism, link, link_with};
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use resolve::{Def, Rank, Resolution};
 pub use trie::{Export, ExportInfo};
