@@ -96,9 +96,17 @@ fn bench_link(c: &mut Criterion) {
         opts.config.ident = (*name).into();
         opts.config.entry_symbol = "_main".into();
         group.throughput(Throughput::Bytes(total as u64));
+        // M4: the fused pipeline (default) next to the pre-fusion reference
+        // — the architecture doc §10.3 M4 perf gate measures the delta.
         group.bench_function((*name).to_string(), |b| {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
+                std::hint::black_box(image.len());
+            })
+        });
+        group.bench_function(format!("{name}_reference"), |b| {
+            b.iter(|| {
+                let image = pgr_driver::link_reference_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
             })
         });
@@ -184,6 +192,12 @@ fn bench_link_dylib(c: &mut Criterion) {
                 std::hint::black_box(image.len());
             })
         });
+        group.bench_function(format!("{name}_reference"), |b| {
+            b.iter(|| {
+                let image = pgr_driver::link_reference_bytes(&opts).unwrap();
+                std::hint::black_box(image.len());
+            })
+        });
     }
 
     group.finish();
@@ -220,6 +234,12 @@ fn bench_link_outputs(c: &mut Criterion) {
         group.bench_function(label.to_string(), |b| {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
+                std::hint::black_box(image.len());
+            })
+        });
+        group.bench_function(format!("{label}_reference"), |b| {
+            b.iter(|| {
+                let image = pgr_driver::link_reference_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
             })
         });
