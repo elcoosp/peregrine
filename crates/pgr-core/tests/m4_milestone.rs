@@ -263,7 +263,7 @@ fn copy_runs_partition_every_content_byte() {
         ident: "runs-gate".into(),
         ..LinkConfig::default()
     };
-    let result = link_with(&inputs, &cfg, Parallelism::Serial).unwrap();
+    let result = link_with(&inputs, &[], &cfg, Parallelism::Serial).unwrap();
     let layout = &result.layout;
 
     // Every byte-carrying, non-synthetic piece must be covered by exactly
@@ -315,8 +315,8 @@ fn parallel_pass1_matches_the_serial_reference() {
         ident: "m4-parallel-gate".into(),
         ..LinkConfig::default()
     };
-    let serial = link_with(&inputs, &cfg, Parallelism::Serial).unwrap();
-    let auto = link_with(&inputs, &cfg, Parallelism::Auto).unwrap();
+    let serial = link_with(&inputs, &[], &cfg, Parallelism::Serial).unwrap();
+    let auto = link_with(&inputs, &[], &cfg, Parallelism::Auto).unwrap();
     assert_eq!(
         layout_fingerprint(&serial.layout),
         layout_fingerprint(&auto.layout),
@@ -347,7 +347,7 @@ fn resolved_tables_carry_every_in_image_definition() {
         ident: "m4-resolved-gate".into(),
         ..LinkConfig::default()
     };
-    let result = link_with(&inputs, &cfg, Parallelism::Serial).unwrap();
+    let result = link_with(&inputs, &[], &cfg, Parallelism::Serial).unwrap();
 
     // Every defined external in the output symtab must appear in its file's
     // resolved[] table with the exact output vaddr.
@@ -413,8 +413,8 @@ fn runs_and_fingerprint_survive_parallel_parse_on_wide_corpus() {
     // Dylib output too (0 image base — different slot-word math).
     cfg.filetype = pgr_core::layout::OutputType::Dylib;
     cfg.install_name = Some("@rpath/libuneven.dylib".into());
-    let serial = link_with(&inputs, &cfg, Parallelism::Serial).unwrap();
-    let auto = link_with(&inputs, &cfg, Parallelism::Auto).unwrap();
+    let serial = link_with(&inputs, &[], &cfg, Parallelism::Serial).unwrap();
+    let auto = link_with(&inputs, &[], &cfg, Parallelism::Auto).unwrap();
     assert_eq!(
         layout_fingerprint(&serial.layout),
         layout_fingerprint(&auto.layout)
