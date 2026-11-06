@@ -13,13 +13,32 @@
 //! * the flag set is one M2 understands (regular / weak definition);
 //!   re-export and stub-and-resolver nodes warn as unimplemented.
 
+use pgr_format::trie::EXPORT_SYMBOL_FLAGS_REEXPORT;
+
 use crate::{Code, Issue, Report};
+
+/// One walked export: a regular address, or an M3 re-export with its
+/// ordinal and (possibly renamed) imported name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrieEntry {
+    /// Full symbol name (edges concatenated).
+    pub name: String,
+    /// Raw terminal flags.
+    pub flags: u32,
+    /// Export address (`None` for re-exports).
+    pub address: Option<u64>,
+    /// Re-export ordinal (`flags & 0x08` nodes).
+    pub reexport_ordinal: Option<u64>,
+    /// The original name in the re-exported dylib (equals `name` when the
+    /// terminal omits the string).
+    pub imported_name: String,
+}
 
 /// Walk result: the exported symbols the trie describes.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct TrieExports {
-    /// `(name, flags, address)` per terminal node, in walk order.
-    pub entries: Vec<(String, u32, u64)>,
+    /// One entry per terminal node, in walk order.
+    pub entries: Vec<TrieEntry>,
 }
 
 /// Walks and validates an export-trie payload.
@@ -101,8 +120,10 @@ fn walk(
         }
     }
     if terminal_size > 0 {
-        // Terminal: `ULEB flags, ULEB address` (or ordinal + name for
-        // re-exports — an M3 surface the walk tolerates but flags).
+        // Terminal: `ULEB flags, ULEB address` — or, for M3 re-exports
+        // (`flags & 0x08`), `ULEB ordinal` plus an optional NUL imported
+        // name (absent = same name; dyld resolves via the re-exported
+        // dylib).
         let info = &data[terminal_start..terminal_end.unwrap()];
         let Some((flags, after_flags)) = uleb_at(info, 0) else {
             report.issues.push(Issue::error(
@@ -112,26 +133,45 @@ fn walk(
             ));
             return;
         };
-        let address = if flags & 0x8 != 0 {
-            // REEXPORT: `ULEB ordinal, original-name NUL string`. Record the
-            // node as unresolved (dyld resolves via the re-exported dylib).
-            if uleb_at(info, after_flags).is_none() {
+        let (address, reexport_ordinal, imported_name) = if flags & 0x8 != 0 {
+            let Some((ordinal, after)) = uleb_at(info, after_flags) else {
                 report.issues.push(Issue::error(
                     Code::ExportTrie,
                     "re-export node lacks its ordinal",
                     Some(terminal_start as u64),
                 ));
                 return;
+            };
+            if ordinal == 0 {
+                report.issues.push(Issue::error(
+                    Code::ExportTrie,
+                    "re-export ordinal is zero (ordinals are 1-based)",
+                    Some(terminal_start as u64),
+                ));
+                return;
             }
-            report.issues.push(Issue::warning(
-                Code::ExportTrie,
-                "re-exported export node (M3 surface)",
-                Some(terminal_start as u64),
-            ));
-            None
+            let imported = if after < info.len() {
+                match info[after..].iter().position(|&b| b == 0) {
+                    Some(nul) if after + nul + 1 == info.len() => {
+                        String::from_utf8_lossy(&info[after..after + nul]).into_owned()
+                    }
+                    _ => {
+                        report.issues.push(Issue::error(
+                            Code::ExportTrie,
+                            "re-export imported name is not NUL-terminated or leaves trailing \
+                             bytes",
+                            Some(terminal_start as u64),
+                        ));
+                        return;
+                    }
+                }
+            } else {
+                prefix.clone()
+            };
+            (None, Some(ordinal), imported)
         } else {
             match uleb_at(info, after_flags) {
-                Some((addr, after)) if after == info.len() => Some(addr),
+                Some((addr, after)) if after == info.len() => (Some(addr), None, prefix.clone()),
                 _ => {
                     report.issues.push(Issue::error(
                         Code::ExportTrie,
@@ -149,8 +189,14 @@ fn walk(
                 Some(flags),
             ));
         }
-        out.entries
-            .push((prefix.clone(), flags as u32, address.unwrap_or(u64::MAX)));
+        let _ = EXPORT_SYMBOL_FLAGS_REEXPORT;
+        out.entries.push(TrieEntry {
+            name: prefix.clone(),
+            flags: flags as u32,
+            address,
+            reexport_ordinal,
+            imported_name,
+        });
     }
     cur = terminal_end.unwrap();
     if cur >= data.len() {
@@ -297,8 +343,26 @@ mod tests {
         let mut report = Report::default();
         let exports = check_export_trie(&trie, &mut report);
         assert_eq!(exports.entries.len(), 2);
-        assert_eq!(exports.entries[0], ("_main".into(), 0, 0x4c8));
-        assert_eq!(exports.entries[1], ("_mh_execute_header".into(), 0, 0));
+        assert_eq!(
+            exports.entries[0],
+            super::TrieEntry {
+                name: "_main".into(),
+                flags: 0,
+                address: Some(0x4c8),
+                reexport_ordinal: None,
+                imported_name: "_main".into(),
+            }
+        );
+        assert_eq!(
+            exports.entries[1],
+            super::TrieEntry {
+                name: "_mh_execute_header".into(),
+                flags: 0,
+                address: Some(0),
+                reexport_ordinal: None,
+                imported_name: "_mh_execute_header".into(),
+            }
+        );
         assert!(
             !report
                 .issues
