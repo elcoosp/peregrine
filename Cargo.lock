@@ -184,6 +184,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -346,17 +371,18 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "pgr-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "pgr-fixtures",
  "pgr-format",
+ "rayon",
  "thiserror",
 ]
 
 [[package]]
 name = "pgr-driver"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "pgr-core",
@@ -369,18 +395,20 @@ dependencies = [
 
 [[package]]
 name = "pgr-emit"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
+ "criterion",
  "pgr-core",
  "pgr-fixtures",
  "pgr-format",
+ "rayon",
  "sha2",
  "thiserror",
 ]
 
 [[package]]
 name = "pgr-fixtures"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "pgr-format",
  "sha2",
@@ -388,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-format"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -399,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-verify"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "object",
  "pgr-fixtures",
@@ -508,6 +536,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core",
+]
+
+[[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
 ]
 
 [[package]]
