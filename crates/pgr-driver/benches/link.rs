@@ -189,10 +189,49 @@ fn bench_link_dylib(c: &mut Criterion) {
     group.finish();
 }
 
+/// M3: the same dylib-bound corpus emitted as `-dylib` and `-bundle`
+/// outputs — exercises the 0 image base (no `__PAGEZERO`), `LC_ID_DYLIB`
+/// absence/presence, and the full export trie over every defined external.
+fn bench_link_outputs(c: &mut Criterion) {
+    let dir = std::env::temp_dir().join("pgr_bench_link_outputs");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut group = c.benchmark_group("pgr-driver/link_outputs");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(4));
+
+    let corpus = bench_corpus(8, 1_024, 16);
+    for (kind, label) in [
+        (pgr_core::layout::OutputType::Dylib, "dylib_8_objects"),
+        (pgr_core::layout::OutputType::Bundle, "bundle_8_objects"),
+    ] {
+        let mut opts = pgr_driver::opts::Options::default();
+        let mut total = 0usize;
+        for (i, bytes) in corpus.0.iter().enumerate() {
+            let p = dir.join(format!("{label}_obj_{i}.o"));
+            std::fs::write(&p, bytes).unwrap();
+            opts.inputs.push(p.display().to_string());
+            total += bytes.len();
+        }
+        opts.config.ident = label.into();
+        opts.config.filetype = kind;
+        opts.config.install_name = Some("@rpath/libbench.dylib".into());
+        group.throughput(Throughput::Bytes(total as u64));
+        group.bench_function(label.to_string(), |b| {
+            b.iter(|| {
+                let image = pgr_driver::link_to_bytes(&opts).unwrap();
+                std::hint::black_box(image.len());
+            })
+        });
+    }
+    group.finish();
+}
+
 /// Bench entry point (macro-free so the workspace `missing_docs` lint holds).
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     bench_link(&mut criterion);
     bench_link_dylib(&mut criterion);
+    bench_link_outputs(&mut criterion);
     criterion.final_summary();
 }
