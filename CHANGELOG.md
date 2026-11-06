@@ -4,6 +4,101 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.7.0] - 2026-11-07### Features
+- **core:** M6 branch thunks/veneers — out-of-range `B`/`BL` sites (beyond
+  the ±128 MiB arm64 reach) get a 3-instruction veneer (`adrp x16/add
+  x16/br x16`) inserted into the same output section right after the
+  site's piece, inside the layout fixed point; the veneer reaches its
+  target through ADRP's ±4 GiB window so no chaining is ever required;
+  giant-atom sites (a single atom larger than the branch range) fail with
+  ld64-style diagnostics; determinism-gated (double-link layout equality)
+- **verify:** M6 branch-range checker — every `B`/`BL` in the executable
+  sections is decoded and its target must land back inside `__TEXT`,
+  4-byte aligned (`Code::BranchRange`); the architecture doc's "thunk
+  placement verified by a branch-range checker in `pgr-verify`" gate
+- **format:** M6 classic `LC_DYLD_INFO` opcode streams — rebase/bind
+  encoders and decoders (ULEB/SLEB, trailing-flags symbols, special
+  ordinals), round-trip and malformed-input gated, never panics
+- **core:** M6 `LC_DYLD_INFO_ONLY` legacy fallback — chained fixups are a
+  macOS ≥ 12 format (TDD §3.6 invariant 3), so `minos < 12.0.0` and
+  `-no_fixup_chains` emit classic rebase/bind streams instead of the
+  chained payload (slot bytes stay zero, no `__chain_starts`); the import
+  metadata (symtab/indirect construction) is built identically to the
+  chained path via the shared `build_import_table`
+- **emit:** the classic rebase/bind streams land in `__LINKEDIT` (both
+  the reference and fused tile emitters write them identically)
+- **verify:** classic dyld-info stream walk — both streams decoded the
+  way dyld does; slot bounds/alignment, bind ordinals vs the
+  `LC_LOAD_DYLIB` list, special ordinals only in flat images, non-empty
+  symbol names (`Code::DyldInfoStreams`)
+- **core:** M6 ICF (identical code folding) — `-icf=safe`/`-icf=all`/
+  `-no_icf` (ld64 vocabulary, default none); Hopcroft-style color
+  refinement over per-atom `(content, ordered relocation fingerprints)`
+  signatures with byte hashing on the shared compute pool and
+  deterministic first-occurrence class ids; `-icf=safe` never folds
+  address-taken atoms, weak definitions never fold, section-relative
+  targets never fold (unredirectable); folded aliases keep their symtab
+  names at the canonical copy's address and output section; composes with
+  `-dead_strip` and the D4 cstring merge
+- **core:** M6 Stage A caches (architecture doc §7.1) — the POI (Parsed
+  Object Image) cache stores everything Pass 1 produces pre-interning
+  (sections with raw relocations, typed symbols, the name pool, D1 atom
+  ranges) content-addressed by `sha256(input || flags)`; frozen `.tbd`
+  caches the parsed stub; both are checksum-framed (`PGRPOI1`/`PGRFTBD1`),
+  atomically written (unique temp + rename — the shared-temp race is
+  regression-gated), and corruption/version tolerant (silent re-parse)
+- **driver:** M6 flag surface — `-icf=`/`-icf <level>`/`-no_icf`,
+  `-cache <dir>` / `PGR_CACHE_DIR` / `-no_cache`; cached vs uncached
+  output byte-identical (the §7.1 gate); LTO bitcode inputs (raw
+  `BC\xC0\xDE` and `0x0B17C0DE` wrapper) detected up front with a clear
+  `-fno-lto` diagnostic instead of a deep Mach-O parse failure
+- **core:** M6 Stage A plumbing — `link_cached` threads the POI cache
+  through direct inputs and archive members alike (member keys hash the
+  member bytes; `from_archive`/archive-name stay call-site properties)
+- **fixtures:** `ObjectBuilder::set_subsections_via_symbols` (chained
+  form) already exercised by the M5 tests; M6 corpora add ObjC/Swift
+  metadata sections (`__objc_classrefs`, `__objc_selrefs`,
+  `__swift5_types`) and `-icf` fold corpora
+
+### Performance
+- **bench:** `pgr-driver/link_icf` — the "ICF ≤ 25% added wall" gate:
+  17.29 ms fold-off vs 19.37 ms `-icf=safe` on the fully-foldable 32×512
+  corpus (**+12.0%**, 16,383 atoms folded, ~192 KiB of duplicate text
+  removed)
+- **bench:** `pgr-driver/link_cache` — Stage A: cold 177.8 ms vs warm
+  172.8 ms on the parse-heavy 64K-symbol corpus (−2.8% wall; the corpus
+  is Pass 2/3-bound, so the POI cache's Pass 1 elimination is bounded by
+  Pass 1's share — recorded honestly with the pass profile)
+- **bench:** `pgr-driver/tbd` — the "`.tbd` startup cost < 1 ms" gate:
+  frozen export-set decode **19.9 µs** vs 35.8 µs YAML text parse (1.8×,
+  both ≪ 1 ms)
+- **bench:** M4/M5 gates re-measured with M6 in the pipeline: large link
+  175.7 ms (was 174–176), dead-strip 259.0/136.0 ms off/on (1.90×, was
+  1.90×) — the veneer scan, fixup-command dispatch and fold-empty fast
+  path cost nothing measurable
+
+### Tests
+- **core:** veneer insertion on forward/backward overflow (one veneer per
+  site, in-range final deltas, double-link determinism, no veneers when
+  in range); ICF fold/keep/alias gates (identical fold, distinct targets
+  stay, safe vs all address-taken split, dead-strip composition,
+  parallel-vs-serial equality); POI round-trip, corruption battery, cache
+  key stability, cached-vs-uncached layout equality, consecutive-hit
+  equality (the shared-temp store race is regression-gated); frozen-`.tbd`
+  round-trip; classic stream planning (slot order, ordinals, specials,
+  addends) and segment-bound errors
+- **format:** opcode encoders (ULEB/SLEB vs LLVM vectors), rebase/bind
+  round-trips, `dyld_info_command` parse gates, truncated-stream battery
+- **verify:** branch-range decode battery (B/BL shapes, register-branch
+  shapes), in-range pass, out-of-range/misaligned/negative-target errors,
+  truncated tails tolerated; classic stream slot/ordinal/name checks
+- **driver:** `m6_thunks` (giant-text e2e), `m6_legacy` (minos 11 +
+  `-no_fixup_chains` + rebase/bind stream contents + determinism + dylib
+  bind names), `m6_icf` (CLI parse, fold e2e with strict verifier,
+  `-icf=all` superset), `m6_cache` (byte-identity, corruption re-parse,
+  frozen-`.tbd` dylib links, `-no_cache`), `m6_ecosystem` (LTO detection,
+  ObjC/Swift pass-through + determinism)
+
 ## [0.6.0] - 2026-11-06### Features
 - **format:** M5 `!<arch>` archive parser — Apple `__.SYMDEF`/`__.SYMDEF_64`
   and GNU `/` ranlib tables (32/64-bit entries), BSD `#1/<len>` and GNU `//`
