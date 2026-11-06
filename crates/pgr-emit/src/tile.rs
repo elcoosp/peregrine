@@ -317,6 +317,19 @@ impl<'a> TileCtx<'a> {
                 &layout.fixups.payload,
             ));
         }
+        if let Some(info) = &layout.dyld_info {
+            // M6 classic streams occupy the fixup payload's LINKEDIT slot.
+            if !info.rebase.is_empty() {
+                blob_spans.push(span(
+                    le.dyld_rebase_off,
+                    info.rebase.len() as u64,
+                    &info.rebase,
+                ));
+            }
+            if !info.bind.is_empty() {
+                blob_spans.push(span(le.dyld_bind_off, info.bind.len() as u64, &info.bind));
+            }
+        }
         blob_spans.push(span(le.trie_off, layout.trie.len() as u64, &layout.trie));
         if le.func_starts_size > 0 {
             blob_spans.push(span(
