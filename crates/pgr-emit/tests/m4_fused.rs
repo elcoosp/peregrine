@@ -218,7 +218,7 @@ fn hello_greet() -> Vec<LinkInput> {
 
 /// The M4 gate: fused bytes == reference bytes, for one config.
 fn assert_fused_matches_reference(inputs: &[LinkInput], cfg: &LinkConfig) {
-    let result = link(inputs, cfg)
+    let result = link(inputs, &[], cfg)
         .unwrap_or_else(|e| panic!("link failed for ident {:?}: {e:?}", cfg.ident));
     let reference = build_image(&result.layout, &result.objects)
         .unwrap_or_else(|e| panic!("reference emit failed: {e:?}"));
