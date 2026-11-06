@@ -63,6 +63,161 @@ pub enum DriverError {
         /// What failed.
         message: String,
     },
+    /// A `-exported_symbols_list`/`-unexported_symbols_list` file could not
+    /// be read or parsed.
+    #[error("{flag} {path}: {message}")]
+    SymbolList {
+        /// The flag that wanted the file.
+        flag: String,
+        /// The file path.
+        path: String,
+        /// What went wrong.
+        message: String,
+    },
+}
+
+/// Reads a symbol-list file (one symbol per line, `#` comments and blank
+/// lines ignored — the ld64 subset Peregrine supports; see docs/COMPAT.md).
+fn read_symbol_list(flag: &str, path: &str) -> Result<Vec<Vec<u8>>, DriverError> {
+    let text = std::fs::read_to_string(path).map_err(|e| DriverError::SymbolList {
+        flag: flag.to_string(),
+        path: path.to_string(),
+        message: e.to_string(),
+    })?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        out.push(line.as_bytes().to_vec());
+    }
+    Ok(out)
+}
+
+/// Scans a Mach-O dylib binary into a [`Dylib`] input (M3): the install
+/// name and versions come from `LC_ID_DYLIB`, the exports from
+/// `LC_DYLD_EXPORTS_TRIE` (or, when stripped, the symtab's external
+/// definitions).
+///
+/// # Errors
+/// [`DriverError::Tbd`] on malformed images (the variant carries any
+/// Mach-O parse failure; named for the M2 text-stub path it extends).
+pub fn scan_dylib(path: &str, bytes: &[u8]) -> Result<Dylib, DriverError> {
+    let header = pgr_format::MachHeader64::parse(bytes).map_err(|e| DriverError::Tbd {
+        path: path.to_string(),
+        source: e,
+    })?;
+    if header.filetype != pgr_format::consts::MH_DYLIB {
+        return Err(DriverError::Tbd {
+            path: path.to_string(),
+            source: pgr_format::FormatError::Malformed {
+                what: format!(
+                    "not a dylib (filetype {:#x}); Peregrine links .o objects and .tbd/.dylib \
+                     dylibs",
+                    header.filetype
+                ),
+            },
+        });
+    }
+    let mut it = pgr_format::LoadCommandIter::new(
+        bytes,
+        pgr_format::MachHeader64::SIZE,
+        header.ncmds,
+        header.sizeofcmds,
+    )
+    .map_err(|e| DriverError::Tbd {
+        path: path.to_string(),
+        source: e,
+    })?;
+    let mut install_name = None;
+    let mut current_version = 0u32;
+    let mut compatibility_version = 0u32;
+    let mut trie_payload: Option<&[u8]> = None;
+    let mut symtab: Option<(u32, u32, u32, u32)> = None; // (symoff, nsyms, stroff, strsize)
+    while let Some(cmd) = it.next_command().map_err(|e| DriverError::Tbd {
+        path: path.to_string(),
+        source: e,
+    })? {
+        match cmd.kind {
+            pgr_format::LoadCommandKind::IdDylib => {
+                let d =
+                    pgr_format::DylibCommand::parse(cmd.bytes).map_err(|e| DriverError::Tbd {
+                        path: path.to_string(),
+                        source: e,
+                    })?;
+                if let Ok(name) = d.name(cmd.bytes) {
+                    install_name = Some(String::from_utf8_lossy(name).into_owned());
+                    current_version = d.current_version;
+                    compatibility_version = d.compatibility_version;
+                }
+            }
+            pgr_format::LoadCommandKind::LinkeditData(pgr_format::consts::LC_DYLD_EXPORTS_TRIE) => {
+                if let Ok(lc) = pgr_format::LinkeditDataCommand::parse(cmd.bytes) {
+                    if let Ok(payload) = lc.data(bytes) {
+                        trie_payload = Some(payload);
+                    }
+                }
+            }
+            pgr_format::LoadCommandKind::Symtab => {
+                if let Ok(st) = pgr_format::SymtabCommand::parse(cmd.bytes, 0) {
+                    symtab = Some((st.symoff, st.nsyms, st.stroff, st.strsize));
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(install_name) = install_name else {
+        return Err(DriverError::Tbd {
+            path: path.to_string(),
+            source: pgr_format::FormatError::Malformed {
+                what: "dylib carries no LC_ID_DYLIB install name".into(),
+            },
+        });
+    };
+    // Export surface: the trie is authoritative; the symtab extdefs are the
+    // fallback for dylibs without an export trie.
+    let mut exports: Vec<Vec<u8>> = Vec::new();
+    if let Some(payload) = trie_payload {
+        for e in pgr_format::trie::exports(payload).map_err(|e| DriverError::Tbd {
+            path: path.to_string(),
+            source: e,
+        })? {
+            exports.push(e.name);
+        }
+    } else if let Some((symoff, nsyms, stroff, strsize)) = symtab {
+        for i in 0..nsyms as usize {
+            let Ok(sym) = pgr_format::cursor::pod_read_unaligned_at::<pgr_format::Nlist64>(
+                bytes,
+                symoff as usize + i * 16,
+            ) else {
+                break;
+            };
+            let defined = sym.is_external()
+                && !sym.is_stab()
+                && sym.n_type & pgr_format::consts::N_TYPE == pgr_format::consts::N_SECT;
+            if !defined {
+                continue;
+            }
+            let strx = sym.n_strx as usize;
+            let Some(rest) = bytes.get(stroff as usize + strx..stroff as usize + strsize as usize)
+            else {
+                break;
+            };
+            let Some(end) = rest.iter().position(|&b| b == 0) else {
+                break;
+            };
+            exports.push(rest[..end].to_vec());
+        }
+    }
+    Ok(Dylib {
+        install_name,
+        current_version,
+        compatibility_version,
+        exports,
+        weak: false,
+        reexport: false,
+    })
 }
 
 /// The in-memory link product: image bytes plus the plan facts.
@@ -104,12 +259,12 @@ pub fn tbd_to_dylib(path: &str, bytes: &[u8], weak: bool) -> Result<Dylib, Drive
             .map(|s| s.name.into_bytes())
             .collect(),
         weak,
+        reexport: false,
     })
 }
 
 /// Resolves `-l<name>` against the `-L` search dirs (then the default
-/// `/usr/lib`) to a `.tbd` path. Mach-O dylib binaries are M3 — the search
-/// reports them distinctly.
+/// `/usr/lib`) to a `.tbd` stub or a Mach-O dylib binary (M3).
 ///
 /// # Errors
 /// [`DriverError::Io`] when the file exists but cannot be read.
@@ -117,7 +272,12 @@ pub fn resolve_lib(
     name: &str,
     lib_dirs: &[String],
 ) -> Result<Option<(String, Vec<u8>)>, DriverError> {
-    let candidates = ["lib".to_owned() + name + ".tbd", name.to_owned() + ".tbd"];
+    let candidates = [
+        "lib".to_owned() + name + ".tbd",
+        name.to_owned() + ".tbd",
+        "lib".to_owned() + name + ".dylib",
+        name.to_owned() + ".dylib",
+    ];
     let mut dirs: Vec<&str> = lib_dirs.iter().map(String::as_str).collect();
     dirs.push("/usr/lib");
     for dir in &dirs {
@@ -150,16 +310,35 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
         })?;
         if looks_like_tbd(&bytes) {
             let weak = opts.weak_library_inputs.contains(&i);
-            dylibs.push(tbd_to_dylib(path, &bytes, weak)?);
+            let mut dylib = tbd_to_dylib(path, &bytes, weak)?;
+            dylib.reexport = opts.reexport_library_inputs.contains(&i);
+            dylibs.push(dylib);
             continue;
+        }
+        // M3: Mach-O dylib binaries are linkable inputs (install name +
+        // exports scanned from the image).
+        if pgr_format::MachHeader64::parse(&bytes)
+            .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
+        {
+            let mut dylib = scan_dylib(path, &bytes)?;
+            dylib.reexport = opts.reexport_library_inputs.contains(&i);
+            dylibs.push(dylib);
+            continue;
+        }
+        if opts.reexport_library_inputs.contains(&i) {
+            return Err(DriverError::Tbd {
+                path: path.clone(),
+                source: pgr_format::FormatError::Malformed {
+                    what: "-reexport_library input is not a dylib (.tbd or Mach-O)".into(),
+                },
+            });
         }
         inputs.push(LinkInput {
             name: format!("{path} (input {i})"),
             bytes,
         });
     }
-    // `-l` library search: every hit is a `.tbd` stub (M2); a Mach-O dylib
-    // binary is an explicit M3 error.
+    // `-l` library search: `.tbd` stubs (M2) and Mach-O dylib binaries (M3).
     for name in &opts.libs {
         match resolve_lib(name, &opts.lib_dirs)? {
             Some((path, bytes)) => {
@@ -168,18 +347,12 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
                 } else if pgr_format::MachHeader64::parse(&bytes)
                     .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
                 {
-                    return Err(DriverError::Tbd {
-                        path,
-                        source: pgr_format::FormatError::Malformed {
-                            what: "Mach-O dylib binaries arrive at M3 (use a .tbd stub at M2)"
-                                .into(),
-                        },
-                    });
+                    dylibs.push(scan_dylib(&path, &bytes)?);
                 } else {
                     return Err(DriverError::Tbd {
                         path,
                         source: pgr_format::FormatError::Malformed {
-                            what: "not a .tbd stub".into(),
+                            what: "not a .tbd stub or Mach-O dylib".into(),
                         },
                     });
                 }
@@ -196,6 +369,21 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
     }
     let mut config = opts.config.clone();
     config.dylibs = dylibs;
+    // M3 dylib defaults: the install name defaults to the output path
+    // (ld64 behavior); dylibs/bundles never load a dylinker.
+    if config.filetype == pgr_core::layout::OutputType::Dylib && config.install_name.is_none() {
+        config.install_name = Some(opts.output.clone());
+    }
+    if config.filetype != pgr_core::layout::OutputType::Execute {
+        config.dynamic_linker = false;
+    }
+    // M3 export filters.
+    if let Some(path) = &opts.exported_list_path {
+        config.exported_only = Some(read_symbol_list("-exported_symbols_list", path)?);
+    }
+    if let Some(path) = &opts.unexported_list_path {
+        config.unexported = read_symbol_list("-unexported_symbols_list", path)?;
+    }
     let result = pgr_core::link(&inputs, &config)?;
 
     // `-u <symbol>`: the symbol must resolve to an in-image definition
@@ -253,30 +441,48 @@ pub fn version_line() -> String {
     format!("pgr (Peregrine) {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// The `--help` text (the M1 flag surface).
+/// The `--help` text (the M3 flag surface).
 #[must_use]
 pub fn usage() -> String {
-    let mut s = String::with_capacity(1024);
+    let mut s = String::with_capacity(1600);
     s.push_str(&version_line());
     s.push_str("\n\nPeregrine: ultra-fast Mach-O linker for arm64-apple-darwin.\n\n");
-    s.push_str("M1 — static hello-world: direct .o inputs, -static semantics,\n");
-    s.push_str("LC_MAIN/LC_SYMTAB/LC_DYSYMTAB, rebase-only chained fixups,\n");
-    s.push_str("__chain_starts, ad-hoc signature, deterministic layout.\n\n");
+    s.push_str("M3 — dynamic executables, dylibs and bundles: .o/.tbd/.dylib inputs,\n");
+    s.push_str("two-level namespace, GOT/stub synthesis, chained fixups (rebase+bind),\n");
+    s.push_str("full export trie with re-exports, export filters, ad-hoc signature.\n\n");
     s.push_str("Usage: pgr [options] <object files>\n\n");
     s.push_str("Options:\n");
     s.push_str("  -o <path>                    output file (required)\n");
-    s.push_str("  -arch arm64                  target architecture (M1: arm64 only)\n");
+    s.push_str("  -arch arm64                  target architecture (arm64 only)\n");
     s.push_str("  -platform_version <p> <min> <sdk>   build version (macos only)\n");
     s.push_str("  -e <symbol>                  entry symbol (default _main)\n");
     s.push_str("  -static                      static semantics (M1 default)\n");
+    s.push_str("  -dylib                       link a dylib (MH_DYLIB)\n");
+    s.push_str("  -bundle                      link a bundle (MH_BUNDLE)\n");
+    s.push_str("  -install_name <path>         LC_ID_DYLIB install name (with -dylib;\n");
+    s.push_str("                               defaults to the output path)\n");
+    s.push_str("  -current_version <X.Y.Z>     LC_ID_DYLIB current version\n");
+    s.push_str("  -compatibility_version <X.Y.Z>   LC_ID_DYLIB compatibility version\n");
+    s.push_str("  -reexport_library <path>     LC_REEXPORT_DYLIB + trie re-exports\n");
+    s.push_str("  -exported_symbols_list <f>   export only the listed symbols\n");
+    s.push_str("  -unexported_symbols_list <f> hide the listed symbols (N_PEXT)\n");
+    s.push_str("  -mark_dead_strippable_dylib  set MH_DEAD_STRIPPABLE_DYLIB\n");
+    s.push_str("  -l <name> | -l<name>         link a library (searched via -L)\n");
+    s.push_str("  -L <dir>                     library search directory\n");
+    s.push_str("  -rpath <path>                LC_RPATH runtime search path\n");
+    s.push_str("  -flat_namespace              flat-lookup binds (drop MH_TWOLEVEL)\n");
+    s.push_str("  -undefined error|dynamic_lookup   unresolved-reference policy\n");
+    s.push_str("  -u <symbol>                  force the symbol to be defined\n");
+    s.push_str("  -weak_library <path>         weak-load a dylib\n");
+    s.push_str("  -source_version <A.B.C.D.E>  LC_SOURCE_VERSION\n");
     s.push_str("  -fixup_chains | -no_fixup_chains    chained fixups (default on)\n");
     s.push_str("  -adhoc | -no_adhoc           ad-hoc code signature (default on)\n");
-    s.push_str("  -headerpad <n>               reserve header space (advisory at M1)\n");
+    s.push_str("  -headerpad <n>               reserve header space (advisory)\n");
     s.push_str("  -segalign <n>                0x1000 or 0x4000 (default 0x4000)\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
-    s.push_str("Dylibs (-dylib), archives, .tbd inputs and -dead_strip arrive at\n");
-    s.push_str("M2/M3/M5 (TDD §12 roadmap).\n");
+    s.push_str("Archives (.a), -framework, -dead_strip and -order_file arrive at\n");
+    s.push_str("M5 (TDD §12 roadmap).\n");
     s
 }
 
