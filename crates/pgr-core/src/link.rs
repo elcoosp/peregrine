@@ -8,6 +8,14 @@
 //! (symbol decode runs in deterministic index chunks). [`Parallelism::Serial`]
 //! forces the M1–M3 single-threaded shape; both paths produce identical
 //! layouts (determinism policy §4.3) and the equality is gated in tests.
+//!
+//! M5 adds **archive liveness** (S7, perf doc §4.2): static archives arrive
+//! with their ranlib table pre-parsed and members are pulled lazily — the
+//! fixpoint walks the unresolved-name set against the index in archive
+//! command order, parsing only members that resolve something (`-all_load`
+//! and `-force_load` short-circuit to eager). The pull order is a pure
+//! function of the inputs, so FileIds — and every later pass — stay
+//! schedule- and environment-independent.
 
 use crate::LinkError;
 use crate::ids::{FileId, StringId};
@@ -17,6 +25,7 @@ use crate::object::InputObject;
 use crate::pool;
 use crate::resolve::Resolution;
 use rayon::prelude::*;
+use std::collections::HashSet;
 
 /// Pass 1 scheduling policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,6 +56,35 @@ pub struct LinkInput {
     pub bytes: Vec<u8>,
 }
 
+/// One archive member descriptor (data span + name for diagnostics).
+#[derive(Debug, Clone)]
+pub struct LinkArchiveMember {
+    /// Member name (`greet.o`), diagnostics only.
+    pub name: String,
+    /// File offset of the member's data inside [`LinkArchive::bytes`].
+    pub offset: u64,
+    /// Data size in bytes.
+    pub size: u64,
+}
+
+/// A static archive input (M5/S7): the raw bytes plus the pre-parsed ranlib
+/// table. Members are **not** parsed here — the pull fixpoint decides which
+/// members the link needs, which is the S7 decision (lazy beats eager on
+/// archive-heavy corpora; see `docs/BENCHMARKS.md`).
+#[derive(Debug, Clone)]
+pub struct LinkArchive {
+    /// Archive name (diagnostics; `libfoo.a`).
+    pub name: String,
+    /// Raw archive bytes (members slice into it).
+    pub bytes: Vec<u8>,
+    /// Ranlib entries in stored order: `(symbol name, member index)`.
+    pub index: Vec<(Vec<u8>, u32)>,
+    /// Content members in file order.
+    pub members: Vec<LinkArchiveMember>,
+    /// `-all_load` / `-force_load`: pull every member regardless of liveness.
+    pub all_load: bool,
+}
+
 /// The full Pass 1–3 product: the emit plan plus the parsed input arena
 /// (Pass 4 needs the input bytes for the section copies).
 #[derive(Debug)]
@@ -65,8 +103,12 @@ pub struct LinkResult {
 /// # Errors
 /// [`LinkError`] on malformed inputs, unresolvable/duplicate symbols, or
 /// layout contract violations.
-pub fn link(inputs: &[LinkInput], cfg: &LinkConfig) -> Result<LinkResult, LinkError> {
-    link_with(inputs, cfg, Parallelism::Auto)
+pub fn link(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+) -> Result<LinkResult, LinkError> {
+    link_with(inputs, archives, cfg, Parallelism::Auto)
 }
 
 /// Runs Passes 1–3 with an explicit scheduling policy.
@@ -76,11 +118,18 @@ pub fn link(inputs: &[LinkInput], cfg: &LinkConfig) -> Result<LinkResult, LinkEr
 /// layout contract violations.
 pub fn link_with(
     inputs: &[LinkInput],
+    archives: &[LinkArchive],
     cfg: &LinkConfig,
     parallel: Parallelism,
 ) -> Result<LinkResult, LinkError> {
     // ---- Pass 1: parse & collect names for the interner --------------------
-    let mut objects = parse_inputs(inputs, parallel)?;
+    let mut objects = parse_inputs(inputs, parallel, cfg.dead_strip)?;
+    // ---- S7 archive liveness (M5): pull only referenced members ------------
+    let pulled = pull_archive_members(&objects, archives, cfg)?;
+    for obj in pulled {
+        objects.push(obj);
+    }
+
     let mut names: Vec<Vec<u8>> = Vec::new();
     for obj in &mut objects {
         names.append(&mut obj.take_symbol_names());
@@ -135,6 +184,7 @@ pub fn link_with(
 fn parse_inputs(
     inputs: &[LinkInput],
     parallel: Parallelism,
+    split_symbols: bool,
 ) -> Result<Vec<InputObject>, LinkError> {
     let mut objects: Vec<Option<InputObject>> = (0..inputs.len()).map(|_| None).collect();
     if parallel.is_parallel() && inputs.len() > 1 {
@@ -167,12 +217,178 @@ fn parse_inputs(
             )?);
         }
     }
+    // M5/D1+D4: fill the atom tables (cstring sections always split for
+    // the merge; symbol-boundary splitting only feeds dead-strip).
+    for obj in objects.iter_mut().flatten() {
+        obj.compute_atoms(split_symbols);
+    }
     Ok(objects.into_iter().map(Option::unwrap).collect())
+}
+
+/// The S7 archive pull fixpoint (M5). Seeds the unresolved-name set from the
+/// direct objects (weak references do not pull — ld64 semantics), then walks
+/// the archive indexes in command-line order until nothing new pulls. Only
+/// pulled members are parsed, so an archive-heavy link pays for the members
+/// it uses, not the members it ships (`-all_load`/`-force_load` parse all).
+///
+/// Determinism: archives are scanned in command order, members in index
+/// order; FileIds continue after the direct inputs in pull order.
+fn pull_archive_members(
+    direct: &[InputObject],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+) -> Result<Vec<InputObject>, LinkError> {
+    if archives.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut defined: HashSet<Vec<u8>> = HashSet::new();
+    let mut undefined: HashSet<Vec<u8>> = HashSet::new();
+    for obj in direct {
+        let names = obj.peek_symbol_names();
+        for (i, sym) in obj.symbols.iter().enumerate() {
+            if sym.stab || !sym.external {
+                continue;
+            }
+            let Some(name) = names.get(i) else {
+                continue;
+            };
+            if sym.is_defined() || sym.is_common() {
+                defined.insert(name.clone());
+            } else if sym.is_undefined() && !sym.weak_ref {
+                undefined.insert(name.clone());
+            }
+        }
+    }
+    // `-u` names are liveness roots: a member defining one is pulled.
+    for sym in &cfg.load_symbols {
+        undefined.insert(sym.clone());
+    }
+
+    let mut pulled: Vec<InputObject> = Vec::new();
+    let mut pulled_set: HashSet<(usize, u64)> = HashSet::new();
+    let base_file = direct.len() as u32;
+
+    // Eager path: `-all_load` / `-force_load` archives contribute every
+    // member in file order.
+    for (ai, arch) in archives.iter().enumerate() {
+        if !arch.all_load {
+            continue;
+        }
+        for member in &arch.members {
+            if !pulled_set.insert((ai, member.offset)) {
+                continue;
+            }
+            let obj = parse_member(
+                arch,
+                member,
+                base_file + pulled.len() as u32,
+                cfg.dead_strip,
+            )?;
+            record_names(&obj, &mut defined, &mut undefined);
+            pulled.push(obj);
+        }
+    }
+
+    // Lazy fixpoint: scan indexes in archive command order; a member is
+    // pulled when it defines a still-unresolved name.
+    loop {
+        let mut changed = false;
+        for (ai, arch) in archives.iter().enumerate() {
+            for (name, member_index) in &arch.index {
+                if !undefined.contains(name) || defined.contains(name) {
+                    continue;
+                }
+                let Some(member) = arch.members.get(*member_index as usize) else {
+                    return Err(LinkError::Internal {
+                        message: format!(
+                            "archive {}: index entry points at member {} of {}",
+                            arch.name,
+                            member_index,
+                            arch.members.len()
+                        ),
+                    });
+                };
+                if !pulled_set.insert((ai, member.offset)) {
+                    continue;
+                }
+                let obj = parse_member(
+                    arch,
+                    member,
+                    base_file + pulled.len() as u32,
+                    cfg.dead_strip,
+                )?;
+                record_names(&obj, &mut defined, &mut undefined);
+                pulled.push(obj);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(pulled);
+        }
+    }
+}
+
+/// Parses one archive member as an [`InputObject`] (ranked below direct
+/// inputs — see [`crate::resolve::Rank::ArchiveStrong`]).
+fn parse_member(
+    arch: &LinkArchive,
+    member: &LinkArchiveMember,
+    file: u32,
+    split_symbols: bool,
+) -> Result<InputObject, LinkError> {
+    let start = member.offset as usize;
+    let end = start
+        .checked_add(member.size as usize)
+        .ok_or_else(|| LinkError::Internal {
+            message: format!("archive {} member {} overflows", arch.name, member.name),
+        })?;
+    let bytes = arch
+        .bytes
+        .get(start..end)
+        .ok_or_else(|| LinkError::Internal {
+            message: format!(
+                "archive {} member {} span {}..{} is out of bounds",
+                arch.name, member.name, start, end
+            ),
+        })?
+        .to_vec();
+    let mut obj = InputObject::parse(
+        FileId(file),
+        &format!("{}({})", arch.name, member.name),
+        bytes,
+    )?;
+    obj.from_archive = true;
+    obj.archive_name = arch.name.clone();
+    obj.compute_atoms(split_symbols);
+    Ok(obj)
+}
+
+/// Feeds one parsed member's defined/undefined names into the fixpoint sets.
+fn record_names(
+    obj: &InputObject,
+    defined: &mut HashSet<Vec<u8>>,
+    undefined: &mut HashSet<Vec<u8>>,
+) {
+    let names = obj.peek_symbol_names();
+    for (i, sym) in obj.symbols.iter().enumerate() {
+        if sym.stab || !sym.external {
+            continue;
+        }
+        let Some(name) = names.get(i) else {
+            continue;
+        };
+        if sym.is_defined() || sym.is_common() {
+            defined.insert(name.clone());
+            undefined.remove(name);
+        } else if sym.is_undefined() && !sym.weak_ref {
+            undefined.insert(name.clone());
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LinkConfig, LinkInput, link};
+    use super::{LinkArchive, LinkArchiveMember, LinkConfig, LinkInput, link};
     use crate::LinkError;
     use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 
@@ -267,6 +483,7 @@ mod tests {
                     bytes: greet,
                 },
             ],
+            &[],
             &cfg,
         );
         let layout = match layout {
@@ -352,6 +569,7 @@ mod tests {
                 name: "hello.o".into(),
                 bytes: main,
             }],
+            &[],
             &cfg,
         )
         .unwrap_err();
@@ -368,9 +586,82 @@ mod tests {
                 name: "greet.o".into(),
                 bytes,
             }],
+            &[],
             &cfg,
         )
         .unwrap_err();
         assert!(err.to_string().contains("_main"), "{err}");
+    }
+
+    /// S7: a member is pulled when it defines an unresolved name — the
+    /// hello/greet pair through an archive instead of direct inputs.
+    #[test]
+    fn archive_member_is_pulled_for_an_unresolved_name() {
+        let main = hello_main_only().build().unwrap();
+        let greet = greet().build().unwrap();
+        let unused = {
+            let mut b = ObjectBuilder::new("unused.o");
+            let t = b.add_section(ObjectSection::text(
+                "__text",
+                vec![0xC0, 0x03, 0x5F, 0xD6],
+                Vec::new(),
+            ));
+            b.add_symbol(ObjectSymbol::Defined {
+                name: "_unused".into(),
+                section_index: t,
+                value: 0,
+                weak: false,
+            });
+            b.build().unwrap()
+        };
+        let mut archive = pgr_fixtures::ArchiveBuilder::new("libutil.a");
+        archive.add_member("greet.o", greet);
+        archive.add_member("unused.o", unused);
+        let bytes = archive.build();
+        let parsed = pgr_format::parse_archive(&bytes).unwrap();
+        let arch = LinkArchive {
+            name: "libutil.a".into(),
+            bytes,
+            index: parsed
+                .index
+                .iter()
+                .map(|e| (e.name.clone().into_bytes(), e.member))
+                .collect(),
+            members: parsed
+                .members
+                .iter()
+                .map(|m| LinkArchiveMember {
+                    name: m.name.clone(),
+                    offset: m.offset,
+                    size: m.size,
+                })
+                .collect(),
+            all_load: false,
+        };
+        let cfg = LinkConfig {
+            ident: "hello".into(),
+            ..LinkConfig::default()
+        };
+        let result = link(
+            &[LinkInput {
+                name: "hello.o".into(),
+                bytes: main,
+            }],
+            &[arch],
+            &cfg,
+        )
+        .unwrap();
+        // greet.o pulled, unused.o not: exactly 2 objects in the arena.
+        assert_eq!(
+            result.objects.len(),
+            2,
+            "{:?}",
+            result
+                .objects
+                .iter()
+                .map(|o| (&o.name, o.from_archive))
+                .collect::<Vec<_>>()
+        );
+        assert!(result.objects[1].from_archive);
     }
 }
