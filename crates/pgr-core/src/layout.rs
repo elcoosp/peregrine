@@ -25,18 +25,68 @@ use crate::object::{InputObject, RelocKind, RelocTarget};
 use crate::resolve::{Def, Rank, Resolution, UndefinedPolicy};
 use pgr_format::consts::{
     BIND_SPECIAL_DYLIB_FLAT_LOOKUP, INDIRECT_SYMBOL_LOCAL, MH_BINDS_TO_WEAK, MH_TWOLEVEL,
-    MH_WEAK_DEFINES, N_ABS, N_EXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K,
+    MH_WEAK_DEFINES, N_ABS, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K,
     PAGEZERO_SIZE_64, REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS,
     S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR, S_SYMBOL_STUBS, S_ZEROFILL, SECTION_TYPE_MASK,
     STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
 };
+
+/// The output image kind (M3): `-static`/dynamic executables, `-dylib`
+/// dylibs and `-bundle` bundles. The kind drives the file type, the image
+/// base (`0x1_0000_0000` for executables, `0` for dylibs/bundles), the load
+/// command set (`LC_MAIN`/`LC_LOAD_DYLINKER` only for executables,
+/// `LC_ID_DYLIB` only for dylibs) and the header flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputType {
+    /// `MH_EXECUTE` (the M1/M2 default).
+    #[default]
+    Execute,
+    /// `MH_DYLIB` (`-dylib`): exports its defined externs, carries
+    /// `LC_ID_DYLIB`, no entry point.
+    Dylib,
+    /// `MH_BUNDLE` (`-bundle`): dlopen-able, no `LC_ID_DYLIB`, no entry
+    /// point.
+    Bundle,
+}
+
+impl OutputType {
+    /// The Mach-O file type for this output kind.
+    #[must_use]
+    pub const fn filetype(self) -> u32 {
+        match self {
+            Self::Execute => pgr_format::consts::MH_EXECUTE,
+            Self::Dylib => pgr_format::consts::MH_DYLIB,
+            Self::Bundle => pgr_format::consts::MH_BUNDLE,
+        }
+    }
+
+    /// The image base: `__PAGEZERO` vmsize for executables (the
+    /// constant-delta contract `vmaddr = fileoff + base`), `0` for dylibs
+    /// and bundles (the verifier's dylib contract: `__TEXT.vmaddr ==
+    /// fileoff`).
+    #[must_use]
+    pub const fn image_base(self) -> u64 {
+        match self {
+            Self::Execute => PAGEZERO_SIZE_64,
+            Self::Dylib | Self::Bundle => 0,
+        }
+    }
+
+    /// True when the image loads as a program (entry point + dylinker).
+    #[must_use]
+    pub const fn is_executable(self) -> bool {
+        matches!(self, Self::Execute)
+    }
+}
 
 /// Link configuration the layout pass consumes (driver-derived).
 #[derive(Debug, Clone)]
 pub struct LinkConfig {
     /// Identifier embedded in the code signature (output-path leaf).
     pub ident: String,
-    /// Entry symbol name (`-e`, default `_main`).
+    /// Output image kind (M3; executables remain the default).
+    pub filetype: OutputType,
+    /// Entry symbol name (`-e`, default `_main`; executables only).
     pub entry_symbol: String,
     /// `LC_BUILD_VERSION` platform (macOS at M1).
     pub platform: u32,
@@ -45,13 +95,15 @@ pub struct LinkConfig {
     /// Packed SDK version.
     pub sdk: u32,
     /// Emit `LC_LOAD_DYLINKER` (verifier-clean images; true-static binaries
-    /// omit it — M1 keeps it, matching the M0 fixtures).
+    /// omit it — M1 keeps it, matching the M0 fixtures). Dylibs and bundles
+    /// never carry it.
     pub dynamic_linker: bool,
     /// `-no_fixup_chains` disables the chained-fixups payload.
     pub fixup_chains: bool,
     /// `-no_adhoc` skips the ad-hoc signature.
     pub adhoc: bool,
-    /// Input dylibs in `LC_LOAD_DYLIB` order (M2; parsed `.tbd` stubs).
+    /// Input dylibs in `LC_LOAD_DYLIB`/`LC_REEXPORT_DYLIB` order (M2;
+    /// parsed `.tbd` stubs, M3 Mach-O dylib scans).
     pub dylibs: Vec<crate::resolve::Dylib>,
     /// `-flat_namespace`: binds carry the flat-lookup ordinal and the
     /// image drops `MH_TWOLEVEL` (M2).
@@ -62,12 +114,28 @@ pub struct LinkConfig {
     pub rpaths: Vec<String>,
     /// `-source_version A.B.C.D.E` (packed; `LC_SOURCE_VERSION` when set).
     pub source_version: Option<u64>,
+    /// M3 `-install_name` (dylibs): the `LC_ID_DYLIB` string. Defaults to
+    /// the output path in the driver when unset.
+    pub install_name: Option<String>,
+    /// M3 `-current_version` (dylibs, packed).
+    pub current_version: u32,
+    /// M3 `-compatibility_version` (dylibs, packed).
+    pub compatibility_version: u32,
+    /// M3 `-exported_symbols_list`: when set, ONLY these names export
+    /// (exact-name subset of ld64's glob form; see docs/COMPAT.md).
+    pub exported_only: Option<Vec<Vec<u8>>>,
+    /// M3 `-unexported_symbols_list`: names removed from the export surface
+    /// (marked `N_PEXT` in the symtab, absent from the trie).
+    pub unexported: Vec<Vec<u8>>,
+    /// M3 `-mark_dead_strippable_dylib`: sets `MH_DEAD_STRIPPABLE_DYLIB`.
+    pub dead_strippable: bool,
 }
 
 impl Default for LinkConfig {
     fn default() -> Self {
         Self {
             ident: String::new(),
+            filetype: OutputType::Execute,
             entry_symbol: "_main".into(),
             platform: pgr_format::consts::PLATFORM_MACOS,
             minos: 0x000c_0000, // 12.0.0
@@ -80,6 +148,12 @@ impl Default for LinkConfig {
             undefined_policy: UndefinedPolicy::default(),
             rpaths: Vec::new(),
             source_version: None,
+            install_name: None,
+            current_version: 0,
+            compatibility_version: 0,
+            exported_only: None,
+            unexported: Vec::new(),
+            dead_strippable: false,
         }
     }
 }
@@ -275,6 +349,11 @@ pub struct OutputSymbol {
 pub struct Layout {
     /// Echo of the config identifier (the signature's identity string).
     pub ident: String,
+    /// The Mach-O file type (`MH_EXECUTE`/`MH_DYLIB`/`MH_BUNDLE`).
+    pub filetype: u32,
+    /// The image base (`__PAGEZERO` vmsize for executables, `0` for
+    /// dylibs/bundles): every absolute fixup/trie address is relative to it.
+    pub image_base: u64,
     /// Output segments in command order (PAGEZERO first, LINKEDIT last).
     pub segments: Vec<SegmentPlan>,
     /// Output sections in file order.
@@ -284,17 +363,18 @@ pub struct Layout {
     /// Header + load-command bytes (the UUID field is zeroed; emit patches
     /// it after hashing).
     pub header_bytes: Vec<u8>,
-    /// Byte offset of the `LC_MAIN` entryoff field inside the header bytes.
+    /// Byte offset of the `LC_MAIN` entryoff field inside the header bytes
+    /// (executables only; 0 otherwise).
     pub entryoff_at: u64,
     /// Total file size.
     pub file_size: u64,
-    /// Entry point offset within `__TEXT`.
+    /// Entry point offset within `__TEXT` (executables only).
     pub entryoff: u64,
     /// `__TEXT` vmsize (the signature's execSegLimit).
     pub text_vmsize: u64,
     /// Output symbol table in emission order.
     pub symbols: Vec<OutputSymbol>,
-    /// Export trie bytes (minimal executable trie).
+    /// Export trie bytes (full trie: defined externs + re-exports, M3).
     pub trie: Vec<u8>,
     /// Function-starts ULEB delta stream.
     pub func_starts: Vec<u8>,
@@ -604,6 +684,9 @@ pub fn layout(
     interner: &Interner,
     cfg: &LinkConfig,
 ) -> Result<Layout, LinkError> {
+    // Constant-delta base: `__PAGEZERO` vmsize for executables, 0 for
+    // dylibs/bundles (M3). Every address math derives from this.
+    let image_base = cfg.filetype.image_base();
     // ---- bucketing ---------------------------------------------------------
     let (mut buckets, mut bucket_of, fixup_slot_count) = bucket_inputs(objects, res)?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
@@ -657,7 +740,7 @@ pub fn layout(
             .iter()
             .map(|s| (s.vmaddr, s.vmsize, s.fileoff))
             .collect();
-        let plan = plan_fixups(slots, &segs, PAGEZERO_SIZE_64, PAGE_SIZE_16K, interner)?;
+        let plan = plan_fixups(slots, &segs, image_base, PAGE_SIZE_16K, interner)?;
         let actual = if chains_enabled {
             plan.chain_starts.len()
         } else {
@@ -685,6 +768,20 @@ pub fn layout(
         message: "fixup plan missing after convergence".into(),
     })?;
 
+    // ---- export visibility (M3) ------------------------------------------------
+    // `-exported_symbols_list` restricts the surface to the listed names;
+    // `-unexported_symbols_list` removes names. Hidden externals stay in the
+    // symtab as private externals (`N_PEXT`) — ld64's behavior — and never
+    // reach the trie.
+    let visible = |name: &[u8]| -> bool {
+        if let Some(only) = &cfg.exported_only {
+            if !only.iter().any(|n| n.as_slice() == name) {
+                return false;
+            }
+        }
+        !cfg.unexported.iter().any(|n| n.as_slice() == name)
+    };
+
     // ---- symbol table ---------------------------------------------------------
     let mut symbols = build_symtab(
         objects,
@@ -693,9 +790,10 @@ pub fn layout(
         &state.sections,
         &state.addr_of,
         &commons,
+        &visible,
     );
     // `__mh_execute_header`: the image's own exported header symbol (ld64
-    // and lld both emit it for executables; the M2 trie lists it).
+    // and lld both emit it; the M2 trie lists it).
     // `link()` always interns the name; direct `layout()` callers without
     // it simply skip the entry.
     let text_vmaddr = state
@@ -710,14 +808,16 @@ pub fn layout(
         .position(|s| s.seg_name == "__TEXT" && s.size > 0)
         .map_or(1, |i| (i + 1) as u8);
     if let Some(id) = interner.lookup(b"__mh_execute_header") {
-        symbols.push(OutputSymbol {
-            name: id,
-            n_type: N_EXT | N_SECT,
-            n_sect: mh_header_sect,
-            n_desc: REFERENCED_DYNAMICALLY,
-            value: text_vmaddr,
-            external: true,
-        });
+        if visible(b"__mh_execute_header") {
+            symbols.push(OutputSymbol {
+                name: id,
+                n_type: N_EXT | N_SECT,
+                n_sect: mh_header_sect,
+                n_desc: REFERENCED_DYNAMICALLY,
+                value: text_vmaddr,
+                external: true,
+            });
+        }
     }
 
     // Undefined externals (dylib exports + dynamic lookups), in import
@@ -800,47 +900,96 @@ pub fn layout(
     // ---- indirect symbol table (M2): __got slots then __stubs slots ------
     // Entries name the symtab entry each pointer slot stands for (TDD
     // §3.3); `INDIRECT_SYMBOL_LOCAL` covers slots that only rebase.
-    let sym_index_of =
-        |id: StringId| -> Option<usize> { symbols.iter().position(|s| s.name == id) };
+    // (Hash map: O(1) lookups keep the pass linear in the M4 shapes.)
+    let mut sym_index: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::with_capacity(symbols.len());
+    for (i, s) in symbols.iter().enumerate() {
+        sym_index.entry(s.name.0).or_insert(i as u32);
+    }
     let mut indirect_syms: Vec<u32> = Vec::new();
     for id in &needs.got {
-        match sym_index_of(*id) {
-            Some(i) => indirect_syms.push(i as u32),
+        match sym_index.get(&id.0) {
+            Some(i) => indirect_syms.push(*i),
             None => indirect_syms.push(INDIRECT_SYMBOL_LOCAL),
         }
     }
     for id in &needs.stubs {
-        match sym_index_of(*id) {
-            Some(i) => indirect_syms.push(i as u32),
+        match sym_index.get(&id.0) {
+            Some(i) => indirect_syms.push(*i),
             None => indirect_syms.push(INDIRECT_SYMBOL_LOCAL),
         }
     }
 
-    // ---- export trie (M2: every defined external + __mh_execute_header) ---
-    let trie = build_trie(&symbols, interner, PAGEZERO_SIZE_64)?;
+    // ---- export trie (M3 full trie) -----------------------------------------
+    // Defined externs (visible ones) + `__mh_execute_header` carry regular
+    // addresses; `-reexport_library` exports become REEXPORT nodes with the
+    // dylib's 1-based ordinal. Local definitions shadow re-exports of the
+    // same name (the trie builder keeps the first of each equal name).
+    let mut exports: Vec<crate::trie::Export> = Vec::new();
+    for sym in &symbols {
+        if !sym.external || sym.n_type & N_SECT == 0 {
+            continue;
+        }
+        let name = interner.bytes(sym.name);
+        if !visible(name) {
+            continue;
+        }
+        let flags = u32::from(sym.n_desc & N_WEAK_DEF != 0)
+            * crate::trie::EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
+        exports.push(crate::trie::Export {
+            name,
+            info: crate::trie::ExportInfo::Regular {
+                flags,
+                address: sym.value,
+            },
+        });
+    }
+    for (ord, d) in cfg.dylibs.iter().enumerate() {
+        if !d.reexport {
+            continue;
+        }
+        for name in &d.exports {
+            if !visible(name) {
+                continue;
+            }
+            exports.push(crate::trie::Export {
+                name,
+                info: crate::trie::ExportInfo::Reexport {
+                    ordinal: u64::try_from(ord + 1).unwrap_or(1),
+                    imported_name: b"",
+                },
+            });
+        }
+    }
+    let trie = crate::trie::build(&mut exports, image_base)?;
+    let has_reexports = cfg.dylibs.iter().any(|d| d.reexport);
 
-    // ---- entry --------------------------------------------------------------------
-    let entry_id = interner
-        .lookup(cfg.entry_symbol.as_bytes())
-        .ok_or(LinkError::Symbol {
-            name: cfg.entry_symbol.clone(),
-            message: format!(
-                "entry symbol \"{}\" is not defined by any input",
-                cfg.entry_symbol
-            ),
-        })?;
-    let entry_vaddr = state
-        .def_addr
-        .get(&entry_id.0)
-        .copied()
-        .ok_or(LinkError::Symbol {
-            name: cfg.entry_symbol.clone(),
-            message: format!(
-                "entry symbol \"{}\" is not defined by any input",
-                cfg.entry_symbol
-            ),
-        })?;
-    let entryoff = entry_vaddr - PAGEZERO_SIZE_64;
+    // ---- entry (executables only; dylibs/bundles have no LC_MAIN) --------------
+    let entryoff = if cfg.filetype.is_executable() {
+        let entry_id = interner
+            .lookup(cfg.entry_symbol.as_bytes())
+            .ok_or(LinkError::Symbol {
+                name: cfg.entry_symbol.clone(),
+                message: format!(
+                    "entry symbol \"{}\" is not defined by any input",
+                    cfg.entry_symbol
+                ),
+            })?;
+        let entry_vaddr = state
+            .def_addr
+            .get(&entry_id.0)
+            .copied()
+            .ok_or(LinkError::Symbol {
+                name: cfg.entry_symbol.clone(),
+                message: format!(
+                    "entry symbol \"{}\" is not defined by any input",
+                    cfg.entry_symbol
+                ),
+            })?;
+        entry_vaddr - image_base
+    } else {
+        0
+    };
 
     // ---- __LINKEDIT chunks + signature sizing --------------------------------------
     let fixup_payload_size = if fixups.slot_count > 0 && cfg.fixup_chains {
@@ -901,6 +1050,7 @@ pub fn layout(
 
     // ---- header + load commands -----------------------------------------------------
     let header_inputs = HeaderInputs {
+        filetype: cfg.filetype,
         sym_off,
         nsyms: symbols.len(),
         str_off,
@@ -919,18 +1069,25 @@ pub fn layout(
         sig_off,
         sig_size,
         entryoff,
+        install_name: cfg.install_name.clone(),
+        current_version: cfg.current_version,
+        compatibility_version: cfg.compatibility_version,
         dylibs: cfg.dylibs.clone(),
         rpaths: cfg.rpaths.clone(),
         source_version: cfg.source_version,
         flat_namespace: cfg.flat_namespace,
         binds_to_weak: fixups.has_weak_binds || res.any_weak_bind(objects),
         weak_defines: res.definitions().any(|(_, d)| d.weak) || cfg.dylibs.iter().any(|d| d.weak),
+        has_reexports,
+        dead_strippable: cfg.dead_strippable,
     };
     let (header_bytes, uuid_at, entryoff_at) =
         build_header(cfg, &state.segments, &state.sections, &header_inputs)?;
 
     Ok(Layout {
         ident: cfg.ident.clone(),
+        filetype: cfg.filetype.filetype(),
+        image_base,
         segments: state.segments,
         sections: state.sections,
         linkedit: LinkeditPlan {
@@ -1149,17 +1306,22 @@ fn place(
     }
 
     // ---- segment packing (§8) ----------------------------------------------
+    // Constant-delta base: 0x1_0000_0000 for executables (after __PAGEZERO),
+    // 0 for dylibs/bundles (M3: `__TEXT.vmaddr == fileoff`, no __PAGEZERO).
+    let base = cfg.filetype.image_base();
     let mut segments: Vec<SegmentPlan> = Vec::new();
-    segments.push(SegmentPlan {
-        name: "__PAGEZERO".into(),
-        vmaddr: 0,
-        vmsize: PAGEZERO_SIZE_64,
-        fileoff: 0,
-        filesize: 0,
-        maxprot: 0,
-        initprot: 0,
-        sections: Vec::new(),
-    });
+    if base > 0 {
+        segments.push(SegmentPlan {
+            name: "__PAGEZERO".into(),
+            vmaddr: 0,
+            vmsize: base,
+            fileoff: 0,
+            filesize: 0,
+            maxprot: 0,
+            initprot: 0,
+            sections: Vec::new(),
+        });
+    }
 
     for seg_name in ["__TEXT", "__DATA_CONST", "__DATA"] {
         let (maxprot, initprot) = match seg_name {
@@ -1179,8 +1341,8 @@ fn place(
             align_up_u64(prev_end, PAGE_SIZE_16K)
         };
         // VM and file cursors move in lockstep under the constant-delta
-        // contract (`vmaddr = fileoff + PAGEZERO`); zero-fill sections
-        // advance VM only (§8.1 rule 5).
+        // contract (`vmaddr = fileoff + base`); zero-fill sections advance
+        // VM only (§8.1 rule 5).
         let mut cursor = if seg_name == "__TEXT" {
             align_up_u64(header_len as u64, 8)
         } else {
@@ -1193,7 +1355,7 @@ fn place(
                 continue;
             }
             cursor = align_up_u64(cursor, 1u64 << s.align_log2);
-            s.vm_addr = cursor + PAGEZERO_SIZE_64;
+            s.vm_addr = cursor + base;
             if s.zerofill {
                 s.file_off = 0;
             } else {
@@ -1208,7 +1370,7 @@ fn place(
         let vmsize = align_up_u64(cursor - seg_fileoff, PAGE_SIZE_16K).max(PAGE_SIZE_16K);
         segments.push(SegmentPlan {
             name: seg_name.into(),
-            vmaddr: seg_fileoff + PAGEZERO_SIZE_64,
+            vmaddr: seg_fileoff + base,
             vmsize,
             fileoff: seg_fileoff,
             filesize: file_end - seg_fileoff,
@@ -1221,7 +1383,7 @@ fn place(
     let le_fileoff = align_up_u64(prev_end.max(PAGE_SIZE_16K), PAGE_SIZE_16K);
     segments.push(SegmentPlan {
         name: "__LINKEDIT".into(),
-        vmaddr: le_fileoff + PAGEZERO_SIZE_64,
+        vmaddr: le_fileoff + base,
         vmsize: 0,
         fileoff: le_fileoff,
         filesize: 0,
@@ -1706,6 +1868,9 @@ fn lookup(obj: &InputObject, target: RelocTarget, space: &AddrSpace<'_>) -> Resu
 
 /// Builds the output symbol table: locals (file order), ext defs (file
 /// order), commons (name order); `n_sect` remapped to output sections.
+/// M3: hidden externals (export filters) become private externals
+/// (`N_SECT | N_PEXT`, `external: false`) merged into the locals range in
+/// (file, sym) order — ld64's `-exported_symbols_list` behavior.
 fn build_symtab(
     objects: &[InputObject],
     res: &Resolution,
@@ -1713,6 +1878,7 @@ fn build_symtab(
     sections: &[PlacedSection],
     addr_of: &std::collections::HashMap<(u32, usize), u64>,
     commons: &[(StringId, &Def)],
+    visible: &dyn Fn(&[u8]) -> bool,
 ) -> Vec<OutputSymbol> {
     // Output section lookup by (file, input section): (index, base).
     let mut sect_of: std::collections::HashMap<(u32, usize), usize> =
@@ -1724,12 +1890,15 @@ fn build_symtab(
             }
         }
     }
+    // Locals with their (file, sym) order key (hidden extdefs merge in).
+    let mut locals: Vec<((u32, u32), OutputSymbol)> = Vec::new();
+    let mut hidden: Vec<((u32, u32), OutputSymbol)> = Vec::new();
     let mut out: Vec<OutputSymbol> = Vec::new();
 
     // Locals: file order, symbol order; stabs skipped; non-section locals
     // pass through as absolute.
     for obj in objects {
-        for sym in &obj.symbols {
+        for (sym_i, sym) in obj.symbols.iter().enumerate() {
             if sym.stab || sym.external {
                 continue;
             }
@@ -1741,23 +1910,29 @@ fn build_symtab(
                     let osect = sym
                         .section
                         .and_then(|sect| sect_of.get(&(obj.file.0, sect)).copied());
-                    out.push(OutputSymbol {
-                        name: sym.name,
-                        n_type: N_SECT,
-                        n_sect: osect.map_or(0, |i| (i + 1) as u8),
-                        n_desc: 0,
-                        value: base + sym.value,
-                        external: false,
-                    });
+                    locals.push((
+                        (obj.file.0, sym_i as u32),
+                        OutputSymbol {
+                            name: sym.name,
+                            n_type: N_SECT,
+                            n_sect: osect.map_or(0, |i| (i + 1) as u8),
+                            n_desc: 0,
+                            value: base + sym.value,
+                            external: false,
+                        },
+                    ));
                 }
-                None => out.push(OutputSymbol {
-                    name: sym.name,
-                    n_type: N_ABS,
-                    n_sect: 0,
-                    n_desc: 0,
-                    value: sym.value,
-                    external: false,
-                }),
+                None => locals.push((
+                    (obj.file.0, sym_i as u32),
+                    OutputSymbol {
+                        name: sym.name,
+                        n_type: N_ABS,
+                        n_sect: 0,
+                        n_desc: 0,
+                        value: sym.value,
+                        external: false,
+                    },
+                )),
             }
         }
     }
@@ -1777,7 +1952,7 @@ fn build_symtab(
             .get(&(def.file.0, sect))
             .copied()
             .unwrap_or(usize::MAX);
-        out.push(OutputSymbol {
+        let entry = OutputSymbol {
             name: id,
             n_type: N_EXT | N_SECT,
             n_sect: if osect == usize::MAX {
@@ -1788,14 +1963,28 @@ fn build_symtab(
             n_desc: if def.weak { N_WEAK_DEF } else { 0 },
             value: base + def.value,
             external: true,
-        });
+        };
+        if visible(interner.bytes(id)) {
+            out.push(entry);
+        } else {
+            // Hidden: a private external local (`N_PEXT`), ordered by its
+            // defining (file, sym) position within the locals range.
+            hidden.push((
+                (def.file.0, def.sym as u32),
+                OutputSymbol {
+                    n_type: N_SECT | N_PEXT,
+                    external: false,
+                    ..entry
+                },
+            ));
+        }
     }
     // Commons: name-sorted (the allocation order); address from the
     // __common section layout via the piece's `common_name`.
     let common_sect = sections
         .iter()
         .position(|s| s.seg_name == "__DATA" && s.name == "__common");
-    for (id, _def) in commons {
+    for (id, def) in commons {
         let Some(ci) = common_sect else { continue };
         let Some(piece) = sections[ci]
             .pieces
@@ -1804,16 +1993,47 @@ fn build_symtab(
         else {
             continue;
         };
-        out.push(OutputSymbol {
+        let entry = OutputSymbol {
             name: *id,
             n_type: N_EXT | N_SECT,
             n_sect: (ci + 1) as u8,
             n_desc: 0,
             value: sections[ci].vm_addr + piece.offset,
             external: true,
-        });
+        };
+        if visible(interner.bytes(*id)) {
+            out.push(entry);
+        } else {
+            hidden.push((
+                (def.file.0, def.sym as u32),
+                OutputSymbol {
+                    n_type: N_SECT | N_PEXT,
+                    external: false,
+                    ..entry
+                },
+            ));
+        }
     }
-    let _ = interner;
+    // Merge hidden defs into the locals range (both sides already sorted by
+    // (file, sym); a stable merge keeps the canonical order).
+    if hidden.is_empty() {
+        out.splice(0..0, locals.into_iter().map(|(_, s)| s));
+    } else {
+        let mut merged: Vec<OutputSymbol> = Vec::with_capacity(locals.len() + hidden.len());
+        let mut h = hidden.into_iter().peekable();
+        for (key, sym) in locals {
+            while let Some((hk, _)) = h.peek() {
+                if *hk <= key {
+                    merged.push(h.next().expect("peeked").1);
+                } else {
+                    break;
+                }
+            }
+            merged.push(sym);
+        }
+        merged.extend(h.map(|(_, s)| s));
+        out.splice(0..0, merged);
+    }
     out
 }
 
@@ -1858,207 +2078,11 @@ pub fn uleb(mut v: u64) -> Vec<u8> {
     out
 }
 
-/// Export trie (M2): one terminal node per externally-visible defined
-/// symbol plus `__mh_execute_header`, children sorted by their first byte
-/// (TDD §3.3). Node layout: `ULEB terminal_size, [ULEB flags, ULEB
-/// address]`, `u8 child_count`, then per child `substring, 0x0, ULEB
-/// offset` (the dyld/ld64 edge form). Addresses are image-base-relative
-/// (dyld resolves `image_load_address + addr`).
-fn build_trie(
-    symbols: &[OutputSymbol],
-    interner: &Interner,
-    image_base: u64,
-) -> Result<Vec<u8>, LinkError> {
-    #[derive(Debug)]
-    struct Node {
-        /// Terminal export info (sorted-name prefix), `None` = pure prefix.
-        export: Option<(u32, u64)>, // (flags, address)
-        children: Vec<(Vec<u8>, usize)>, // (substring, child index)
-    }
-    let mut nodes: Vec<Node> = vec![Node {
-        export: None,
-        children: Vec::new(),
-    }];
-
-    // Exports in sorted-name order for a deterministic trie.
-    let mut exports: Vec<(&OutputSymbol, Vec<u8>)> = symbols
-        .iter()
-        .filter(|s| s.external && s.n_type & N_SECT != 0)
-        .map(|s| (s, interner.bytes(s.name).to_vec()))
-        .collect();
-    exports.sort_by(|a, b| a.1.cmp(&b.1));
-    exports.dedup_by(|a, b| a.1 == b.1);
-
-    for (sym, name) in exports {
-        let address = sym
-            .value
-            .checked_sub(image_base)
-            .ok_or(LinkError::Internal {
-                message: "export address below the image base".into(),
-            })?;
-        let flags = u32::from(sym.n_desc & N_WEAK_DEF != 0);
-        // Walk/build the node chain, splitting edges on common prefixes.
-        let mut cur = 0usize;
-        let mut rest = &name[..];
-        'insert: while !rest.is_empty() {
-            // Find a child edge sharing a prefix.
-            let mut advanced = false;
-            for (sub, child) in nodes[cur].children.clone() {
-                let common = sub
-                    .iter()
-                    .zip(rest.iter())
-                    .position(|(a, b)| a != b)
-                    .unwrap_or(sub.len().min(rest.len()));
-                if common > 0 {
-                    if common < sub.len() {
-                        // Split the edge: new intermediate node.
-                        let tail = sub[common..].to_vec();
-                        let intermediate = Node {
-                            export: None,
-                            children: vec![(tail, child)],
-                        };
-                        let inter_idx = nodes.len();
-                        nodes.push(intermediate);
-                        nodes[cur].children.retain(|(s, _)| s != &sub);
-                        nodes[cur]
-                            .children
-                            .push((sub[..common].to_vec(), inter_idx));
-                        nodes[cur].children.sort_by(|a, b| a.0.cmp(&b.0));
-                        cur = inter_idx;
-                    } else {
-                        cur = child;
-                    }
-                    rest = &rest[common..];
-                    advanced = true;
-                    break;
-                }
-            }
-            if advanced {
-                continue 'insert;
-            }
-            // New edge for the remaining prefix (one character edges keep
-            // the builder simple; ld64 uses single-char edges too).
-            let child_idx = nodes.len();
-            nodes.push(Node {
-                export: None,
-                children: Vec::new(),
-            });
-            nodes[cur].children.push((rest[..1].to_vec(), child_idx));
-            nodes[cur].children.sort_by(|a, b| a.0.cmp(&b.0));
-            cur = child_idx;
-            rest = &rest[1..];
-        }
-        if nodes[cur].export.is_some() {
-            return Err(LinkError::Internal {
-                message: "duplicate export in the trie".into(),
-            });
-        }
-        nodes[cur].export = Some((flags, address));
-    }
-
-    // Two-pass offset assignment: node offsets depend on ULEB widths, which
-    // depend on offsets (ld64's `updateOffset` fixpoint; converges fast).
-    #[derive(Debug, Clone, Default)]
-    struct Offsets {
-        offset: Vec<usize>,
-        total: usize,
-    }
-    let mut off = Offsets {
-        offset: vec![0usize; nodes.len()],
-        total: 0,
-    };
-    let mut pass = 0usize;
-    loop {
-        // Compute terminal sizes.
-        let terminal: Vec<usize> = nodes
-            .iter()
-            .map(|n| match n.export {
-                None => 0,
-                Some((flags, address)) => uleb(u64::from(flags)).len() + uleb(address).len(),
-            })
-            .collect();
-        let mut next = 0usize;
-        for i in 0..nodes.len() {
-            off.offset[i] = next;
-            let node_size = terminal[i]
-                + if terminal[i] == 0 {
-                    1
-                } else {
-                    uleb(terminal[i] as u64).len()
-                }
-                + 1
-                + nodes[i]
-                    .children
-                    .iter()
-                    .map(|(sub, child)| sub.len() + 1 + uleb(off.offset[*child] as u64).len())
-                    .sum::<usize>();
-            next += node_size;
-        }
-        if off.total == next || pass > 8 {
-            off.total = next;
-            break;
-        }
-        off.total = next;
-        pass += 1;
-    }
-
-    // Serialize.
-    let terminal: Vec<usize> = nodes
-        .iter()
-        .map(|n| match n.export {
-            None => 0,
-            Some((flags, address)) => uleb(u64::from(flags)).len() + uleb(address).len(),
-        })
-        .collect();
-    let mut out = vec![0u8; off.total];
-    for (i, n) in nodes.iter().enumerate() {
-        let mut w = off.offset[i];
-        if terminal[i] > 0 {
-            let t = uleb(terminal[i] as u64);
-            out[w..w + t.len()].copy_from_slice(&t);
-            w += t.len();
-            let (flags, address) = n.export.expect("terminal size implies export");
-            let fb = uleb(u64::from(flags));
-            out[w..w + fb.len()].copy_from_slice(&fb);
-            w += fb.len();
-            let ab = uleb(address);
-            out[w..w + ab.len()].copy_from_slice(&ab);
-            w += ab.len();
-        } else {
-            out[w] = 0;
-            w += 1;
-        }
-        out[w] = n.children.len() as u8;
-        w += 1;
-        for (sub, child) in &n.children {
-            out[w..w + sub.len()].copy_from_slice(sub);
-            w += sub.len();
-            out[w] = 0;
-            w += 1;
-            let ob = uleb(off.offset[*child] as u64);
-            out[w..w + ob.len()].copy_from_slice(&ob);
-            w += ob.len();
-        }
-        let ts = terminal[i];
-        debug_assert_eq!(
-            w,
-            off.offset[i]
-                + ts
-                + if ts == 0 { 1 } else { uleb(ts as u64).len() }
-                + 1
-                + n.children
-                    .iter()
-                    .map(|(s, c)| s.len() + 1 + uleb(off.offset[*c] as u64).len())
-                    .sum::<usize>(),
-            "node serialization must match its computed size"
-        );
-    }
-    Ok(out)
-}
-
 /// Assembles header + load commands. Returns `(bytes, uuid_at, entryoff_at)`.
 /// `__LINKEDIT` chunk positions the header references.
 struct HeaderInputs {
+    /// The output image kind (drives filetype, LC_MAIN/LC_ID_DYLIB).
+    filetype: OutputType,
     /// LC_SYMTAB: file offset, entry count.
     sym_off: u64,
     nsyms: usize,
@@ -2084,8 +2108,12 @@ struct HeaderInputs {
     /// LC_DYSYMTAB indirect symbol table.
     indirect_off: u64,
     indirect_count: usize,
-    /// LC_MAIN entry offset within `__TEXT`.
+    /// LC_MAIN entry offset within `__TEXT` (executables only).
     entryoff: u64,
+    /// M3 `LC_ID_DYLIB` inputs (dylibs only).
+    install_name: Option<String>,
+    current_version: u32,
+    compatibility_version: u32,
     /// M2 load-command inputs.
     dylibs: Vec<crate::resolve::Dylib>,
     rpaths: Vec<String>,
@@ -2093,9 +2121,15 @@ struct HeaderInputs {
     flat_namespace: bool,
     binds_to_weak: bool,
     weak_defines: bool,
+    /// M3: at least one `-reexport_library` (suppresses
+    /// `MH_NO_REEXPORTED_DYLIBS`).
+    has_reexports: bool,
+    /// M3 `-mark_dead_strippable_dylib`.
+    dead_strippable: bool,
 }
 
-/// The exact `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB` command size for a name.
+/// The exact `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB`/`LC_REEXPORT_DYLIB`
+/// command size for a name.
 fn dylib_cmd_size(install_name: &str) -> usize {
     align8(24 + install_name.len() + 1)
 }
@@ -2111,7 +2145,9 @@ fn build_header(
     sections: &[PlacedSection],
     hi: &HeaderInputs,
 ) -> Result<(Vec<u8>, u64, u64), LinkError> {
+    let is_exec = hi.filetype.is_executable();
     let dylinker_len = align8(12 + "/usr/lib/dyld\0".len());
+    let emit_dylinker = is_exec && cfg.dynamic_linker;
     let fixup_lc = if hi.fixup_size > 0 { 16 } else { 0 };
     let dylib_cmds: Vec<u32> = hi
         .dylibs
@@ -2119,15 +2155,19 @@ fn build_header(
         .map(|d| {
             if d.weak {
                 pgr_format::consts::LC_LOAD_WEAK_DYLIB
+            } else if d.reexport {
+                pgr_format::consts::LC_REEXPORT_DYLIB
             } else {
                 pgr_format::consts::LC_LOAD_DYLIB
             }
         })
         .collect();
-    let ncmds: u32 = 5
-        + 1
-        + u32::from(cfg.dynamic_linker)
-        + 1 // LC_MAIN
+    let ncmds: u32 = u32::try_from(segments.len()).map_err(|_| LinkError::Internal {
+        message: "segment count exceeds u32".into(),
+    })? + 1 // LC_BUILD_VERSION
+        + u32::from(emit_dylinker)
+        + u32::from(is_exec) // LC_MAIN
+        + u32::from(hi.filetype == OutputType::Dylib) // LC_ID_DYLIB
         + 1 // LC_SYMTAB
         + 1 // LC_DYSYMTAB
         + u32::from(fixup_lc > 0)
@@ -2135,20 +2175,29 @@ fn build_header(
         + 1 // LC_FUNCTION_STARTS
         + 1 // LC_UUID
         + u32::from(cfg.adhoc)
-        + u32::try_from(hi.dylibs.len()).expect("dylib count fits u32")
-        + u32::try_from(hi.rpaths.len()).expect("rpath count fits u32")
+        + u32::try_from(hi.dylibs.len()).map_err(|_| LinkError::Internal {
+            message: "dylib count exceeds u32".into(),
+        })?
+        + u32::try_from(hi.rpaths.len()).map_err(|_| LinkError::Internal {
+            message: "rpath count exceeds u32".into(),
+        })?
         + u32::from(hi.source_version.is_some());
     let nsections: usize = sections.iter().filter(|s| s.size > 0).count();
     let sizeofcmds = command_size(cfg, nsections, fixup_lc > 0);
     debug_assert_eq!(
         32 + sizeofcmds,
-        32 + 72 * 5
+        32 + 72 * segments.len()
             + 80 * nsections
-            + 32
-            + if cfg.dynamic_linker { dylinker_len } else { 0 }
-            + 24
-            + 24
-            + 80
+            + 32 // LC_BUILD_VERSION
+            + if emit_dylinker { dylinker_len } else { 0 }
+            + if is_exec { 24 } else { 0 } // LC_MAIN
+            + if hi.filetype == OutputType::Dylib {
+                dylib_cmd_size(hi.install_name.as_deref().unwrap_or(""))
+            } else {
+                0
+            }
+            + 24 // LC_SYMTAB
+            + 80 // LC_DYSYMTAB
             + fixup_lc
             + 16 // LC_DYLD_EXPORTS_TRIE
             + 16 // LC_FUNCTION_STARTS
@@ -2166,12 +2215,25 @@ fn build_header(
     w32(&mut buf, 0, pgr_format::consts::MH_MAGIC_64);
     w32(&mut buf, 4, pgr_format::consts::CPU_TYPE_ARM64);
     w32(&mut buf, 8, pgr_format::consts::CPU_SUBTYPE_ARM64_ALL);
-    w32(&mut buf, 12, pgr_format::consts::MH_EXECUTE);
+    w32(&mut buf, 12, hi.filetype.filetype());
     w32(&mut buf, 16, ncmds);
     w32(&mut buf, 20, sizeofcmds as u32);
-    let mut flags = pgr_format::consts::MH_NOUNDEFS
-        | pgr_format::consts::MH_DYLDLINK
-        | pgr_format::consts::MH_PIE;
+    // Header flags (M3 semantics): MH_NOUNDEFS only when the symtab carries
+    // no undefined externals; MH_PIE only for executables; dylibs without
+    // re-exports carry MH_NO_REEXPORTED_DYLIBS (ld64's convention).
+    let mut flags = pgr_format::consts::MH_DYLDLINK;
+    if hi.n_undef == 0 {
+        flags |= pgr_format::consts::MH_NOUNDEFS;
+    }
+    if is_exec {
+        flags |= pgr_format::consts::MH_PIE;
+    }
+    if hi.filetype == OutputType::Dylib && !hi.has_reexports {
+        flags |= pgr_format::consts::MH_NO_REEXPORTED_DYLIBS;
+    }
+    if hi.dead_strippable {
+        flags |= pgr_format::consts::MH_DEAD_STRIPPABLE_DYLIB;
+    }
     if !hi.flat_namespace {
         flags |= MH_TWOLEVEL;
     }
@@ -2228,15 +2290,30 @@ fn build_header(
     w32(&mut buf, lc + 24, pgr_format::consts::TOOL_LD);
     w32(&mut buf, lc + 28, 0x000f_0200);
     lc += 32;
-    if cfg.dynamic_linker {
+    if emit_dylinker {
         w32(&mut buf, lc, pgr_format::consts::LC_LOAD_DYLINKER);
         w32(&mut buf, lc + 4, dylinker_len as u32);
         w32(&mut buf, lc + 8, 12);
         buf[lc + 12..lc + 12 + "/usr/lib/dyld\0".len()].copy_from_slice(b"/usr/lib/dyld\0");
         lc += dylinker_len;
     }
-    // LC_LOAD_DYLIB / LC_LOAD_WEAK_DYLIB per input dylib, in ordinal
-    // order — the two-level namespace index base (TDD §3.3).
+    // LC_ID_DYLIB (dylibs): the install name the two-level namespace keys on.
+    if hi.filetype == OutputType::Dylib {
+        let name = hi.install_name.as_deref().unwrap_or("");
+        let cmdsize = dylib_cmd_size(name);
+        w32(&mut buf, lc, pgr_format::consts::LC_ID_DYLIB);
+        w32(&mut buf, lc + 4, cmdsize as u32);
+        w32(&mut buf, lc + 8, 24); // name lc_str offset
+        w32(&mut buf, lc + 12, 1); // timestamp (ld64 writes 1)
+        w32(&mut buf, lc + 16, hi.current_version);
+        w32(&mut buf, lc + 20, hi.compatibility_version);
+        buf[lc + 24..lc + 24 + name.len()].copy_from_slice(name.as_bytes());
+        buf[lc + 24 + name.len()] = 0;
+        lc += cmdsize;
+    }
+    // LC_LOAD_DYLIB / LC_LOAD_WEAK_DYLIB / LC_REEXPORT_DYLIB per input
+    // dylib, in ordinal order — the two-level namespace index base
+    // (TDD §3.3); re-exports join the same ordinal space (M3).
     for (d, &cmd) in hi.dylibs.iter().zip(dylib_cmds.iter()) {
         let name = d.install_name.as_bytes();
         let cmdsize = dylib_cmd_size(&d.install_name);
@@ -2268,12 +2345,18 @@ fn build_header(
         w64(&mut buf, lc + 8, sv);
         lc += 16;
     }
-    w32(&mut buf, lc, pgr_format::consts::LC_MAIN);
-    w32(&mut buf, lc + 4, 24);
-    let entryoff_at = lc + 8;
-    w64(&mut buf, entryoff_at, hi.entryoff);
-    w64(&mut buf, lc + 16, 0); // stacksize
-    lc += 24;
+    // LC_MAIN: executables only (M3: dylibs and bundles carry none).
+    let entryoff_at;
+    if is_exec {
+        w32(&mut buf, lc, pgr_format::consts::LC_MAIN);
+        w32(&mut buf, lc + 4, 24);
+        entryoff_at = lc + 8;
+        w64(&mut buf, entryoff_at, hi.entryoff);
+        w64(&mut buf, lc + 16, 0); // stacksize
+        lc += 24;
+    } else {
+        entryoff_at = 0;
+    }
     w32(&mut buf, lc, pgr_format::consts::LC_SYMTAB);
     w32(&mut buf, lc + 4, 24);
     w32(&mut buf, lc + 8, hi.sym_off as u32);
@@ -2337,19 +2420,28 @@ fn pad16(name: &[u8]) -> [u8; 16] {
 /// The exact `sizeofcmds` — the single source of truth shared by `place`
 /// (section start math) and `build_header`.
 fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: bool) -> usize {
-    let dylinker_len = if cfg.dynamic_linker {
+    let is_exec = cfg.filetype.is_executable();
+    let emit_dylinker = is_exec && cfg.dynamic_linker;
+    let dylinker_len = if emit_dylinker {
         align8(12 + "/usr/lib/dyld\0".len())
     } else {
         0
     };
-    72 * 5
+    // Executables carry __PAGEZERO (5 segments); dylibs/bundles do not (4).
+    let nsegments = if is_exec { 5 } else { 4 };
+    nsegments * 72
         + 80 * nsections
         + 32 // LC_BUILD_VERSION
         + dylinker_len
+        + if cfg.filetype == OutputType::Dylib {
+            dylib_cmd_size(cfg.install_name.as_deref().unwrap_or(""))
+        } else {
+            0
+        }
         + cfg.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
         + cfg.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
         + usize::from(cfg.source_version.is_some()) * 16 // LC_SOURCE_VERSION
-        + 24 // LC_MAIN
+        + usize::from(is_exec) * 24 // LC_MAIN
         + 24 // LC_SYMTAB
         + 80 // LC_DYSYMTAB
         + usize::from(fixup_lc) * 16 // LC_DYLD_CHAINED_FIXUPS
