@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 pgr-fixtures = { workspace = true }
 object = { workspace = true }
 criterion = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "parse"
