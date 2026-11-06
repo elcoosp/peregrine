@@ -187,6 +187,15 @@ fn write_linkedit(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
             "fixup payload",
         )?;
     }
+    if let Some(info) = &layout.dyld_info {
+        // M6 classic streams occupy the fixup payload's LINKEDIT slot.
+        if !info.rebase.is_empty() {
+            put_chunk(buf, le.dyld_rebase_off, &info.rebase, "rebase stream")?;
+        }
+        if !info.bind.is_empty() {
+            put_chunk(buf, le.dyld_bind_off, &info.bind, "bind stream")?;
+        }
+    }
     put_chunk(buf, le.trie_off, &layout.trie, "export trie")?;
     if le.func_starts_size > 0 {
         put_chunk(
