@@ -217,14 +217,17 @@ pub fn plan_fixups(
     // addend: 0..=255 inline in the word, everything else in the import
     // entry; only one side is ever nonzero, so dedup keys on the outlined
     // half.
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct BindKey {
         lib_ordinal: u8,
         name: Vec<u8>,
         outlined_addend: i64,
         weak: bool,
     }
+    // Seen-set dedup: O(1) per slot keeps the import build linear (the
+    // M4 shapes sort this table canonically afterwards).
     let mut bind_keys: Vec<BindKey> = Vec::new();
+    let mut seen: std::collections::HashSet<BindKey> = std::collections::HashSet::new();
     let mut has_weak_binds = false;
     for slot in &slots {
         let FixupKind::Bind {
@@ -247,7 +250,7 @@ pub fn plan_fixups(
             outlined_addend: outlined,
             weak,
         };
-        if !bind_keys.contains(&key) {
+        if seen.insert(key.clone()) {
             bind_keys.push(key);
         }
         if weak {
