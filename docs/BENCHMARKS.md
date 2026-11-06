@@ -1,9 +1,10 @@
-# Peregrine Benchmarks — M0/M1/M2/M3/M4 Baselines
+# Peregrine Benchmarks — M0/M1/M2/M3/M4/M5 Baselines
 
-Status: **M0–M4 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
+Status: **M0–M5 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
 end-to-end link baseline + architecture doc §10.3 M2 dynamic-link baseline +
 M3 export-trie gate "trie build < 10 ms for 10⁵ exports" + M4 fused-emit
-byte-identity gate and its sandbox perf half).
+byte-identity gate and its sandbox perf half + M5 archive/dead-strip/
+cstring gates).
 
 These numbers are **dev-sandbox baselines**, not Apple Silicon results. They
 exist to (a) prove the benchmark harness works end-to-end from day one and
@@ -35,6 +36,88 @@ do honest work.
 
 ```sh
 cargo bench -p pgr-driver
+```
+
+## Recorded baseline (M5, archives & dead code — S7/D1/D12/D4)
+
+The M5 milestone (architecture doc §10.3 row M5) adds the archive surface
+(ranlib-guided lazy member pull — the **S7 decision: lazy adopted**),
+symbol-boundary atomization (D1) with the `-dead_strip` mark-sweep (D12),
+`__cstring` merging (D4) and the real-world flag surface (`-filelist`,
+`-framework`/`-F`, `-sectcreate`, `-all_load`/`-force_load`). New benches:
+
+### Archive parse (`pgr-format/parse_archive`, new bench)
+
+| Bench | Input | Median | Throughput |
+|---|---|---|---|
+| `pgr-format/parse_archive/archive_64_members` | 64-member archive (member objects + name-sorted ranlib table, ~1.4 MiB) | ~118 µs | **~11.9 GiB/s** |
+
+The Pass 0 cost of the lazy strategy: one structural walk that yields the
+member table and the `(symbol, member)` index the pull fixpoint consumes.
+
+### Archive liveness (`pgr-driver/link_archive`, new bench — the S7 decision rule)
+
+Corpus: 64 members × 256 symbols × 32 KiB (≈ 2 MiB archive); `main.o`
+references member 1's symbols and each member references its predecessor,
+so the pull fixpoint loads a transitive chain — the rest of the archive is
+never needed.
+
+| Bench | Median | Notes |
+|---|---|---|
+| `pgr-driver/link_archive/archive_64_lazy` | **4.02 ms** | S7 lazy: only the pulled members are parsed and placed |
+| `pgr-driver/link_archive/archive_64_all_load` | **49.06 ms** | `-all_load` eager baseline: all 64 members parsed |
+| **Δ** | **12.2×** | the S7 adoption rule ("adopt lazy if ≥ 20% faster") is met with an order of magnitude to spare |
+
+### Dead-strip (`pgr-driver/link_dead_strip`, new bench — the D12 perf gate)
+
+Corpus: the large static corpus (32 objects × 2 048 symbols × 32 KiB) with
+`MH_SUBSECTIONS_VIA_SYMBOLS` set and a second, never-referenced symbol set
+per object (≈ 50% dead weight).
+
+| Bench | Median | Notes |
+|---|---|---|
+| `pgr-driver/link_dead_strip/large_32_objects_off` | **255 ms** | the M1–M4 shape (whole-section pieces) |
+| `pgr-driver/link_dead_strip/large_32_objects_on` | **134 ms** | `-dead_strip`: mark-sweep + atom pieces |
+| **Δ** | **1.9× faster** | the gate ("dead-strip adds ≤ 30% to the link") is met with negative overhead: half the atoms are never placed, copied or hashed |
+
+Optimization note (bench-driven, recorded because it shaped the D12 code):
+the first working mark-sweep was **3.5× slower** than the unstripped link
+(911 ms) — the live-set identity was an O(atoms) linear scan per query and
+the mark phase re-scanned every relocation per atom. Three changes closed
+it: (a) liveness queries are O(log atoms) binary searches over the shared
+atom-start table, (b) the edge graph is built in one pass per section —
+relocations are bucketed into their atoms once, never re-scanned per atom,
+(c) the atom tables are borrowed slices instead of per-call clones. The
+result is also byte-identical to the slow first draft (the live set is a
+pure function of the inputs).
+
+### `__cstring` merging (`pgr-driver/link_cstring`, new bench)
+
+| Bench | Input | Median | Notes |
+|---|---|---|---|
+| `pgr-driver/link_cstring/cstring_16_objects` | 16 objects × 512 strings (half a shared pool duplicated in every object) | **1.69 ms** | the shared pool is placed once; per-string dedup is a hash-map pass over string atoms (D4) |
+
+### M4 gates still hold with M5 on (the roadmap's M5 precondition)
+
+| Bench | M4 recorded | M5 re-measured | Verdict |
+|---|---|---|---|
+| `pgr-emit/emit` fused vs reference | 1.37× (1.59 vs 2.18 ms) | **1.39× (1.58 vs 2.20 ms)** | holds |
+| `pgr-driver/link/large_32_objects` | 172.1 ms | 172.7 ms | holds (noise band) |
+| `pgr-driver/link_dylib/large_32_objects_dylib` | 33.8 ms | 32.9 ms | holds |
+| `pgr-driver/link_outputs/dylib_8_objects` | 18.1 ms | 18.7 ms | holds |
+| `pgr-format/summarize/single_image` | ~53 GiB/s | 51.8 GiB/s | holds |
+| `pgr-core/trie` `m3_partition/100000` (10⁵ exports) | 31.5 ms | 30.7 ms | holds (legacy M2 baseline: 354.9 ms) |
+
+The M5 byte-identity gates: `m5_archive_member_is_pulled_and_the_output
+_verifies`, `m5_dead_strip_matches_the_reference_emit_and_determinism`,
+`m5_cstring_merge_dedups_across_inputs` (and the section-relative pointer
+gate), `m5_sectcreate_places_file_contents` — all compare the fused bytes
+against the preserved reference emit on the new corpus shapes and fail the
+build on divergence.
+
+```sh
+cargo bench -p pgr-format --bench parse -- parse_archive
+cargo bench -p pgr-driver --bench link -- "link_archive|link_dead_strip|link_cstring"
 ```
 
 ## Recorded baseline (M4, the speed pass — fused tile emit)
