@@ -92,11 +92,12 @@ fn patch_offset(op: &PatchOp) -> u32 {
 }
 
 /// Writes the encoded chained-fixup words into their pointer slots (file
-/// offset == vaddr − base under the constant-delta contract).
+/// offset == vaddr − image_base under the constant-delta contract; M3:
+/// the base is 0 for dylibs/bundles).
 fn write_chain_words(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     for (vaddr, word) in &layout.fixups.slot_words {
         let at = vaddr
-            .checked_sub(pgr_format::consts::PAGEZERO_SIZE_64)
+            .checked_sub(layout.image_base)
             .ok_or(EmitError::Contract {
                 message: format!("fixup slot vaddr {vaddr:#x} below the image base"),
             })?;
@@ -197,8 +198,16 @@ fn write_signature(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
         })?;
     dst.copy_from_slice(&uuid);
     let hashes = signature::page_hashes(buf, le.uuid_at as usize, le.sig_off, false);
-    let blob =
-        signature::build_superblob(&layout.ident, le.sig_off, &hashes, layout.text_vmsize, true)?;
+    // M3: only executables carry the CS_EXECSEG_MAIN_BINARY flag; dylibs
+    // and bundles sign with execSegFlags = 0.
+    let is_exec = layout.filetype == pgr_format::consts::MH_EXECUTE;
+    let blob = signature::build_superblob(
+        &layout.ident,
+        le.sig_off,
+        &hashes,
+        layout.text_vmsize,
+        is_exec,
+    )?;
     if blob.len() != le.sig_size as usize {
         return Err(EmitError::Contract {
             message: format!(
