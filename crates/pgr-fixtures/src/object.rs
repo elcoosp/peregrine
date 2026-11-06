@@ -176,6 +176,48 @@ impl ObjectReloc {
         }
     }
 
+    /// 8-byte absolute pointer to a *section-relative* address
+    /// (`r_extern = 0`, `r_symbolnum = section + 1`): the addend lives in
+    /// the slot bytes. Exercises the M5 section-target containment paths.
+    #[must_use]
+    pub const fn unsigned_sect(sect: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sect + 1,
+            pcrel: false,
+            length_log2: RELOC_LENGTH_8,
+            extern_: false,
+            rtype: ARM64_RELOC_UNSIGNED,
+        }
+    }
+
+    /// ADRP page immediate against a section-relative address.
+    #[must_use]
+    pub const fn page21_sect(sect: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sect + 1,
+            pcrel: true,
+            length_log2: RELOC_LENGTH_4,
+            extern_: false,
+            rtype: ARM64_RELOC_PAGE21,
+        }
+    }
+
+    /// ADD/LDR 12-bit page-offset immediate against a section-relative
+    /// address.
+    #[must_use]
+    pub const fn pageoff12_sect(sect: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sect + 1,
+            pcrel: false,
+            length_log2: RELOC_LENGTH_4,
+            extern_: false,
+            rtype: ARM64_RELOC_PAGEOFF12,
+        }
+    }
+
     /// Positions the relocation at `offset` within its section.
     #[must_use]
     pub const fn at(mut self, offset: u32) -> Self {
@@ -328,6 +370,12 @@ pub struct ObjectBuilder {
     sections: Vec<ObjectSection>,
     symbols: Vec<ObjectSymbol>,
     build_version: bool,
+    /// `MH_SUBSECTIONS_VIA_SYMBOLS`: the M5 atomizer splits this object's
+    /// sections at symbol boundaries.
+    subsections: bool,
+    /// Declaration indices marked `N_ALT_ENTRY` (they merge into the
+    /// preceding atom instead of starting one).
+    alt_entries: std::collections::BTreeSet<usize>,
 }
 
 impl ObjectBuilder {
@@ -339,6 +387,8 @@ impl ObjectBuilder {
             sections: Vec::new(),
             symbols: Vec::new(),
             build_version: true,
+            subsections: false,
+            alt_entries: std::collections::BTreeSet::new(),
         }
     }
 
@@ -364,6 +414,21 @@ impl ObjectBuilder {
     #[must_use]
     pub const fn set_build_version(mut self, on: bool) -> Self {
         self.build_version = on;
+        self
+    }
+
+    /// Sets `MH_SUBSECTIONS_VIA_SYMBOLS` on the header (M5 atomization).
+    #[must_use]
+    pub const fn set_subsections_via_symbols(mut self, on: bool) -> Self {
+        self.subsections = on;
+        self
+    }
+
+    /// Marks symbol `declaration_index` (as returned by [`Self::add_symbol`])
+    /// `N_ALT_ENTRY`: it merges into the preceding atom.
+    #[must_use]
+    pub fn set_alt_entry(mut self, declaration_index: usize) -> Self {
+        self.alt_entries.insert(declaration_index);
         self
     }
 
@@ -438,12 +503,14 @@ impl ObjectBuilder {
             strtab.push(0);
             entries.push((strx, n_type, n_sect, n_desc, value));
         };
-        for sym in &self.symbols {
+        for (decl_i, sym) in self.symbols.iter().enumerate() {
             if let ObjectSymbol::Local(name) = sym {
-                push_sym(&mut strtab, &mut entries, name, 0, 0, 0, 0);
+                let n_desc =
+                    u16::from(self.alt_entries.contains(&decl_i)) * pgr_format::consts::N_ALT_ENTRY;
+                push_sym(&mut strtab, &mut entries, name, 0, 0, n_desc, 0);
             }
         }
-        for sym in &self.symbols {
+        for (decl_i, sym) in self.symbols.iter().enumerate() {
             if let ObjectSymbol::Defined {
                 name,
                 section_index,
@@ -451,7 +518,10 @@ impl ObjectBuilder {
                 weak,
             } = sym
             {
-                let n_desc = if *weak { N_WEAK_DEF } else { 0 };
+                let mut n_desc = if *weak { N_WEAK_DEF } else { 0 };
+                if self.alt_entries.contains(&decl_i) {
+                    n_desc |= pgr_format::consts::N_ALT_ENTRY;
+                }
                 let blob_addr = placed.get(*section_index).map_or(0, |(addr, _)| *addr);
                 push_sym(
                     &mut strtab,
@@ -509,6 +579,11 @@ impl ObjectBuilder {
         buf[12..16].copy_from_slice(&MH_OBJECT.to_le_bytes());
         buf[16..20].copy_from_slice(&ncmds.to_le_bytes());
         buf[20..24].copy_from_slice(&(sizeofcmds as u32).to_le_bytes());
+        buf[24..28].copy_from_slice(
+            &u32::from(self.subsections)
+                .wrapping_mul(pgr_format::consts::MH_SUBSECTIONS_VIA_SYMBOLS)
+                .to_le_bytes(),
+        );
 
         let mut lc = 32usize;
         let w32 = |buf: &mut [u8], at: usize, v: u32| {
