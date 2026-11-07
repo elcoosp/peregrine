@@ -1,0 +1,28 @@
+[package]
+name = "pgr-daemon"
+description = "Peregrine resident link server (pgrd) and client: persistent parse state across links (architecture doc §7.2, M8)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+pgr-core = { workspace = true }
+pgr-emit = { workspace = true }
+pgr-format = { workspace = true }
+sha2 = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pgr-fixtures = { workspace = true }
+pgr-verify = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "pgrd"
+path = "src/main.rs"
