@@ -22,7 +22,7 @@ pub mod writer;
 pub use emit::build_image;
 pub use reloc::apply as apply_patch;
 pub use signature::{blob_size, build_superblob, derive_uuid, page_hashes};
-pub use tile::build_image_fused;
+pub use tile::{build_image_fused, build_image_fused_into};
 pub use writer::write_image;
 
 /// Crate version, re-exported for tooling smoke tests.
