@@ -57,6 +57,14 @@ pub struct Options {
     pub cache_dir: Option<String>,
     /// M6 `-no_cache`: force caching off even when a directory is set.
     pub no_cache: bool,
+    /// M7 `-syslibroot <dir>` (repeatable): SDK roots that reshape the
+    /// library/framework search paths (ld64 rule — see
+    /// [`effective_lib_dirs`]).
+    pub syslibroots: Vec<String>,
+    /// M7 `-cache_max <bytes>` / `PGR_CACHE_MAX`: the cache directory's size
+    /// bound (oldest-mtime LRU eviction; `0` = unbounded). Defaults to 2 GiB
+    /// when a cache directory is active.
+    pub cache_max: Option<u64>,
 }
 
 impl Default for Options {
@@ -82,6 +90,8 @@ impl Default for Options {
             sectcreate: Vec::new(),
             cache_dir: None,
             no_cache: false,
+            cache_max: None,
+            syslibroots: Vec::new(),
         }
     }
 }
@@ -123,15 +133,30 @@ pub enum OptsError {
         /// What was repeated.
         message: String,
     },
+    /// A `@response-file` could not be read, nested too deeply, or contained
+    /// a malformed token (exit code 2).
+    #[error("response file {path}: {message}")]
+    ResponseFile {
+        /// The `@path` argument as written.
+        path: String,
+        /// What went wrong.
+        message: String,
+    },
 }
 
 /// Flags accepted with no effect at M1 (their features do not exist yet).
-const NOOP_FLAGS: [&str; 5] = [
+/// M7 adds the build-system no-ops: demangling (symtab names are stored
+/// verbatim, exactly ld64's on-disk effect) and the deduplicate toggle
+/// (cstring/code dedup stays on — the arm64 default).
+const NOOP_FLAGS: [&str; 8] = [
     "-no_adhoc_extensions",
     "-keep_private_externs",
     "-no_uuid",
     "-no_function_starts",
     "-no_data_in_code",
+    "-demangle",
+    "-no_demangle",
+    "-no_deduplicate",
 ];
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
@@ -156,11 +181,14 @@ const LATER_FLAGS: [(&str, &str); 9] = [
     ),
 ];
 
-/// Parses argv (without the program name).
+/// Parses argv (without the program name). `@response-file` arguments are
+/// expanded in place first (recursively, ld64-style tokenization).
 ///
 /// # Errors
 /// [`OptsError`] on any malformed or unsupported flag.
 pub fn parse(args: &[std::ffi::OsString]) -> Result<Options, OptsError> {
+    let expanded = expand_response_files(args, 0)?;
+    let args: &[std::ffi::OsString] = &expanded;
     let mut opts = Options::default();
     let mut output_seen = false;
     let mut i = 0usize;
@@ -196,6 +224,167 @@ fn next_value(args: &[std::ffi::OsString], i: &mut usize, flag: &str) -> Result<
         .ok_or_else(|| OptsError::MissingValue {
             flag: flag.to_string(),
         })
+}
+
+/// Maximum `@response-file` nesting depth (cycle protection).
+const RESPONSE_FILE_MAX_DEPTH: usize = 32;
+
+/// Expands `@path` arguments in place (M7): the file's contents are
+/// tokenized ld64-style (whitespace-separated, `#` comments, `"` grouping
+/// with `\` escapes) and spliced into the argument list at the argument's
+/// position. Response files nest (a token starting with `@` inside a file is
+/// expanded recursively, bounded by [`RESPONSE_FILE_MAX_DEPTH`]).
+///
+/// Expansion is **opportunistic, exactly ld64's rule**: a token starting
+/// with `@` only expands when the referenced file exists — otherwise the
+/// token passes through untouched, which is what keeps `-install_name
+/// @rpath/libfoo.dylib` (and every other `@`-prefixed value) working.
+fn expand_response_files(
+    args: &[std::ffi::OsString],
+    depth: usize,
+) -> Result<Vec<std::ffi::OsString>, OptsError> {
+    let mut out = Vec::with_capacity(args.len());
+    for arg in args {
+        let s = arg.to_str().ok_or_else(|| OptsError::InvalidValue {
+            flag: "<arg>".into(),
+            value: arg.to_string_lossy().into_owned(),
+        })?;
+        if let Some(path) = s.strip_prefix('@') {
+            if !std::path::Path::new(path).is_file() {
+                // ld64 semantics: not a readable response file — literal.
+                out.push(arg.clone());
+                continue;
+            }
+            if depth >= RESPONSE_FILE_MAX_DEPTH {
+                return Err(OptsError::ResponseFile {
+                    path: s.to_string(),
+                    message: format!("nested more than {RESPONSE_FILE_MAX_DEPTH} levels (cycle?)"),
+                });
+            }
+            let text = std::fs::read_to_string(path).map_err(|e| OptsError::ResponseFile {
+                path: s.to_string(),
+                message: e.to_string(),
+            })?;
+            let tokens = tokenize_response_file(&text).map_err(|m| OptsError::ResponseFile {
+                path: s.to_string(),
+                message: m,
+            })?;
+            let inner: Vec<std::ffi::OsString> =
+                tokens.into_iter().map(std::ffi::OsString::from).collect();
+            out.extend(expand_response_files(&inner, depth + 1)?);
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Tokenizes one response file body: whitespace-separated tokens, `#`
+/// comments to end of line, `"`-quoted sections with `\` escaping the next
+/// character (so `\` + space joins a token). Errors name the line.
+fn tokenize_response_file(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let mut it = line.chars().peekable();
+        while let Some(&c) = it.peek() {
+            if c.is_whitespace() {
+                it.next();
+                continue;
+            }
+            if c == '#' {
+                break;
+            }
+            let mut tok = String::new();
+            let mut quoted = false;
+            while let Some(&c) = it.peek() {
+                match c {
+                    '"' => {
+                        quoted = !quoted;
+                        it.next();
+                    }
+                    '\\' => {
+                        it.next();
+                        if let Some(&n) = it.peek() {
+                            tok.push(n);
+                            it.next();
+                        }
+                    }
+                    c if c.is_whitespace() && !quoted => break,
+                    c => {
+                        tok.push(c);
+                        it.next();
+                    }
+                }
+            }
+            if quoted {
+                return Err(format!("line {}: unterminated quote", n + 1));
+            }
+            out.push(tok);
+        }
+    }
+    Ok(out)
+}
+
+/// Joins one `-syslibroot` with a search dir (ld64 pairs the SDK root with
+/// every search path; absolute dirs concatenate cleanly).
+fn join_root(root: &str, dir: &str) -> String {
+    let root = root.trim_end_matches('/');
+    if dir.starts_with('/') {
+        format!("{root}{dir}")
+    } else {
+        format!("{root}/{dir}")
+    }
+}
+
+/// The effective library search dirs (M7, ld64 `-syslibroot` rule):
+///
+/// * no roots: the `-L` dirs, then the default `/usr/lib`;
+/// * exactly one root: **only the root-prefixed variants** are searched
+///   (`<root>/<dir>` for every `-L` dir and the default) — the SDK stands in
+///   for the host;
+/// * two or more roots: the **union** — every root-prefixed variant plus the
+///   original path itself.
+#[must_use]
+pub fn effective_lib_dirs(lib_dirs: &[String], syslibroots: &[String]) -> Vec<String> {
+    effective_dirs(lib_dirs, syslibroots, &["/usr/lib"])
+}
+
+/// [`effective_lib_dirs`] for frameworks: the `-F` dirs plus Apple's default
+/// framework directories.
+#[must_use]
+pub fn effective_framework_dirs(framework_dirs: &[String], syslibroots: &[String]) -> Vec<String> {
+    effective_dirs(
+        framework_dirs,
+        syslibroots,
+        &["/System/Library/Frameworks", "/Library/Frameworks"],
+    )
+}
+
+/// The shared `-syslibroot` combination rule (see [`effective_lib_dirs`]).
+fn effective_dirs(dirs: &[String], roots: &[String], defaults: &[&str]) -> Vec<String> {
+    if roots.is_empty() {
+        let mut out: Vec<String> = dirs.to_vec();
+        out.extend(defaults.iter().map(|s| (*s).to_string()));
+        return out;
+    }
+    let mut out = Vec::new();
+    let push_all = |out: &mut Vec<String>, d: &str| {
+        if roots.len() == 1 {
+            out.push(join_root(&roots[0], d));
+        } else {
+            for r in roots {
+                out.push(join_root(r, d));
+            }
+            out.push(d.to_string());
+        }
+    };
+    for d in dirs {
+        push_all(&mut out, d);
+    }
+    for d in defaults {
+        push_all(&mut out, d);
+    }
+    out
 }
 
 /// Applies one option flag to the configuration.
@@ -285,6 +474,15 @@ fn apply_flag(
         "-rpath" => {
             let v = next_value(args, i, arg)?;
             opts.config.rpaths.push(v);
+        }
+        "-syslibroot" => {
+            let v = next_value(args, i, arg)?;
+            opts.syslibroots.push(v);
+        }
+        "-object_path_lto" => {
+            // The LTO object scratch path build systems pass; accepted, no
+            // effect (bitcode objects are diagnosed at input mapping, M6).
+            let _v = next_value(args, i, arg)?;
         }
         "-source_version" => {
             let v = next_value(args, i, arg)?;
@@ -384,6 +582,14 @@ fn apply_flag(
         "-cache" => {
             let v = next_value(args, i, arg)?;
             opts.cache_dir = Some(v);
+        }
+        "-cache_max" => {
+            let v = next_value(args, i, arg)?;
+            let n = parse_number(&v).ok_or_else(|| OptsError::InvalidValue {
+                flag: arg.into(),
+                value: v.clone(),
+            })?;
+            opts.cache_max = Some(n);
         }
         "-no_cache" => opts.no_cache = true,
         "-all_load" => opts.all_load = true,
@@ -874,5 +1080,167 @@ mod tests {
         assert_eq!(parse_number("0x4000"), Some(0x4000));
         assert_eq!(parse_number("16384"), Some(16384));
         assert_eq!(parse_number("nope"), None);
+    }
+
+    // ---- M7: build-system integration surface ----------------------------
+
+    fn write_rf(dir: &str, name: &str, body: &str) -> String {
+        let p = std::env::temp_dir().join(dir).join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        p.display().to_string()
+    }
+
+    #[test]
+    fn m7_response_file_expands_in_place() {
+        let rf = write_rf(
+            "pgr_opts_m7",
+            "simple.rsp",
+            "# one arg per line (CMake/Ninja shape)\n\nfirst.o\n\"quoted path.o\"\n-L rspdir\n",
+        );
+        let o = parse(&args(&["-o", "out", &format!("@{rf}"), "last.o"])).unwrap();
+        assert_eq!(
+            o.inputs,
+            ["first.o", "quoted path.o", "last.o"],
+            "expansion is positional"
+        );
+        assert_eq!(o.lib_dirs, ["rspdir"], "flags inside the file flow");
+    }
+
+    #[test]
+    fn m7_response_file_quotes_and_escapes() {
+        let rf = write_rf(
+            "pgr_opts_m7",
+            "quotes.rsp",
+            "\"a b.o\" \"c\\\"d.o\" e\\ f.o f.o\n",
+        );
+        let o = parse(&args(&["-o", "out", &format!("@{rf}")])).unwrap();
+        assert_eq!(o.inputs, ["a b.o", "c\"d.o", "e f.o", "f.o"]);
+    }
+
+    #[test]
+    fn m7_response_files_nest_and_flags_flow() {
+        let inner = write_rf("pgr_opts_m7", "inner.rsp", "-L innerdir\n-L second\n");
+        let outer = write_rf("pgr_opts_m7", "outer.rsp", &format!("a.o @{}", inner));
+        let o = parse(&args(&["-o", "out", &format!("@{outer}")])).unwrap();
+        assert_eq!(o.inputs, ["a.o"]);
+        assert_eq!(o.lib_dirs, ["innerdir", "second"]);
+    }
+
+    #[test]
+    fn m7_response_file_missing_passes_through_ld64_style() {
+        // ld64's rule: a token starting with `@` only expands when the file
+        // exists — otherwise it is a literal (this is what keeps
+        // `-install_name @rpath/libfoo.dylib` working).
+        let o = parse(&args(&[
+            "-dylib",
+            "-o",
+            "out",
+            "-install_name",
+            "@rpath/libfoo.dylib",
+            "@/no/such/file.rsp",
+        ]))
+        .unwrap();
+        assert_eq!(o.config.install_name, Some("@rpath/libfoo.dylib".into()));
+        assert_eq!(o.inputs, ["@/no/such/file.rsp"], "literal passthrough");
+    }
+
+    #[test]
+    fn m7_response_file_cycles_are_depth_bounded() {
+        let base = std::env::temp_dir().join("pgr_opts_m7");
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("cycle_a.rsp").display().to_string();
+        let b = base.join("cycle_b.rsp").display().to_string();
+        std::fs::write(&a, format!("@{b}")).unwrap();
+        std::fs::write(&b, format!("@{a}")).unwrap();
+        let err = parse(&args(&["-o", "out", &format!("@{a}")])).unwrap_err();
+        assert!(matches!(err, OptsError::ResponseFile { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn m7_syslibroot_shapes_the_search_paths() {
+        let o = parse(&args(&[
+            "-o",
+            "out",
+            "-L",
+            "lib",
+            "-L",
+            "other",
+            "-syslibroot",
+            "/sdk",
+            "-F",
+            "fws",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(o.syslibroots, ["/sdk"]);
+        // Single root: prefixed paths only (ld64 rule).
+        assert_eq!(
+            super::effective_lib_dirs(&o.lib_dirs, &o.syslibroots),
+            ["/sdk/lib", "/sdk/other", "/sdk/usr/lib"]
+        );
+        assert_eq!(
+            super::effective_framework_dirs(&o.framework_dirs, &o.syslibroots),
+            [
+                "/sdk/fws",
+                "/sdk/System/Library/Frameworks",
+                "/sdk/Library/Frameworks"
+            ]
+        );
+        // No roots: the raw paths plus the defaults.
+        let o2 = parse(&args(&["-o", "out", "-L", "lib", "a.o"])).unwrap();
+        assert_eq!(
+            super::effective_lib_dirs(&o2.lib_dirs, &o2.syslibroots),
+            ["lib", "/usr/lib"]
+        );
+    }
+
+    #[test]
+    fn m7_multiple_syslibroots_search_the_union() {
+        let o = parse(&args(&[
+            "-o",
+            "out",
+            "-L",
+            "lib",
+            "-syslibroot",
+            "/sdk1",
+            "-syslibroot",
+            "/sdk2",
+            "a.o",
+        ]))
+        .unwrap();
+        // ≥ 2 roots: every root-prefixed variant *plus* the original path.
+        assert_eq!(
+            super::effective_lib_dirs(&o.lib_dirs, &o.syslibroots),
+            [
+                "/sdk1/lib",
+                "/sdk2/lib",
+                "lib",
+                "/sdk1/usr/lib",
+                "/sdk2/usr/lib",
+                "/usr/lib"
+            ]
+        );
+    }
+
+    #[test]
+    fn m7_build_system_noop_flags_are_accepted() {
+        // Flags Xcode/clang -fuse-ld/CMake pass that Peregrine honors by
+        // doing exactly what it already does (no demangling, no dedup
+        // toggles): accepted, no effect, value flags consume their value.
+        let o = parse(&args(&[
+            "-o",
+            "out",
+            "-demangle",
+            "-no_deduplicate",
+            "a.o",
+            "-object_path_lto",
+            "/tmp/lto.o",
+            "b.o",
+        ]))
+        .unwrap();
+        assert_eq!(o.inputs, ["a.o", "b.o"]);
+        let o2 = parse(&args(&["-o", "out", "-no_demangle", "a.o"])).unwrap();
+        assert_eq!(o2.inputs, ["a.o"]);
     }
 }
