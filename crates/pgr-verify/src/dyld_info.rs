@@ -96,13 +96,13 @@ fn check_slot(seg: u8, seg_off: u64, segments: &[(u64, u64)], report: &mut Repor
         report.issues.push(Issue::error(
             Code::DyldInfoStreams,
             format!("stream slot {seg_off:#x} leaves segment {seg} (vmsize {vmsize:#x})"),
-            Some(vmaddr + seg_off),
+            Some(vmaddr.saturating_add(seg_off)),
         ));
     } else if seg_off % 8 != 0 {
         report.issues.push(Issue::error(
             Code::DyldInfoStreams,
             format!("stream slot {seg_off:#x} in segment {seg} is not 8-byte aligned"),
-            Some(vmaddr + seg_off),
+            Some(vmaddr.saturating_add(seg_off)),
         ));
     }
 }
