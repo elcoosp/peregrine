@@ -249,8 +249,10 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
                     if slot_off + 8 > u64::from(seg.page_size) || slot_off + 8 > mach_seg.vmsize {
                         break;
                     }
-                    let slot_file =
-                        mach_seg.fileoff + u64::from(page) * u64::from(seg.page_size) + slot_off;
+                    let slot_file = mach_seg
+                        .fileoff
+                        .saturating_add(u64::from(page).saturating_mul(u64::from(seg.page_size)))
+                        .saturating_add(slot_off);
                     let Some(word_bytes) =
                         exec_bytes.get(slot_file as usize..slot_file as usize + 8)
                     else {
