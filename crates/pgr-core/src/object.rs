@@ -484,8 +484,12 @@ impl InputObject {
         range: core::ops::Range<usize>,
         fail: &F,
     ) -> Result<(Vec<InputSymbol>, Vec<Vec<u8>>), LinkError> {
-        let mut symbols = Vec::with_capacity(range.len());
-        let mut names: Vec<Vec<u8>> = Vec::with_capacity(range.len());
+        // The pre-allocation is bounded by what the file could hold (symbols
+        // are 16 bytes on disk): a mutated `nsyms` yields per-entry read
+        // errors, never a multi-GiB `Vec` (M7 fuzzing-at-scale hardening).
+        let cap = range.len().min(bytes.len() / 16 + 1);
+        let mut symbols = Vec::with_capacity(cap);
+        let mut names: Vec<Vec<u8>> = Vec::with_capacity(cap);
         for i in range {
             let off = st.symoff as usize + i * 16;
             let raw: pgr_format::symtab::Nlist64 =
@@ -579,8 +583,10 @@ impl InputObject {
                 .map(|r| Self::decode_symbols(bytes, st, strtab, sections, r.clone(), fail))
                 .collect()
         });
-        let mut symbols = Vec::with_capacity(nsyms);
-        let mut names = Vec::with_capacity(nsyms);
+        // Same 16-bytes-per-symbol bound as the serial decode.
+        let cap = nsyms.min(bytes.len() / 16 + 1);
+        let mut symbols = Vec::with_capacity(cap);
+        let mut names = Vec::with_capacity(cap);
         for part in parts {
             let (mut s, mut n) = part?;
             symbols.append(&mut s);
@@ -846,7 +852,11 @@ fn convert_section(
         }
         data = start..end;
     }
-    let mut raw_relocs = Vec::with_capacity(s.nreloc as usize);
+    // The relocation pre-allocation is bounded by the bytes the file can
+    // hold (8 bytes per entry): a mutated `nreloc` (the link_object fuzzer
+    // drove it to 2³⁰ = 8 GiB) yields per-entry read errors instead.
+    let reloc_cap = (s.nreloc as usize).min(file_bytes.len() / 8 + 1);
+    let mut raw_relocs = Vec::with_capacity(reloc_cap);
     for i in 0..s.nreloc as usize {
         let off = s.reloff as usize + i * 8;
         let r = RelocationInfo::parse(file_bytes, off)
