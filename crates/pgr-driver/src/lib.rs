@@ -307,9 +307,11 @@ pub fn tbd_to_dylib_cached(
     Ok(dylib)
 }
 
-/// Resolves `-l<name>` against the `-L` search dirs (then the default
-/// `/usr/lib`) to a `.tbd` stub, a Mach-O dylib binary, or — M5 — a static
-/// archive (dylib candidates win, matching ld64's search order).
+/// Resolves `-l<name>` against the given search dirs (already ld64-effective:
+/// `-syslibroot`-reshaped, defaults included — see
+/// [`opts::effective_lib_dirs`]) to a `.tbd` stub, a Mach-O dylib binary, or
+/// — M5 — a static archive (dylib candidates win, matching ld64's search
+/// order).
 ///
 /// # Errors
 /// [`DriverError::Io`] when the file exists but cannot be read.
@@ -325,9 +327,7 @@ pub fn resolve_lib(
         "lib".to_owned() + name + ".a",
         name.to_owned() + ".a",
     ];
-    let mut dirs: Vec<&str> = lib_dirs.iter().map(String::as_str).collect();
-    dirs.push("/usr/lib");
-    for dir in &dirs {
+    for dir in lib_dirs {
         for cand in &candidates {
             let p = Path::new(dir).join(cand);
             if p.is_file() {
@@ -342,9 +342,10 @@ pub fn resolve_lib(
     Ok(None)
 }
 
-/// Resolves `-framework <name>` against the `-F` dirs (then Apple's default
-/// framework directories) to a `.tbd` stub or a Mach-O dylib binary:
-/// `<dir>/<Name>.framework/<Name>` (+ `.tbd`).
+/// Resolves `-framework <name>` against the given search dirs (already
+/// ld64-effective: `-syslibroot`-reshaped, defaults included — see
+/// [`opts::effective_framework_dirs`]): `<dir>/<Name>.framework/<Name>`
+/// (+ `.tbd`).
 ///
 /// # Errors
 /// [`DriverError::Io`] when the file exists but cannot be read.
@@ -352,14 +353,11 @@ pub fn resolve_framework(
     name: &str,
     framework_dirs: &[String],
 ) -> Result<Option<(String, Vec<u8>)>, DriverError> {
-    let mut dirs: Vec<String> = framework_dirs.to_vec();
-    dirs.push("/System/Library/Frameworks".into());
-    dirs.push("/Library/Frameworks".into());
     let stems = [
         format!("{name}.framework/{name}.tbd"),
         format!("{name}.framework/{name}"),
     ];
-    for dir in &dirs {
+    for dir in framework_dirs {
         for stem in &stems {
             let p = Path::new(dir).join(stem);
             if p.is_file() {
@@ -411,13 +409,27 @@ pub fn link_reference_image(opts: &opts::Options) -> Result<ImageAndPlan, Driver
 fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, DriverError> {
     // M6 Stage A caches: opt-in via `-cache <dir>` / `PGR_CACHE_DIR`;
     // `-no_cache` always wins. A cache failure never fails the link.
+    // M7: the directory is size-bounded (oldest-mtime LRU eviction) —
+    // `-cache_max <bytes>` / `PGR_CACHE_MAX`, default 2 GiB; `0` = unbounded.
+    const DEFAULT_CACHE_MAX: u64 = 2 * 1024 * 1024 * 1024;
+    let cache_max = opts.cache_max.or_else(|| {
+        std::env::var("PGR_CACHE_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    });
     let cache = if opts.no_cache {
         None
     } else {
         opts.cache_dir
             .clone()
             .or_else(|| std::env::var("PGR_CACHE_DIR").ok())
-            .and_then(|dir| pgr_core::cache::PoiCache::open(std::path::Path::new(&dir)).ok())
+            .and_then(|dir| {
+                pgr_core::cache::PoiCache::open_limited(
+                    std::path::Path::new(&dir),
+                    cache_max.unwrap_or(DEFAULT_CACHE_MAX),
+                )
+                .ok()
+            })
     };
     let mut inputs = Vec::with_capacity(opts.inputs.len());
     let mut archives: Vec<LinkArchive> = Vec::new();
@@ -470,9 +482,11 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
         )?;
     }
     // `-l` library search: `.tbd` stubs (M2), Mach-O dylib binaries (M3),
-    // static archives (M5).
+    // static archives (M5). M7: the search list is the ld64-effective
+    // dirs — `-syslibroot`-reshaped, defaults appended.
+    let lib_dirs = opts::effective_lib_dirs(&opts.lib_dirs, &opts.syslibroots);
     for name in &opts.libs {
-        match resolve_lib(name, &opts.lib_dirs)? {
+        match resolve_lib(name, &lib_dirs)? {
             Some((path, bytes)) => {
                 if looks_like_tbd(&bytes) {
                     dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
@@ -497,15 +511,18 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
                 return Err(DriverError::Tbd {
                     path: format!("lib{name}.tbd"),
                     source: pgr_format::FormatError::Malformed {
-                        what: "library not found (searched -L dirs and /usr/lib)".into(),
+                        what: "library not found (searched the -L dirs and /usr/lib, each \
+                               -syslibroot-prefixed as ld64 does)"
+                            .into(),
                     },
                 });
             }
         }
     }
-    // M5 `-framework` search.
+    // M5 `-framework` search (M7: ld64-effective `-F` dirs + defaults).
+    let framework_dirs = opts::effective_framework_dirs(&opts.framework_dirs, &opts.syslibroots);
     for name in &opts.frameworks {
-        match resolve_framework(name, &opts.framework_dirs)? {
+        match resolve_framework(name, &framework_dirs)? {
             Some((path, bytes)) => {
                 if looks_like_tbd(&bytes) {
                     dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
@@ -783,6 +800,15 @@ pub fn usage() -> String {
     s.push_str("  -adhoc | -no_adhoc           ad-hoc code signature (default on)\n");
     s.push_str("  -headerpad <n>               reserve header space (advisory)\n");
     s.push_str("  -segalign <n>                0x1000 or 0x4000 (default 0x4000)\n");
+    s.push_str("  -sectcreate <seg> <sect> <file>   place file bytes in a section\n");
+    s.push_str("  -syslibroot <dir>            SDK root prefixed onto every search\n");
+    s.push_str("                               path (repeatable; ld64 pairing rule)\n");
+    s.push_str("  @<response-file>             expand arguments from a file\n");
+    s.push_str("  -cache <dir>                 Stage A link cache (POI + frozen .tbd)\n");
+    s.push_str("  -cache_max <bytes>           cache size bound (LRU eviction;\n");
+    s.push_str("                               default 2 GiB, 0 = unbounded)\n");
+    s.push_str("  -no_cache                    disable the link cache\n");
+    s.push_str("  -icf=safe|-icf=all|-no_icf   identical code folding (default none)\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
