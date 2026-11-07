@@ -98,6 +98,13 @@ each flag has a fixture".
 | TLV (`__thread_vars`, `tlv_bootstrap`) | ❌ | M5 | reloc types parsed and rejected today |
 
 | `-icf=safe` / `-icf=all` / `-no_icf` (identical code folding) | ✅ | M6 | `pgr-core::icf` tests, `m6_icf::*` |
+| `-syslibroot <dir>` (repeatable; ld64 pairing rule: 1 root = prefixed-only, ≥2 roots = union + original) | ✅ | M7 | `opts::effective_lib_dirs` tests, `m7_driver::m7_syslibroot_*` |
+| `@<response-file>` (nested, `#` comments, quotes/escapes; opportunistic expansion — a non-existent `@path` passes through, keeping `-install_name @rpath/...` intact) | ✅ | M7 | `opts::m7_response_file_*`, `m7_driver::m7_response_file_drives_a_real_link` |
+| `-demangle` / `-no_demangle` / `-no_deduplicate` (accepted no-ops: symtab names stay verbatim; dedup stays on — the arm64 default) | ✅ (no-op) | M7 | `opts::m7_build_system_noop_flags_are_accepted`, `m7_compat::m7_noops` |
+| `-object_path_lto <path>` (accepted; value consumed — LTO objects stay diagnosed per M6) | ✅ (no-op) | M7 | `opts::m7_build_system_noop_flags_are_accepted` |
+| `-cache_max <bytes>` / `PGR_CACHE_MAX` (LRU size bound; default 2 GiB, 0 = unbounded) | ✅ | M7 | `pgr_core::cache` LRU tests, `m7_cache::m7_cache_max_bounds_the_directory` |
+| Versioned cache format v2 (format+parser revisions in frame and key, directory marker with self-heal) | ✅ | M7 | `pgr_core::cache::m7_*` tests, `m7_cache::*` |
+| M7 compatibility suite (38-case agreed list, ≥ 98% gate) | ✅ | M7 | `m7_compat::m7_compat_suite_passes_the_agreed_list` |
 | `-cache <dir>` / `PGR_CACHE_DIR` / `-no_cache` (Stage A POI + frozen `.tbd`) | ✅ | M6 | `pgr-core::cache` tests, `m6_cache::*` |
 | LLVM bitcode (LTO) object detection + diagnostic | ✅ (diagnose-only) | M6 | `m6_ecosystem::m6_lto_bitcode_objects_are_detected_and_diagnosed` |
 | ObjC `__objc_classrefs`/`__objc_selrefs`, Swift `__swift5_*` section pass-through | ✅ (pass-through) | M6 | `m6_ecosystem::m6_objc_and_swift_sections_pass_through_and_verify` |
