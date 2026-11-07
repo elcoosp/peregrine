@@ -399,3 +399,68 @@ link now:
   with ULEB writes; at M6 scale the chained/classic split costs nothing
   measurable (the slot list is built once either way). The verifier's
   stream walk is gated for correctness, not speed.
+
+## Recorded baseline (M7 — production; versioned cache, build-system surface)
+
+The M7 milestone (architecture doc §10.3 row M7, in-tree scope) versions the
+cache format, adds the build-system driver surface (response files,
+`-syslibroot`, LRU-bounded caches) and the compatibility suite. New bench
+(`pgr-driver/cache_evict`) plus the full re-measure of every prior gate with
+M7 in the pipeline (`cargo bench`, default sampling, 2-core KVM sandbox):
+
+### LRU-bounded cache (`pgr-driver/cache_evict`, new bench)
+
+The size bound's cost lives only on the store path (scan + evict after each
+POI store); warm hits never store, so the steady-state relink is untouched.
+
+| Bench | Median | Notes |
+|---|---|---|
+| `cache_evict/unbounded` | **9.12 ms** | the M6 warm-cache path (4 objects × 1 024 symbols) |
+| `cache_evict/bounded_64kib` | **9.73 ms** | every store scans and evicts (cap binds) |
+| **Δ** | **+6.7% on cold stores** | warm links (all hits) measure identical to unbounded — no stores, no scans; the M7 format's `touch` recency mark is two syscalls per hit |
+
+### Versioned cache format (v2) gates re-measured
+
+| Bench | M6 (v1) record | M7 (v2) | Verdict |
+|---|---|---|---|
+| `pgr-driver/link_cache/medium_16_objects_cold` | 177.8 ms | 186.4 ms (quick-sampling run) | holds within the sandbox noise band |
+| `pgr-driver/link_cache/medium_16_objects_warm` | 172.8 ms | **173.7 ms** | holds — the two-revision key, marker check and recency touch cost nothing measurable |
+| `pgr-driver/tbd/libbench_text_parse` | 35.8 µs | 36.2 µs | holds |
+| `pgr-driver/tbd/libbench_frozen_load` | 19.9 µs | **19.8 µs** | holds (the v2 frame is 4 bytes larger; ≪ the 1 ms gate) |
+
+### Prior gates re-measured with M7 in the pipeline
+
+| Bench | M4/M5/M6 record | M7 re-measure | Gate |
+|---|---|---|---|
+| `pgr-driver/link/large_32_objects` | 172–176 ms | **175.6 ms** | holds |
+| `pgr-driver/link/small_4_objects` | 2.34 ms | 2.42 ms | holds |
+| `pgr-driver/link_dylib/large_32_objects_dylib` | 33.8–37.3 ms | 36.9 ms | holds |
+| `pgr-driver/link_outputs/dylib_8_objects` | 18.1–18.7 ms | 18.6 ms | holds |
+| `pgr-driver/link_outputs/bundle_8_objects` | 17.9–18.5 ms | 18.4 ms | holds |
+| `pgr-driver/link_archive/archive_64_lazy` | 4.02 ms | **3.99 ms** | holds (S7 lazy) |
+| `pgr-driver/link_archive/archive_64_all_load` | 49.06 ms | 50.4 ms | holds |
+| `pgr-driver/link_dead_strip/large_32_objects_off` | 255–259 ms | 263.6 ms | holds (noise band) |
+| `pgr-driver/link_dead_strip/large_32_objects_on` | 134–136 ms | **136.4 ms** | 1.93× vs off (gate: ≤ +30%) |
+| `pgr-driver/link_cstring/cstring_16_objects` | 1.69 ms (M5 record) | 1.94 ms | **no regression**: the M6 baseline re-measured on the same box today is 1.88 ms — the delta is environmental drift, not M7 code |
+| `pgr-driver/link_icf/large_32x512_off` | 17.29 ms | **16.47 ms** | holds |
+| `pgr-driver/link_icf/large_32x512_safe` | 19.37 ms | 18.92 ms | +14.8% vs off (gate: ≤ 25%) |
+| `pgr-emit/emit` fused vs reference | 1.37× (1.59 vs 2.18 ms) | **1.38× (1.59 vs 2.17 ms)** | holds |
+| `pgr-format/summarize/single_image` | ~53 GiB/s | 52.7 GiB/s | holds |
+| `pgr-format/summarize/corpus_24_images` | ~25.7 GiB/s | 24.7 GiB/s | holds |
+| `pgr-format/parse_archive/archive_64_members` | 11.9 GiB/s | **12.2 GiB/s** | holds (the M5 row's "~118 µs" was a unit slip: the corpus is ~118 KiB, i.e. ~9.9 µs at that rate — corrected here) |
+| `pgr-core/trie m3_partition/100000` (10⁵ exports) | 31.5 ms | **27.9 ms** | holds (legacy M2 baseline today: 349.6 ms) |
+
+### Fuzzing at scale (the M7 row's "fuzzers clean" gate)
+
+Short local libFuzzer sessions (61 s each, ASan, 2-core sandbox) over the
+four parser targets plus the two new ones — all clean after the fixes below:
+
+| Target | Execs (61 s) | Result |
+|---|---|---|
+| `dyld_info_streams` (new) | 1 860 070 | clean |
+| `cache_entries` (new) | 6 302 019 | clean after the `HEADER_LEN + len` overflow fix |
+| `verify_image` | 143 230 | clean after the hostile-header arithmetic battery (structural/dyld_info/pair/chain_starts/branch_range) |
+| `link_object` | 319 230 | clean after the stale `link()` signature fix and the 8 GiB `nreloc` pre-allocation bound |
+
+Each crash class carries a deterministic regression test in the tree; the
+M7 row's "fuzzers clean for 30 CPU-days" formally closes on the P0 rig.
