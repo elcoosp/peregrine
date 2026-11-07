@@ -65,6 +65,13 @@ pub struct Options {
     /// bound (oldest-mtime LRU eviction; `0` = unbounded). Defaults to 2 GiB
     /// when a cache directory is active.
     pub cache_max: Option<u64>,
+    /// M8 `-resident`: route the link through the resident daemon
+    /// (`pgrd`, architecture doc §7.2). Optional and transparent by
+    /// contract: an unreachable daemon falls back to the one-shot link.
+    pub resident: bool,
+    /// M8 `-resident_socket <path>`: the daemon socket (default:
+    /// `$PGR_DAEMON_SOCK`, else `{tmpdir}/pgr-<uid>.sock`).
+    pub resident_socket: Option<String>,
 }
 
 impl Default for Options {
@@ -92,6 +99,8 @@ impl Default for Options {
             no_cache: false,
             cache_max: None,
             syslibroots: Vec::new(),
+            resident: false,
+            resident_socket: None,
         }
     }
 }
@@ -592,6 +601,12 @@ fn apply_flag(
             opts.cache_max = Some(n);
         }
         "-no_cache" => opts.no_cache = true,
+        "-resident" => opts.resident = true,
+        "-no_resident" => opts.resident = false,
+        "-resident_socket" => {
+            let v = next_value(args, i, arg)?;
+            opts.resident_socket = Some(v);
+        }
         "-all_load" => opts.all_load = true,
         "-force_load" => {
             let v = next_value(args, i, arg)?;
