@@ -10,8 +10,9 @@ publish = false
 
 [dependencies]
 pgr-format = { workspace = true }
-pgr-core = { path = "../pgr-core" }
-pgr-emit = { path = "../pgr-emit" }
+pgr-core = { workspace = true }
+pgr-emit = { workspace = true }
+pgr-daemon = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -28,4 +29,8 @@ workspace = true
 
 [[bench]]
 name = "link"
+harness = false
+
+[[bench]]
+name = "resident"
 harness = false
