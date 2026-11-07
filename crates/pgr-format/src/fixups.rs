@@ -122,8 +122,17 @@ pub fn parse_header(payload: &[u8]) -> Result<ChainedFixupsHeader, FormatError> 
     })
 }
 
-/// Reads `count` `u32` values at `offset` from `bytes`.
+/// Reads `count` `u32` values at `offset` from `bytes`. The count is bounded
+/// by the bytes actually available (a mutated/truncated count yields a typed
+/// error instead of a huge pre-allocation).
 fn read_u32_slice(bytes: &[u8], offset: usize, count: usize) -> Result<Vec<u32>, FormatError> {
+    let avail = bytes.len().saturating_sub(offset);
+    if count > avail / 4 {
+        return Err(FormatError::Overrun {
+            offset,
+            overrun: count * 4 - avail,
+        });
+    }
     let mut c = Cursor::new(bytes);
     c.seek(offset)?;
     let mut out = Vec::with_capacity(count);
@@ -339,13 +348,38 @@ pub fn encode_bind_word(ordinal: u32, addend: u8, next: u32) -> Result<u64, Form
 }
 
 /// Parses the import table (`imports_count` entries at `imports_offset`).
+///
+/// The count is validated against the payload *before* any pre-allocation:
+/// each format has a fixed minimum entry size, so a mutated or truncated
+/// `imports_count` yields a typed [`FormatError::Overrun`] instead of
+/// attempting a multi-GiB `Vec` (the M7 fuzzing-at-scale find).
 pub fn parse_imports(
     payload: &[u8],
     header: &ChainedFixupsHeader,
 ) -> Result<Vec<Import>, FormatError> {
+    let entry_min: usize = match header.imports_format {
+        DYLD_CHAINED_IMPORT => 4,
+        DYLD_CHAINED_IMPORT_ADDEND => 8,
+        DYLD_CHAINED_IMPORT_ADDEND64 => 16,
+        other => {
+            return Err(FormatError::Invalid {
+                offset: header.imports_offset as usize,
+                what: "unknown dyld_chained_import format",
+                value: other as u64,
+            });
+        }
+    };
     let count = header.imports_count as usize;
+    let imports_off = header.imports_offset as usize;
+    let avail = payload.len().saturating_sub(imports_off);
+    if count.checked_mul(entry_min).is_none_or(|need| need > avail) {
+        return Err(FormatError::Overrun {
+            offset: imports_off,
+            overrun: count.saturating_mul(entry_min).saturating_sub(avail),
+        });
+    }
     let mut c = Cursor::new(payload);
-    c.seek(header.imports_offset as usize)?;
+    c.seek(imports_off)?;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         let imp = match header.imports_format {
@@ -402,6 +436,48 @@ mod tests {
         DYLD_CHAINED_PTR_START_MULTI, DYLD_CHAINED_PTR_START_MULTI_MASK,
         DYLD_CHAINED_PTR_START_NONE,
     };
+
+    /// M7 (fuzzing at scale): a mutated `imports_count` must produce a typed
+    /// error, **not** a multi-GiB pre-allocation (a truncated image once
+    /// drove `imports_count × 16` = 68 GiB and aborted the process — an
+    /// allocation abort is the same failure class as a panic for a parser).
+    #[test]
+    fn m7_imports_count_is_bounded_by_the_payload() {
+        let header = crate::fixups::ChainedFixupsHeader {
+            fixups_version: 0,
+            starts_offset: 28,
+            imports_offset: 4,
+            symbols_offset: 4,
+            imports_count: 4_278_190_081, // mutated u32 from a fuzz case
+            imports_format: DYLD_CHAINED_IMPORT_ADDEND64,
+            symbols_format: 0,
+        };
+        let payload = vec![0u8; 64];
+        let err = parse_imports(&payload, &header).unwrap_err();
+        assert!(
+            matches!(err, crate::error::FormatError::Overrun { .. }),
+            "expected Overrun, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn m7_unknown_imports_format_rejects_up_front() {
+        let header = crate::fixups::ChainedFixupsHeader {
+            fixups_version: 0,
+            starts_offset: 28,
+            imports_offset: 4,
+            symbols_offset: 4,
+            imports_count: 2,
+            imports_format: 0x99,
+            symbols_format: 0,
+        };
+        let payload = vec![0u8; 64];
+        let err = parse_imports(&payload, &header).unwrap_err();
+        assert!(
+            matches!(err, crate::error::FormatError::Invalid { .. }),
+            "got {err:?}"
+        );
+    }
 
     /// Round-trips a rebase word through the encode/decode pair, using the
     /// bit layout from the fixup-chain diagram: target 36b, high8 8b,
