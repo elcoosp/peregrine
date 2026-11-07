@@ -14,7 +14,7 @@
   <p>
     <a href="https://github.com/elcoosp/peregrine/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/elcoosp/peregrine/ci.yml?style=flat-square&label=CI" alt="CI status"/></a>
     <a href="https://github.com/elcoosp/peregrine/actions/workflows/fuzz.yml"><img src="https://img.shields.io/github/actions/workflow/status/elcoosp/peregrine/fuzz.yml?style=flat-square&label=fuzz" alt="Fuzz status"/></a>
-    <a href="https://github.com/elcoosp/peregrine/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/version-0.7.0-blue?style=flat-square" alt="Version 0.7.0"/></a>
+    <a href="https://github.com/elcoosp/peregrine/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/version-1.1.0-blue?style=flat-square" alt="Version 1.1.0"/></a>
     <a href="https://github.com/elcoosp/peregrine/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/rust-1.85%2B-orange?style=flat-square" alt="MSRV 1.85"/></a>
     <a href="https://github.com/elcoosp/peregrine/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-lightgrey?style=flat-square" alt="Dual license: MIT OR Apache-2.0"/></a>
   </p>
@@ -65,19 +65,21 @@ Every linked image passes `pgr-verify --strict` in the repo's own end-to-end gat
 - **Deterministic output.** Double links are byte-identical (a CI-level gate), the parallel fused tile emit is byte-identical to the reference emit kept in-tree, and nothing reads hash iteration order — parallel schedules change who computes a result, never the result.
 - **Safe, panic-free parsing.** The workspace forbids `unsafe` (`unsafe_code = "forbid"`) and carries no lint suppressions; parsers return typed errors and never panic. Nightly cargo-fuzz targets (`parse_any`, `parse_tbd`, `verify_image`, `link_object`) plus stable proptests keep that honest.
 - **Relink caching.** Content-addressed, checksum-framed caches for parsed objects and frozen `.tbd` export sets (`-cache <dir>`, `PGR_CACHE_DIR`, `-no_cache`); cached and uncached outputs are byte-identical, and corruption falls back to a silent re-parse.
+- **Resident relinking (M8).** `pgr -resident` routes a link through the optional `pgrd` daemon, which keeps the parsed state of unchanged inputs (POIs), the input bytes and the emit buffer across links: a warm relink transfers manifests only, skips the parse (hit-counted), and reuses its output buffer. Optional and transparent by contract — the daemon is started on demand, idles out, and every failure silently falls back to the one-shot link. Resident output is byte-identical to the one-shot link (a test gate, not a promise): the daemon holds no output state, so a crash or restart can never corrupt an image.
 - **Current Mach-O coverage.** `DYLD_CHAINED_PTR_64_OFFSET` chained fixups with a classic `LC_DYLD_INFO_ONLY` opcode fallback for pre-12.0 deployment targets, full export tries with re-exports, arm64 GOT/stub synthesis, branch veneers for beyond-±128 MiB calls, ad-hoc signing, `.tbd` v3/v4, and BSD/GNU long-name archives. Mach-O constants are cross-checked against the `object` crate in CI.
 
 ## How it works
 
-Peregrine is a six-pass pipeline split across five crates. `pgr-driver` maps inputs (Pass 0) and drives the loop; `pgr-format` provides zero-copy, bounds-checked parsing of Mach-O, archives, `.tbd` stubs, chained fixups and signature blobs; `pgr-core` runs Passes 1–3 (LPT-scheduled parallel parse and interning, two-level symbol resolution with archive liveness, layout with `__got`/`__stubs` synthesis, ICF, dead-strip and fixup planning); `pgr-emit` runs Passes 4–5, where parallel 16 KiB tiles copy runs, apply relocations, encode chain words, place `__LINKEDIT` and hash signature pages in one pass over each byte, then a 4-writer `pwrite` pool flushes the file. `pgr-verify` closes the loop by treating the output as a hostile third-party image and validating it against the contract dyld will enforce at load time.
+Peregrine is a six-pass pipeline split across six crates. `pgr-driver` maps inputs (Pass 0) and drives the loop; `pgr-format` provides zero-copy, bounds-checked parsing of Mach-O, archives, `.tbd` stubs, chained fixups and signature blobs; `pgr-core` runs Passes 1–3 (LPT-scheduled parallel parse and interning, two-level symbol resolution with archive liveness, layout with `__got`/`__stubs` synthesis, ICF, dead-strip and fixup planning); `pgr-emit` runs Passes 4–5, where parallel 16 KiB tiles copy runs, apply relocations, encode chain words, place `__LINKEDIT` and hash signature pages in one pass over each byte, then a 4-writer `pwrite` pool flushes the file. `pgr-verify` closes the loop by treating the output as a hostile third-party image and validating it against the contract dyld will enforce at load time. `pgr-daemon` (M8) wraps the same pipeline in a resident server: unchanged inputs keep their parsed state across links, with byte-identity to the one-shot link gated by tests.
 
 | Crate | Role |
 |---|---|
 | `pgr-driver` | the `pgr` CLI binary: option parsing, input classification, the Pass 0–5 loop |
 | `pgr-format` | zero-copy Mach-O primitives: headers, load commands, symtab, relocations, chained fixups, export tries, `.tbd` v3/v4, `!<arch>` archives, signature blobs |
-| `pgr-core` | Passes 1–3: interning, two-level resolution, layout, ICF, dead-strip, thunks, dyld-info planning, caches |
+| `pgr-core` | Passes 1–3: interning, two-level resolution, layout, ICF, dead-strip, thunks, dyld-info planning, caches, the M8 reverse reference index / insertion-stable import table / slack policy |
 | `pgr-emit` | Passes 4–5: fused tile emit, relocation application, ad-hoc signature, concurrent writer |
 | `pgr-verify` | the read-side verifier: library and `pgr-verify` CLI |
+| `pgr-daemon` | the M8 resident link server: the `pgrd` daemon, its wire protocol, the persistent session (POIs + bytes + emit buffer) and the client `pgr -resident` speaks |
 | `pgr-fixtures` | deterministic Mach-O object and archive builders shared by tests, benches and the fuzz corpus |
 
 ## Usage
@@ -91,7 +93,8 @@ Key driver flags (full surface: `pgr --help`):
 | Symbol binding | `-flat_namespace`, `-undefined error\|dynamic_lookup`, `-weak_library`, `-rpath` |
 | Dylib metadata | `-install_name`, `-current_version`, `-compatibility_version`, `-reexport_library`, `-exported_symbols_list`, `-unexported_symbols_list` |
 | Codegen and size | `-dead_strip`, `-icf=safe\|all\|none`, `-fixup_chains`/`-no_fixup_chains`, `-adhoc`/`-no_adhoc`, `-segalign`, `-headerpad`, `-sectcreate` |
-| Caching and jobs | `-cache <dir>`, `-no_cache`, `PGR_CACHE_DIR`, `PGR_JOBS` |
+| Caching and jobs | `-cache <dir>`, `-no_cache`, `PGR_CACHE_DIR`, `-cache_max <bytes>`, `PGR_CACHE_MAX`, `PGR_JOBS` |
+| Resident mode (M8) | `-resident`, `-resident_socket <path>`, `PGR_DAEMON_SOCK`, `PGR_RESIDENT_DEBUG`; the `pgrd` daemon: `--socket`, `--idle-secs`, `--shutdown` |
 
 Environment: `PGR_JOBS` sizes the shared compute pool (default: available parallelism); `PGR_LLD64=/path/to/ld64.lld` enables the golden harness that compares Peregrine's bind semantics slot-for-slot against `ld64.lld` (skipped when lld is absent).
 
@@ -112,7 +115,7 @@ Compatibility is a tracked checklist rather than a promise: [docs/COMPAT.md](doc
 ## Status
 
 > [!NOTE]
-> Peregrine is a pre-1.0 project (v0.7.0) with the M6 "scale and ecosystem" milestone's in-tree scope shipped: branch veneers, ICF, the classic-fixup fallback, and Stage A caches. The target is arm64-apple-darwin only — `CPU_TYPE_ARM64`, little-endian, 16 KiB segment congruence — producing `MH_EXECUTE`, `MH_DYLIB` and `MH_BUNDLE` images; chained fixups serve macOS 12.0+ targets, and older deployment targets (or `-no_fixup_chains`) get classic `LC_DYLD_INFO_ONLY` rebase/bind streams. The host side is platform-independent: CI builds and runs the full test suite on Linux x86_64 and macOS aarch64. Performance claims stop at the dev-sandbox baselines in docs/BENCHMARKS.md — the hardware gates against `ld64.lld` on Apple Silicon are specified but not yet measured. LTO object execution, compact-unwind synthesis, `-order_file`, TLV, and ObjC/Swift semantics beyond section pass-through are deferred with reasons in docs/COMPAT.md and the roadmap.
+> Peregrine is a post-1.0 project (v1.1.0) whose milestone stream follows the architecture doc: M6 (ICF, veneers, legacy fixups, Stage A caches) and M7 (versioned caches, build-system surface, the ≥ 98% compatibility suite, fuzzing at scale) shipped the in-tree scope; M8 ships the resident + incremental foundations — the `pgrd` resident server with its persistent POI session, the reverse reference index, the insertion-stable import table, and slack-aware layout with the §7.3 fallback ladder. The target is arm64-apple-darwin only — `CPU_TYPE_ARM64`, little-endian, 16 KiB segment congruence — producing `MH_EXECUTE`, `MH_DYLIB` and `MH_BUNDLE` images; chained fixups serve macOS 12.0+ targets, and older deployment targets (or `-no_fixup_chains`) get classic `LC_DYLD_INFO_ONLY` rebase/bind streams. The host side is platform-independent: CI builds and runs the full test suite on Linux x86_64 and macOS aarch64. Performance claims stop at the dev-sandbox baselines in docs/BENCHMARKS.md — the hardware gates against `ld64.lld` on Apple Silicon (including M8's resident-relink gate) are specified but not yet measured, and the M8 warm-relink bench is recorded honestly as a wash on the Pass 2/3-bound sandbox corpus. LTO object execution, compact-unwind synthesis, `-order_file`, TLV, ObjC/Swift semantics beyond section pass-through, and the M9 in-place incremental relink are deferred with reasons in docs/COMPAT.md and the roadmap.
 
 ## Learn more
 
