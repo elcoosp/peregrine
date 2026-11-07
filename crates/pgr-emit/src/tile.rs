@@ -84,6 +84,33 @@ pub fn build_image_fused(layout: &Layout, objects: &[InputObject]) -> Result<Vec
     // D10: the zeroed allocation reaches the allocator's lazy zero-page path
     // (no memset); padding and zero-fill sections are zero by contract.
     let mut buf = vec![0u8; layout.file_size as usize];
+    emit_fused(&mut buf, layout, objects)?;
+    Ok(buf)
+}
+
+/// [`build_image_fused`] into a caller-owned buffer (M8: the resident
+/// server's page-fault gate — reusing one buffer across links turns the
+/// fresh `mmap`-style zero-fill fault storm into warm-page writes). The
+/// buffer is cleared and resized to the plan's file size first, so padding
+/// and gap bytes are zero by the same contract the fresh path relies on
+/// (§11); capacity is retained across calls.
+///
+/// # Errors
+/// [`EmitError::Contract`] on operand/plan inconsistencies;
+/// [`EmitError::Internal`] on buffer indexing bugs.
+pub fn build_image_fused_into(
+    buf: &mut Vec<u8>,
+    layout: &Layout,
+    objects: &[InputObject],
+) -> Result<(), EmitError> {
+    buf.clear();
+    buf.resize(layout.file_size as usize, 0u8);
+    emit_fused(buf, layout, objects)
+}
+
+/// The fused tile emit body over a zeroed buffer of exactly
+/// `layout.file_size` bytes.
+fn emit_fused(buf: &mut [u8], layout: &Layout, objects: &[InputObject]) -> Result<(), EmitError> {
     if buf.len() < layout.header_bytes.len() {
         return Err(EmitError::Contract {
             message: "header page larger than the output file".into(),
@@ -106,7 +133,7 @@ pub fn build_image_fused(layout: &Layout, objects: &[InputObject]) -> Result<Vec
 
     // D10 (background pre-fault): touch one byte per 4 KiB page in parallel
     // so tile tasks pay soft faults instead of zero-fill faults.
-    prefault(&mut buf);
+    prefault(buf);
 
     // ---- the tile loop (parallel over disjoint 16 KiB buffer slices) -------
     let hash_tables: Vec<Vec<[u8; 32]>> = buf
@@ -156,9 +183,9 @@ pub fn build_image_fused(layout: &Layout, objects: &[InputObject]) -> Result<Vec
         hashes[..32].copy_from_slice(&h.finalize());
 
         // The SuperBlob lands last (beyond the hashed range).
-        write_superblob(layout, &mut buf, &hashes)?;
+        write_superblob(layout, &mut *buf, &hashes)?;
     }
-    Ok(buf)
+    Ok(())
 }
 
 /// The reference `page_hashes` table length for `code_limit` bytes.
