@@ -230,8 +230,73 @@ fn main() {
     )
     .expect("write v3 tbd seed");
 
+    // ---- M7 seeds: classic dyld-info opcode streams + cache entries ------
+    // (the M7 fuzzing-at-scale targets `dyld_info_streams` and
+    // `cache_entries`; valid entries give libFuzzer the codec shapes).
+    let rebase_stream = pgr_format::dyld_info::encode_rebase_stream(&[
+        pgr_format::dyld_info::RebaseEntry {
+            seg: 1,
+            seg_off: 0x40,
+        },
+        pgr_format::dyld_info::RebaseEntry {
+            seg: 2,
+            seg_off: 0x8,
+        },
+    ]);
+    std::fs::write(dir.join("classic_rebase_stream"), &rebase_stream)
+        .expect("write rebase stream seed");
+    let bind_stream =
+        pgr_format::dyld_info::encode_bind_stream(&[pgr_format::dyld_info::BindEntry {
+            seg: 2,
+            seg_off: 0,
+            ordinal: pgr_format::dyld_info::BindOrdinal::Dylib(1),
+            flags: 0,
+            name: b"_printf".to_vec(),
+            addend: 0,
+        }]);
+    std::fs::write(dir.join("classic_bind_stream"), &bind_stream).expect("write bind stream seed");
+
+    // A minimal-but-valid v2 POI frame: flags | svs | from_archive |
+    // archive_name("") | 0 sections | 0 syms | 0 names | 0 atom tables.
+    let mut poi_payload: Vec<u8> = Vec::new();
+    for b in [1u8, 0, 0] {
+        poi_payload.push(b);
+    }
+    poi_payload.extend_from_slice(&0u32.to_le_bytes()); // archive_name len
+    for _ in 0..4 {
+        poi_payload.extend_from_slice(&0u32.to_le_bytes()); // 4 empty tables
+    }
+    std::fs::write(dir.join("cache_poi_v2"), frame("PGRPOI1\0", &poi_payload))
+        .expect("write POI seed");
+    // A minimal frozen-.tbd frame: install_name("") | versions | 0 exports.
+    let mut tbd_payload: Vec<u8> = Vec::new();
+    tbd_payload.extend_from_slice(&0u32.to_le_bytes());
+    tbd_payload.extend_from_slice(&1u32.to_le_bytes());
+    tbd_payload.extend_from_slice(&1u32.to_le_bytes());
+    tbd_payload.extend_from_slice(&0u32.to_le_bytes());
+    std::fs::write(
+        dir.join("cache_frozen_tbd_v2"),
+        frame("PGRFTBD1", &tbd_payload),
+    )
+    .expect("write frozen-tbd seed");
+
     println!(
-        "wrote 3 seed images + 3 seed objects + 2 tbd seeds into {}",
+        "wrote 3 seed images + 3 seed objects + 2 tbd + 2 stream + 2 cache seeds into {}",
         dir.display()
     );
+}
+
+/// Frames a cache payload the way `pgr_core::cache` does (v2): magic(8) |
+/// format(u32=2) | parser(u32=1) | len(u64) | sha256(payload) | payload.
+fn frame(magic: &str, payload: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut out = Vec::with_capacity(56 + payload.len());
+    out.extend_from_slice(magic.as_bytes());
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    let digest: [u8; 32] = Sha256::digest(payload).into();
+    out.extend_from_slice(&digest);
+    out.extend_from_slice(payload);
+    out
 }
