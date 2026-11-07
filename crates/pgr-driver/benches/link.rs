@@ -618,6 +618,46 @@ fn bench_tbd_frozen(c: &mut Criterion) {
     group.finish();
 }
 
+/// M7 LRU bound: the per-store cost of enforcing a size bound (scan + evict)
+/// vs the unbounded path — the bound must be noise on the link wall.
+fn bench_cache_evict(c: &mut Criterion) {
+    let dir = std::env::temp_dir().join("pgr_bench_cache_evict");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 4 objects x 1,024 symbols: enough parse work for the POI entries to
+    // be realistic (a few KiB each).
+    let corpus = bench_corpus(4, 1_024, 8);
+    let files: &Vec<Vec<u8>> = &corpus.0;
+    let total: usize = corpus.1;
+    let mut base = pgr_driver::opts::Options::default();
+    for (i, bytes) in files.iter().enumerate() {
+        let p = dir.join(format!("evict_obj_{i}.o"));
+        std::fs::write(&p, bytes).unwrap();
+        base.inputs.push(p.display().to_string());
+    }
+    base.config.ident = "cache_evict_bench".into();
+
+    let mut group = c.benchmark_group("pgr-driver/cache_evict");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(4));
+    group.throughput(Throughput::Bytes(total as u64));
+
+    for (name, cache_max) in [("bounded_64kib", Some(64 * 1024u64)), ("unbounded", None)] {
+        let fresh = dir.join(format!("evict-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fresh);
+        let mut opts = base.clone();
+        opts.cache_dir = Some(fresh.display().to_string());
+        opts.cache_max = cache_max;
+        group.bench_function(name.to_string(), |b| {
+            b.iter(|| {
+                let image = pgr_driver::link_to_bytes(&opts).unwrap();
+                std::hint::black_box(image.len());
+            })
+        });
+    }
+    group.finish();
+}
+
 /// Bench entry point (macro-free so the workspace `missing_docs` lint holds).
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
@@ -630,5 +670,6 @@ fn main() {
     bench_link_icf(&mut criterion);
     bench_link_cache(&mut criterion);
     bench_tbd_frozen(&mut criterion);
+    bench_cache_evict(&mut criterion);
     criterion.final_summary();
 }
