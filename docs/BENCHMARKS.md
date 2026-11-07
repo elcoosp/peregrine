@@ -464,3 +464,68 @@ four parser targets plus the two new ones — all clean after the fixes below:
 
 Each crash class carries a deterministic regression test in the tree; the
 M7 row's "fuzzers clean for 30 CPU-days" formally closes on the P0 rig.
+
+## Recorded baseline (M8 — resident + incremental foundations)
+
+The M8 milestone (architecture doc §10.4 row M8) ships the resident-server
+foundations: `pgrd` (§7.2) with the in-memory POI session, the reverse
+reference index, the insertion-stable import table, slack-aware layout and
+the reused emit buffer. New bench (`pgr-driver/resident`) plus the M8
+correctness gates (`m8_foundations.rs`, `m8_resident.rs`, `pgrd_binary.rs`).
+Recorded on the same 2-core KVM dev sandbox (`cargo bench`, default
+sampling).
+
+### Resident warm relink (`pgr-driver/resident`, new bench)
+
+Corpus: 64 objects × 2 048 symbols × 2 KiB text (the parse-heavy shape —
+the symbol tables dominate the input bytes). The resident iterations run
+the exact user path (`pgr -resident` → prepare → hash → negotiate → POI
+decode → link → fused emit → wire); the daemon reports **64/64 POI hits**
+from the second iteration on and reuses its emit buffer.
+
+| Bench | Median | Throughput | Notes |
+|---|---|---|---|
+| `resident/one_shot_64_objects` | **224.3 ms** | 37.8 MiB/s | the full pipeline (v1.0 path) |
+| `resident/resident_warm_64_objects` | **260.3 ms** | 32.6 MiB/s | POI hits 64/64, no input re-transfer, buffer reuse active |
+
+**Honest verdict: a wash-to-slight-loss on this sandbox corpus, recorded
+as-is.** The phase breakdown (release-mode probe):
+
+| Phase | Cost |
+|---|---|
+| client Pass 0 (`prepare_link`) | 4.2 ms |
+| client manifest build (hash + stage bytes) | ~8 ms (parallelized SHA-256) |
+| daemon session link (POI decode + Passes 2–5 + wire) | ~248 ms |
+
+The finding replays the M6 cache-bench physics one level up: this corpus —
+like the M6 POI-cache corpus — is **Pass 2/3-bound** (interning, resolution,
+layout, symtab/trie dominate), and the POI *decode* on this sandbox measures
+comparable to a fresh parse, so the skipped Pass 1 does not cover the
+manifest + wire overhead. What the numbers do not show (hardware-gated,
+like every Apple-Silicon row in this doc): the §10.4 M8 performance gate
+("resident relink ≥ 5× ld-prime") is decided on the P0 rig, and the
+*bytes-over-the-wire* and *page-fault* savings this design exists for are
+bounded by the fixture sizes here (8 MiB inputs, 6 MiB images). What the
+bench *does* prove functionally: the session skip is real (hit counters),
+the output is byte-identical to the one-shot link on every iteration
+(gated in `m8_resident.rs`), and the emit buffer survives across links
+(`scratch` capacity gate in the session tests).
+
+### The M8 correctness gates (all green)
+
+* `m8_foundations.rs` (13): reverse-index site lists (live + dead-filtered,
+  total-ordered), insertion-stable import ordinals across growth rounds,
+  slack padding math + fallback ladder, slack-off structural identity with
+  v1.0, pre-parsed-link layout equality, archive pull through
+  `link_from_objects`, the shared `-u` gate.
+* `m8_resident.rs` (7): resident-vs-one-shot byte identity (executable,
+  dylib and archive corpora, cold and warm), POI-hit counters across the
+  wire, one-shot fallback transparency, daemon restart, 4-way concurrent
+  clients, `-u` error parity through the fallback.
+* `pgrd_binary.rs` (4): the real `pgrd` process — strict-verifier-clean
+  resident output, SIGKILL-restart identity, link-error survival,
+  idle-exit (§7.2).
+
+```sh
+cargo bench -p pgr-driver --bench resident
+```
