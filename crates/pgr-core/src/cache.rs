@@ -17,10 +17,20 @@
 //!   from text parsing to a decode. The per-input `weak`/`reexport` flags
 //!   ride the driver, not the cache.
 //!
-//! Layout (little-endian, pointer-free):
-//! `magic(8) | version(u32) | payload_len(u64) | sha256(payload)(32) |
-//! payload`. Writes are atomic (temp file + rename); keys are hex-encoded
-//! SHA-256 digests, so build-system parallelism is safe.
+//! Layout, M7 **versioned cache format** (little-endian, pointer-free):
+//! `magic(8) | format_version(u32) | parser_revision(u32) | payload_len(u64)
+//! | sha256(payload)(32) | payload`. The two revision fields are the §7.1
+//! requirement that a cache entry "records the `pgr` format version"; the
+//! payload starts with the parse-affecting flag byte it was produced under.
+//! Writes are atomic (temp file + rename); keys are hex-encoded SHA-256
+//! digests over the input bytes *and* both revisions *and* the
+//! parse-affecting flags, so build-system parallelism is safe and stale
+//! entries become unreachable rather than merely unread. The cache directory
+//! carries a format marker (`PGR_CACHE_FORMAT`): a directory written by a
+//! different format/parser self-heals on open (stale pgr-shaped files are
+//! reclaimed, the marker is rewritten). Directories can be size-bounded with
+//! oldest-mtime (LRU) eviction — a hit refreshes recency, and the
+//! just-stored entry is never evicted.
 
 use crate::ids::FileId;
 use crate::object::{InputObject, InputSection, InputSymbol};
@@ -30,6 +40,24 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const POI_MAGIC: &[u8; 8] = b"PGRPOI1\0";
+
+/// Cache format version (M7): the framing *and* payload layout revision.
+/// Bump when the frame or codec changes shape; v1 (M6) entries are then
+/// silently missed and reclaimed by the directory self-heal.
+pub const CACHE_FORMAT_VERSION: u32 = 2;
+
+/// Parser revision: bumped when Pass 1's parse semantics change in a way
+/// that would make a stored POI stale even though the framing is unchanged.
+pub const PARSER_REVISION: u32 = 1;
+
+/// The directory-level format marker file name. Its payload is
+/// `"PGR-CACHE-FORMAT\0" || format_version(u32) || parser_revision(u32)`;
+/// a mismatch (or absence) on open reclaims every pgr-shaped file in the
+/// directory and rewrites the marker.
+pub const MARKER_NAME: &str = "PGR_CACHE_FORMAT";
+
+const MARKER_TAG: &[u8; 17] = b"PGR-CACHE-FORMAT\0";
+const MARKER_LEN: usize = MARKER_TAG.len() + 8;
 
 /// Unique temp-file suffix for atomic stores (concurrent writers must never
 /// share a temp path — the rename target is the content key, but the temp
@@ -41,35 +69,103 @@ fn tmp_path(dir: &Path, tag: &str) -> PathBuf {
     dir.join(format!(".tmp-{tag}-{}-{n}", std::process::id()))
 }
 const FROZEN_TBD_MAGIC: &[u8; 8] = b"PGRFTBD1";
-const HEADER_LEN: usize = 8 + 4 + 8 + 32;
-const POI_VERSION: u32 = 1;
+const HEADER_LEN: usize = 8 + 4 + 4 + 8 + 32;
 
-/// Per-user content-addressed cache directory (Stage A). `None`-safe: all
-/// methods short-circuit when the cache is disabled.
+/// Files pgr owns in a cache directory: 64-hex content keys and its own
+/// `.tmp-*` scratch. The self-heal only ever removes these shapes.
+fn is_own_file(name: &std::ffi::OsStr) -> bool {
+    let Some(s) = name.to_str() else {
+        return false;
+    };
+    s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()) || s.starts_with(".tmp-")
+}
+
+/// Per-user content-addressed cache directory (Stage A, versioned at M7).
+/// `None`-safe: all methods short-circuit when the cache is disabled.
 #[derive(Debug, Clone)]
 pub struct PoiCache {
     dir: PathBuf,
+    /// Size bound in bytes (`None` = unbounded). Enforced after each store:
+    /// entries beyond the bound are evicted oldest-mtime-first (LRU — a hit
+    /// refreshes recency), and the just-stored entry is never evicted.
+    max_bytes: Option<u64>,
+    /// Serializes store+evict across the parse pool's threads: without it,
+    /// two concurrent stores each spare their own entry and evict the
+    /// other's — the bound can wipe the directory (regression-gated by the
+    /// parallel-store stress test).
+    store_lock: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
 impl PoiCache {
-    /// Opens (creating if needed) the cache directory.
+    /// Opens (creating if needed) the cache directory, unbounded.
+    ///
+    /// The directory's format marker is validated: a directory written by a
+    /// different cache format or parser revision self-heals (stale
+    /// pgr-shaped files are reclaimed, the marker is rewritten); files pgr
+    /// does not own are never touched.
     ///
     /// # Errors
     /// [`std::io::Error`] when the directory cannot be created.
     pub fn open(dir: &Path) -> std::io::Result<Self> {
-        std::fs::create_dir_all(dir)?;
-        Ok(Self {
-            dir: dir.to_path_buf(),
-        })
+        Self::open_limited(dir, 0)
     }
 
-    /// The cache key of one input: SHA-256 over the bytes plus the
-    /// parse-affecting flag byte.
+    /// [`PoiCache::open`] with a size bound in bytes (`0` = unbounded).
+    ///
+    /// # Errors
+    /// [`std::io::Error`] when the directory cannot be created.
+    pub fn open_limited(dir: &Path, max_bytes: u64) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let cache = Self {
+            dir: dir.to_path_buf(),
+            max_bytes: (max_bytes > 0).then_some(max_bytes),
+            store_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+        };
+        cache.heal_marker()?;
+        Ok(cache)
+    }
+
+    /// Validates (or writes, or heals) the directory format marker.
+    fn heal_marker(&self) -> std::io::Result<()> {
+        let marker = self.dir.join(MARKER_NAME);
+        let mut want = Vec::with_capacity(MARKER_LEN);
+        want.extend_from_slice(MARKER_TAG);
+        want.extend_from_slice(&CACHE_FORMAT_VERSION.to_le_bytes());
+        want.extend_from_slice(&PARSER_REVISION.to_le_bytes());
+        if std::fs::read(&marker).is_ok_and(|got| got == want) {
+            return Ok(());
+        }
+        // Missing or foreign marker: reclaim every file pgr owns (entries
+        // from an incompatible format are unreachable under the current key
+        // derivation anyway) and write our marker. Foreign files stay.
+        for e in std::fs::read_dir(&self.dir)?.flatten() {
+            let name = e.file_name();
+            if name != MARKER_NAME
+                && e.metadata().is_ok_and(|md| md.is_file())
+                && is_own_file(&name)
+            {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        std::fs::write(&marker, &want)
+    }
+
+    /// The cache key of one input (M7 v2): SHA-256 over the input bytes, the
+    /// parse-affecting flag, **and both format revisions** — an entry written
+    /// by another format/parser revision is unreachable under a v2 key, so
+    /// stale data can never be read even if the self-heal has not run yet.
     #[must_use]
     pub fn content_key(bytes: &[u8], split_symbols: bool) -> [u8; 32] {
+        Self::key_derive(bytes, split_symbols, CACHE_FORMAT_VERSION, PARSER_REVISION)
+    }
+
+    /// The key derivation itself, parameterized for tests.
+    fn key_derive(bytes: &[u8], split_symbols: bool, format: u32, parser: u32) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(bytes);
-        h.update([u8::from(split_symbols)]);
+        h.update([u8::from(split_symbols), 0, 0, 0]);
+        h.update(format.to_le_bytes());
+        h.update(parser.to_le_bytes());
         h.finalize().into()
     }
 
@@ -83,9 +179,10 @@ impl PoiCache {
     }
 
     /// Loads one cached parse. `bytes` is the (unchanged) input file — Pass
-    /// 4 copies section bytes from it. Any decode failure (missing,
-    /// truncated, corrupt, version mismatch) yields `None` — the caller
-    /// re-parses.
+    /// 4 copies section bytes from it. `split_symbols` must match the flag
+    /// the entry was stored under. Any decode failure (missing, truncated,
+    /// corrupt, version mismatch, flag mismatch) yields `None` — the caller
+    /// re-parses. A hit refreshes the entry's recency (LRU).
     #[must_use]
     pub fn load(
         &self,
@@ -93,20 +190,79 @@ impl PoiCache {
         file: FileId,
         name: &str,
         bytes: Vec<u8>,
+        split_symbols: bool,
     ) -> Option<InputObject> {
-        let cached = std::fs::read(self.path(key)).ok()?;
-        let mut obj = decode_poi(&cached, file, name)?;
+        let path = self.path(key);
+        let cached = std::fs::read(&path).ok()?;
+        let mut obj = decode_poi(&cached, file, name, split_symbols)?;
         obj.bytes = bytes;
+        self.touch(&path);
         Some(obj)
     }
 
+    /// Refreshes one entry's mtime (the LRU recency mark). Best effort.
+    fn touch(&self, path: &Path) {
+        if let Ok(f) = std::fs::File::options().write(true).open(path) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+    }
+
     /// Stores one parsed object (atomic replace; failures are silent — the
-    /// cache is an optimization only).
-    pub fn store(&self, key: &[u8; 32], obj: &InputObject) {
-        let bytes = encode_poi(obj);
+    /// cache is an optimization only), then enforces the size bound. The
+    /// write-rename-evict sequence is serialized: concurrent stores from the
+    /// parse pool must not evict each other's just-stored entries.
+    pub fn store(&self, key: &[u8; 32], obj: &InputObject, split_symbols: bool) {
+        let bytes = encode_poi(obj, split_symbols);
+        let dst = self.path(key);
+        let _serial = self.store_lock.lock();
         let tmp = tmp_path(&self.dir, "poi");
         if std::fs::write(&tmp, &bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, self.path(key));
+            let _ = std::fs::rename(&tmp, &dst);
+        }
+        self.enforce_limit(&dst);
+    }
+
+    /// Evicts entries oldest-mtime-first until the directory is within the
+    /// bound. The just-stored entry (`keep`) is never evicted.
+    fn enforce_limit(&self, keep: &Path) {
+        let Some(max) = self.max_bytes else {
+            return;
+        };
+        let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+        let Ok(rd) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut total = 0u64;
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let is_entry = name
+                .to_str()
+                .is_some_and(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()));
+            if !is_entry {
+                continue;
+            }
+            let Ok(md) = e.metadata() else { continue };
+            total += md.len();
+            entries.push((
+                e.path(),
+                md.len(),
+                md.modified().unwrap_or(std::time::SystemTime::now()),
+            ));
+        }
+        if total <= max {
+            return;
+        }
+        entries.sort_by_key(|e| e.2);
+        for (path, len, _) in entries {
+            if total <= max {
+                break;
+            }
+            if path == keep {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(len);
+            }
         }
     }
 
@@ -117,13 +273,16 @@ impl PoiCache {
         decode_frozen_dylib(&bytes)
     }
 
-    /// Stores one parsed `.tbd`.
+    /// Stores one parsed `.tbd` (same serialization as [`PoiCache::store`]).
     pub fn store_dylib(&self, key: &[u8; 32], dylib: &FrozenDylib) {
         let bytes = encode_frozen_dylib(dylib);
+        let dst = self.path(key);
+        let _serial = self.store_lock.lock();
         let tmp = tmp_path(&self.dir, "tbd");
         if std::fs::write(&tmp, &bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, self.path(key));
+            let _ = std::fs::rename(&tmp, &dst);
         }
+        self.enforce_limit(&dst);
     }
 }
 
@@ -170,7 +329,8 @@ impl From<FrozenDylib> for Dylib {
 fn frame(magic: &[u8; 8], payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
     out.extend_from_slice(magic);
-    out.extend_from_slice(&POI_VERSION.to_le_bytes());
+    out.extend_from_slice(&CACHE_FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&PARSER_REVISION.to_le_bytes());
     out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
     let digest: [u8; 32] = Sha256::digest(payload).into();
     out.extend_from_slice(&digest);
@@ -182,22 +342,25 @@ struct Unframed<'a> {
     payload: &'a [u8],
 }
 
-/// Validates the frame (magic, version, length, checksum) and returns the
-/// payload slice; `None` on any mismatch (silent cache miss).
+/// Validates the frame (magic, both revisions, length, checksum) and returns
+/// the payload slice; `None` on any mismatch (silent cache miss).
 fn unframe<'a>(bytes: &'a [u8], magic: &[u8; 8]) -> Option<Unframed<'a>> {
     if bytes.len() < HEADER_LEN || &bytes[0..8] != magic {
         return None;
     }
-    let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-    if version != POI_VERSION {
+    let format = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    let parser = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
+    if format != CACHE_FORMAT_VERSION || parser != PARSER_REVISION {
         return None;
     }
-    let len = u64::from_le_bytes(bytes[12..20].try_into().ok()?) as usize;
-    if bytes.len() != HEADER_LEN + len {
+    let len = u64::from_le_bytes(bytes[16..24].try_into().ok()?) as usize;
+    // Checked: a hostile `len` must never wrap the sum (the M7 cache_entries
+    // fuzzer found this as an `add with overflow` abort).
+    if bytes.len() != HEADER_LEN.checked_add(len)? {
         return None;
     }
     let payload = &bytes[HEADER_LEN..];
-    let want: [u8; 32] = bytes[20..52].try_into().ok()?;
+    let want: [u8; 32] = bytes[24..56].try_into().ok()?;
     let got: [u8; 32] = Sha256::digest(payload).into();
     if want != got {
         return None;
@@ -265,10 +428,13 @@ impl<'a> Reader<'a> {
 
 // ---- POI codec ---------------------------------------------------------------
 
-/// Serializes one parsed object (post-`compute_atoms`, pre-intern).
+/// Serializes one parsed object (post-`compute_atoms`, pre-intern) together
+/// with the parse-affecting flag it was produced under (§7.1: the entry
+/// "records the `pgr` format version and any parse-affecting flags").
 #[must_use]
-pub fn encode_poi(obj: &InputObject) -> Vec<u8> {
+pub fn encode_poi(obj: &InputObject, split_symbols: bool) -> Vec<u8> {
     let mut p = Vec::new();
+    put_u8(&mut p, u8::from(split_symbols));
     put_u8(&mut p, u8::from(obj.subsections_via_symbols));
     put_u8(&mut p, u8::from(obj.from_archive));
     put_str(&mut p, &obj.archive_name);
@@ -315,12 +481,17 @@ pub fn encode_poi(obj: &InputObject) -> Vec<u8> {
     frame(POI_MAGIC, &p)
 }
 
-/// Rebuilds one object from its POI bytes. Any inconsistency (truncation,
-/// checksum, bounds) yields `None` — the caller re-parses.
+/// Rebuilds one object from its POI bytes. `want_split` must match the flag
+/// the entry was stored under. Any inconsistency (truncation, checksum,
+/// bounds, revision or flag mismatch) yields `None` — the caller re-parses.
 #[must_use]
-pub fn decode_poi(bytes: &[u8], file: FileId, name: &str) -> Option<InputObject> {
+pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> Option<InputObject> {
     let Unframed { payload } = unframe(bytes, POI_MAGIC)?;
     let mut r = Reader { b: payload, at: 0 };
+    let stored_split = r.u8()? != 0;
+    if stored_split != want_split {
+        return None;
+    }
     let subsections_via_symbols = r.u8()? != 0;
     let from_archive = r.u8()? != 0;
     let archive_name = r.str()?;
@@ -517,8 +688,8 @@ mod tests {
         let (bytes, _text) = sample_object();
         let bytes_for_finish = bytes.clone();
         let obj = parse_object(bytes);
-        let enc = encode_poi(&obj);
-        let dec = decode_poi(&enc, FileId(9), "hello.o").expect("decode");
+        let enc = encode_poi(&obj, true);
+        let dec = decode_poi(&enc, FileId(9), "hello.o", true).expect("decode");
         assert_eq!(dec.file.0, 9);
         assert_eq!(dec.name, "hello.o");
         assert_eq!(dec.subsections_via_symbols, obj.subsections_via_symbols);
@@ -548,18 +719,18 @@ mod tests {
     fn poi_rejects_corruption_silently() {
         let (bytes, _) = sample_object();
         let obj = parse_object(bytes);
-        let mut enc = encode_poi(&obj);
+        let mut enc = encode_poi(&obj, true);
         // Flip a payload byte: checksum mismatch → None.
         let last = enc.len() - 1;
         enc[last] ^= 0xFF;
-        assert!(decode_poi(&enc, FileId(1), "x").is_none());
+        assert!(decode_poi(&enc, FileId(1), "x", true).is_none());
         // Truncated frame → None.
-        let enc = encode_poi(&obj);
-        assert!(decode_poi(&enc[..enc.len() / 2], FileId(1), "x").is_none());
+        let enc = encode_poi(&obj, true);
+        assert!(decode_poi(&enc[..enc.len() / 2], FileId(1), "x", true).is_none());
         // Wrong magic → None.
-        let mut enc = encode_poi(&obj);
+        let mut enc = encode_poi(&obj, true);
         enc[0] = b'X';
-        assert!(decode_poi(&enc, FileId(1), "x").is_none());
+        assert!(decode_poi(&enc, FileId(1), "x", true).is_none());
     }
 
     use crate::interner::Interner;
@@ -574,18 +745,26 @@ mod tests {
         let key2 = PoiCache::content_key(&bytes, true);
         assert_eq!(key, key2, "keys are pure functions of content+flags");
         assert_ne!(key, PoiCache::content_key(&bytes, false), "flags split");
-        cache.store(&key, &obj);
+        cache.store(&key, &obj, true);
         let hit = cache
-            .load(&key, FileId(3), "hello.o", bytes.clone())
+            .load(&key, FileId(3), "hello.o", bytes.clone(), true)
             .expect("hit");
         assert_eq!(hit.peek_symbol_names(), obj.peek_symbol_names());
         assert_eq!(hit.atoms, obj.atoms);
         assert_eq!(hit.file.0, 3);
         // A miss decodes to None without panicking.
-        assert!(cache.load(&[9u8; 32], FileId(1), "x", Vec::new()).is_none());
+        assert!(
+            cache
+                .load(&[9u8; 32], FileId(1), "x", Vec::new(), true)
+                .is_none()
+        );
         // Different bytes → different key → miss.
         let other = PoiCache::content_key(b"different-bytes", true);
-        assert!(cache.load(&other, FileId(1), "x", Vec::new()).is_none());
+        assert!(
+            cache
+                .load(&other, FileId(1), "x", Vec::new(), true)
+                .is_none()
+        );
     }
 
     #[test]
@@ -662,6 +841,308 @@ mod tests {
         let last = enc.len() - 1;
         enc[last] ^= 0x55;
         assert!(decode_frozen_dylib(&enc).is_none());
+    }
+}
+
+#[cfg(test)]
+mod m7_versioned {
+    //! M7 versioned-cache-format gates (architecture doc §10.3 row M7:
+    //! "**versioned cache format**"; §7.1: "A cache entry also records the
+    //! `pgr` format version and any parse-affecting flags" and
+    //! "size-bounded with LRU eviction").
+    use super::{
+        CACHE_FORMAT_VERSION, FrozenDylib, PARSER_REVISION, PoiCache, decode_frozen_dylib,
+        decode_poi, encode_frozen_dylib, encode_poi,
+    };
+    use crate::ids::FileId;
+    use crate::resolve::Dylib;
+    use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
+
+    fn tiny_object(body: u8) -> (Vec<u8>, crate::object::InputObject) {
+        let mut b = ObjectBuilder::new("tiny.o");
+        let text = b.add_section(ObjectSection::text(
+            "__text",
+            vec![body, 0xC0, 0x03, 0x5F, 0xD6],
+            vec![],
+        ));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_f".into(),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+        let bytes = b.build().unwrap();
+        let mut obj =
+            crate::object::InputObject::parse(FileId(1), "tiny.o", bytes.clone()).expect("parse");
+        obj.compute_atoms(true);
+        (bytes, obj)
+    }
+
+    fn tiny_dylib() -> FrozenDylib {
+        FrozenDylib::from(&Dylib {
+            install_name: "/usr/lib/libt.dylib".into(),
+            current_version: 1 << 16,
+            compatibility_version: 1 << 16,
+            exports: vec![b"_f".to_vec()],
+            weak: false,
+            reexport: false,
+        })
+    }
+
+    #[test]
+    fn m7_hostile_frame_len_overflows_silently() {
+        // Regression (cache_entries fuzzer, crash-642df7d7): a framed length
+        // near usize::MAX wrapped `HEADER_LEN + len` and aborted. The decode
+        // must be a silent miss instead.
+        let mut hostile = Vec::with_capacity(56);
+        hostile.extend_from_slice(b"PGRPOI1\0");
+        hostile.extend_from_slice(&CACHE_FORMAT_VERSION.to_le_bytes());
+        hostile.extend_from_slice(&PARSER_REVISION.to_le_bytes());
+        hostile.extend_from_slice(&u64::MAX.to_le_bytes()); // len
+        hostile.extend_from_slice(&[0u8; 32]); // checksum (never reached)
+        assert!(decode_poi(&hostile, FileId(1), "tiny.o", true).is_none());
+    }
+
+    #[test]
+    fn m7_frames_record_format_and_parser_revisions() {
+        let (_bytes, obj) = tiny_object(0x91);
+        let enc = encode_poi(&obj, true);
+        assert_eq!(&enc[0..8], b"PGRPOI1\0", "magic stays");
+        assert_eq!(
+            u32::from_le_bytes(enc[8..12].try_into().unwrap()),
+            CACHE_FORMAT_VERSION,
+            "frame field 1 is the cache format version"
+        );
+        assert_eq!(
+            u32::from_le_bytes(enc[12..16].try_into().unwrap()),
+            PARSER_REVISION,
+            "frame field 2 is the parser revision"
+        );
+        assert_eq!(CACHE_FORMAT_VERSION, 2, "M7 bumps the format to v2");
+        let tenc = encode_frozen_dylib(&tiny_dylib());
+        assert_eq!(
+            u32::from_le_bytes(tenc[8..12].try_into().unwrap()),
+            CACHE_FORMAT_VERSION
+        );
+        assert_eq!(
+            u32::from_le_bytes(tenc[12..16].try_into().unwrap()),
+            PARSER_REVISION
+        );
+        // Decodes agree.
+        assert!(decode_poi(&enc, FileId(2), "tiny.o", true).is_some());
+        assert!(decode_frozen_dylib(&tenc).is_some());
+    }
+
+    #[test]
+    fn m7_v1_frames_are_silently_missed() {
+        // Rebuild a legacy v1 frame (52-byte header: magic|ver|len|sha) around
+        // the current payload: the v2 decoder must reject it (silent miss).
+        use sha2::{Digest, Sha256};
+        let (_bytes, obj) = tiny_object(0x92);
+        let enc = encode_poi(&obj, true);
+        let payload = &enc[56..];
+        let mut v1 = Vec::with_capacity(52 + payload.len());
+        v1.extend_from_slice(b"PGRPOI1\0");
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        let digest: [u8; 32] = Sha256::digest(payload).into();
+        v1.extend_from_slice(&digest);
+        v1.extend_from_slice(payload);
+        assert!(
+            decode_poi(&v1, FileId(1), "tiny.o", true).is_none(),
+            "a v1 frame is not a v2 hit"
+        );
+    }
+
+    #[test]
+    fn m7_keys_bind_versions_and_flags() {
+        // The v2 key is a pure function of (bytes, flags, format, parser) —
+        // and it must differ from the v1 key shape (bytes ‖ flag) so stale
+        // entries become unreachable, not merely unread.
+        use sha2::{Digest, Sha256};
+        let k_split = PoiCache::content_key(b"input-bytes", true);
+        let k_nosplit = PoiCache::content_key(b"input-bytes", false);
+        assert_ne!(k_split, k_nosplit, "flags split keys");
+        let mut v1h = Sha256::new();
+        v1h.update(b"input-bytes");
+        v1h.update([1u8]);
+        let v1_key: [u8; 32] = v1h.finalize().into();
+        assert_ne!(k_split, v1_key, "v2 keys never collide with v1 keys");
+        // Key stability: same inputs, same key (twice).
+        assert_eq!(k_split, PoiCache::content_key(b"input-bytes", true));
+    }
+
+    #[test]
+    fn m7_payload_flag_mismatch_is_a_miss() {
+        let (_bytes, obj) = tiny_object(0x93);
+        let enc = encode_poi(&obj, true);
+        // The entry records the parse-affecting flag; a load that asks for
+        // the other flag must not hit (defense in depth under key reuse).
+        assert!(decode_poi(&enc, FileId(1), "tiny.o", true).is_some());
+        assert!(decode_poi(&enc, FileId(1), "tiny.o", false).is_none());
+    }
+
+    #[test]
+    fn m7_dir_marker_self_heals_foreign_and_legacy_dirs() {
+        let dir = std::env::temp_dir().join(format!(
+            "pgr_m7_marker_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A "foreign" cache dir: a marker from a different format plus one
+        // entry-shaped file and one scratch file.
+        std::fs::write(dir.join(super::MARKER_NAME), b"garbage-from-another-pgr").unwrap();
+        let stale_entry = dir.join("a".repeat(64));
+        std::fs::write(&stale_entry, b"stale").unwrap();
+        let stale_tmp = dir.join(".tmp-poi-999-1");
+        std::fs::write(&stale_tmp, b"stale").unwrap();
+        let stranger = dir.join("user-owns-this.txt");
+        std::fs::write(&stranger, b"not ours").unwrap();
+        // Opening heals: marker rewritten, our-shaped stale files removed,
+        // foreign files untouched.
+        let cache = PoiCache::open(&dir).unwrap();
+        assert!(dir.join(super::MARKER_NAME).is_file(), "marker restored");
+        let marker = std::fs::read(dir.join(super::MARKER_NAME)).unwrap();
+        assert_eq!(&marker[0..17], b"PGR-CACHE-FORMAT\0");
+        assert_eq!(
+            u32::from_le_bytes(marker[17..21].try_into().unwrap()),
+            CACHE_FORMAT_VERSION
+        );
+        assert_eq!(
+            u32::from_le_bytes(marker[21..25].try_into().unwrap()),
+            PARSER_REVISION
+        );
+        assert!(!stale_entry.exists(), "stale entry wiped");
+        assert!(!stale_tmp.exists(), "stale temp wiped");
+        assert!(stranger.is_file(), "files pgr does not own stay");
+        // A legacy v1 dir (no marker, entry-shaped files) heals the same way.
+        let legacy_entry = dir.join(format!("{:064x}", 42));
+        std::fs::write(&legacy_entry, b"v1 entry").unwrap();
+        std::fs::remove_file(dir.join(super::MARKER_NAME)).unwrap();
+        let _cache2 = PoiCache::open(&dir).unwrap();
+        assert!(!legacy_entry.exists(), "legacy v1 entries are reclaimed");
+        assert!(dir.join(super::MARKER_NAME).is_file());
+        // The healed cache stores and loads.
+        let (bytes, obj) = tiny_object(0x94);
+        let key = PoiCache::content_key(&bytes, true);
+        cache.store(&key, &obj, true);
+        let hit = cache.load(&key, FileId(3), "tiny.o", bytes, true);
+        assert!(hit.is_some(), "healed cache still works");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn m7_size_bound_evicts_oldest_and_spares_the_new_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "pgr_m7_evict_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        // One entry is a few hundred bytes; cap at two entries' worth.
+        let (_b1, o1) = tiny_object(0xA1);
+        let (_b2, o2) = tiny_object(0xA2);
+        let (_b3, o3) = tiny_object(0xA3);
+        let e1 = encode_poi(&o1, true);
+        let limit = (e1.len() as u64) * 2 + 10;
+        let cache = PoiCache::open_limited(&dir, limit).unwrap();
+        // Distinct key inputs (the object bytes share the Mach-O magic, so
+        // the key material must not come from them).
+        let k1 = PoiCache::content_key(&[0xA1], true);
+        let k2 = PoiCache::content_key(&[0xA2], true);
+        let k3 = PoiCache::content_key(&[0xA3], true);
+        // Backdate mtimes so the eviction order is deterministic.
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let mid = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2_000);
+        cache.store(&k1, &o1, true);
+        set_mtime(&dir.join(hex(&k1)), old);
+        cache.store(&k2, &o2, true);
+        set_mtime(&dir.join(hex(&k2)), mid);
+        cache.store(&k3, &o3, true); // over limit → k1 (oldest) goes
+        assert!(!dir.join(hex(&k1)).exists(), "oldest entry evicted");
+        assert!(dir.join(hex(&k2)).exists(), "middle entry kept");
+        assert!(
+            dir.join(hex(&k3)).exists(),
+            "just-stored entry never evicted"
+        );
+        let total: u64 = own_entries(&dir).iter().map(|(_, len, _)| *len).sum();
+        assert!(
+            total <= limit + e1.len() as u64,
+            "size bounded (total {total})"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn m7_load_touches_recency_so_hot_entries_survive() {
+        let dir = std::env::temp_dir().join(format!(
+            "pgr_m7_lru_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (b1, o1) = tiny_object(0xB1);
+        let (_b2, o2) = tiny_object(0xB2);
+        let (_b3, o3) = tiny_object(0xB3);
+        let enc = encode_poi(&o1, true);
+        let limit = (enc.len() as u64) * 2 + 10;
+        let cache = PoiCache::open_limited(&dir, limit).unwrap();
+        let k1 = PoiCache::content_key(&b1, true);
+        let k2 = PoiCache::content_key(&[0xC2], true);
+        let k3 = PoiCache::content_key(&[0xC3], true);
+        let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(500);
+        cache.store(&k1, &o1, true);
+        set_mtime(&dir.join(hex(&k1)), epoch);
+        cache.store(&k2, &o2, true);
+        set_mtime(&dir.join(hex(&k2)), epoch);
+        // A hit refreshes k1's recency…
+        assert!(
+            cache.load(&k1, FileId(1), "tiny.o", b1, true).is_some(),
+            "k1 hits before the eviction pass"
+        );
+        // …so the third store evicts k2, not the hot k1.
+        cache.store(&k3, &o3, true);
+        assert!(dir.join(hex(&k1)).exists(), "recently used entry survives");
+        assert!(!dir.join(hex(&k2)).exists(), "coldest entry evicted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- helpers ------------------------------------------------------------
+
+    fn hex(key: &[u8; 32]) -> String {
+        let mut s = String::with_capacity(64);
+        for b in key {
+            s.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
+            s.push(char::from_digit(u32::from(b & 0xF), 16).unwrap_or('0'));
+        }
+        s
+    }
+
+    fn own_entries(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let ok = name.len() == 64 && name.bytes().all(|c| c.is_ascii_hexdigit());
+                if !ok {
+                    continue;
+                }
+                let md = e.metadata().ok();
+                let mtime = md
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::SystemTime::now());
+                out.push((e.path(), md.map_or(0, |m| m.len()), mtime));
+            }
+        }
+        out
+    }
+
+    fn set_mtime(path: &std::path::Path, t: std::time::SystemTime) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(t).unwrap();
     }
 }
 
