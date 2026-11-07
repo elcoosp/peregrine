@@ -235,6 +235,7 @@ fn parse_inputs(
                             FileId(i as u32),
                             &inputs[i].name,
                             inputs[i].bytes.clone(),
+                            split_symbols,
                         )
                     {
                         return Ok(hit);
@@ -245,7 +246,7 @@ fn parse_inputs(
                         inputs[i].bytes.clone(),
                     )?;
                     if let Some(cache) = cache {
-                        cache.store(&keys[i], &obj);
+                        cache.store(&keys[i], &obj, split_symbols);
                     }
                     Ok(obj)
                 })
@@ -257,15 +258,20 @@ fn parse_inputs(
     } else {
         for (i, input) in inputs.iter().enumerate() {
             if let Some(cache) = cache
-                && let Some(hit) =
-                    cache.load(&keys[i], FileId(i as u32), &input.name, input.bytes.clone())
+                && let Some(hit) = cache.load(
+                    &keys[i],
+                    FileId(i as u32),
+                    &input.name,
+                    input.bytes.clone(),
+                    split_symbols,
+                )
             {
                 objects[i] = Some(hit);
                 continue;
             }
             let obj = InputObject::parse(FileId(i as u32), &input.name, input.bytes.clone())?;
             if let Some(cache) = cache {
-                cache.store(&keys[i], &obj);
+                cache.store(&keys[i], &obj, split_symbols);
             }
             objects[i] = Some(obj);
         }
@@ -412,7 +418,7 @@ fn parse_member(
     let name = format!("{}({})", arch.name, member.name);
     if let Some(cache) = cache {
         let key = crate::cache::PoiCache::content_key(&bytes, split_symbols);
-        if let Some(mut hit) = cache.load(&key, FileId(file), &name, bytes.clone()) {
+        if let Some(mut hit) = cache.load(&key, FileId(file), &name, bytes.clone(), split_symbols) {
             hit.from_archive = true;
             hit.archive_name = arch.name.clone();
             return Ok(hit);
@@ -424,7 +430,7 @@ fn parse_member(
     obj.compute_atoms(split_symbols);
     if let Some(cache) = cache {
         let key = crate::cache::PoiCache::content_key(&obj.bytes, split_symbols);
-        cache.store(&key, &obj);
+        cache.store(&key, &obj, split_symbols);
     }
     Ok(obj)
 }
