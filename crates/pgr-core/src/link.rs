@@ -141,7 +141,31 @@ pub fn link_cached(
     cache: Option<&crate::cache::PoiCache>,
 ) -> Result<LinkResult, LinkError> {
     // ---- Pass 1: parse & collect names for the interner --------------------
-    let mut objects = parse_inputs(inputs, parallel, cfg.dead_strip, cache)?;
+    let objects = parse_inputs(inputs, parallel, cfg.dead_strip, cache)?;
+    link_from_objects(objects, archives, cfg, parallel, cache)
+}
+
+/// Runs Passes 1b–3 over **already-parsed** direct inputs (M8): the resident
+/// server skips the Mach-O parse for unchanged files (its session holds the
+/// Pass 1 product) and calls this instead of [`link_cached`]. The archive
+/// pull fixpoint, interning, resolution, liveness/ICF and layout run exactly
+/// as in the one-shot path — a pre-parsed link must produce the identical
+/// layout (gated in `tests/m8_foundations.rs`), and through it, identical
+/// bytes.
+///
+/// `objects` must be parsed, atomized ([`InputObject::compute_atoms`]) and
+/// carry their command-line [`FileId`]s.
+///
+/// # Errors
+/// [`LinkError`] on malformed archive members, unresolvable/duplicate
+/// symbols, or layout contract violations.
+pub fn link_from_objects(
+    mut objects: Vec<InputObject>,
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    cache: Option<&crate::cache::PoiCache>,
+) -> Result<LinkResult, LinkError> {
     // ---- S7 archive liveness (M5): pull only referenced members ------------
     let pulled = pull_archive_members(&objects, archives, cfg, cache)?;
     for obj in pulled {
@@ -456,6 +480,34 @@ fn record_names(
             undefined.insert(name.clone());
         }
     }
+}
+
+/// The `-u` gate (M5 semantics, shared by the driver's one-shot path and the
+/// M8 resident server): every named symbol must resolve to an **in-image**
+/// definition. Archive members pulled for the name count (the name also
+/// seeds the pull fixpoint, so a member defining it is present).
+///
+/// # Errors
+/// [`LinkError::Symbol`] naming the first missing symbol.
+pub fn check_load_symbols(result: &LinkResult, names: &[Vec<u8>]) -> Result<(), LinkError> {
+    for sym in names {
+        let defined = result.layout.symbols.iter().any(|s| {
+            s.external
+                && s.n_type & pgr_format::consts::N_TYPE != pgr_format::consts::N_UNDF
+                && result.interner.bytes(s.name) == sym.as_slice()
+        });
+        if !defined {
+            return Err(LinkError::Symbol {
+                name: String::from_utf8_lossy(sym).into_owned(),
+                message: format!(
+                    "-u {}: symbol is not defined by any input (direct objects or pulled \
+                     archive members)",
+                    String::from_utf8_lossy(sym)
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
