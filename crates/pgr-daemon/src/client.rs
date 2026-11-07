@@ -1,0 +1,381 @@
+//! The resident-link client (M8): what `pgr -resident` speaks to `pgrd`.
+//!
+//! Fail-soft by contract (§7.2 "optional and transparent"): every failure —
+//! no daemon, stale socket, protocol mismatch, mid-link daemon death — is a
+//! [`ClientError`], and the driver answers it by falling back to the
+//! one-shot link. Nothing here can corrupt an output: the client writes the
+//! image bytes through the normal Pass 5 path after the daemon returns.
+//!
+//! [`connect_or_start`] implements "started on demand by
+//! `pgr`": connect to the socket; when nothing answers, spawn `pgrd` (the
+//! `pgrd` binary next to the running `pgr`) and retry briefly.
+
+use crate::protocol::{
+    DecodeError, LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK,
+    TAG_IMAGE, TAG_LINK, TAG_NEED, TAG_SHUTDOWN, content_hash, put_u32, put_u64,
+};
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// One link's outcome from the daemon.
+#[derive(Debug, Clone)]
+pub struct ResidentImage {
+    /// The complete output image bytes.
+    pub image: Vec<u8>,
+    /// Entry offset within `__TEXT` (executables).
+    pub entryoff: u64,
+    /// Chained-fixup slots packed.
+    pub fixup_slots: u64,
+    /// POI hits across the session so far (diagnostics/benches).
+    pub poi_hits: u64,
+    /// POI misses across the session so far.
+    pub poi_misses: u64,
+}
+
+/// A client-side failure: the caller falls back to one-shot.
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    /// The socket is absent, dead, or refused the connection.
+    #[error("resident daemon unavailable at {path}: {source}")]
+    Connect {
+        /// The socket path.
+        path: String,
+        /// The OS error.
+        source: std::io::Error,
+    },
+    /// The daemon answered with an error (link failure, protocol problem).
+    #[error("resident daemon error: {0}")]
+    Daemon(String),
+    /// The connection broke or the peer spoke nonsense.
+    #[error("resident protocol: {0}")]
+    Protocol(#[from] DecodeError),
+    /// Local I/O on the socket.
+    #[error("resident protocol I/O: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// A request plus its byte payloads: what [`DaemonClient::link`] needs.
+/// The `blobs` ride along and only the missing ones cross the wire.
+#[derive(Debug, Clone)]
+pub struct LinkJob {
+    /// The link description (config, manifests).
+    pub request: LinkRequest,
+    /// Content-hash → bytes for every input and archive in the request.
+    pub blobs: Vec<([u8; 32], Vec<u8>)>,
+}
+
+impl LinkJob {
+    /// Builds a job from the driver-side prepared link state. The manifest
+    /// hashes run on the shared compute pool (one SHA-256 per input; the
+    /// largest single client-side cost of a warm relink).
+    #[must_use]
+    pub fn build(
+        config: &pgr_core::layout::LinkConfig,
+        force_load: &[Vec<u8>],
+        inputs: &[pgr_core::LinkInput],
+        archives: &[pgr_core::LinkArchive],
+    ) -> Self {
+        use rayon::prelude::*;
+        let owned: Vec<&[u8]> = inputs
+            .iter()
+            .map(|i| i.bytes.as_slice())
+            .chain(archives.iter().map(|a| a.bytes.as_slice()))
+            .collect();
+        let hashes: Vec<[u8; 32]> = pgr_core::pool::compute_pool().install(|| {
+            owned
+                .par_iter()
+                .map(|b| content_hash(b))
+                .collect::<Vec<_>>()
+        });
+        let mut blobs: Vec<([u8; 32], Vec<u8>)> = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (hashes[i], o.bytes.clone()))
+            .collect();
+        blobs.extend(
+            archives
+                .iter()
+                .enumerate()
+                .map(|(k, a)| (hashes[inputs.len() + k], a.bytes.clone())),
+        );
+        let request = LinkRequest {
+            config: config.clone(),
+            force_load: force_load.to_vec(),
+            inputs: inputs
+                .iter()
+                .enumerate()
+                .map(|(i, o)| crate::protocol::InputEntry {
+                    name: o.name.clone(),
+                    hash: hashes[i],
+                })
+                .collect(),
+            archives: archives
+                .iter()
+                .enumerate()
+                .map(|(k, a)| crate::protocol::ArchiveEntry {
+                    name: a.name.clone(),
+                    all_load: a.all_load,
+                    hash: hashes[inputs.len() + k],
+                })
+                .collect(),
+        };
+        Self { request, blobs }
+    }
+}
+
+/// One open daemon connection.
+pub struct DaemonClient {
+    stream: UnixStream,
+}
+
+impl DaemonClient {
+    /// Connects to the daemon socket.
+    ///
+    /// # Errors
+    /// [`ClientError::Connect`] when the socket is absent or refuses.
+    pub fn connect(path: &Path) -> Result<Self, ClientError> {
+        let stream = UnixStream::connect(path).map_err(|source| ClientError::Connect {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Ok(Self { stream })
+    }
+
+    /// Handshakes and returns the daemon's version banner.
+    ///
+    /// # Errors
+    /// [`ClientError`] on protocol problems.
+    pub fn hello(&mut self) -> Result<String, ClientError> {
+        let mut body = Vec::new();
+        put_u32(&mut body, PROTO_VERSION);
+        write_frame(&mut self.stream, TAG_HELLO, &body)?;
+        let (tag, body) = read_frame(&mut self.stream)?;
+        match tag {
+            TAG_HELLO_ACK => {
+                let mut r = crate::protocol::Reader::new(&body);
+                let proto = r.u32()?;
+                if proto != PROTO_VERSION {
+                    return Err(ClientError::Daemon(format!(
+                        "protocol version mismatch (daemon {proto})"
+                    )));
+                }
+                Ok(r.str()?)
+            }
+            TAG_ERROR => Err(ClientError::Daemon(
+                String::from_utf8_lossy(&body).into_owned(),
+            )),
+            _ => Err(ClientError::Daemon("unexpected handshake reply".into())),
+        }
+    }
+
+    /// Runs one link. Blob negotiation skips the hashes the daemon holds.
+    ///
+    /// # Errors
+    /// [`ClientError`] on any failure (fall back to one-shot).
+    pub fn link(&mut self, job: &LinkJob) -> Result<ResidentImage, ClientError> {
+        write_frame(&mut self.stream, TAG_LINK, &job.request.encode())?;
+        loop {
+            let (tag, body) = read_frame(&mut self.stream)?;
+            match tag {
+                TAG_NEED => {
+                    let mut r = crate::protocol::Reader::new(&body);
+                    let n = r.u32()?;
+                    let mut wanted: Vec<[u8; 32]> = Vec::with_capacity(n as usize);
+                    for _ in 0..n {
+                        wanted.push(r.hash()?);
+                    }
+                    r.done()?;
+                    for hash in wanted {
+                        let Some((_, bytes)) = job.blobs.iter().find(|(h, _)| h == &hash) else {
+                            return Err(ClientError::Daemon(
+                                "daemon asked for bytes the client does not hold".into(),
+                            ));
+                        };
+                        let mut b = Vec::with_capacity(40 + bytes.len());
+                        b.extend_from_slice(&hash);
+                        put_u64(&mut b, bytes.len() as u64);
+                        b.extend_from_slice(bytes);
+                        write_frame(&mut self.stream, TAG_BLOB, &b)?;
+                    }
+                }
+                TAG_IMAGE => {
+                    let mut r = crate::protocol::Reader::new(&body);
+                    let entryoff = r.u64()?;
+                    let fixup_slots = r.u64()?;
+                    let poi_hits = u64::from(r.u32()?);
+                    let poi_misses = u64::from(r.u32()?);
+                    let len = r.u64()? as usize;
+                    let image = r.take(len)?.to_vec();
+                    r.done()?;
+                    return Ok(ResidentImage {
+                        image,
+                        entryoff,
+                        fixup_slots,
+                        poi_hits,
+                        poi_misses,
+                    });
+                }
+                TAG_ERROR => {
+                    return Err(ClientError::Daemon(
+                        String::from_utf8_lossy(&body).into_owned(),
+                    ));
+                }
+                _ => return Err(ClientError::Daemon(format!("unexpected message tag {tag}"))),
+            }
+        }
+    }
+
+    /// Asks the daemon to exit (its session dies with it — clients always
+    /// fall back, so this is a convenience, never a correctness event).
+    ///
+    /// # Errors
+    /// [`ClientError`] when the daemon is unreachable (already fine).
+    pub fn shutdown(mut self) -> Result<(), ClientError> {
+        write_frame(&mut self.stream, TAG_SHUTDOWN, &[])?;
+        let _ = read_frame(&mut self.stream);
+        Ok(())
+    }
+}
+
+/// Connects, or — when nothing listens — spawns `pgrd` (the binary next to
+/// `exe_hint`) and retries for up to ~2 s. Returns `None`-worthy errors
+/// verbatim: the caller falls back to one-shot on any [`ClientError`].
+///
+/// # Errors
+/// [`ClientError::Connect`] when the daemon cannot be reached even after a
+/// start attempt.
+pub fn connect_or_start(
+    socket: &Path,
+    exe_hint: Option<&Path>,
+) -> Result<DaemonClient, ClientError> {
+    if let Ok(client) = DaemonClient::connect(socket) {
+        return Ok(client);
+    }
+    let Some(hint) = exe_hint else {
+        return Err(ClientError::Connect {
+            path: socket.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no daemon is listening and no pgrd start hint was given",
+            ),
+        });
+    };
+    let pgrd = hint.with_file_name("pgrd");
+    if !pgrd.is_file() {
+        return Err(ClientError::Connect {
+            path: format!("{} (no pgrd binary beside the driver)", socket.display()),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "pgrd not found"),
+        });
+    }
+    let _ = std::process::Command::new(&pgrd)
+        .arg("--socket")
+        .arg(socket)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if Instant::now() >= deadline {
+            return Err(ClientError::Connect {
+                path: socket.display().to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "pgrd did not accept within 2s",
+                ),
+            });
+        }
+        if let Ok(c) = DaemonClient::connect(socket) {
+            return Ok(c);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// The one-call shape the driver uses: connect (starting the daemon on
+/// demand), handshake, link. Any error propagates — the driver falls back.
+///
+/// # Errors
+/// [`ClientError`] as above.
+pub fn link_via_daemon(
+    socket: &Path,
+    exe_hint: Option<&Path>,
+    job: &LinkJob,
+) -> Result<ResidentImage, ClientError> {
+    let mut client = connect_or_start(socket, exe_hint)?;
+    client.hello()?;
+    client.link(job)
+}
+
+/// The default socket path: `$PGR_DAEMON_SOCK`, else
+/// `{tmpdir}/pgr-{uid}.sock` (unix).
+#[must_use]
+pub fn default_socket() -> PathBuf {
+    if let Ok(p) = std::env::var("PGR_DAEMON_SOCK") {
+        return PathBuf::from(p);
+    }
+    let uid = client_uid();
+    std::env::temp_dir().join(format!("pgr-{uid}.sock"))
+}
+
+// A dependency-free per-user scratch name: the uid when the environment
+// carries it (sudo sets SUDO_UID), else the process id — the socket path is
+// overridable via PGR_DAEMON_SOCK for shared setups.
+fn client_uid() -> u64 {
+    if let Ok(uid) = std::env::var("SUDO_UID") {
+        if let Ok(v) = uid.trim().parse::<u64>() {
+            return v;
+        }
+    }
+    u64::from(std::process::id())
+}
+
+/// Asks the daemon at `socket` to exit (the `pgrd --shutdown` path).
+///
+/// # Errors
+/// [`ClientError`] when the daemon is unreachable.
+pub fn shutdown_daemon(socket: &Path) -> Result<(), ClientError> {
+    DaemonClient::connect(socket)?.shutdown()
+}
+
+fn write_frame(w: &mut UnixStream, tag: u32, body: &[u8]) -> std::io::Result<()> {
+    let mut frame = Vec::with_capacity(8 + body.len());
+    put_u32(&mut frame, (4 + body.len()) as u32);
+    put_u32(&mut frame, tag);
+    frame.extend_from_slice(body);
+    w.write_all(&frame)
+}
+
+fn read_frame(r: &mut UnixStream) -> Result<(u32, Vec<u8>), ClientError> {
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if !(4..=(256 << 20)).contains(&len) {
+        return Err(ClientError::Daemon("frame length out of bounds".into()));
+    }
+    let mut payload = vec![0u8; len];
+    r.read_exact(&mut payload)?;
+    let tag = u32::from_le_bytes(payload[..4].try_into().unwrap());
+    Ok((tag, payload[4..].to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LinkJob;
+    use crate::protocol::content_hash;
+    use pgr_core::layout::LinkConfig;
+
+    #[test]
+    fn job_build_hashes_all_payloads() {
+        let inputs = vec![pgr_core::LinkInput {
+            name: "a.o".into(),
+            bytes: b"aaaa".to_vec(),
+        }];
+        let job = LinkJob::build(&LinkConfig::default(), &[], &inputs, &[]);
+        assert_eq!(job.request.inputs.len(), 1);
+        assert_eq!(job.request.inputs[0].hash, content_hash(b"aaaa"));
+        assert_eq!(job.blobs.len(), 1);
+        assert!(job.request.archives.is_empty());
+    }
+}
