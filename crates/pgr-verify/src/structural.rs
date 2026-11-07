@@ -80,7 +80,9 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
             LoadCommandKind::Segment64 => {
                 let seg = SegmentCommand64::parse(cmd.bytes, 0)
                     .map_err(|e| issue_from(&e, Code::LoadCommandMalformed))?;
-                nsections += seg.nsects;
+                // Hostile headers can carry nsects near u32::MAX: saturate
+                // instead of overflowing the counter (M7 fuzzing find).
+                nsections = nsections.saturating_add(seg.nsects);
                 segments.push(seg);
             }
             LoadCommandKind::Symtab => {
@@ -214,8 +216,12 @@ fn count_fixup_slots(bytes: &[u8], lc: &LinkeditDataCommand, nsegments: usize) -
                     let mut guard = 0;
                     while guard < 100_000 {
                         guard += 1;
-                        let at = page_base + u64::from(p) * u64::from(seg.page_size) + slot_off;
-                        let Some(word_bytes) = bytes.get(at as usize..at as usize + 8) else {
+                        let at = page_base
+                            .saturating_add(u64::from(p).saturating_mul(u64::from(seg.page_size)))
+                            .saturating_add(slot_off);
+                        let Some(word_bytes) =
+                            bytes.get(at as usize..at.saturating_add(8) as usize)
+                        else {
                             break;
                         };
                         let word = pgr_format::fixups::ChainWord64::new(u64::from_le_bytes(
@@ -557,7 +563,7 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                 format!(
                     "segment {name}: file range [{:#x}, {:#x}) exceeds file size {:#x}",
                     seg.fileoff,
-                    seg.fileoff + seg.filesize,
+                    seg.fileoff.saturating_add(seg.filesize),
                     file_len
                 ),
                 Some(seg.fileoff),
@@ -692,7 +698,7 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                 Code::SegmentLayout,
                 format!(
                     "__LINKEDIT must extend to EOF (ends {:#x}, file size {:#x})",
-                    le.fileoff + le.filesize,
+                    le.fileoff.saturating_add(le.filesize),
                     file_len
                 ),
                 Some(le.fileoff),
