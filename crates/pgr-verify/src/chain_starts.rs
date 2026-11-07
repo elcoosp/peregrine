@@ -58,8 +58,10 @@ pub(crate) fn check_chain_starts(bytes: &[u8], img: &ParsedImage<'_>, report: &m
                 if h == DYLD_CHAINED_PTR_START_NONE {
                     continue;
                 }
-                let file =
-                    seg.segment_offset + u64::from(page) * u64::from(seg.page_size) + u64::from(h);
+                let file = seg
+                    .segment_offset
+                    .saturating_add(u64::from(page).saturating_mul(u64::from(seg.page_size)))
+                    .saturating_add(u64::from(h));
                 if file <= u64::from(u32::MAX) {
                     payload_heads.push(file as u32);
                 }
