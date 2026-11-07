@@ -27,5 +27,5 @@ fuzz_target!(|data: &[u8]| {
         ident: "fuzz".into(),
         ..pgr_core::layout::LinkConfig::default()
     };
-    let _ = pgr_core::link(&[input, twin], &cfg);
+    let _ = pgr_core::link(&[input, twin], &[], &cfg);
 });
