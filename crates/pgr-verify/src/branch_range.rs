@@ -59,9 +59,9 @@ pub(crate) fn check_branch_words(
         let Some((is_bl, delta)) = decode_branch(word) else {
             continue;
         };
-        let pc = base + (i * 4) as u64;
-        let target = (pc as i64) + delta;
-        let anchor = file_off.map(|off| off + (i * 4) as u64);
+        let pc = base.saturating_add((i * 4) as u64);
+        let target = (pc as i64).saturating_add(delta);
+        let anchor = file_off.map(|off| off.saturating_add((i * 4) as u64));
         let what = if is_bl { "bl" } else { "b" };
         if target < 0 || (target as u64) < lo || (target as u64) >= hi {
             report.issues.push(Issue::error(
