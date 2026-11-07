@@ -4,6 +4,89 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [1.0.0] - 2026-11-07### Features
+- **core:** M7 versioned cache format v2 — `CACHE_FORMAT_VERSION = 2` plus a
+  parser revision recorded in every POI/frozen-`.tbd` frame *and* bound into
+  the cache key (`sha256(bytes ‖ flags ‖ format ‖ parser)` — stale entries
+  are unreachable, not merely unread); entries record the parse-affecting
+  flag and decode rejects mismatches; the directory carries a
+  `PGR_CACHE_FORMAT` marker and self-heals on foreign or legacy content
+  (pgr-shaped files reclaimed, foreign files untouched); v1 frames are
+  silently missed (determinism-gated cached-vs-uncached equality re-asserted
+  on v2)
+- **core:** M7 size-bounded caches — oldest-mtime (LRU) eviction with
+  recency refresh on hits; the just-stored entry is never evicted; store +
+  evict serialized per cache so Pass 1's concurrent stores cannot wipe the
+  directory (regression-gated by a 30-iteration parallel-store stress test)
+- **driver:** M7 `-cache_max <bytes>` / `PGR_CACHE_MAX` (default 2 GiB,
+  0 = unbounded)
+- **driver:** M7 build-system surface — `@response-file` expansion (nested,
+  depth-bounded; ld64 tokenization with `#` comments, quote grouping and
+  backslash escapes; **opportunistic** expansion — a non-existent `@path`
+  passes through, keeping `-install_name @rpath/libfoo.dylib` intact)
+- **driver:** M7 `-syslibroot <dir>` (repeatable) with the ld64 pairing
+  rule: one root searches only prefixed variants of every `-L`/`-F` dir and
+  the defaults; two or more roots search the union including the original
+  path (`effective_lib_dirs`/`effective_framework_dirs`)
+- **driver:** M7 accepted no-ops with fixtures — `-demangle`/`-no_demangle`
+  /`-no_deduplicate` (arm64 defaults already match) and
+  `-object_path_lto <path>` (value consumed; LTO inputs stay diagnosed)
+- **driver:** M7 compatibility suite (`m7_compat.rs`) — the agreed list as
+  38 fixture-backed end-to-end cases (load commands, image contracts,
+  driver flags & search, M7 surface, determinism, diagnostics), each strict
+  verifier-clean, with the roadmap's **≥ 98% pass** gate pinned by its own
+  test (currently **38/38 = 100%**)
+- **fuzz:** M7 fuzzing at scale — new targets `dyld_info_streams` (classic
+  rebase/bind opcode decoders) and `cache_entries` (v2 cache decoders),
+  valid framed/streamed seeds in `emit_corpus`, and the six-target nightly
+  matrix
+- **fixtures:** `emit_link_inputs` example — the deterministic
+  hello/greet/tbd inputs the runtime-validation job links
+- **docs:** `docs/MIGRATION.md` — the ld64 → pgr migration guide (flag
+  mapping, no-ops, cache semantics, determinism contract, exit codes)
+
+### Bug Fixes
+- **format:** `parse_imports` bounds `imports_count` by the payload before
+  pre-allocation (a mutated/truncated image once drove `count × 16` to
+  68 GiB and aborted; typed `Overrun` now; unknown formats rejected up
+  front) and `read_u32_slice` bounds its count — M7 fuzzing finds
+- **core:** cache unframe uses `checked_add` for the framed length (the
+  `cache_entries` fuzzer wrapped `HEADER_LEN + len` on a hostile header);
+  object relocation decode caps `with_capacity(nreloc)` by the file's
+  bytes (the `link_object` fuzzer drove an 8 GiB allocation)
+- **verify:** hostile-header arithmetic overflow battery — `nsections`
+  accumulation and segment/branch/chain/pair address computations all
+  saturate (`structural`, `dyld_info`, `pair`, `chain_starts`,
+  `branch_range`); each crash has a deterministic regression test
+- **fuzz:** the `link_object` target links again (the M5 `link()`
+  signature change had broken its compile)
+
+### Performance
+- **bench:** `pgr-driver/cache_evict` — the LRU bound costs only on cold
+  stores: 9.73 ms bounded vs 9.12 ms unbounded (+6.7%) on the 4-object
+  parse-heavy corpus; warm (all-hit) links are unchanged — no stores, no
+  scans
+- **bench:** every M4–M6 gate re-measured with M7 in the pipeline and
+  holding: large link 175.6 ms, dead-strip 136.4 ms (1.93× vs off), ICF
+  +14.8% (gate ≤ 25%), fused emit 1.38× the reference, warm cache 173.7 ms
+  (was 172.8 — the v2 key/marker/touch cost nothing measurable), frozen
+  `.tbd` 19.8 µs, trie 10⁵ exports 27.9 ms, archive parse 12.2 GiB/s
+  (docs/BENCHMARKS.md records the full table; the M5 row's "~118 µs" unit
+  slip is corrected there)
+
+### Tests
+- **core:** v2 frame/key/flag gates, marker self-heal (foreign + legacy
+  dirs), LRU eviction + recency, hostile framed-length miss, parallel-store
+  stress (30 bounded links)
+- **driver:** response-file e2e (expansion order-preserving, byte-identical
+  to the plain link), syslibroot single-root prefix-only + two-root union,
+  `-cache_max` bound e2e, frozen-`.tbd` v2 round-trip, the 38-case compat
+  suite
+- **format:** bounded imports count / unknown format, hostile framed
+  lengths
+- **verify:** saturated arithmetic on mutated headers (chain walks, branch
+  ranges, segment contracts)
+
 ## [0.7.0] - 2026-11-07### Features
 - **core:** M6 branch thunks/veneers — out-of-range `B`/`BL` sites (beyond
   the ±128 MiB arm64 reach) get a 3-instruction veneer (`adrp x16/add
