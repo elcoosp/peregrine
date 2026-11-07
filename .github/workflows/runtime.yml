@@ -1,0 +1,64 @@
+name: Runtime validation
+
+# The hardware half of the architecture doc §10.3 M7 row: "runtime
+# validation on macOS hardware (run the produced binaries, `codesign -v`,
+# dyld load, in CI)". This job links with `pgr` on a macOS runner, then runs
+# and validates the produced images. It is plumbing: it executes on macOS
+# runners when available (the P0 rig / hosted macos-14 aarch64) and is
+# skipped with a clear marker elsewhere.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  runtime:
+    name: run-and-validate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14] # GitHub's aarch64 macOS runner pool
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+      - name: Build (locked, release)
+        run: cargo build --release --locked
+      - name: Emit link inputs (deterministic fixtures)
+        run: cargo run --locked -p pgr-fixtures --example emit_link_inputs -- link-inputs
+      - name: Link a binary with the fused pipeline
+        run: |
+          target/release/pgr -o hello \
+            link-inputs/hello_main.o \
+            -l greet -L link-inputs \
+            -platform_version macos 12.0 14.0
+      - name: Run the produced binary
+        run: ./hello
+      - name: Validate the signature and the load
+        run: |
+          codesign -v hello
+          codesign -dv hello
+          vtool -show hello
+      - name: Link a dylib pair and validate both
+        run: |
+          target/release/pgr -dylib -install_name @rpath/libhello.dylib \
+            -o libhello.dylib \
+            link-inputs/greet.o \
+            link-inputs/libSystem.tbd \
+            -platform_version macos 12.0 14.0
+          codesign -v libhello.dylib
+      - name: Strict verifier on every image
+        run: |
+          target/release/pgr-verify hello --strict
+          target/release/pgr-verify libhello.dylib --strict
