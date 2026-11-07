@@ -81,7 +81,7 @@ impl OutputType {
 }
 
 /// Link configuration the layout pass consumes (driver-derived).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkConfig {
     /// Identifier embedded in the code signature (output-path leaf).
     pub ident: String,
@@ -141,6 +141,12 @@ pub struct LinkConfig {
     /// M6 `-icf`: identical-code-folding level (default `None`, ld64's
     /// documented default; see [`crate::icf`]).
     pub icf: crate::icf::IcfMode,
+    /// M8-c slack-aware layout (§7.3 "layout stability"): when `Some`, every
+    /// user-content output section reserves growth room (the policy's
+    /// padding) so an incremental relink usually reuses its placement. The
+    /// default `None` keeps the v1.0 exact packing — clean links stay
+    /// bit-deterministic either way (padding is a pure function of size).
+    pub layout_slack: Option<crate::slack::SlackPolicy>,
 }
 
 impl Default for LinkConfig {
@@ -169,6 +175,7 @@ impl Default for LinkConfig {
             dead_strip: false,
             load_symbols: Vec::new(),
             icf: crate::icf::IcfMode::default(),
+            layout_slack: None,
         }
     }
 }
@@ -1837,6 +1844,15 @@ fn place(
             (2u32, chain_starts_size as u64)
         } else {
             (max_align, cursor)
+        };
+        // M8-c slack: user-content sections reserve growth room. Synthetic
+        // sections (`__got`/`__stubs`/`__chain_starts`) are contract-coupled
+        // to the fixup plan and stay exact; zero-fill tails are virtual and
+        // need no reservation.
+        let size = match (&cfg.layout_slack, name.as_str()) {
+            (Some(_), "__got" | "__stubs" | "__chain_starts") => size,
+            (Some(policy), _) if size > 0 && !zerofill => policy.pad_section(seg_name, size, align),
+            _ => size,
         };
         sections.push(PlacedSection {
             name: name.clone(),
