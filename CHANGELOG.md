@@ -4,6 +4,94 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+
+## [1.1.0] - 2026-11-08
+
+### Features
+
+- **daemon:** M8 resident link server — the new `pgr-daemon` crate ships
+  `pgrd` (unix-domain socket, idle timeout, `--shutdown`) and the client
+  `pgr -resident` uses. The session keeps the Pass 1 product of every
+  direct input (POI frames keyed by the Stage A versioned content key),
+  the input bytes (content-hash keyed, transferred once), and the fused
+  emit buffer (reused across links — the §10.4 M8 "page-fault cost
+  eliminated (buffer reuse)" groundwork). Blob negotiation sends only
+  bytes the daemon does not hold; `-resident_socket <path>` /
+  `PGR_DAEMON_SOCK` pick the socket; `pgr` starts `pgrd` on demand (the
+  binary beside it) and **falls back to the one-shot link on any failure**
+  (§7.2 "optional and transparent"; `PGR_RESIDENT_DEBUG=1` prints the
+  fallback reason)
+- **daemon:** M8 correctness gates — resident output byte-identical to the
+  one-shot link in deterministic mode (executable/dylib/archive corpora,
+  cold and warm, gated end-to-end); daemon SIGKILL/restart never changes a
+  byte (the daemon holds no output state; clients write via the Pass 5
+  atomic path); concurrent clients serialize with identical results; link
+  errors surface through the fallback with the one-shot message text
+- **core:** M8 `link_from_objects` — Passes 1b–3 over already-parsed
+  direct inputs (the resident path's entry point); the S7 archive pull
+  fixpoint, interning, resolution, liveness/ICF and layout run exactly as
+  in `link_cached`, and the pre-parsed layout is gated identical;
+  `-u` enforcement shared via the new `check_load_symbols` (driver and
+  daemon run the same gate)
+- **core:** M8-a reverse reference index (`pgr_core::revindex`) — symbol →
+  referencing `(file, section, offset)` sites over the parsed inputs,
+  recorded at full links (§7.3 step 3); dead-atom references drop when the
+  M5 live set is active; sites total-ordered and deduplicated (the index
+  is a pure function of the inputs)
+- **core:** M8-b insertion-stable import table (`pgr_core::stable_imports`)
+  — canonical ordinals on a clean build ((name, ordinal, addend, weak)
+  order — address-independent, D7's property made load-bearing); growth
+  keeps every existing ordinal and appends new imports canonically (§7.3
+  step 5, the M9 relink ordinal-reuse foundation); the table drops
+  straight into the `pgr_format` import/name-pool shape
+- **core:** M8-c slack-aware layout with fallback (`pgr_core::slack`) —
+  `LinkConfig::layout_slack` reserves per-section growth room (10% text /
+  5% data, clamped, aligned; synthetic `__got`/`__stubs`/`__chain_starts`
+  stay contract-exact) so a changed atom usually fits where it was;
+  default off — v1.0 packing is byte-unchanged, and slack padding is a
+  pure function of size (deterministic both ways); the §7.3 fallback
+  ladder (in-place → segment re-layout → clean link) is a pure decision
+  function
+- **emit:** `build_image_fused_into` — the fused tile emit into a
+  caller-owned buffer (cleared + resized, capacity retained), the reuse
+  path the resident session's scratch buffer rides on
+
+### Performance
+
+- **bench:** `pgr-driver/resident` — the warm-relink path recorded
+  honestly: one-shot 224.3 ms vs resident-warm 260.3 ms on the
+  parse-heavy 64×2048×2 KiB corpus (POI hits 64/64, no input re-transfer,
+  buffer reuse). The finding replays M6's: the corpus is Pass 2/3-bound
+  and the POI decode measures ≈ a fresh parse on this sandbox, so the
+  skipped Pass 1 does not yet cover manifest+wire overhead; the §10.4 M8
+  performance gates (≥ 5× ld-prime) stay hardware-gated. Full phase
+  breakdown in docs/BENCHMARKS.md
+- **bench:** client manifest hashing runs on the shared compute pool (one
+  SHA-256 per input, parallelized)
+
+### Tests
+
+- **core:** `m8_foundations.rs` — reverse-index gates (site lists,
+  dead-atom filtering under the live set, total order, schedule
+  independence), import-table canonical order + ordinal stability across
+  growth rounds + key shape (ordinal/addend/weak distinguish), slack
+  padding math + fallback ladder + layout gates (pieces never move,
+  synthetics exact, deterministic both ways), pre-parsed-layout equality,
+  fixup-word equality, archive pull through the preparsed path, shared
+  `-u` gate
+- **daemon:** protocol round-trips (rich/default configs, version
+  mismatch, truncation/trailing-byte rejection, frame bounds), session
+  gates (cold-vs-warm byte identity incl. one-shot parity, changed-input
+  POI reuse, missing-blob and hash-mismatch refusal, LRU memory ceiling,
+  scratch reuse, archive inputs), `pgrd_binary.rs` — strict-verifier-clean
+  resident output, SIGKILL restart identity, error survival, idle exit
+- **driver:** `m8_resident.rs` — resident-vs-one-shot byte identity over
+  executable/dylib/archive corpora (cold + warm), POI-hit counters across
+  the wire, fallback transparency (absent daemon), restart transparency,
+  4-way concurrent clients, `-u` parity through the fallback
+- **emit:** the fused `_into` variant is byte-identical to the allocating
+  path (reused by the M4 gates)
+
 ## [1.0.0] - 2026-11-07### Features
 - **core:** M7 versioned cache format v2 — `CACHE_FORMAT_VERSION = 2` plus a
   parser revision recorded in every POI/frozen-`.tbd` frame *and* bound into
