@@ -49,4 +49,18 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "dyld_info_streams"
+path = "fuzz_targets/dyld_info_streams.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_entries"
+path = "fuzz_targets/cache_entries.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
