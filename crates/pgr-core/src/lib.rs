@@ -25,6 +25,9 @@ pub mod link;
 pub mod object;
 pub mod pool;
 pub mod resolve;
+pub mod revindex;
+pub mod slack;
+pub mod stable_imports;
 pub mod thunks;
 pub mod trie;
 
@@ -38,11 +41,14 @@ pub use layout::{
     SegmentPlan,
 };
 pub use link::{
-    LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, link, link_cached,
-    link_with,
+    LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, check_load_symbols, link,
+    link_cached, link_from_objects, link_with,
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use resolve::{Def, Rank, Resolution};
+pub use revindex::{RefSite, ReverseIndex};
+pub use slack::{LayoutFallback, SlackPolicy};
+pub use stable_imports::{StableImport, StableImports};
 pub use trie::{Export, ExportInfo};
 
 /// A fatal link error (M1 surface: inputs, symbols, layout, encoding).
