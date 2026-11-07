@@ -16,6 +16,7 @@ pub mod synth;
 use pgr_core::LinkArchive;
 use pgr_core::LinkArchiveMember;
 use pgr_core::LinkInput;
+use pgr_core::cache::PoiCache;
 use pgr_core::resolve::Dylib;
 use pgr_emit::write_image;
 use std::path::Path;
@@ -376,10 +377,52 @@ pub fn resolve_framework(
 /// tests, benchmarks and the verifier pipeline. Runs the M4 pipeline: the
 /// parallel Pass 1–3 front half plus the fused tile emit.
 ///
+/// M8 `-resident`: the prepared link state is offered to the resident
+/// daemon first ([`pgr_daemon::link_via_daemon`]); any failure — no daemon,
+/// stale socket, protocol mismatch, link error — silently falls back to the
+/// one-shot path (§7.2 "optional and transparent"; `PGR_RESIDENT_DEBUG=1`
+/// prints the fallback reason for diagnosis).
+///
 /// # Errors
 /// [`DriverError`] on option, link, emit, tbd or I/O failures.
 pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> {
-    let result = link_inputs_for_emit(opts)?;
+    let (prepared, cache) = prepare_link(opts)?;
+    if opts.resident {
+        let job = pgr_daemon::LinkJob::build(
+            &prepared.config,
+            &prepared.force_load,
+            &prepared.inputs,
+            &prepared.archives,
+        );
+        let socket = opts
+            .resident_socket
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(pgr_daemon::default_socket);
+        let exe_hint = std::env::current_exe().ok();
+        match pgr_daemon::link_via_daemon(&socket, exe_hint.as_deref(), &job) {
+            Ok(img) => {
+                return Ok(ImageAndPlan {
+                    image: img.image,
+                    entryoff: img.entryoff,
+                    fixup_slots: usize::try_from(img.fixup_slots).unwrap_or(usize::MAX),
+                });
+            }
+            Err(e) => {
+                if std::env::var_os("PGR_RESIDENT_DEBUG").is_some() {
+                    eprintln!("pgr: resident fallback: {e}");
+                }
+            }
+        }
+    }
+    let result = pgr_core::link_cached(
+        &prepared.inputs,
+        &prepared.archives,
+        &prepared.config,
+        pgr_core::Parallelism::Auto,
+        cache.as_ref(),
+    )?;
+    check_force_load(&result, &prepared.force_load)?;
     let image = pgr_emit::build_image_fused(&result.layout, &result.objects)?;
     Ok(ImageAndPlan {
         entryoff: result.layout.entryoff,
@@ -404,9 +447,53 @@ pub fn link_reference_image(opts: &opts::Options) -> Result<ImageAndPlan, Driver
     })
 }
 
+/// The M8 prepared link state: everything Pass 0 mapped, ready for the
+/// pipeline. Both the one-shot path and the resident path (`-resident`)
+/// consume it — the resident client turns it into a wire request.
+#[derive(Debug)]
+pub struct PreparedLink {
+    /// Direct object inputs, in command order (bytes included).
+    pub inputs: Vec<LinkInput>,
+    /// Static archives, in command order (members lazy).
+    pub archives: Vec<LinkArchive>,
+    /// The link configuration handed to Pass 3.
+    pub config: pgr_core::layout::LinkConfig,
+    /// `-u` names (the daemon runs the same gate).
+    pub force_load: Vec<Vec<u8>>,
+}
+
 /// Runs Passes 0–3 for the option inputs and returns the emit plan (the
 /// shared front half of [`link_to_image`] and [`link_reference_image`]).
 fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, DriverError> {
+    let (prepared, cache) = prepare_link(opts)?;
+    let result = pgr_core::link_cached(
+        &prepared.inputs,
+        &prepared.archives,
+        &prepared.config,
+        pgr_core::Parallelism::Auto,
+        cache.as_ref(),
+    )?;
+    check_force_load(&result, &prepared.force_load)?;
+    Ok(result)
+}
+
+/// The driver's `-u` gate over the shared [`pgr_core::check_load_symbols`]
+/// (the resident server runs the same check; the message shape stays the
+/// M5 driver's).
+fn check_force_load(result: &pgr_core::LinkResult, names: &[Vec<u8>]) -> Result<(), DriverError> {
+    pgr_core::check_load_symbols(result, names).map_err(|e| match e {
+        pgr_core::LinkError::Symbol { name, .. } => DriverError::ForceLoad {
+            symbol: name,
+            message: "not defined by any input (direct objects or pulled archive members)".into(),
+        },
+        other => other.into(),
+    })
+}
+
+/// Pass 0 (M8 shape): maps the option inputs into a [`PreparedLink`] plus
+/// the optional Stage A cache (the one-shot path consumes the cache;
+/// the resident daemon holds its own in-memory state instead).
+fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>), DriverError> {
     // M6 Stage A caches: opt-in via `-cache <dir>` / `PGR_CACHE_DIR`;
     // `-no_cache` always wins. A cache failure never fails the link.
     // M7: the directory is size-bounded (oldest-mtime LRU eviction) —
@@ -588,32 +675,20 @@ fn link_inputs_for_emit(opts: &opts::Options) -> Result<pgr_core::LinkResult, Dr
     if let Some(path) = &opts.unexported_list_path {
         config.unexported = read_symbol_list("-unexported_symbols_list", path)?;
     }
-    let result = pgr_core::link_cached(
-        &inputs,
-        &archives,
-        &config,
-        pgr_core::Parallelism::Auto,
-        cache.as_ref(),
-    )?;
-
-    // `-u <symbol>`: the symbol must resolve to an in-image definition. The
-    // name also seeds the archive pull loop, so a member defining it is
-    // pulled even when nothing else references it (ld64 `-u` semantics).
-    for sym in &opts.force_load {
-        let defined = result.layout.symbols.iter().any(|s| {
-            s.external
-                && s.n_type & pgr_format::consts::N_TYPE != pgr_format::consts::N_UNDF
-                && result.interner.bytes(s.name) == sym.as_bytes()
-        });
-        if !defined {
-            return Err(DriverError::ForceLoad {
-                symbol: sym.clone(),
-                message: "not defined by any input (direct objects or pulled archive members)"
-                    .into(),
-            });
-        }
-    }
-    Ok(result)
+    let force_load: Vec<Vec<u8>> = opts
+        .force_load
+        .iter()
+        .map(|s| s.as_bytes().to_vec())
+        .collect();
+    Ok((
+        PreparedLink {
+            inputs,
+            archives,
+            config,
+            force_load,
+        },
+        cache,
+    ))
 }
 
 /// Detects LLVM bitcode: raw bitcode files start with `BC\xC0\xDE`, the
@@ -809,6 +884,11 @@ pub fn usage() -> String {
     s.push_str("                               default 2 GiB, 0 = unbounded)\n");
     s.push_str("  -no_cache                    disable the link cache\n");
     s.push_str("  -icf=safe|-icf=all|-no_icf   identical code folding (default none)\n");
+    s.push_str("  -resident                    route the link through the resident\n");
+    s.push_str("                               daemon (pgrd); falls back to the\n");
+    s.push_str("                               one-shot link when unreachable\n");
+    s.push_str("  -resident_socket <path>      daemon socket (default $PGR_DAEMON_SOCK,\n");
+    s.push_str("                               else {tmpdir}/pgr-<uid>.sock)\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
