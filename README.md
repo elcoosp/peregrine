@@ -4,31 +4,27 @@ An ultra-fast Mach-O linker for **arm64-apple-darwin**, written in Rust,
 cross-linking from Linux — developed verifier-first so correctness gates ship
 before the fast paths.
 
-> **Status: M5 core shipped (archives, `-dead_strip`, `__cstring` merging,
-> real-world flags).** Building on the M4 fused tile emit, M5 lands the
-> roadmap's real-world-link engine: **static archives** with the S7 decision
-> taken (ranlib-guided **lazy member pull** — 12.2× the eager path on the
-> archive-heavy bench), **`-dead_strip`** (D12 mark-sweep over D1
-> symbol-boundary atoms — 1.9× *faster* than the unstripped link at 50%
-> dead weight, gate was ≤ 30% overhead), **`__cstring` merging** (D4,
-> ld64-default-on, with symbol- and section-relative remaps), and the
-> driver flags `-filelist`, `-framework`/`-F`, `-sectcreate`,
-> `-all_load`/`-force_load`. The M4 correctness gate is byte-identity with
-> the pre-fusion pipeline, which stays in the tree as the reference
-> (`pgr-emit::build_image` / `pgr_driver::link_reference_bytes`): every
-> corpus shape — executables, dylibs, bundles, re-exports, export filters,
-> flat namespace, `-no_fixup_chains`, `-no_adhoc`, and the new M5 shapes
-> (archive-pulled links, dead-stripped links, merged-cstring links) — emits
-> identical bytes through both paths, and every fused output passes the
-> strict verifier. The M4 perf gates hold with M5 on (emit 1.39× the
-> reference; full-pipeline parity within noise; see [BENCHMARKS]
-> (docs/BENCHMARKS.md) for the recorded numbers). M0–M4 foundations are
-> unchanged; the remaining M5 row items — compact-unwind synthesis (D2),
-> the stabs/debug map (D3) and `-order_file` — are deferred with reasons
-> (they gate on macOS hardware: C++ exceptions, lldb, and the D1 ordering
-> pass respectively; see the
-> [roadmap](docs/peregrine-performance-architecture-and-roadmap.md), the
-> [TDD](docs/TDD.md) and the [compat checklist](docs/COMPAT.md)).
+> **Status: M7 production shipped (versioned cache, build-system surface,
+> compat suite, fuzzing at scale) — v1.0.0.** Building on M6 (veneers, ICF,
+> legacy fixups, Stage A caches), M7 lands the roadmap's production row in
+> its in-tree scope: the **versioned cache format v2** (format + parser
+> revisions in every frame and key, a directory marker with self-heal,
+> oldest-mtime LRU size bounds via `-cache_max`/`PGR_CACHE_MAX`, default
+> 2 GiB), the **build-system driver surface** (`@response-file` expansion
+> with ld64's opportunistic rule, `-syslibroot` with the ld64 pairing rule,
+> accepted no-ops `-demangle`/`-no_demangle`/`-no_deduplicate`/
+> `-object_path_lto`), the **compatibility suite** (38 fixture-backed cases
+> over the agreed list, gate **≥ 98%** — currently 100%), **fuzzing at
+> scale** (two new targets — classic dyld-info opcode streams and the cache
+> decoders — which found and closed four real crash/OOM classes; all six
+> targets run clean), and the **migration guide**
+> ([docs/MIGRATION.md](docs/MIGRATION.md)). Every M4–M6 perf gate re-measured
+> and holding (large link 175.6 ms, dead-strip 1.93×, ICF +14.8% ≤ 25%,
+> fused emit 1.38×, warm cache 173.7 ms, frozen `.tbd` 19.8 µs; see
+> [BENCHMARKS](docs/BENCHMARKS.md)). The hardware-bound halves (G2 ≥ 8× vs
+> `ld64.lld`, runtime validation via `codesign`/dyld on produced binaries,
+> 30 CPU-days of fuzzing) formally close on the P0 rig; the CI plumbing for
+> the macOS runtime-validation job ships with this milestone.
 
 ## Workspace layout (TDD §4.1)
 
@@ -63,7 +59,7 @@ before the fast paths.
 
 ```sh
 cargo build --release --locked
-cargo test --workspace --locked          # 280+ tests: units, e2e gate, proptests, cross-checks, M4/M5 byte-identity gates
+cargo test --workspace --locked          # 350+ tests: units, e2e gate, proptests, cross-checks, byte-identity gates, the M7 compat suite
 cargo bench -p pgr-format                # parser GB/s baseline (docs/BENCHMARKS.md)
 cargo bench -p pgr-core --bench trie     # export-trie build gate (docs/BENCHMARKS.md)
 cargo bench -p pgr-emit --bench emit     # fused-tile vs reference Pass 4 (docs/BENCHMARKS.md)
@@ -99,6 +95,16 @@ PGR_LLD64=$(which ld64.lld) cargo test -p pgr-driver --test e2e
 # Verify any Mach-O image against the Peregrine contract:
 ./target/release/pgr-verify hi --strict
 
+# M7 build-system surface: response files (CMake/Ninja/Xcode shape) and
+# -syslibroot (the ld64 SDK pairing rule — single root: prefixed-only;
+# multiple roots: union + original):
+pgr @link.rsp
+pgr -o hi main.o -l System -syslibroot /sdks/MacOSX.sdk -platform_version macos 12.0 14.0
+
+# M7 Stage A cache v2 with an LRU size bound (default 2 GiB, 0 = unbounded):
+pgr -o app app.o -cache .pgr-cache -cache_max 536870912
+PGR_CACHE_DIR=.pgr-cache pgr -o app app.o   # env form; -no_cache forces off
+
 # Run the M5 pipeline single-threaded (determinism/debugging):
 PGR_JOBS=1 ./target/release/pgr -o hi printf_main.o -l System -L /path/to/stubs
 
@@ -112,8 +118,14 @@ cargo +nightly fuzz run link_object -- -max_total_time=120
 * **CI** (`.github/workflows/ci.yml`): fmt → clippy (`-D warnings`) → locked
   tests → doc gate → bench compile, on Linux x86_64 and macOS aarch64.
 * **Fuzz** (`.github/workflows/fuzz.yml`): nightly libFuzzer runs over
-  `parse_any`, `parse_tbd` (new at M2), `verify_image` and `link_object`
-  with a fixture-seeded corpus (GOT-reloc objects + tbd stubs).
+  `parse_any`, `parse_tbd`, `verify_image`, `link_object` and the M7
+  targets `dyld_info_streams` / `cache_entries`, with a fixture-seeded
+  corpus (images, objects, tbd stubs, classic opcode streams, cache
+  entries).
+* **Runtime validation** (`.github/workflows/runtime.yml`, M7): on macOS
+  runners, links a binary/dylib pair, runs the produced binaries, and
+  validates them with `codesign -v` + dyld — the hardware half of the M7
+  row.
 * **Release** (`.github/workflows/release.yml`): pushing a `v*` tag builds
   Linux + macOS binaries, generates the changelog/notes with
   [git-cliff](https://git-cliff.org) from conventional commits and attaches
@@ -197,6 +209,53 @@ cargo +nightly fuzz run link_object -- -max_total_time=120
       ordering pass; `-ObjC` member pull joins M6's ObjC class handling.
       The roadmap's real-project correctness gate (ripgrep, C++, ObjC,
       Rust links *running* on Apple Silicon) formally closes on the P0 rig
+
+## M7 gate checklist (architecture doc §10.3 row M7 — production, in-tree scope)
+
+- [x] **Versioned cache format**: `CACHE_FORMAT_VERSION = 2` + a parser
+      revision recorded in every POI/frozen-`.tbd` frame *and* bound into
+      the cache key (stale entries are unreachable, not merely unread);
+      entries record the parse-affecting flag; the directory carries a
+      format marker and self-heals on foreign/legacy content (pgr-owned
+      files reclaimed, foreign files untouched); size-bounded with
+      oldest-mtime (LRU) eviction, recency touch on hits, and the
+      just-stored entry never evicted — `-cache_max <bytes>` /
+      `PGR_CACHE_MAX`, default 2 GiB. §7.1's "cached vs uncached
+      byte-identical" gate re-asserted on v2
+- [x] **ld-compatible driver, build-system surface**: `@response-file`
+      expansion (recursive, depth-bounded, ld64 tokenization, opportunistic
+      expansion so `@rpath/...` values pass through), `-syslibroot`
+      (repeatable, the ld64 pairing rule), accepted no-ops
+      `-demangle`/`-no_demangle`/`-no_deduplicate`/`-object_path_lto`;
+      every flag fixture-backed (`docs/COMPAT.md` rows)
+- [x] **Compatibility suite** (`m7_compat.rs`): the agreed list — 38
+      fixture-backed cases spanning load commands, image contracts, driver
+      flags & search, M7 surface, determinism and diagnostics — driven
+      through the real pipeline and `pgr-verify --strict`; the gate
+      `≥ 98% pass on the agreed list` is pinned by its own test and
+      currently measures **38/38 (100%)**
+- [x] **Fuzzing at scale**: two new targets (`dyld_info_streams`,
+      `cache_entries`) with framed valid seeds; the six-target nightly
+      matrix updated; short local sessions over all targets surfaced and
+      closed four real defect classes (cache frame-length overflow, hostile
+      header arithmetic in five verifier sites, a stale fuzz-target
+      signature, an 8 GiB `nreloc` pre-allocation) — each with a
+      deterministic regression test; the 30-CPU-day gate closes on the P0 rig
+- [x] **Docs and migration guide**: `docs/MIGRATION.md` (ld64 → pgr flag
+      mapping, no-ops, cache semantics, determinism contract, exit codes),
+      README + `docs/COMPAT.md` + `docs/BENCHMARKS.md` updated for M7
+- [x] **Bench everything**: the full bench suite re-run with M7 in the
+      pipeline — every M4–M6 gate holds; the new `cache_evict` bench shows
+      the LRU bound costs only on cold stores (+6.7% there) and nothing on
+      warm hits
+- [ ] **Deferred with reasons** (the rest of the M7 row): `ld`-compatible
+      driver *tested through* clang `-fuse-ld`/Xcode/`xcodebuild`/cargo
+      (needs macOS hosts; the flag shapes those tools pass are
+      fixture-covered), runtime validation on macOS hardware (run produced
+      binaries, `codesign -v`, dyld load — the CI job ships as
+      `.github/workflows/runtime.yml` and executes on the P0 rig), the G2
+      perf gates (≥ 8× vs `ld64.lld`, ≥ 3× vs ld-prime, startup ≤ 3 ms,
+      nightly ±3%), and fuzzing at 30 CPU-days
 
 ## M6 gate checklist (architecture doc §10.3 row M6 — scale & ecosystem, in-tree scope)
 
@@ -365,6 +424,8 @@ cargo +nightly fuzz run link_object -- -max_total_time=120
 * `docs/BENCHMARKS.md` — recorded M0/M1/M2/M3/M4 baselines and how to read
   them
 * `docs/COMPAT.md` — ld64/D13 compatibility checklist with fixture links
+* `docs/MIGRATION.md` — migrating from ld64 to `pgr` (flags, cache,
+  determinism, exit codes)
 * `CHANGELOG.md` — generated by git-cliff
 
 ## License
