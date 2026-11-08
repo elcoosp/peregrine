@@ -77,7 +77,7 @@ pub enum Code {
     FixupsSegmentOffset,
     /// Signature blob layout is malformed.
     SignatureLayout,
-    /// A recomputed page hash does not match the CodeDirectory.
+    /// A recomputed page hash does not match the `CodeDirectory`.
     SignatureHashMismatch,
     /// Entry point, build version or function-start payload invalid.
     LinkeditPayload,
@@ -206,6 +206,7 @@ impl Report {
 /// The image type shapes the checks: executables and dylibs get the full
 /// segment/base/signature contract; bundles and other types get structural
 /// checks only.
+#[must_use]
 pub fn verify(bytes: &[u8], opts: &Options) -> Report {
     let mut report = Report::default();
     let parsed = match structural::parse_image(bytes) {
@@ -258,7 +259,7 @@ pub fn verify_ok(bytes: &[u8], opts: &Options) -> bool {
 
 /// Symbol count from the parsed symtab (0 when stripped).
 fn img_nsyms(img: &structural::ParsedImage<'_>) -> u32 {
-    img.symtab.map(|st| st.nsyms).unwrap_or(0)
+    img.symtab.map_or(0, |st| st.nsyms)
 }
 
 /// Converts a parse error into an issue (used at every call boundary).
