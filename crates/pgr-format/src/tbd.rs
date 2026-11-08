@@ -106,13 +106,13 @@ pub fn parse_tbd(bytes: &[u8]) -> Result<Tbd, FormatError> {
         let (key, value) = parse_key_value(content)?;
         match key {
             "tbd-version" => {
-                let v = scalar_u64(value)? as u8;
+                let v = scalar_u64(value)?;
                 if v != 3 && v != 4 {
                     return Err(FormatError::Malformed {
                         what: format!("unsupported tbd-version {v}"),
                     });
                 }
-                version = Some(v);
+                version = Some(u8::try_from(v).unwrap_or(0));
             }
             "install-name" => tbd.install_name = scalar_string(value)?.to_string(),
             "current-version" => tbd.current_version = packed_version(value)?,
@@ -205,7 +205,8 @@ fn content_of(line: &str) -> &str {
 /// Line cursor over the document: skips blank lines and comment lines,
 /// keeps raw lines (indentation drives block-structure parsing).
 struct Lines<'a> {
-    lines: std::str::Lines<'a>,
+    /// The raw document lines (indentation drives block parsing).
+    iter: std::str::Lines<'a>,
     peeked: Option<&'a str>,
     done: bool,
 }
@@ -213,7 +214,7 @@ struct Lines<'a> {
 impl<'a> Lines<'a> {
     fn new(doc: &'a str) -> Self {
         Self {
-            lines: doc.lines(),
+            iter: doc.lines(),
             peeked: None,
             done: false,
         }
@@ -224,15 +225,14 @@ impl<'a> Lines<'a> {
             if self.done {
                 return Ok(None);
             }
-            let line = match self.peeked.take() {
-                Some(l) => l,
-                None => match self.lines.next() {
-                    Some(l) => l,
-                    None => {
-                        self.done = true;
-                        return Ok(None);
-                    }
-                },
+            let line = if let Some(l) = self.peeked.take() {
+                l
+            } else {
+                let Some(l) = self.iter.next() else {
+                    self.done = true;
+                    return Ok(None);
+                };
+                l
             };
             let content = content_of(line).trim_start();
             if content.is_empty() || content.starts_with('#') {
@@ -619,6 +619,6 @@ mod tests {
     fn format_error_is_displayed() {
         let err = parse_tbd(b"nonsense").unwrap_err();
         assert!(matches!(err, FormatError::Malformed { .. }));
-        assert!(!err.to_string().is_empty());
+        assert_ne!(err.to_string(), "");
     }
 }
