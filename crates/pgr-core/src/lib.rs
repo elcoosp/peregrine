@@ -24,6 +24,7 @@ pub mod layout;
 pub mod link;
 pub mod object;
 pub mod pool;
+pub mod propagate;
 pub mod resolve;
 pub mod revindex;
 pub mod slack;
@@ -45,6 +46,7 @@ pub use link::{
     link_cached, link_from_objects, link_with,
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
+pub use propagate::{PropagationScope, SectionDigest};
 pub use resolve::{Def, Rank, Resolution};
 pub use revindex::{RefSite, ReverseIndex};
 pub use slack::{LayoutFallback, SlackPolicy};

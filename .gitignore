@@ -8,3 +8,5 @@ Cargo.lock.bak
 .DS_Store
 commit.sh
 ship.sh
+.github/pr-body.md
+.github/commit-plan.tsv

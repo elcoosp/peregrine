@@ -620,3 +620,36 @@ the 1.2%-of-image patch bytes and the COW clone are the whole story.
 ```sh
 cargo bench -p pgr-driver --bench incremental
 ```
+
+## Recorded baseline (M9 tier 2b — the change-propagation planner)
+
+The tier-2b milestone (architecture doc §7.3 step 3, roadmap row M9 GA)
+ships the per-symbol change-propagation planner: the record grows the
+parse's section-digest table (content + symbol records, v3), and the
+relink planner gains the **propagation gate** — every changed content
+span must sit inside `pgr_core::propagate::predict`'s scope (the seeds'
+own output-section extents plus the reverse-index closure of their
+dependents) or the relink falls back to the full link instead of
+patching bytes nobody predicted. New bench (`pgr-emit/propagate`)
+measures the gate's added cost over the planner's tier-1 baseline; the
+corpus is the §10.4-shaped one — 8 objects × 256 cross-object reference
+sites × 16 KiB `__text` (~274 KB image), one body edit as the seed.
+
+| `pgr-emit/propagate` (2-core KVM sandbox, criterion median) | time | throughput |
+|---|---|---|
+| `propagation_scope` — digest diff + reverse-index build + closure walk | **572.9 µs** | 456.0 MiB/s |
+| `plan_patch_with_gate` — full planner end to end (span table + diff + gate) | **1.1088 ms** | 235.6 MiB/s |
+
+Reading: the propagation gate's whole added work (digest diff, reverse
+index build, dependent closure) is ~52% of the planner's wall on this
+corpus — the planner's span table extraction (TileCtx build) dominates.
+The scope walk visits 2 048 reference sites and lands a one-section seed
+with its dependents; on real edit shapes (one changed section, a handful
+of dependents) the gate's cost is the reverse-index build, which the
+resident session (M8) can amortize across links. The GA tier (incremental
+resolve over the same index) is what turns this from a *gate* into a
+*speedup* — recorded here so the baseline exists when it lands.
+
+```sh
+cargo bench -p pgr-emit --bench propagate
+```

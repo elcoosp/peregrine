@@ -790,3 +790,147 @@ fn randomized_edit_sequences_keep_the_patch_byte_identical() {
         "the walk must exercise both tiers (in place: {in_place_steps}, fallback: {fallback_steps})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tier 2b — the per-symbol change-propagation planner (§7.3 step 3)
+// ---------------------------------------------------------------------------
+
+use pgr_core::propagate::section_digests;
+
+/// greet.o with `_greet` at `value` inside an 8-byte `__text`
+/// (`nop; ret`): moving `value` retargets hello.o's `BL _greet` without
+/// resizing anything — the skeleton holds, the dependents retarget.
+fn greet_at(value: u64) -> ObjectBuilder {
+    let mut b = ObjectBuilder::new("greet.o");
+    let text = b.add_section(ObjectSection::text(
+        "__text",
+        vec![0x1F, 0x20, 0x03, 0xD5, 0xC0, 0x03, 0x5F, 0xD6], // nop; ret
+        vec![],
+    ));
+    let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_greet".into(),
+        section_index: text,
+        value,
+        weak: false,
+    });
+    b.section_mut(data).relocs = vec![ObjectReloc::unsigned(0).at(0)];
+    b
+}
+
+fn hello_greet_inputs(greet_value: u64) -> Vec<LinkInput> {
+    vec![
+        LinkInput {
+            name: "hello.o".into(),
+            bytes: hello(64, false).build().unwrap(),
+        },
+        LinkInput {
+            name: "greet.o".into(),
+            bytes: greet_at(greet_value).build().unwrap(),
+        },
+    ]
+}
+
+#[test]
+fn record_v3_roundtrips_the_section_digests_and_rejects_v2() {
+    let (layout, objects) = link(
+        &inputs(&hello(64, false)),
+        &cfg(OutputType::Execute, true, Vec::new()),
+    );
+    let image = build_image_fused(&layout, &objects).unwrap();
+    let record = LinkRecord::record(&layout, &objects, &image).unwrap();
+
+    assert_eq!(
+        record.section_digests,
+        section_digests(&objects),
+        "the record captures the parse's section digests in parse order"
+    );
+    let back = LinkRecord::decode(&record.encode()).expect("v3 roundtrip");
+    assert_eq!(
+        back.section_digests, record.section_digests,
+        "the codec is lossless over the digest table"
+    );
+
+    // A foreign version decodes to None — the relink re-records (the
+    // documented fallback contract for pre-2b records).
+    let mut downgraded = record.encode();
+    downgraded[8..12].copy_from_slice(&2u32.to_le_bytes());
+    assert!(
+        LinkRecord::decode(&downgraded).is_none(),
+        "v2 records must not decode under the v3 codec"
+    );
+}
+
+#[test]
+fn propagation_gate_accepts_a_predicted_dependent_retarget() {
+    // `_greet` moves one instruction down (same section size): hello.o's
+    // `BL _greet` word retargets. The scope predicts hello.o's text (the
+    // dependent site) and greet.o's text (the seed), so the patch stays
+    // in place and byte-identical — the gate must not false-fallback on a
+    // genuine cross-file dependent change.
+    let kind = OutputType::Execute;
+    let cfg1 = cfg(kind, true, Vec::new());
+    let (layout1, objects1) = link(&hello_greet_inputs(0), &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+
+    let dir = workdir("propagate_accept");
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+
+    let mut cfg2 = cfg(kind, true, anchors_of(&layout1));
+    cfg2.sig_anchor = Some(layout1.linkedit.sig_off);
+    let (layout2, objects2) = link(&hello_greet_inputs(4), &cfg2);
+    let image2_full = build_image_fused(&layout2, &objects2).unwrap();
+
+    let decision = plan_patch(&record, &layout2, &objects2, cfg2.layout_slack.as_ref()).unwrap();
+    let plan = match &decision {
+        PatchDecision::InPlace(p) => p.clone(),
+        PatchDecision::Fallback(r) => panic!("a predicted retarget fell back: {r}"),
+    };
+    let (outcome, next_record) =
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+    assert_eq!(
+        std::fs::read(&prev).unwrap(),
+        image2_full,
+        "the patched output is byte-identical to the full emit"
+    );
+    assert_eq!(
+        next_record.section_digests,
+        section_digests(&objects2),
+        "the refreshed record anchors the next cycle to the new parse"
+    );
+    assert!(outcome.dirty_tiles < outcome.total_tiles);
+}
+
+#[test]
+fn propagation_gate_declines_an_unpredicted_content_change() {
+    // The gate's tripwire: when the span diff dirties a content tile the
+    // propagation scope cannot explain (here: a record whose digest table
+    // claims a parse it did not see — the stale-record shape), the planner
+    // falls back instead of trusting the diff. Fallback is always correct.
+    let kind = OutputType::Execute;
+    let cfg1 = cfg(kind, true, Vec::new());
+    let (layout1, objects1) = link(&inputs(&hello(64, false)), &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let mut record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+
+    let mut cfg2 = cfg(kind, true, anchors_of(&layout1));
+    cfg2.sig_anchor = Some(layout1.linkedit.sig_off);
+    let (layout2, objects2) = link(&inputs(&hello(64, true)), &cfg2);
+
+    // The lie: claim the record saw exactly this (edited) parse. The real
+    // recorded spans disagree with what the digest table vouches for, and
+    // the gate must catch the discrepancy instead of patching blind.
+    record.section_digests = section_digests(&objects2);
+    let decision = plan_patch(&record, &layout2, &objects2, cfg2.layout_slack.as_ref()).unwrap();
+    match decision {
+        PatchDecision::Fallback(FallbackReason::PropagationMismatch { detail }) => {
+            assert!(
+                detail.contains("tile"),
+                "the reason names the tiles: {detail}"
+            );
+        }
+        other => panic!("expected a propagation fallback, got {other:?}"),
+    }
+}
