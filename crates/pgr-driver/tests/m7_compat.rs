@@ -251,8 +251,8 @@ fn load_cmds(bytes: &[u8]) -> Vec<pgr_format::LoadCommandKind> {
     out
 }
 
-fn has_cmd(cmds: &[pgr_format::LoadCommandKind], want: &pgr_format::LoadCommandKind) -> bool {
-    cmds.iter().any(|k| k == want)
+fn has_cmd(cmds: &[pgr_format::LoadCommandKind], want: pgr_format::LoadCommandKind) -> bool {
+    cmds.iter().any(|k| k == &want)
 }
 
 use pgr_format::LoadCommandKind as LK;
@@ -278,8 +278,10 @@ macro_rules! case {
 }
 
 /// The gate: the M7 row's "compat suite ≥ 98% pass on the agreed list".
+/// Exact integer arithmetic — `passed/total ≥ 98%` ⟺ `50·passed ≥ 49·total`
+/// (both sides scaled by 50, so the comparison is exact, no float casts).
 fn pass_rate_ok(passed: usize, total: usize) -> bool {
-    total > 0 && (passed as f64) / (total as f64) >= 0.98
+    total > 0 && passed.saturating_mul(50) >= total.saturating_mul(49)
 }
 
 fn cases() -> Vec<CompatCase> {
@@ -416,7 +418,7 @@ fn lc_canonical_order() -> Result<(), String> {
         LK::LoadDylinker,
         LK::Uuid,
     ] {
-        assert!(has_cmd(&cmds, &want), "missing {want:?}");
+        assert!(has_cmd(&cmds, want), "missing {want:?}");
     }
     Ok(())
 }
@@ -429,8 +431,9 @@ fn lc_entry_build() -> Result<(), String> {
     );
     let image = link(&base_opts(&paths, &dir.join("out.bin"), "compat"));
     let cmds = load_cmds(&image);
-    assert!(has_cmd(&cmds, &LK::Main), "LC_MAIN");
-    assert!(has_cmd(&cmds, &LK::BuildVersion), "LC_BUILD_VERSION");
+    assert!(has_cmd(&cmds, LK::Main), "LC_MAIN");
+    assert!(has_cmd(&cmds, LK::BuildVersion), "LC_BUILD_VERSION");
+    assert_strict(&image, "entry/build-version exec")?;
     Ok(())
 }
 
@@ -446,8 +449,8 @@ fn lc_rpath_sv() -> Result<(), String> {
     let image = link(&opts);
     assert_strict(&image, "rpath/source_version exec")?;
     let cmds = load_cmds(&image);
-    assert!(has_cmd(&cmds, &LK::Rpath), "LC_RPATH");
-    assert!(has_cmd(&cmds, &LK::SourceVersion), "LC_SOURCE_VERSION");
+    assert!(has_cmd(&cmds, LK::Rpath), "LC_RPATH");
+    assert!(has_cmd(&cmds, LK::SourceVersion), "LC_SOURCE_VERSION");
     Ok(())
 }
 
@@ -463,7 +466,7 @@ fn lc_load_dylib() -> Result<(), String> {
     let image = link(&base_opts(&paths, &dir.join("out.bin"), "compat"));
     assert_strict(&image, "dylib-linked exec")?;
     let cmds = load_cmds(&image);
-    assert!(has_cmd(&cmds, &LK::LoadDylib), "LC_LOAD_DYLIB");
+    assert!(has_cmd(&cmds, LK::LoadDylib), "LC_LOAD_DYLIB");
     Ok(())
 }
 
@@ -488,7 +491,7 @@ fn lc_weak_dylib() -> Result<(), String> {
     assert_strict(&image, "weak-dylib exec")?;
     // Weak dylibs classify as LoadDylib with the weak opcode; assert present.
     let cmds = load_cmds(&image);
-    assert!(has_cmd(&cmds, &LK::LoadDylib), "weak LC_LOAD_DYLIB");
+    assert!(has_cmd(&cmds, LK::LoadDylib), "weak LC_LOAD_DYLIB");
     Ok(())
 }
 
@@ -506,8 +509,8 @@ fn lc_id_dylib() -> Result<(), String> {
     let image = link(&opts);
     assert_strict(&image, "dylib output")?;
     let cmds = load_cmds(&image);
-    assert!(has_cmd(&cmds, &LK::IdDylib), "LC_ID_DYLIB");
-    assert!(!has_cmd(&cmds, &LK::Main), "no LC_MAIN on a dylib");
+    assert!(has_cmd(&cmds, LK::IdDylib), "LC_ID_DYLIB");
+    assert!(!has_cmd(&cmds, LK::Main), "no LC_MAIN on a dylib");
     Ok(())
 }
 
@@ -530,7 +533,7 @@ fn lc_reexport() -> Result<(), String> {
     let image = link(&parsed);
     assert_strict(&image, "re-exporting dylib")?;
     let cmds = load_cmds(&image);
-    assert!(has_cmd(&cmds, &LK::ReexportDylib), "LC_REEXPORT_DYLIB");
+    assert!(has_cmd(&cmds, LK::ReexportDylib), "LC_REEXPORT_DYLIB");
     Ok(())
 }
 
@@ -608,6 +611,7 @@ fn ic_uuid() -> Result<(), String> {
     });
     let other = write_inputs(&dir, &[("greet2.o", &b2.build().unwrap())]);
     let c = link(&base_opts(&other, &dir.join("c.bin"), "compat"));
+    assert_strict(&c, "uuid corpus variant")?;
     assert_ne!(a, c, "different content → different content-derived UUID");
     Ok(())
 }
@@ -1442,7 +1446,10 @@ fn m7_compat_suite_passes_the_agreed_list() {
                 let msg = p
                     .downcast_ref::<String>()
                     .cloned()
-                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .or_else(|| {
+                        p.downcast_ref::<&str>()
+                            .map(std::string::ToString::to_string)
+                    })
                     .unwrap_or_else(|| "panicked".into());
                 Err(format!("panicked: {msg}"))
             });
@@ -1463,7 +1470,8 @@ fn m7_compat_suite_passes_the_agreed_list() {
         }
     }
     let total = list.len();
-    let rate = 100.0 * passed as f64 / total as f64;
+    let rate = 100.0 * f64::from(u32::try_from(passed).unwrap_or(u32::MAX))
+        / f64::from(u32::try_from(total).unwrap_or(u32::MAX));
     eprintln!("=== {passed}/{total} passed ({rate:.1}%) — gate: ≥ 98% ===");
     assert!(
         pass_rate_ok(passed, total),
