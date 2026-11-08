@@ -100,7 +100,7 @@ impl ReverseIndex {
     /// Every recorded site referencing `id`, ascending.
     #[must_use]
     pub fn sites(&self, id: StringId) -> &[RefSite] {
-        self.sites.get(&id.0).map(Vec::as_slice).unwrap_or(&[])
+        self.sites.get(&id.0).map_or(&[], Vec::as_slice)
     }
 
     /// The referenced symbols, ascending by name id.
