@@ -14,13 +14,18 @@
 //!   `unsafe_code = "forbid"` gate stays intact.
 
 pub mod emit;
+pub mod incremental;
 pub mod reloc;
 pub mod signature;
 pub mod tile;
 pub mod writer;
 
 pub use emit::build_image;
-pub use reloc::apply as apply_patch;
+pub use incremental::{
+    FallbackReason, Integrity, LinkRecord, PatchDecision, PatchError, PatchOutcome, PatchPlan,
+    RecordedSection, RecordedSpan, SpanTable, apply_patch, check_output, plan_patch,
+};
+pub use reloc::apply as apply_patch_reloc;
 pub use signature::{blob_size, build_superblob, derive_uuid, page_hashes};
 pub use tile::{build_image_fused, build_image_fused_into};
 pub use writer::write_image;
