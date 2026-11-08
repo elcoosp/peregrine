@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 
 /// Wire-protocol revision. A mismatch is a hard [`DecodeError::Proto`]
 /// (the client falls back to one-shot rather than guessing).
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -376,6 +376,15 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         }
         None => put_u8(out, 0),
     }
+    // M9 slack anchors (v2 wire): the incremental relink's cross-link
+    // layout reservations ride with the config so the resident link and
+    // the one-shot link shape identical layouts.
+    put_u32(out, cfg.slack_anchor.len() as u32);
+    for a in &cfg.slack_anchor {
+        put_str(out, &a.seg);
+        put_str(out, &a.name);
+        put_u64(out, a.padded);
+    }
     put_u32(out, cfg.dylibs.len() as u32);
     for d in &cfg.dylibs {
         put_str(out, &d.install_name);
@@ -455,6 +464,16 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             max_bytes: r.u64()?,
         }),
     };
+    // M9 slack anchors (v2 wire; see encode_config).
+    let slack_anchor = (0..r.u32()?)
+        .map(|_| -> Result<pgr_core::slack::SlackAnchor, DecodeError> {
+            Ok(pgr_core::slack::SlackAnchor {
+                seg: r.str()?,
+                name: r.str()?,
+                padded: r.u64()?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let dylibs = (0..r.u32()?)
         .map(|_| {
             Ok(Dylib {
@@ -494,6 +513,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         load_symbols,
         icf,
         layout_slack,
+        slack_anchor,
     })
 }
 
@@ -542,6 +562,11 @@ mod tests {
             load_symbols: vec![b"_kept".to_vec()],
             icf: pgr_core::icf::IcfMode::Safe,
             layout_slack: Some(pgr_core::SlackPolicy::default()),
+            slack_anchor: vec![pgr_core::slack::SlackAnchor {
+                seg: "__TEXT".into(),
+                name: "__text".into(),
+                padded: 0x4000,
+            }],
         }
     }
 
