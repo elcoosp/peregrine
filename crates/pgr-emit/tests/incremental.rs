@@ -8,11 +8,17 @@
 //! decision) is wrong. Everything else pins the §7.3 behavior: growth
 //! within slack stays in place, skeleton moves fall back through the
 //! ladder, an unchanged relink touches nothing, and the integrity gate is
-//! honest about what it checks.
+//! honest about what it checks. Tier 2a adds the cross-link import table:
+//! the record carries it (v2), the anchored relink keeps its ordinals, and
+//! the byte-identity contract holds under import churn — including the
+//! scaled-down randomized-edit gate (the M9 GA bar runs 10⁴ sequences on
+//! the P0 rig; this suite runs a deterministic subset in CI).
 
-use pgr_core::layout::{LinkConfig, Layout, OutputType};
+use pgr_core::layout::{Layout, LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, Parallelism, link_cached};
+use pgr_core::resolve::Dylib;
 use pgr_core::slack::{SlackAnchor, SlackPolicy};
+use pgr_core::stable_imports::StableImport;
 use pgr_emit::incremental::{
     FallbackReason, Integrity, LinkRecord, PatchDecision, apply_patch, check_output, plan_patch,
 };
@@ -93,7 +99,7 @@ fn greet() -> ObjectBuilder {
     b
 }
 
-fn inputs(hello: ObjectBuilder) -> Vec<LinkInput> {
+fn inputs(hello: &ObjectBuilder) -> Vec<LinkInput> {
     vec![
         LinkInput {
             name: "hello.o".into(),
@@ -110,12 +116,7 @@ fn cfg(kind: OutputType, slack: bool, anchors: Vec<SlackAnchor>) -> LinkConfig {
     cfg_adhoc(kind, slack, anchors, true)
 }
 
-fn cfg_adhoc(
-    kind: OutputType,
-    slack: bool,
-    anchors: Vec<SlackAnchor>,
-    adhoc: bool,
-) -> LinkConfig {
+fn cfg_adhoc(kind: OutputType, slack: bool, anchors: Vec<SlackAnchor>, adhoc: bool) -> LinkConfig {
     LinkConfig {
         ident: "m9-incremental".into(),
         filetype: kind,
@@ -160,11 +161,11 @@ fn patch_and_assert_identity(
     kind: OutputType,
     slack: bool,
     adhoc: bool,
-    old: Vec<LinkInput>,
-    new: Vec<LinkInput>,
+    old: &[LinkInput],
+    new: &[LinkInput],
 ) -> pgr_emit::incremental::PatchOutcome {
     let cfg_old = cfg_adhoc(kind, slack, Vec::new(), adhoc);
-    let (layout1, objects1) = link(&old, &cfg_old);
+    let (layout1, objects1) = link(old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
 
     let dir = workdir(tag);
@@ -173,8 +174,11 @@ fn patch_and_assert_identity(
 
     let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
 
-    let cfg_new = cfg_adhoc(kind, slack, anchors_of(&layout1), adhoc);
-    let (layout2, objects2) = link(&new, &cfg_new);
+    let mut cfg_new = cfg_adhoc(kind, slack, anchors_of(&layout1), adhoc);
+    // The relink cycle anchors the signature boundary (the LINKEDIT tail
+    // reservation's counterpart; the driver does the same from the record).
+    cfg_new.sig_anchor = slack.then_some(layout1.linkedit.sig_off).filter(|&v| v > 0);
+    let (layout2, objects2) = link(new, &cfg_new);
     let image2_full = build_image_fused(&layout2, &objects2).unwrap();
 
     let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
@@ -186,7 +190,10 @@ fn patch_and_assert_identity(
     let (outcome, next_record) =
         apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
     assert!(!outcome.untouched);
-    assert!(outcome.bytes_patched <= image1.len() as u64, "patch wrote more than the image");
+    assert!(
+        outcome.bytes_patched <= image1.len() as u64,
+        "patch wrote more than the image"
+    );
 
     let patched = std::fs::read(&prev).unwrap();
     assert_eq!(
@@ -194,9 +201,18 @@ fn patch_and_assert_identity(
         "the patched output must be byte-identical to the full fused emit"
     );
     // The returned record describes the new state exactly.
-    assert_eq!(next_record, LinkRecord::record(&layout2, &objects2, &image2_full).unwrap());
+    assert_eq!(
+        next_record,
+        LinkRecord::record(&layout2, &objects2, &image2_full).unwrap()
+    );
     // The next relink over the same inputs is a no-op.
-    let decision3 = plan_patch(&next_record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
+    let decision3 = plan_patch(
+        &next_record,
+        &layout2,
+        &objects2,
+        cfg_new.layout_slack.as_ref(),
+    )
+    .unwrap();
     assert!(matches!(decision3, PatchDecision::InPlace(ref p) if p.is_untouched()));
     outcome
 }
@@ -208,8 +224,8 @@ fn body_edit_patches_in_place_and_matches_the_full_emit() {
         OutputType::Execute,
         true,
         true,
-        inputs(hello(64, false)),
-        inputs(hello(64, true)),
+        &inputs(&hello(64, false)),
+        &inputs(&hello(64, true)),
     );
     // A same-size body edit: the content tile(s) plus the UUID page — a
     // small fraction of the image.
@@ -232,8 +248,8 @@ fn growth_within_slack_patches_in_place_and_matches_the_full_emit() {
         OutputType::Execute,
         true,
         true,
-        inputs(hello(32 * 1024, false)),
-        inputs(hello(33 * 1024, false)),
+        &inputs(&hello(32 * 1024, false)),
+        &inputs(&hello(33 * 1024, false)),
     );
     assert!(
         outcome.dirty_tiles < outcome.total_tiles,
@@ -255,8 +271,8 @@ fn dylib_output_patches_in_place_and_matches_the_full_emit() {
         OutputType::Dylib,
         true,
         true,
-        inputs(hello(64, false)),
-        inputs(hello(64, true)),
+        &inputs(&hello(64, false)),
+        &inputs(&hello(64, true)),
     );
 }
 
@@ -269,50 +285,58 @@ fn no_slack_corpus_still_patches_same_size_edits() {
         OutputType::Execute,
         false,
         true,
-        inputs(hello(64, false)),
-        inputs(hello(64, true)),
+        &inputs(&hello(64, false)),
+        &inputs(&hello(64, true)),
     );
 }
 
 #[test]
 fn unchanged_relink_is_untouched() {
-    let old = inputs(hello(64, false));
+    let old = inputs(&hello(64, false));
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
     let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
 
     // Same inputs, anchored config: identical plan.
-    let cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
     let (layout2, objects2) = link(&old, &cfg_new);
     let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
     match decision {
         PatchDecision::InPlace(plan) => {
             assert!(plan.is_untouched(), "identical inputs must dirty nothing");
-            assert!(apply_patch(
-                &std::env::temp_dir().join("pgr_emit_inc_noop_missing"),
-                &record,
-                &plan,
-                &layout2,
-                &objects2,
-                &std::env::temp_dir().join("pgr_emit_inc_noop_missing_out"),
-            )
-            .is_err(), "an untouched plan is not an apply request");
+            assert!(
+                apply_patch(
+                    &std::env::temp_dir().join("pgr_emit_inc_noop_missing"),
+                    &record,
+                    &plan,
+                    &layout2,
+                    &objects2,
+                    &std::env::temp_dir().join("pgr_emit_inc_noop_missing_out"),
+                )
+                .is_err(),
+                "an untouched plan is not an apply request"
+            );
         }
         PatchDecision::Fallback(r) => panic!("identical inputs fell back: {r}"),
     }
 }
 
 #[test]
-fn symbol_count_change_falls_back_to_the_clean_link() {
-    let old = inputs(hello(64, false));
+fn symbol_count_change_patches_in_place_inside_the_linkedit_reservation() {
+    // Tier 2a: the `__LINKEDIT` tail reservation (slack links) keeps the
+    // signature boundary fixed while the chunk stream grows — one extra
+    // symtab entry (16 B) plus its string now patches in place instead of
+    // moving `sig_off` and falling back (the tier-1 behavior, pinned by
+    // `ident_change_falls_back_to_the_clean_link` below).
+    let old = inputs(&hello(64, false));
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
     let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
 
-    // The edit adds a local symbol: the symtab grows, the `__LINKEDIT`
-    // chunk plan moves — the frozen skeleton is gone.
+    // The edit adds a local symbol: the symtab grows into the reservation.
     let mut b = hello(64, true);
     b.add_symbol(ObjectSymbol::Defined {
         name: "_new_local".into(),
@@ -320,13 +344,53 @@ fn symbol_count_change_falls_back_to_the_clean_link() {
         value: 16,
         weak: false,
     });
-    let new = inputs(b);
-    let cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    let new = inputs(&b);
+    let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
     let (layout2, objects2) = link(&new, &cfg_new);
+    let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
+    let plan = match decision {
+        PatchDecision::InPlace(p) => p,
+        PatchDecision::Fallback(reason) => panic!(
+            "symtab growth within the reservation must patch in place, got Fallback({reason:?})"
+        ),
+    };
+    let dir = workdir("symtab_growth");
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+    let (_outcome, next_record) =
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+    let full = build_image_fused(&layout2, &objects2).unwrap();
+    assert_eq!(
+        std::fs::read(&prev).unwrap(),
+        full,
+        "the symtab-growth patch must stay byte-identical to the full emit"
+    );
+    assert_eq!(
+        next_record,
+        LinkRecord::record(&layout2, &objects2, &full).unwrap()
+    );
+}
+
+#[test]
+fn ident_change_falls_back_to_the_clean_link() {
+    // The identity is frozen skeleton state: renaming the image is not a
+    // bytes-only edit (the CodeDirectory's identifier changes size), so
+    // the ladder re-runs the full link.
+    let old = inputs(&hello(64, false));
+    let cfg_old = cfg(OutputType::Execute, true, Vec::new());
+    let (layout1, objects1) = link(&old, &cfg_old);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+
+    let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
+    cfg_new.ident = "m9-incremental-renamed".into();
+    let (layout2, objects2) = link(&old, &cfg_new);
     let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
     match decision {
         PatchDecision::Fallback(FallbackReason::Skeleton { detail, .. }) => {
-            assert!(!detail.is_empty());
+            assert_ne!(detail, "");
         }
         other => panic!("expected a skeleton fallback, got {other:?}"),
     }
@@ -334,7 +398,7 @@ fn symbol_count_change_falls_back_to_the_clean_link() {
 
 #[test]
 fn growth_past_the_anchor_falls_back_through_the_ladder() {
-    let old = inputs(hello(64, false));
+    let old = inputs(&hello(64, false));
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
@@ -343,16 +407,11 @@ fn growth_past_the_anchor_falls_back_through_the_ladder() {
     // 64 KiB of new text blows way past the min-pad anchor: the section
     // resizes — the ladder classifies it (segment re-layout tier; the v1
     // engine escalates straight to the clean link).
-    let new = inputs(hello(64 * 1024, false));
-    let cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    let new = inputs(&hello(64 * 1024, false));
+    let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
     let (layout2, objects2) = link(&new, &cfg_new);
-    let decision = plan_patch(
-        &record,
-        &layout2,
-        &objects2,
-        cfg_new.layout_slack.as_ref(),
-    )
-    .unwrap();
+    let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
     match decision {
         PatchDecision::Fallback(FallbackReason::Skeleton {
             tier: Some(tier), ..
@@ -363,7 +422,7 @@ fn growth_past_the_anchor_falls_back_through_the_ladder() {
 
 #[test]
 fn integrity_gate_checks_what_it_claims_and_no_more() {
-    let old = inputs(hello(64, false));
+    let old = inputs(&hello(64, false));
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
@@ -372,7 +431,10 @@ fn integrity_gate_checks_what_it_claims_and_no_more() {
     let dir = workdir("integrity");
     let path = dir.join("out");
     std::fs::write(&path, &image1).unwrap();
-    assert!(matches!(check_output(&path, &record).unwrap(), Integrity::Match));
+    assert!(matches!(
+        check_output(&path, &record).unwrap(),
+        Integrity::Match
+    ));
 
     // Tamper page 0 (sampled): caught.
     let mut tampered = image1.clone();
@@ -414,14 +476,21 @@ fn integrity_gate_checks_what_it_claims_and_no_more() {
     let mut tampered = image1.clone();
     tampered[first_mid] ^= 0xff;
     std::fs::write(&path, &tampered).unwrap();
-    assert!(matches!(check_output(&path, &record).unwrap(), Integrity::Match));
-    let cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    assert!(matches!(
+        check_output(&path, &record).unwrap(),
+        Integrity::Match
+    ));
+    let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
     let (layout2, objects2) = link(&old, &cfg_new);
     let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
     let PatchDecision::InPlace(plan) = decision else {
         panic!("identical inputs fell back");
     };
-    assert!(plan.is_untouched(), "tampering invisible to the record is a no-op");
+    assert!(
+        plan.is_untouched(),
+        "tampering invisible to the record is a no-op"
+    );
 }
 
 #[test]
@@ -433,7 +502,291 @@ fn unsigned_output_patches_without_a_hash_table() {
         OutputType::Execute,
         true,
         false,
-        inputs(hello(64, false)),
-        inputs(hello(64, true)),
+        &inputs(&hello(64, false)),
+        &inputs(&hello(64, true)),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2a — the cross-link import table (§7.3 step 5, D7 closed)
+// ---------------------------------------------------------------------------
+
+/// An object whose `__data` carries one external pointer per entry of
+/// `binds` (undefined externs resolved by `cfg.dylibs`), plus `_main`.
+fn pointer_main(text_bytes: usize, binds: &[&str]) -> ObjectBuilder {
+    let mut words: Vec<u32> = vec![0xD65F_03C0]; // ret
+    words.resize(text_bytes / 4, 0xD503_201F);
+    let text: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let mut b = ObjectBuilder::new("main.o");
+    let text_idx = b.add_section(ObjectSection::text("__text", text, vec![]));
+    let data_len = binds.len() * 8;
+    let data = b.add_section(ObjectSection::data("__data", vec![0u8; data_len], vec![]));
+    for name in binds {
+        b.add_symbol(ObjectSymbol::Undefined {
+            name: (*name).into(),
+            weak_ref: false,
+        });
+    }
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: text_idx,
+        value: 0,
+        weak: false,
+    });
+    for (i, _) in binds.iter().enumerate() {
+        // The symtab groups locals/defs/undefs; `sym_index` maps the
+        // declaration index onto the relocation's table index.
+        let sym = b.sym_index(i);
+        b.section_mut(data)
+            .relocs
+            .push(ObjectReloc::unsigned(sym).at((i * 8) as u32));
+    }
+    b
+}
+
+fn import_lib(exports: &[&str]) -> Dylib {
+    Dylib {
+        install_name: "/usr/lib/libInc.dylib".into(),
+        current_version: (1 << 16) | (2 << 8),
+        compatibility_version: 1 << 16,
+        exports: exports.iter().map(|s| s.as_bytes().to_vec()).collect(),
+        weak: false,
+        reexport: false,
+    }
+}
+
+fn stable_cfg(
+    kind: OutputType,
+    anchors: Vec<SlackAnchor>,
+    imports: Option<Vec<StableImport>>,
+    sig_anchor: Option<u64>,
+) -> LinkConfig {
+    LinkConfig {
+        ident: "m9-import-churn".into(),
+        filetype: kind,
+        install_name: matches!(kind, OutputType::Dylib).then(|| "@rpath/libinc.dylib".into()),
+        layout_slack: Some(SlackPolicy::default()),
+        slack_anchor: anchors,
+        stable_imports: imports,
+        sig_anchor,
+        dylibs: vec![import_lib(&["_log", "_warn", "_trace"])],
+        ..LinkConfig::default()
+    }
+}
+
+/// The record's import names, in table order.
+fn record_import_names(record: &LinkRecord) -> Vec<String> {
+    record
+        .imports
+        .iter()
+        .map(|k| String::from_utf8_lossy(&k.name).into_owned())
+        .collect()
+}
+
+#[test]
+fn record_carries_the_import_table_and_roundtrips() {
+    let old = inputs(&pointer_main(64, &["_log"]));
+    let cfg1 = stable_cfg(OutputType::Execute, Vec::new(), None, None);
+    let (layout1, objects1) = link(&old, &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+
+    assert_eq!(
+        record_import_names(&record),
+        ["_log"],
+        "the record captures the link's import identities"
+    );
+    let back = LinkRecord::decode(&record.encode()).expect("v2 roundtrip");
+    assert_eq!(
+        back.imports, record.imports,
+        "the codec is lossless over the table"
+    );
+
+    // An empty table roundtrips too (a corpus with no binds).
+    let plain = inputs(&hello(64, false));
+    let (plain_layout, plain_objects) = link(&plain, &cfg(OutputType::Execute, true, Vec::new()));
+    let plain_image = build_image_fused(&plain_layout, &plain_objects).unwrap();
+    let plain_record = LinkRecord::record(&plain_layout, &plain_objects, &plain_image).unwrap();
+    assert_eq!(plain_record.imports, [] as [pgr_core::StableImport; 0]);
+    let plain_back = LinkRecord::decode(&plain_record.encode()).expect("empty-table roundtrip");
+    assert_eq!(plain_back.imports, [] as [pgr_core::StableImport; 0]);
+}
+
+#[test]
+fn import_adding_edit_patches_byte_identically_with_stable_ordinals() {
+    let kind = OutputType::Execute;
+    let old = inputs(&pointer_main(32 * 1024, &["_log"]));
+    let cfg1 = stable_cfg(kind, Vec::new(), None, None);
+    let (layout1, objects1) = link(&old, &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+
+    let dir = workdir("import_churn");
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+    let record1 = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    assert_eq!(record_import_names(&record1), ["_log"]);
+
+    // The edit re-points slot 0 at a NEW import and binds _log one slot
+    // later: first-use renumbering would rewrite _log's word; the anchor
+    // keeps the table [_log] and appends _warn.
+    let new = inputs(&pointer_main(32 * 1024, &["_warn", "_log"]));
+    let cfg2 = stable_cfg(
+        kind,
+        anchors_of(&layout1),
+        Some(record1.imports.clone()),
+        Some(layout1.linkedit.sig_off),
+    );
+    let (layout2, objects2) = link(&new, &cfg2);
+    let image2_full = build_image_fused(&layout2, &objects2).unwrap();
+
+    let decision = plan_patch(&record1, &layout2, &objects2, cfg2.layout_slack.as_ref()).unwrap();
+    let plan = match &decision {
+        PatchDecision::InPlace(p) => p.clone(),
+        PatchDecision::Fallback(r) => panic!("expected in place, fell back: {r}"),
+    };
+    let (outcome, next_record) =
+        apply_patch(&prev, &record1, &plan, &layout2, &objects2, &prev).unwrap();
+    let patched = std::fs::read(&prev).unwrap();
+    assert_eq!(
+        patched, image2_full,
+        "patched output byte-identical to the full emit under import churn"
+    );
+    assert_eq!(
+        record_import_names(&next_record),
+        ["_log", "_warn"],
+        "the refreshed record anchors the next cycle"
+    );
+    assert!(outcome.dirty_tiles < outcome.total_tiles);
+    // The next relink over the same inputs is a no-op (the anchored state
+    // is a fixpoint — importing nothing new renumbers nothing).
+    let decision3 = plan_patch(
+        &next_record,
+        &layout2,
+        &objects2,
+        cfg2.layout_slack.as_ref(),
+    )
+    .unwrap();
+    assert!(matches!(decision3, PatchDecision::InPlace(ref p) if p.is_untouched()));
+}
+
+#[test]
+fn randomized_edit_sequences_keep_the_patch_byte_identical() {
+    // The scaled-down M9 GA randomized gate (roadmap: 10⁴ sequences on the
+    // decision rig; CI runs this deterministic subset). A xorshift64* walk
+    // over edit kinds — body flip, import add, import retarget, no-op —
+    // must land every step on either an in-place patch that is byte-
+    // identical to the full emit, or an honest fallback that re-records.
+    let kind = OutputType::Execute;
+    let exports = ["_log", "_warn", "_trace"];
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    };
+
+    // Link 1: one object, one 8 KiB text, one bind. The seeded baseline.
+    let cfg1 = stable_cfg(kind, Vec::new(), None, None);
+    let (mut layout, objects) = link(&inputs(&pointer_main(8 * 1024, &["_log"])), &cfg1);
+    let mut image = build_image_fused(&layout, &objects).unwrap();
+    let mut record = LinkRecord::record(&layout, &objects, &image).unwrap();
+    let mut binds: usize = 1;
+    let mut shift: usize = 0;
+
+    let dir = workdir("randomized");
+    let prev = dir.join("out");
+    write_image(&image, &prev).unwrap();
+
+    let mut in_place_steps = 0u32;
+    let mut fallback_steps = 0u32;
+    for _seq in 0..16 {
+        for _step in 0..5 {
+            // Pick the edit from the generator.
+            let roll = next() % 5;
+
+            let (new_binds, new_shift, new_text) = match roll {
+                0 => {
+                    // Body growth within slack (same import surface).
+                    (
+                        binds,
+                        shift,
+                        8 * 1024 + usize::try_from(next() % 2048).unwrap(),
+                    )
+                }
+                1 => {
+                    // Import add: an extra pointer to a (possibly new) export.
+                    ((binds + 1).min(exports.len() + 2), shift, 8 * 1024)
+                }
+                2 => {
+                    // Import retarget: same size, different ordinals.
+                    (binds.max(1), shift + 1, 8 * 1024)
+                }
+                3 => {
+                    // Big growth: blows the section's reservation — the
+                    // ladder's honest exit (re-layout tier classification,
+                    // the v1 engine re-runs the full link).
+                    (binds, shift, 8 * 1024 + 24 * 1024)
+                }
+                _ => {
+                    // No-op: the untouched path must stay untouched.
+                    (binds, shift, 8 * 1024)
+                }
+            };
+            binds = new_binds;
+            shift = new_shift % exports.len();
+            let text_bytes = new_text;
+            let build_binds: Vec<&str> = (0..binds)
+                .map(|i| exports[(i + shift) % exports.len()])
+                .collect();
+            let cfg_n = stable_cfg(
+                kind,
+                anchors_of(&layout),
+                Some(record.imports.clone()),
+                Some(layout.linkedit.sig_off),
+            );
+            let (l2, o2) = link(&inputs(&pointer_main(text_bytes, &build_binds)), &cfg_n);
+            let full = build_image_fused(&l2, &o2).unwrap();
+
+            match plan_patch(&record, &l2, &o2, cfg_n.layout_slack.as_ref()).unwrap() {
+                PatchDecision::InPlace(plan) => {
+                    if plan.is_untouched() {
+                        // Nothing changed: the record carries forward.
+                        layout = l2;
+                        continue;
+                    }
+                    let (outcome, next_record) =
+                        apply_patch(&prev, &record, &plan, &l2, &o2, &prev).unwrap();
+                    let patched = std::fs::read(&prev).unwrap();
+                    assert_eq!(
+                        patched, full,
+                        "sequence step diverged: patched != full emit (edit roll {roll})"
+                    );
+                    assert_eq!(next_record, LinkRecord::record(&l2, &o2, &full).unwrap());
+                    record = next_record;
+                    layout = l2;
+                    image = full;
+                    assert!(outcome.bytes_patched <= image.len() as u64);
+                    in_place_steps += 1;
+                }
+                PatchDecision::Fallback(reason) => {
+                    // The ladder's honest exit: re-record from the full link.
+                    fallback_steps += 1;
+                    write_image(&full, &prev).unwrap();
+                    record = LinkRecord::record(&l2, &o2, &full).unwrap();
+                    layout = l2;
+                    // The fallback ladder never produces an untouched plan
+                    // for a changed corpus; record why for the report.
+                    assert!(!matches!(
+                        reason,
+                        FallbackReason::RecordUnreadable | FallbackReason::Disabled
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        in_place_steps > 0 && fallback_steps > 0,
+        "the walk must exercise both tiers (in place: {in_place_steps}, fallback: {fallback_steps})"
     );
 }

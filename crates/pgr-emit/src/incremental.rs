@@ -27,7 +27,7 @@
 //!    `std::fs::copy` resolves to `fclonefileat`: an instant APFS
 //!    copy-on-write clone; on Linux to `copy_file_range`), `pwrite` only
 //!    the dirty tiles into the clone, rebuild page 0 with the freshly
-//!    derived `LC_UUID`, and rebuild the CodeDirectory from the *merged*
+//!    derived `LC_UUID`, and rebuild the `CodeDirectory` from the *merged*
 //!    hash table — recorded hashes for clean tiles, recomputed hashes for
 //!    dirty ones — then rename over the output. Bytes written scale with
 //!    the change, not the image.
@@ -43,7 +43,7 @@
 //! is the one it recorded. The cheap gate ([`check_output`]) hashes the
 //! first page and a deterministic 1/64 sample of the hashed pages; the
 //! code signature is the *load-time* integrity mechanism for everything
-//! else (a tampered clean page breaks the CodeDirectory at exec), and
+//! else (a tampered clean page breaks the `CodeDirectory` at exec), and
 //! `-incremental-verify` is the audit gate that hashes nothing less than
 //! everything.
 
@@ -73,8 +73,11 @@ const MAGIC: &[u8; 8] = b"PGRINC1\0";
 
 /// Record format revision. Bump when the payload layout changes; older
 /// records then fail to decode and the relink silently falls back to the
-/// full link (the fallback must always be available — §7.3).
-pub const FORMAT_VERSION: u32 = 1;
+/// full link (the fallback must always be available — §7.3). **v2** adds
+/// the link's import table ([`LinkRecord::imports`], M9 tier 2a): the
+/// anchored relink keeps recorded bind ordinals instead of renumbering
+/// them (§7.3 step 5); v1 records decode to `None` and re-record.
+pub const FORMAT_VERSION: u32 = 2;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -167,9 +170,9 @@ pub struct LinkRecord {
     pub text_vmsize: u64,
     /// Entry offset within `__TEXT`.
     pub entryoff: u64,
-    /// The signature identity string (CodeDirectory length depends on it).
+    /// The signature identity string (`CodeDirectory` length depends on it).
     pub ident: String,
-    /// The hashed prefix length (the CodeDirectory codeLimit = `sig_off`
+    /// The hashed prefix length (the `CodeDirectory` codeLimit = `sig_off`
     /// when the image is signed, 0 when `-no_adhoc`).
     pub code_limit: u64,
     /// The `__LINKEDIT` chunk plan (offsets + sizes, contract-coupled).
@@ -186,6 +189,11 @@ pub struct LinkRecord {
     /// in place, pages ≥ 1 over the final content — the fused emit's
     /// table exactly).
     pub page_hashes: Vec<[u8; 32]>,
+    /// The link's import table as identities, in ordinal order (v2, M9
+    /// tier 2a): the anchor the next relink binds its own import ordinals
+    /// to — recorded entries keep their ordinals, new binds append, and no
+    /// edit renumbers the table (§7.3 step 5; `LinkConfig::stable_imports`).
+    pub imports: Vec<pgr_core::stable_imports::StableImport>,
 }
 
 /// Why the incremental planner fell back to the full link. The fallback is
@@ -382,9 +390,16 @@ fn tile_piece_spans(dst: u64, bytes: &[u8]) -> Vec<RecordedSpan> {
 fn patch_span(at: u64, op: &PatchOp) -> RecordedSpan {
     let mut h = Sha256::new();
     let (in_offset, a, b): (u32, u64, u64) = match op {
-        PatchOp::Adrp { in_offset, page_delta } => (*in_offset, *page_delta as u64, 0),
+        PatchOp::Adrp {
+            in_offset,
+            page_delta,
+        } => (*in_offset, *page_delta as u64, 0),
         PatchOp::PageOff12 { in_offset, imm12 } => (*in_offset, u64::from(*imm12), 0),
-        PatchOp::Branch26 { in_offset, pc, delta } => (*in_offset, *pc, *delta as u64),
+        PatchOp::Branch26 {
+            in_offset,
+            pc,
+            delta,
+        } => (*in_offset, *pc, *delta as u64),
         PatchOp::Write64 { in_offset, value } => (*in_offset, *value, 0),
     };
     let kind: u8 = match op {
@@ -423,14 +438,14 @@ fn span_table(layout: &Layout, objects: &[InputObject]) -> Result<SpanTable, Pat
         // dwarf a tile; their digests are per tile piece so the dirty-tile
         // set tracks the change, not the span. Synthetics, patch writes
         // and chain words never exceed a tile.
-        runs: ctx
-            .run_spans
-            .iter()
-            .flat_map(to_pieces)
-            .collect(),
+        runs: ctx.run_spans.iter().flat_map(to_pieces).collect(),
         synths: ctx.synth_spans.iter().map(to_span).collect(),
         blobs: ctx.blob_spans.iter().flat_map(to_pieces).collect(),
-        patches: ctx.patches.iter().map(|(at, op)| patch_span(*at, op)).collect(),
+        patches: ctx
+            .patches
+            .iter()
+            .map(|(at, op)| patch_span(*at, op))
+            .collect(),
         words: ctx
             .words
             .iter()
@@ -463,7 +478,12 @@ fn skeleton_of(layout: &Layout) -> (Vec<RecordedSegment>, Vec<RecordedSection>) 
             flags: s.flags,
             align_log2: s.align_log2,
             vm_addr: s.vm_addr,
-            content_size: s.pieces.iter().map(|p| p.offset + p.size).max().unwrap_or(0),
+            content_size: s
+                .pieces
+                .iter()
+                .map(|p| p.offset + p.size)
+                .max()
+                .unwrap_or(0),
             size: s.size,
             file_off: s.file_off,
             zerofill: s.zerofill,
@@ -566,6 +586,9 @@ impl LinkRecord {
             sections,
             spans,
             page_hashes,
+            // The import identities the next relink anchors its ordinals
+            // to (M9 tier 2a; the planner's assigned order).
+            imports: layout.fixups.stable_keys.clone(),
         })
     }
 
@@ -620,6 +643,14 @@ impl LinkRecord {
             e(&mut p, s.filesize);
             e(&mut p, u64::from(s.maxprot));
             e(&mut p, u64::from(s.initprot));
+        }
+        e(&mut p, self.imports.len() as u64);
+        for k in &self.imports {
+            e(&mut p, u64::from(k.lib_ordinal));
+            e(&mut p, u64::from(k.weak));
+            e(&mut p, k.outlined_addend as u64);
+            e(&mut p, k.name.len() as u64);
+            p.extend_from_slice(&k.name);
         }
         e(&mut p, self.sections.len() as u64);
         for s in &self.sections {
@@ -731,6 +762,23 @@ impl LinkRecord {
             })
         };
         let segments = d.list(&mut segment)?;
+        let mut import = |d: &mut Decoder<'_>| {
+            let lib_ordinal = d.u64()?;
+            let weak_byte = d.u64()?;
+            let outlined_addend = d.u64()? as i64;
+            let name_len = usize::try_from(d.u64()?).ok()?;
+            if name_len > 4096 {
+                return None;
+            }
+            let name = d.take(name_len)?.to_vec();
+            Some(pgr_core::stable_imports::StableImport {
+                lib_ordinal: u8::try_from(lib_ordinal).ok()?,
+                name,
+                outlined_addend,
+                weak: weak_byte == 1,
+            })
+        };
+        let imports = d.list(&mut import)?;
         let mut section = |d: &mut Decoder<'_>| {
             let seg = d.str()?;
             let name = d.str()?;
@@ -786,6 +834,7 @@ impl LinkRecord {
             linkedit: le,
             header_sha,
             segments,
+            imports,
             sections,
             spans,
             page_hashes,
@@ -828,10 +877,7 @@ impl Decoder<'_> {
         String::from_utf8(self.take(len)?.to_vec()).ok()
     }
 
-    fn list<T>(
-        &mut self,
-        item: &mut impl FnMut(&mut Decoder<'_>) -> Option<T>,
-    ) -> Option<Vec<T>> {
+    fn list<T>(&mut self, item: &mut impl FnMut(&mut Decoder<'_>) -> Option<T>) -> Option<Vec<T>> {
         let n = usize::try_from(self.u64()?).ok()?;
         if n > self.b.len() {
             return None;
@@ -871,7 +917,11 @@ fn skeleton_mismatch(record: &LinkRecord, layout: &Layout) -> Option<String> {
     let numeric: [(&str, u64, u64); 9] = [
         ("file_size", record.file_size, layout.file_size),
         ("image_base", record.image_base, layout.image_base),
-        ("filetype", u64::from(record.filetype), u64::from(layout.filetype)),
+        (
+            "filetype",
+            u64::from(record.filetype),
+            u64::from(layout.filetype),
+        ),
         ("text_vmsize", record.text_vmsize, layout.text_vmsize),
         ("entryoff", record.entryoff, layout.entryoff),
         ("code_limit", record.code_limit, content_limit(layout)),
@@ -998,7 +1048,10 @@ pub fn plan_patch(
 ) -> Result<PatchDecision, PatchError> {
     if let Some(detail) = skeleton_mismatch(record, layout) {
         let tier = ladder_tier(record, layout, slack);
-        return Ok(PatchDecision::Fallback(FallbackReason::Skeleton { detail, tier }));
+        return Ok(PatchDecision::Fallback(FallbackReason::Skeleton {
+            detail,
+            tier,
+        }));
     }
     let new_spans = span_table(layout, objects)?;
     let mut ranges: Vec<Range<u64>> = Vec::new();
@@ -1066,10 +1119,13 @@ pub fn check_output(prev_path: &Path, record: &LinkRecord) -> Result<Integrity, 
         path: prev_path.display().to_string(),
         source,
     })?;
-    let len = file.metadata().map_err(|source| PatchError::Io {
-        path: prev_path.display().to_string(),
-        source,
-    })?.len();
+    let len = file
+        .metadata()
+        .map_err(|source| PatchError::Io {
+            path: prev_path.display().to_string(),
+            source,
+        })?
+        .len();
     if len != record.file_size {
         return Ok(Integrity::Mismatch {
             detail: format!("file is {len} bytes, record says {}", record.file_size),
@@ -1088,10 +1144,11 @@ pub fn check_output(prev_path: &Path, record: &LinkRecord) -> Result<Integrity, 
         let at = p * HASH_PAGE;
         let take = HASH_PAGE.min(record.code_limit - at);
         let mut buf = vec![0u8; take as usize];
-        file.read_exact_at(&mut buf, at).map_err(|source| PatchError::Io {
-            path: prev_path.display().to_string(),
-            source,
-        })?;
+        file.read_exact_at(&mut buf, at)
+            .map_err(|source| PatchError::Io {
+                path: prev_path.display().to_string(),
+                source,
+            })?;
         let got: [u8; 32] = Sha256::digest(&buf).into();
         let want = record
             .page_hashes
@@ -1114,7 +1171,7 @@ pub fn check_output(prev_path: &Path, record: &LinkRecord) -> Result<Integrity, 
 
 /// Applies an in-place [`PatchDecision`]: clones the previous output,
 /// `pwrite`s the dirty tiles, rebuilds page 0 (new `LC_UUID`) and the
-/// CodeDirectory (merged hash table), renames over the destination, and
+/// `CodeDirectory` (merged hash table), renames over the destination, and
 /// returns the outcome *plus the record of the new state* (the next
 /// relink's baseline).
 ///
@@ -1233,10 +1290,11 @@ fn patch_file(
     code_limit: u64,
 ) -> Result<(PatchOutcome, Vec<[u8; 32]>), PatchError> {
     let write_at = |file: &mut std::fs::File, at: u64, bytes: &[u8]| -> Result<u64, PatchError> {
-        file.write_all_at(bytes, at).map_err(|source| PatchError::Io {
-            path: "patch target".into(),
-            source,
-        })?;
+        file.write_all_at(bytes, at)
+            .map_err(|source| PatchError::Io {
+                path: "patch target".into(),
+                source,
+            })?;
         Ok(bytes.len() as u64)
     };
 
@@ -1296,14 +1354,14 @@ fn patch_file(
     // the header stays exactly as the full emit writes it.
     if code_limit > 0 {
         let uuid = signature::derive_uuid(&merged.concat());
-        for (t, tile) in scratches.iter_mut() {
+        for (t, tile) in &mut scratches {
             if *t == 0 {
                 let uuid_at = layout.linkedit.uuid_at as usize;
-                let dst = tile
-                    .get_mut(uuid_at..uuid_at + 16)
-                    .ok_or_else(|| PatchError::Contract {
-                        message: "UUID field leaves tile 0".into(),
-                    })?;
+                let dst =
+                    tile.get_mut(uuid_at..uuid_at + 16)
+                        .ok_or_else(|| PatchError::Contract {
+                            message: "UUID field leaves tile 0".into(),
+                        })?;
                 dst.copy_from_slice(&uuid);
                 if page_count_of(*t, code_limit) > 0 {
                     let first_page = HASH_PAGE as usize;
@@ -1325,8 +1383,13 @@ fn patch_file(
             final_flat.extend_from_slice(h);
         }
         let is_exec = layout.filetype == pgr_format::consts::MH_EXECUTE;
-        let blob =
-            signature::build_superblob(&layout.ident, code_limit, &final_flat, layout.text_vmsize, is_exec)?;
+        let blob = signature::build_superblob(
+            &layout.ident,
+            code_limit,
+            &final_flat,
+            layout.text_vmsize,
+            is_exec,
+        )?;
         if blob.len() as u64 != layout.linkedit.sig_size {
             return Err(PatchError::Contract {
                 message: format!(
@@ -1392,11 +1455,11 @@ mod tests {
         let old = vec![mk(0, 1), mk(100, 2)];
         let mut ranges = Vec::new();
         diff_spans(&old, &old.clone(), &mut ranges);
-        assert!(ranges.is_empty());
+        assert_eq!(ranges, [] as [std::ops::Range<u64>; 0]);
         // Same digests at the same offsets, different objects: quiet.
         let new = vec![mk(0, 1), mk(100, 2)];
         diff_spans(&old, &new, &mut ranges);
-        assert!(ranges.is_empty());
+        assert_eq!(ranges, [] as [std::ops::Range<u64>; 0]);
     }
 
     #[test]
@@ -1428,13 +1491,19 @@ mod tests {
             sections: vec![RecordedSection {
                 seg: "__TEXT".into(),
                 name: "__text".into(),
-                flags: 0x80000400,
+                flags: 0x8000_0400,
                 align_log2: 2,
                 vm_addr: 0x4000,
                 content_size: 40,
                 size: 4096,
                 file_off: 0x4000,
                 zerofill: false,
+            }],
+            imports: vec![pgr_core::stable_imports::StableImport {
+                lib_ordinal: 1,
+                name: b"_log".to_vec(),
+                outlined_addend: 0,
+                weak: false,
             }],
             spans: SpanTable {
                 runs: vec![RecordedSpan {
