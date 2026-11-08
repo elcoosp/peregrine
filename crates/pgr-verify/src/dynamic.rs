@@ -45,7 +45,7 @@ pub(crate) fn check_fixups(
             report.issues.push(Issue::error(
                 Code::FixupsPayload,
                 format!("payload {name} {off} beyond the payload size {payload_len}"),
-                Some(lc.dataoff as u64),
+                Some(u64::from(lc.dataoff)),
             ));
             return;
         }
@@ -65,7 +65,7 @@ pub(crate) fn check_fixups(
                 starts.seg_count,
                 img.segments.len()
             ),
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
         return;
     }
@@ -88,7 +88,7 @@ pub(crate) fn check_fixups(
                     imp.lib_ordinal,
                     img.dylibs.len()
                 ),
-                Some(lc.dataoff as u64 + u64::from(hdr.imports_offset)),
+                Some(u64::from(lc.dataoff) + u64::from(hdr.imports_offset)),
             ));
         }
         // Name blob: names live at payload[symbols_offset + name_offset]
@@ -98,14 +98,16 @@ pub(crate) fn check_fixups(
             report.issues.push(Issue::error(
                 Code::FixupsImport,
                 format!("import {i}: name offset beyond the payload name blob"),
-                Some(lc.dataoff as u64 + u64::from(hdr.symbols_offset)),
+                Some(u64::from(lc.dataoff) + u64::from(hdr.symbols_offset)),
             ));
         } else if payload[name_start..].iter().all(|&b| b != 0) {
             report.issues.push(Issue::error(
                 Code::FixupsImport,
                 format!("import {i}: unterminated name in the payload name blob"),
                 Some(
-                    lc.dataoff as u64 + u64::from(hdr.symbols_offset) + u64::from(imp.name_offset),
+                    u64::from(lc.dataoff)
+                        + u64::from(hdr.symbols_offset)
+                        + u64::from(imp.name_offset),
                 ),
             ));
         }
@@ -136,7 +138,7 @@ pub(crate) fn check_fixups(
                     "pointer format {} unsupported (need DYLD_CHAINED_PTR_64_OFFSET or _64)",
                     seg.pointer_format
                 ),
-                Some(lc.dataoff as u64 + u64::from(off)),
+                Some(u64::from(lc.dataoff) + u64::from(off)),
             ));
             return;
         }
@@ -145,7 +147,7 @@ pub(crate) fn check_fixups(
             report.issues.push(Issue::error(
                 Code::FixupsPayload,
                 format!("chain page size {page_size:#x} is neither 0x1000 nor 0x4000"),
-                Some(lc.dataoff as u64 + u64::from(off)),
+                Some(u64::from(lc.dataoff) + u64::from(off)),
             ));
             return;
         }
@@ -153,7 +155,7 @@ pub(crate) fn check_fixups(
             report.issues.push(Issue::error(
                 Code::FixupsPayload,
                 format!("fixup segment index {seg_index} has no matching LC_SEGMENT_64"),
-                Some(lc.dataoff as u64),
+                Some(u64::from(lc.dataoff)),
             ));
             return;
         };
@@ -166,7 +168,7 @@ pub(crate) fn check_fixups(
                     "payload segment_offset {:#x} != segment fileoff {:#x} (image-base-relative contract)",
                     seg.segment_offset, mach_seg.fileoff
                 ),
-                Some(lc.dataoff as u64 + u64::from(off)),
+                Some(u64::from(lc.dataoff) + u64::from(off)),
             ));
         }
         // Pages cannot exceed the segment's virtual span.
@@ -179,7 +181,7 @@ pub(crate) fn check_fixups(
                     "page_count {} covers more than the segment vmsize {:#x}",
                     seg.page_count, mach_seg.vmsize
                 ),
-                Some(lc.dataoff as u64 + u64::from(off)),
+                Some(u64::from(lc.dataoff) + u64::from(off)),
             ));
         }
 
