@@ -111,36 +111,18 @@ pub fn parse_archive(bytes: &[u8]) -> Result<Archive, FormatError> {
 
     while pos < bytes.len() {
         let hdr_off = pos;
-        if bytes.len() - pos < HEADER_SIZE {
-            return Err(FormatError::Truncated {
-                offset: pos,
-                need: HEADER_SIZE,
-                have: bytes.len() - pos,
-            });
-        }
-        let hdr = &bytes[pos..pos + HEADER_SIZE];
-        if hdr[58] != b'`' || hdr[59] != b'\n' {
-            return Err(FormatError::Invalid {
-                offset: pos + 58,
-                what: "ar member end marker",
-                value: u16::from_le_bytes([hdr[58], hdr[59]]) as u64,
-            });
-        }
-        let size = decimal_field(hdr, 48, 10, pos + 48)? as u64;
-        let mtime = decimal_field(hdr, 16, 12, pos + 16)? as u64;
-        let uid = decimal_field(hdr, 28, 6, pos + 28)?;
-        let gid = decimal_field(hdr, 34, 6, pos + 34)?;
-        let mode = decimal_field(hdr, 40, 8, pos + 40)?;
-
-        let name_field = trim_end_spaces(&hdr[..16]);
+        let hdr = member_header(bytes, pos)?;
         let data_off = pos + HEADER_SIZE;
-        let data_end = data_off
-            .checked_add(size as usize)
-            .ok_or(FormatError::Invalid {
-                offset: pos + 48,
-                what: "ar member size overflows",
-                value: size,
-            })?;
+        let size = usize::try_from(hdr.size).map_err(|_| FormatError::Invalid {
+            offset: pos + 48,
+            what: "ar member size overflows",
+            value: hdr.size,
+        })?;
+        let data_end = data_off.checked_add(size).ok_or(FormatError::Invalid {
+            offset: pos + 48,
+            what: "ar member size overflows",
+            value: hdr.size,
+        })?;
         if data_end > bytes.len() {
             return Err(FormatError::Overrun {
                 offset: data_off,
@@ -149,111 +131,179 @@ pub fn parse_archive(bytes: &[u8]) -> Result<Archive, FormatError> {
         }
 
         // Structural member classification.
-        let name = name_field.to_vec();
-        if name == b"/" || name == b"__.SYMDEF" || name == b"__.SYMDEF SORTED" {
+        let symbol_table_wide = match hdr.name.as_slice() {
+            b"/" | b"__.SYMDEF" | b"__.SYMDEF SORTED" => Some(false),
+            b"/SYM64/" | b"__.SYMDEF_64" | b"__.SYMDEF_64 SORTED" => Some(true),
+            _ => None,
+        };
+        if let Some(wide) = symbol_table_wide {
             if saw_symbol_table {
                 return Err(FormatError::Malformed {
                     what: "duplicate archive symbol table".into(),
                 });
             }
             saw_symbol_table = true;
-            parse_symbol_table(bytes, data_off, size, false, &mut raw_index)?;
-            pos = pad_end(data_end, size);
+            parse_symbol_table(bytes, data_off, hdr.size, wide, &mut raw_index)?;
+            pos = pad_end(data_end, hdr.size);
             continue;
         }
-        if name == b"/SYM64/" || name == b"__.SYMDEF_64" || name == b"__.SYMDEF_64 SORTED" {
-            if saw_symbol_table {
-                return Err(FormatError::Malformed {
-                    what: "duplicate archive symbol table".into(),
-                });
-            }
-            saw_symbol_table = true;
-            parse_symbol_table(bytes, data_off, size, true, &mut raw_index)?;
-            pos = pad_end(data_end, size);
-            continue;
-        }
-        if name == b"//" {
+        if hdr.name == b"//" {
             long_names = Some(&bytes[data_off..data_end]);
-            pos = pad_end(data_end, size);
+            pos = pad_end(data_end, hdr.size);
             continue;
         }
 
         // Content member: resolve the name, then record it.
-        let (name, data_start) = if name.starts_with(b"#1/") {
-            // BSD long name: `#1/<len>` — the name is the first `<len>` data
-            // bytes (NUL-padded).
-            let name_len = decimal_field(hdr, 3, 13, pos + 3)? as usize;
-            if name_len > size as usize {
-                return Err(FormatError::Overrun {
-                    offset: data_off,
-                    overrun: name_len - size as usize,
-                });
-            }
-            let raw = &bytes[data_off..data_off + name_len];
-            let trimmed = trim_end_nul(raw);
-            (
-                core::str::from_utf8(trimmed)
-                    .map_err(|_| FormatError::Malformed {
-                        what: "BSD long member name is not UTF-8".into(),
-                    })?
-                    .to_string(),
-                data_off + name_len,
-            )
-        } else if name.starts_with(b"/") {
-            // GNU long-name reference: `/offset` into the `//` table.
-            let off = decimal_field(hdr, 1, 15, pos + 1)? as usize;
-            let table = long_names.ok_or(FormatError::Malformed {
-                what: "member references the long-name table before it appears".into(),
-            })?;
-            let entry = table.get(off..).ok_or(FormatError::Overrun {
-                offset: data_off,
-                overrun: off.saturating_sub(table.len()),
-            })?;
-            let end = entry
-                .iter()
-                .position(|&b| b == b'\n' || b == b'\0')
-                .unwrap_or(entry.len());
-            // GNU writes `name/\n`; the trailing `/` is the separator.
-            let entry = trim_end_spaces(&entry[..end]);
-            let entry = entry.strip_suffix(b"/").unwrap_or(entry);
-            (
-                core::str::from_utf8(entry)
-                    .map_err(|_| FormatError::Malformed {
-                        what: "GNU long member name is not UTF-8".into(),
-                    })?
-                    .to_string(),
-                data_off,
-            )
-        } else {
-            // Short name: Apple space-padded (`foo.o`) or GNU `/`-suffixed
-            // (`foo.o/`).
-            let trimmed = trim_end_spaces(name_field);
-            let trimmed = trimmed.strip_suffix(b"/").unwrap_or(trimmed);
-            (
-                core::str::from_utf8(trimmed)
-                    .map_err(|_| FormatError::Malformed {
-                        what: "member name is not UTF-8".into(),
-                    })?
-                    .to_string(),
-                data_off,
-            )
-        };
-
+        let (name, data_start) = content_member_name(
+            bytes,
+            &bytes[pos..pos + HEADER_SIZE],
+            pos,
+            data_off,
+            hdr.size,
+            long_names,
+        )?;
         archive.members.push(ArchiveMember {
             name,
             offset: data_start as u64,
             size: (data_end - data_start) as u64,
             header_offset: hdr_off as u64,
-            mtime,
-            uid,
-            gid,
-            mode,
+            mtime: hdr.mtime,
+            uid: hdr.uid,
+            gid: hdr.gid,
+            mode: hdr.mode,
         });
-        pos = pad_end(data_end, size);
+        pos = pad_end(data_end, hdr.size);
     }
 
     resolve_index(&mut archive, raw_index)?;
     Ok(archive)
+}
+
+/// One parsed ar member header: the decimal fields and the raw name slot.
+struct MemberHeader {
+    size: u64,
+    mtime: u64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    /// The raw 16-byte name field, trailing spaces trimmed.
+    name: Vec<u8>,
+}
+
+/// Parses and validates one member header at `pos` (the end marker and the
+/// decimal fields).
+fn member_header(bytes: &[u8], pos: usize) -> Result<MemberHeader, FormatError> {
+    if bytes.len() - pos < HEADER_SIZE {
+        return Err(FormatError::Truncated {
+            offset: pos,
+            need: HEADER_SIZE,
+            have: bytes.len() - pos,
+        });
+    }
+    let hdr = &bytes[pos..pos + HEADER_SIZE];
+    if hdr[58] != b'`' || hdr[59] != b'\n' {
+        return Err(FormatError::Invalid {
+            offset: pos + 58,
+            what: "ar member end marker",
+            value: u64::from(u16::from_le_bytes([hdr[58], hdr[59]])),
+        });
+    }
+    Ok(MemberHeader {
+        size: u64::from(decimal_field(hdr, 48, 10, pos + 48)?),
+        mtime: u64::from(decimal_field(hdr, 16, 12, pos + 16)?),
+        uid: decimal_field(hdr, 28, 6, pos + 28)?,
+        gid: decimal_field(hdr, 34, 6, pos + 34)?,
+        mode: decimal_field(hdr, 40, 8, pos + 40)?,
+        name: trim_end_spaces(&hdr[..16]).to_vec(),
+    })
+}
+
+/// Resolves a content member's name: BSD `#1/<len>` embedded names, GNU
+/// `/offset` references into the `//` long-name table, or the plain short
+/// form. Returns `(name, data start)` — the long forms consume bytes from
+/// the member data.
+fn content_member_name(
+    bytes: &[u8],
+    hdr: &[u8],
+    pos: usize,
+    data_off: usize,
+    size: u64,
+    long_names: Option<&[u8]>,
+) -> Result<(String, usize), FormatError> {
+    let name_field = trim_end_spaces(&hdr[..16]);
+    if name_field.starts_with(b"#1/") {
+        // BSD long name: `#1/<len>` — the name is the first `<len>` data
+        // bytes (NUL-padded).
+        let name_len = usize::try_from(decimal_field(hdr, 3, 13, pos + 3)?).map_err(|_| {
+            FormatError::Overrun {
+                offset: data_off,
+                overrun: usize::MAX,
+            }
+        })?;
+        let size = usize::try_from(size).map_err(|_| FormatError::Overrun {
+            offset: data_off,
+            overrun: usize::MAX,
+        })?;
+        if name_len > size {
+            return Err(FormatError::Overrun {
+                offset: data_off,
+                overrun: name_len - size,
+            });
+        }
+        let raw = &bytes[data_off..data_off + name_len];
+        let trimmed = trim_end_nul(raw);
+        return Ok((
+            core::str::from_utf8(trimmed)
+                .map_err(|_| FormatError::Malformed {
+                    what: "BSD long member name is not UTF-8".into(),
+                })?
+                .to_string(),
+            data_off + name_len,
+        ));
+    }
+    if name_field.starts_with(b"/") {
+        // GNU long-name reference: `/offset` into the `//` table.
+        let off = usize::try_from(decimal_field(hdr, 1, 15, pos + 1)?).map_err(|_| {
+            FormatError::Overrun {
+                offset: data_off,
+                overrun: usize::MAX,
+            }
+        })?;
+        let table = long_names.ok_or(FormatError::Malformed {
+            what: "member references the long-name table before it appears".into(),
+        })?;
+        let entry = table.get(off..).ok_or(FormatError::Overrun {
+            offset: data_off,
+            overrun: off.saturating_sub(table.len()),
+        })?;
+        let end = entry
+            .iter()
+            .position(|&b| b == b'\n' || b == b'\0')
+            .unwrap_or(entry.len());
+        // GNU writes `name/\n`; the trailing `/` is the separator.
+        let entry = trim_end_spaces(&entry[..end]);
+        let entry = entry.strip_suffix(b"/").unwrap_or(entry);
+        return Ok((
+            core::str::from_utf8(entry)
+                .map_err(|_| FormatError::Malformed {
+                    what: "GNU long member name is not UTF-8".into(),
+                })?
+                .to_string(),
+            data_off,
+        ));
+    }
+    // Short name: Apple space-padded (`foo.o`) or GNU `/`-suffixed
+    // (`foo.o/`).
+    let trimmed = trim_end_spaces(name_field);
+    let trimmed = trimmed.strip_suffix(b"/").unwrap_or(trimmed);
+    Ok((
+        core::str::from_utf8(trimmed)
+            .map_err(|_| FormatError::Malformed {
+                what: "member name is not UTF-8".into(),
+            })?
+            .to_string(),
+        data_off,
+    ))
 }
 
 /// End of member data plus the odd-size pad byte (absent at EOF is fine).
@@ -276,7 +326,12 @@ fn parse_symbol_table(
     wide: bool,
     out: &mut Vec<(String, u64)>,
 ) -> Result<(), FormatError> {
-    let data = &bytes[data_off..data_off + size as usize];
+    let size = usize::try_from(size).map_err(|_| FormatError::Invalid {
+        offset: data_off,
+        what: "symbol table size exceeds the address space",
+        value: size,
+    })?;
+    let data = &bytes[data_off..data_off + size];
     let (count, cursor) = if wide {
         if data.len() < 8 {
             return Err(FormatError::Truncated {
@@ -300,24 +355,28 @@ fn parse_symbol_table(
             });
         }
         (
-            u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as u64,
+            u64::from(u32::from_le_bytes([data[0], data[1], data[2], data[3]])),
             4usize,
         )
     };
     let entry_size = if wide { 16 } else { 8 };
-    let entries_bytes = (count as usize)
-        .checked_mul(entry_size)
-        .ok_or(FormatError::Invalid {
-            offset: data_off,
-            what: "ranlib entry count overflows",
-            value: count,
-        })?;
+    let count_raw = count;
+    let count = usize::try_from(count).map_err(|_| FormatError::Invalid {
+        offset: data_off,
+        what: "ranlib entry count exceeds the address space",
+        value: count_raw,
+    })?;
+    let entries_bytes = count.checked_mul(entry_size).ok_or(FormatError::Invalid {
+        offset: data_off,
+        what: "ranlib entry count overflows",
+        value: count_raw,
+    })?;
     let strings_off = cursor
         .checked_add(entries_bytes)
         .ok_or(FormatError::Invalid {
             offset: data_off,
             what: "ranlib table overflows",
-            value: count,
+            value: count_raw,
         })?;
     if strings_off > data.len() {
         return Err(FormatError::Overrun {
@@ -326,7 +385,7 @@ fn parse_symbol_table(
         });
     }
     let strings = &data[strings_off..];
-    for i in 0..count as usize {
+    for i in 0..count {
         let base = cursor + i * entry_size;
         let (strx, member_off) = if wide {
             let strx = u64::from_le_bytes(data[base..base + 8].try_into().expect("16-byte entry"));
@@ -339,9 +398,10 @@ fn parse_symbol_table(
                 u32::from_le_bytes(data[base + 4..base + 8].try_into().expect("8-byte entry"));
             (u64::from(strx), u64::from(off))
         };
-        let name_bytes = strings.get(strx as usize..).ok_or(FormatError::Overrun {
+        let strx = usize::try_from(strx).unwrap_or(usize::MAX);
+        let name_bytes = strings.get(strx..).ok_or(FormatError::Overrun {
             offset: data_off + base,
-            overrun: strx as usize,
+            overrun: strx,
         })?;
         let end = name_bytes
             .iter()
@@ -349,7 +409,7 @@ fn parse_symbol_table(
             .ok_or(FormatError::Invalid {
                 offset: data_off + base,
                 what: "ranlib string-table entry without a NUL terminator",
-                value: strx,
+                value: u64::try_from(strx).unwrap_or(u64::MAX),
             })?;
         let name =
             core::str::from_utf8(&name_bytes[..end]).map_err(|_| FormatError::Malformed {
@@ -376,7 +436,7 @@ fn resolve_index(archive: &mut Archive, raw: Vec<(String, u64)>) -> Result<(), F
             })?;
         archive.index.push(ArchiveIndexEntry {
             name,
-            member: member as u32,
+            member: u32::try_from(member).unwrap_or(u32::MAX),
         });
     }
     Ok(())
@@ -394,11 +454,11 @@ fn decimal_field(hdr: &[u8], off: usize, len: usize, abs: usize) -> Result<u32, 
             return Err(FormatError::Invalid {
                 offset: abs,
                 what: "ar header decimal field",
-                value: b as u64,
+                value: u64::from(b),
             });
         }
         value = value * 10 + u64::from(b - b'0');
-        if value > u32::MAX as u64 {
+        if value > u64::from(u32::MAX) {
             return Err(FormatError::Invalid {
                 offset: abs,
                 what: "ar header decimal field overflows u32",
@@ -406,7 +466,7 @@ fn decimal_field(hdr: &[u8], off: usize, len: usize, abs: usize) -> Result<u32, 
             });
         }
     }
-    Ok(value as u32)
+    Ok(u32::try_from(value).unwrap_or(u32::MAX))
 }
 
 fn trim_end_spaces(bytes: &[u8]) -> &[u8] {
