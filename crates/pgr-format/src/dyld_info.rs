@@ -106,7 +106,7 @@ impl DyldInfoCommand {
             export_off: u32_at(40),
             export_size: u32_at(44),
         };
-        if cmd.cmdsize != DYLD_INFO_COMMAND_SIZE as u32 {
+        if cmd.cmdsize != u32::try_from(DYLD_INFO_COMMAND_SIZE).unwrap_or(u32::MAX) {
             return Err(FormatError::Invalid {
                 offset: 4,
                 what: "dyld_info_command cmdsize must be 48",
@@ -195,7 +195,8 @@ pub fn encode_bind_stream(entries: &[BindEntry]) -> Vec<u8> {
             }
             BindOrdinal::Special(neg) => {
                 // The immediate encodes the magnitude: dyld computes `0 - imm`.
-                let mag = (-i64::from(neg)) as u8;
+                // Special ordinals are non-positive, so this is `|neg|`.
+                let mag = neg.unsigned_abs();
                 out.push(BIND_SET_DYLIB_SPECIAL_IMM | (mag & 0x0F));
             }
         }
@@ -301,9 +302,10 @@ pub fn decode_bind_stream(bytes: &[u8]) -> Result<Vec<BindEntry>, FormatError> {
                 i = next;
             }
             BIND_SET_DYLIB_SPECIAL_IMM => {
-                // The immediate is a small magnitude; 0 means −16.
+                // The immediate is a small magnitude; 0 means −16. The
+                // negation always fits an i8 (|mag| ≤ 16 by construction).
                 let mag = if imm == 0 { 16 } else { i64::from(imm) };
-                ordinal = BindOrdinal::Special((-mag) as i8);
+                ordinal = BindOrdinal::Special(i8::try_from(-mag).unwrap_or(i8::MIN));
             }
             BIND_SET_TRAILING_FLAGS_SYMBOL => {
                 flags = imm;
@@ -393,7 +395,7 @@ fn uleb_at(data: &[u8], at: usize) -> Option<(u64, usize)> {
 pub fn sleb(mut v: i64) -> Vec<u8> {
     let mut out = Vec::new();
     loop {
-        let byte = (v & 0x7f) as u8;
+        let byte = u8::try_from(v & 0x7f).unwrap_or(0x7f);
         v >>= 7;
         let sign_bit = byte & 0x40 != 0;
         if (v == 0 && !sign_bit) || (v == -1 && sign_bit) {
