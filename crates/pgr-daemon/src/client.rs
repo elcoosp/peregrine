@@ -376,6 +376,6 @@ mod tests {
         assert_eq!(job.request.inputs.len(), 1);
         assert_eq!(job.request.inputs[0].hash, content_hash(b"aaaa"));
         assert_eq!(job.blobs.len(), 1);
-        assert!(job.request.archives.is_empty());
+        assert!(job.request.archives.is_empty(), "no archives expected");
     }
 }
