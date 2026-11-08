@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 /// One import identity: the chained import dedup key (not just the symbol
 /// name — the same name can bind through two libraries, addends or weak
 /// markers, and dyld treats each combination as its own import).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StableImport {
     /// 1-based `LC_LOAD_DYLIB` ordinal (or a `BIND_SPECIAL_DYLIB_*`).
     pub lib_ordinal: u8,
@@ -68,6 +68,25 @@ impl StableImports {
         Self {
             entries: set.into_iter().collect(),
         }
+    }
+
+    /// Builds a table from a *recorded* table (M9 tier 2a): the entries
+    /// keep the order they were captured in — first-use order on the clean
+    /// path — duplicates removed at first occurrence. Unlike [`Self::clean`]
+    /// this never re-sorts: canonicalizing a recorded first-use table would
+    /// renumber every import on the first anchored relink, which is exactly
+    /// the cross-link churn the anchor exists to prevent. Ordinals stay
+    /// stable from here on; growth goes through [`Self::insert`].
+    #[must_use]
+    pub fn anchored(entries: Vec<StableImport>) -> Self {
+        let mut seen: BTreeSet<StableImport> = BTreeSet::new();
+        let mut out = Vec::with_capacity(entries.len());
+        for key in entries {
+            if seen.insert(key.clone()) {
+                out.push(key);
+            }
+        }
+        Self { entries: out }
     }
 
     /// Grows the table: every key already present keeps its ordinal

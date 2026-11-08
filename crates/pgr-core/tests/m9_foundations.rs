@@ -134,13 +134,12 @@ fn anchored_relink_of_grown_content_keeps_every_section_size() {
     assert!(!anchors.is_empty(), "the fixture carries padded sections");
 
     // Link 2 (M8-c, unanchored): grown content re-pads — sizes drift.
-    let unanchored =
-        link_cached(&grown, &[], &slack_cfg(&[]), Parallelism::Serial, None).unwrap();
+    let unanchored = link_cached(&grown, &[], &slack_cfg(&[]), Parallelism::Serial, None).unwrap();
 
     // Link 2 (M9, anchored): grown content still fits the reservation —
     // every section keeps the link-1 size.
-    let anchored = link_cached(&grown, &[], &slack_cfg(&anchors), Parallelism::Serial, None)
-        .unwrap();
+    let anchored =
+        link_cached(&grown, &[], &slack_cfg(&anchors), Parallelism::Serial, None).unwrap();
     for a in &anchors {
         let sect = anchored
             .layout
@@ -224,7 +223,14 @@ fn anchors_are_pure_deterministic_layout_inputs() {
     // link and relinking changes nothing (the stability property the
     // incremental loop relies on).
     let anchors2 = anchors_of(&a.layout);
-    let c = link_cached(&grown, &[], &slack_cfg(&anchors2), Parallelism::Serial, None).unwrap();
+    let c = link_cached(
+        &grown,
+        &[],
+        &slack_cfg(&anchors2),
+        Parallelism::Serial,
+        None,
+    )
+    .unwrap();
     assert_eq!(format!("{:?}", a.layout), format!("{:?}", c.layout));
 }
 

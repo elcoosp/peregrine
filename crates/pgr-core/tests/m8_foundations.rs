@@ -151,7 +151,7 @@ fn revindex_lists_every_external_reference_site() {
 
     // Defined but never referenced: no sites.
     let main = interner.lookup(b"_main").unwrap();
-    assert!(index.sites(main).is_empty());
+    assert_eq!(index.sites(main), []);
     assert!(!index.is_empty());
     assert_eq!(index.len(), 2, "two distinct referenced symbols");
     assert_eq!(index.total_sites(), 4);
@@ -683,6 +683,12 @@ fn preparsed_fixup_words_match_the_one_shot_words() {
     // (greet.o's `__data` slot points at its own `_greet`).
     assert_eq!(word >> 63, 0, "pointer-to-local is a rebase, not a bind");
     // No imports at all: the corpus has no dylib binds.
-    assert!(resident.layout.fixups.imports.is_empty());
-    assert!(one_shot.layout.fixups.imports.is_empty());
+    assert_eq!(
+        resident.layout.fixups.imports,
+        [] as [pgr_format::fixups::Import; 0]
+    );
+    assert_eq!(
+        one_shot.layout.fixups.imports,
+        [] as [pgr_format::fixups::Import; 0]
+    );
 }

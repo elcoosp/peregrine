@@ -30,6 +30,7 @@
 use crate::LinkError;
 use crate::ids::StringId;
 use crate::interner::Interner;
+use crate::stable_imports::StableImport;
 use pgr_format::consts::{
     DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_START_MULTI,
     DYLD_CHAINED_PTR_START_MULTI_MASK, DYLD_CHAINED_PTR_START_NONE,
@@ -158,10 +159,10 @@ struct SegmentChains {
 }
 
 impl SegmentChains {
-    /// `dyld_chained_starts_in_segment.size` (22 fixed bytes + page_start
+    /// `dyld_chained_starts_in_segment.size` (22 fixed bytes + `page_start`
     /// array + overflow tables).
     fn record_size(&self) -> usize {
-        22 + self.page_start.len() * 2 + self.overflow.iter().map(|t| t.len()).sum::<usize>()
+        22 + self.page_start.len() * 2 + self.overflow.iter().map(std::vec::Vec::len).sum::<usize>()
     }
 }
 
@@ -187,6 +188,12 @@ pub struct FixupPlan {
     pub import_names: Vec<u8>,
     /// True when at least one bind is weak (`MH_BINDS_TO_WEAK` input).
     pub has_weak_binds: bool,
+    /// The import table as identities, in ordinal order (M9 tier 2a): the
+    /// exact keys the record stores, so a relink can anchor its ordinals
+    /// to this table (insertion-stable growth; §7.3 step 5). The projection
+    /// of `imports` onto `(lib_ordinal, name, outlined addend, weak)` —
+    /// same order, one entry per import.
+    pub stable_keys: Vec<StableImport>,
 }
 
 /// One import dedup key (first-use insertion order = the chained bind
@@ -260,7 +267,54 @@ pub(crate) fn build_import_table(
     (imports, import_names, has_weak_binds, bind_keys)
 }
 
-/// Plans all fixups (rebases and binds) for the image.
+/// The stable-identity projection of an [`ImportKey`] (the record's table
+/// entry form; M9 tier 2a). `pub(crate)`: the M6 classic path builds its
+/// table inline and projects the same identities onto the plan.
+pub(crate) fn import_key_identity(k: &ImportKey) -> StableImport {
+    StableImport {
+        lib_ordinal: k.lib_ordinal,
+        name: k.name.clone(),
+        outlined_addend: k.outlined_addend,
+        weak: k.weak,
+    }
+}
+
+/// The import table layout for one plan: the on-disk `Import` entries, the
+/// name pool, the ordinal per dedup key (parallel to `bind_keys`), and the
+/// table as identities (what the record stores). Without an anchor the
+/// ordinals are first-use positions — the shipped M2 behavior, unchanged;
+/// with an anchor (M9 tier 2a) the recorded table keeps every ordinal and
+/// genuinely new imports append in canonical order (§7.3 step 5).
+fn import_table_ordinals(
+    bind_keys: &[ImportKey],
+    import_anchor: Option<&[StableImport]>,
+) -> (Vec<u32>, Vec<StableImport>) {
+    let incoming: Vec<StableImport> = bind_keys.iter().map(import_key_identity).collect();
+    match import_anchor {
+        None => ((0..bind_keys.len() as u32).collect(), incoming),
+        Some(anchor) => {
+            let mut table = crate::stable_imports::StableImports::anchored(anchor.to_vec());
+            let assignments = table.insert(incoming.clone());
+            let ordinal_of: std::collections::HashMap<&StableImport, u32> = assignments
+                .iter()
+                .map(|a| (&a.key, a.ordinal as u32))
+                .collect();
+            let ordinals = incoming
+                .iter()
+                .map(|k| {
+                    ordinal_of.get(k).copied().unwrap_or_else(|| {
+                        // `insert` answers every incoming key; unreachable.
+                        u32::try_from(table.len()).unwrap_or(u32::MAX)
+                    })
+                })
+                .collect();
+            (ordinals, table.keys().to_vec())
+        }
+    }
+}
+
+/// Plans all fixups (rebases and binds) for the image: import ordinals in
+/// first-use order over the address-sorted slots (the M2 clean-link bytes).
 ///
 /// `segments` are the image's `LC_SEGMENT_64` entries in command order as
 /// `(vmaddr, vmsize, fileoff)`; each slot lands in the segment containing
@@ -271,11 +325,31 @@ pub(crate) fn build_import_table(
 /// [`LinkError::Layout`] on slots outside any segment, misaligned slots, or
 /// targets beyond the 44-bit field.
 pub fn plan_fixups(
+    slots: Vec<FixupSlot>,
+    segments: &[(u64, u64, u64)],
+    image_base: u64,
+    page_size: u64,
+    interner: &Interner,
+) -> Result<FixupPlan, LinkError> {
+    plan_fixups_with_imports(slots, segments, image_base, page_size, interner, None)
+}
+
+/// [`plan_fixups`] with the M9 tier-2a import anchor (§7.3 step 5): when
+/// `import_anchor` carries the previous link's recorded table, its ordinals
+/// hold and genuinely new imports append — an edit that adds a bind no
+/// longer renumbers the existing ones. `None` reproduces first-use exactly
+/// (clean links are bit-deterministic, §7.3).
+///
+/// # Errors
+/// [`LinkError::Layout`] on slots outside any segment, misaligned slots, or
+/// targets beyond the 44-bit field.
+pub fn plan_fixups_with_imports(
     mut slots: Vec<FixupSlot>,
     segments: &[(u64, u64, u64)],
     image_base: u64,
     page_size: u64,
     interner: &Interner,
+    import_anchor: Option<&[StableImport]>,
 ) -> Result<FixupPlan, LinkError> {
     slots.sort_by_key(|s| s.vaddr);
     for s in &slots {
@@ -290,8 +364,14 @@ pub fn plan_fixups(
     // Key: (lib_ordinal, name bytes, outlined addend, weak). lld splits the
     // addend: 0..=255 inline in the word, everything else in the import
     // entry; only one side is ever nonzero, so dedup keys on the outlined
-    // half.
-    let (imports, import_names, has_weak_binds, bind_keys) = build_import_table(&slots, interner);
+    // half. The anchor (when present) then fixes the recorded ordinals.
+    let (_first_use, _first_use_pool, has_weak_binds, bind_keys) =
+        build_import_table(&slots, interner);
+    let (ordinals, table_keys) = import_table_ordinals(&bind_keys, import_anchor);
+    // The on-disk table and name pool follow the ordinal order: first-use
+    // without an anchor (byte-identical to M2), recorded-order + appended
+    // with one.
+    let (imports, import_names) = imports_from_keys(&table_keys);
 
     // ---- group slots per segment ----------------------------------------
     let mut per_segment: Vec<Vec<FixupSlot>> = vec![Vec::new(); segments.len()];
@@ -320,22 +400,33 @@ pub fn plan_fixups(
                 let off_in_page = (rel % page_size) as u32;
                 let word_base = match s.kind {
                     FixupKind::Rebase { target_vaddr } => rebase_word(target_vaddr, image_base)?,
-                    FixupKind::Bind { name, addend, .. } => {
+                    FixupKind::Bind {
+                        name,
+                        addend,
+                        weak,
+                        lib_ordinal,
+                    } => {
+                        // Full-identity lookup: the same name bound through
+                        // two libraries (or with different weak/addend
+                        // splits) is two imports — a name+addend match
+                        // would encode the wrong library's ordinal.
+                        let outlined = if (0..=255).contains(&addend) {
+                            0
+                        } else {
+                            addend
+                        };
                         let key_pos = bind_keys
                             .iter()
                             .position(|k| {
-                                k.name == interner.bytes(name)
-                                    && k.outlined_addend
-                                        == if (0..=255).contains(&addend) {
-                                            0
-                                        } else {
-                                            addend
-                                        }
+                                k.lib_ordinal == lib_ordinal
+                                    && k.name == interner.bytes(name)
+                                    && k.outlined_addend == outlined
+                                    && k.weak == weak
                             })
                             .ok_or(LinkError::Internal {
                                 message: "bind slot missing from the import table".into(),
                             })?;
-                        let ordinal = key_pos as u32;
+                        let ordinal = ordinals[key_pos];
                         let inline = if (0..=255).contains(&addend) {
                             addend as u8
                         } else {
@@ -361,12 +452,12 @@ pub fn plan_fixups(
                     page_start.push(DYLD_CHAINED_PTR_START_NONE);
                     continue;
                 }
-                let mut page = page.clone();
-                let heads = pack_page(&mut page);
-                for slot in &page {
-                    let vaddr = vmaddr + page_i as u64 * page_size + u64::from(slot.page_off);
+                let mut packed_words = page.clone();
+                let heads = pack_page(&mut packed_words);
+                for slot in &packed_words {
+                    let slot_vaddr = vmaddr + page_i as u64 * page_size + u64::from(slot.page_off);
                     seg.slot_words
-                        .push((vaddr, slot.word_base | u64::from(slot.next) << 51));
+                        .push((slot_vaddr, slot.word_base | u64::from(slot.next) << 51));
                 }
                 if heads.len() == 1 {
                     page_start.push(heads[0]);
@@ -516,7 +607,32 @@ pub fn plan_fixups(
         imports,
         import_names,
         has_weak_binds,
+        stable_keys: table_keys,
     })
+}
+
+/// The on-disk import table for a set of identity keys, in the given
+/// (ordinal) order: `Import` entries plus the NUL-terminated name pool
+/// with `name_offset` patched.
+fn imports_from_keys(keys: &[StableImport]) -> (Vec<Import>, Vec<u8>) {
+    let mut imports = Vec::with_capacity(keys.len());
+    let mut pool: Vec<u8> = Vec::new();
+    let mut offsets: Vec<u32> = Vec::with_capacity(keys.len());
+    for k in keys {
+        offsets.push(pool.len() as u32);
+        pool.extend_from_slice(&k.name);
+        pool.push(0);
+        imports.push(Import {
+            lib_ordinal: u16::from(k.lib_ordinal),
+            weak_import: k.weak,
+            name_offset: 0,
+            addend: k.outlined_addend,
+        });
+    }
+    for (imp, off) in imports.iter_mut().zip(offsets.iter()) {
+        imp.name_offset = *off;
+    }
+    (imports, pool)
 }
 
 #[cfg(test)]
@@ -649,7 +765,7 @@ mod tests {
 
         // Empty imports parse cleanly.
         let imports = parse_imports(&plan.payload, &hdr).unwrap();
-        assert!(imports.is_empty());
+        assert_eq!(imports, [] as [pgr_format::fixups::Import; 0]);
     }
 
     #[test]
@@ -779,7 +895,7 @@ mod tests {
         assert_eq!(plan.chain_starts.len(), 8 + 2 * 4);
         let fmt = u32::from_le_bytes(plan.chain_starts[0..4].try_into().unwrap());
         let count = u32::from_le_bytes(plan.chain_starts[4..8].try_into().unwrap());
-        assert_eq!(fmt, DYLD_CHAINED_PTR_64_OFFSET as u32);
+        assert_eq!(fmt, u32::from(DYLD_CHAINED_PTR_64_OFFSET));
         assert_eq!(count, 2, "one head on page 0, one on page 1");
         let h0 = u32::from_le_bytes(plan.chain_starts[8..12].try_into().unwrap());
         let h1 = u32::from_le_bytes(plan.chain_starts[12..16].try_into().unwrap());
