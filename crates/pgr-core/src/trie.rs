@@ -113,27 +113,6 @@ pub fn build(exports: &mut Vec<Export<'_>>, image_base: u64) -> Result<Vec<u8>, 
         at += e.name.len() + 1;
     }
 
-    // Flat node arena, preorder (children get higher indices than parents).
-    #[derive(Clone, Copy, Debug)]
-    struct Node {
-        export: u32, // exports index + 1 (0 = pure prefix node)
-        edge_start: u32,
-        edge_count: u32,
-    }
-    #[derive(Clone, Copy, Debug)]
-    struct Edge {
-        sub: (u32, u32), // pool range
-        child: u32,      // patched by the child frame
-    }
-    #[derive(Clone, Copy)]
-    struct Frame {
-        lo: u32,
-        hi: u32,
-        depth: u32,
-        edge_slot: u32,
-        parent: u32,
-    }
-
     let mut nodes: Vec<Node> = Vec::with_capacity(exports.len() * 2);
     let mut edges: Vec<Edge> = Vec::with_capacity(exports.len() * 2);
     let mut parent_of: Vec<u32> = Vec::new(); // grows with nodes
@@ -153,6 +132,7 @@ pub fn build(exports: &mut Vec<Export<'_>>, image_base: u64) -> Result<Vec<u8>, 
             }
         }
     };
+
     let mut static_size: Vec<usize> = Vec::with_capacity(exports.len() * 2);
     let mut dyn_size: Vec<u32> = Vec::with_capacity(exports.len() * 2);
     // Scratch reused across nodes (clear keeps the capacity; the walk is
@@ -255,14 +235,6 @@ pub fn build(exports: &mut Vec<Export<'_>>, image_base: u64) -> Result<Vec<u8>, 
     // Widths start at the 4-byte upper bound (offsets in a trie under 2^28
     // bytes fit): pass 1 overshoots, widths only shrink from there, and the
     // fixpoint converges in a handful of passes.
-    #[repr(C)]
-    struct Row {
-        stat: u32,
-        dynw: u32,
-        off: u32,
-        width: u8,
-        parent: u32,
-    }
     let n_nodes = nodes.len();
     let mut rows: Vec<Row> = static_size
         .into_iter()
@@ -309,7 +281,7 @@ pub fn build(exports: &mut Vec<Export<'_>>, image_base: u64) -> Result<Vec<u8>, 
     // Final consistent assignment (a no-op once converged): widths reflect
     // the final offsets, so one flat sweep sizes the payload exactly.
     let mut next = 0usize;
-    for r in rows.iter_mut() {
+    for r in &mut rows {
         r.off = next as u32;
         next = next.saturating_add(r.stat.saturating_add(r.dynw) as usize);
     }
@@ -317,20 +289,6 @@ pub fn build(exports: &mut Vec<Export<'_>>, image_base: u64) -> Result<Vec<u8>, 
     let offs: Vec<u32> = rows.iter().map(|r| r.off).collect();
 
     // ---- serialize (allocation-free: ULEBs are written in place) ----
-    fn write_uleb(buf: &mut [u8], at: &mut usize, mut v: u64) {
-        loop {
-            let mut byte = (v & 0x7f) as u8;
-            v >>= 7;
-            if v != 0 {
-                byte |= 0x80;
-            }
-            buf[*at] = byte;
-            *at += 1;
-            if v == 0 {
-                return;
-            }
-        }
-    }
     let mut out = vec![0u8; total];
     for (i, n) in nodes.iter().enumerate() {
         let mut w = offs[i] as usize;
@@ -376,6 +334,59 @@ pub fn build(exports: &mut Vec<Export<'_>>, image_base: u64) -> Result<Vec<u8>, 
 /// partitioning on the byte at `depth`, recursing only on the byte groups.
 /// The original-index tiebreak makes the result a pure function of the
 /// multiset — no dependence on pivot luck or sort stability.
+/// Flat node arena entry, preorder (children get higher indices than
+/// parents).
+#[derive(Clone, Copy, Debug)]
+struct Node {
+    export: u32, // exports index + 1 (0 = pure prefix node)
+    edge_start: u32,
+    edge_count: u32,
+}
+
+/// One trie edge: the pool range of the substring and the child node.
+#[derive(Clone, Copy, Debug)]
+struct Edge {
+    sub: (u32, u32), // pool range
+    child: u32,      // patched by the child frame
+}
+
+/// The walk stack frame (one node expansion).
+#[derive(Clone, Copy)]
+struct Frame {
+    lo: u32,
+    hi: u32,
+    depth: u32,
+    edge_slot: u32,
+    parent: u32,
+}
+
+/// One serialization row: static bytes, dynamic (offset-width) bytes, the
+/// assigned offset and the parent link.
+#[repr(C)]
+struct Row {
+    stat: u32,
+    dynw: u32,
+    off: u32,
+    width: u8,
+    parent: u32,
+}
+
+/// Writes a ULEB128 at `*at`, advancing it.
+fn write_uleb(buf: &mut [u8], at: &mut usize, mut v: u64) {
+    loop {
+        let mut byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        buf[*at] = byte;
+        *at += 1;
+        if v == 0 {
+            return;
+        }
+    }
+}
+
 fn sort_exports(exports: &mut Vec<Export<'_>>) {
     let mut idx: Vec<u32> = (0..exports.len() as u32).collect();
     mkqs(exports, &mut idx, 0);
@@ -483,7 +494,7 @@ mod tests {
 
     #[test]
     fn empty_export_set_builds_an_empty_payload() {
-        assert!(build(&mut Vec::new(), 0).unwrap().is_empty());
+        assert_eq!(build(&mut Vec::new(), 0).unwrap(), [] as [u8; 0]);
     }
 
     #[test]
