@@ -127,7 +127,7 @@ pub fn fold(
     if !cfg.icf.is_active() {
         return Ok(FoldPlan::default());
     }
-    refine(objects, res, interner, cfg, live)
+    Ok(refine(objects, res, interner, cfg, live))
 }
 
 /// FNV-1a 64: a deterministic hasher (the std hasher is randomly seeded,
@@ -166,8 +166,7 @@ fn addend_of(obj: &InputObject, sect: usize, r: &crate::object::DecodedReloc) ->
                 .get(at..at + 8)
                 .and_then(|b| <[u8; 8]>::try_from(b).ok())
                 .map(u64::from_le_bytes)
-                .map(|v| v as i64)
-                .unwrap_or(0)
+                .map_or(0, |v| v as i64)
         }
         _ => 0,
     }
@@ -291,11 +290,11 @@ fn refine(
     interner: &Interner,
     cfg: &LinkConfig,
     live: &crate::deadstrip::LiveSet,
-) -> Result<FoldPlan, LinkError> {
+) -> FoldPlan {
     use rayon::prelude::*;
     let cands = candidates(objects, live);
     if cands.len() < 2 {
-        return Ok(FoldPlan::default());
+        return FoldPlan::default();
     }
     let taken = address_taken(objects, res, cfg.icf);
     let kept: Vec<&Cand> = cands
@@ -303,7 +302,7 @@ fn refine(
         .filter(|c| !taken.contains(&(c.file, c.sect, c.start)))
         .collect();
     if kept.len() < 2 {
-        return Ok(FoldPlan::default());
+        return FoldPlan::default();
     }
 
     // Candidate identity: (file, sect, atom start) → index into `kept`.
@@ -458,7 +457,7 @@ fn refine(
         plan.folded_bytes += c.end - c.start;
     }
     let _ = interner;
-    Ok(plan)
+    plan
 }
 
 #[cfg(test)]
