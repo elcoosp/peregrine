@@ -12,11 +12,11 @@ const PROGRAM: &str = "pgr";
 fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     match args.first().and_then(|a| a.to_str()) {
-        Some("--version") | Some("-version") | Some("-V") => {
+        Some("--version" | "-version" | "-V") => {
             println!("{}", pgr_driver::version_line());
             return ExitCode::SUCCESS;
         }
-        Some("--help") | Some("-help") | Some("-h") => {
+        Some("--help" | "-help" | "-h") => {
             print!("{}", pgr_driver::usage());
             return ExitCode::SUCCESS;
         }
@@ -44,7 +44,7 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(pgr_driver::DriverError::Opts(_)) | Err(pgr_driver::DriverError::Io { .. }) => {
+        Err(pgr_driver::DriverError::Opts(_) | pgr_driver::DriverError::Io { .. }) => {
             eprintln!("{PROGRAM}: error: {}", first_error(&args));
             ExitCode::from(2)
         }
