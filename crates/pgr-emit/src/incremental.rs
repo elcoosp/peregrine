@@ -19,6 +19,15 @@
 //!      same file size, segment/section placement, `__LINKEDIT` chunk
 //!      plan, identity — anything else is the §7.3 fallback ladder
 //!      (classified through [`SlackPolicy::fits`] when slack is active);
+//!    * the **relayout tier** (tier 2, §7.3 "layout stability") re-admits
+//!      a *shifted* skeleton as a patch plan ([`RelayoutDelta`]): a
+//!      section that overflowed its anchor within the ladder's
+//!      segment-relayout bound holds its base while everything behind it
+//!      shifts, and an outgrown `__LINKEDIT` reservation moves the
+//!      signature boundary with it. The patch rewrites the moved suffix,
+//!      the record's output-section digests exempt byte-identical moved
+//!      sections from the propagation gate, and the clone is resized
+//!      before the dirty tiles land;
 //!    * the **span diff** marks every 16 KiB tile whose byte-producing
 //!      spans changed; the dirty-tile set *is* the patch plan. When every
 //!      content tile is dirty the full emit is cheaper and the planner
@@ -63,6 +72,7 @@ use pgr_core::layout::{Layout, PatchOp};
 use pgr_core::object::InputObject;
 use pgr_core::slack::{LayoutFallback, SlackPolicy};
 use pgr_format::consts::PAGE_SIZE_16K;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -87,8 +97,14 @@ const MAGIC: &[u8; 8] = b"PGRINC1\0";
 /// them (§7.3 step 5). **v3** adds the parse's section-digest table
 /// ([`LinkRecord::section_digests`], M9 tier 2b): the propagation gate
 /// diffs it against the relink's parse to scope the change (§7.3 step 3);
-/// v1/v2 records decode to `None` and re-record.
-pub const FORMAT_VERSION: u32 = 3;
+/// v1/v2 records decode to `None` and re-record. **v4** adds the
+/// output-section content-digest table ([`LinkRecord::content_digests`],
+/// M9 tier 2):
+/// the relayout tier's shift-exemption compares a moved section's final
+/// bytes against the recorded ones, so a pure move rides the ladder while
+/// content churn inside the moved suffix stays gated; v1–v3 records
+/// decode to `None` and re-record.
+pub const FORMAT_VERSION: u32 = 4;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -165,6 +181,27 @@ pub struct RecordedSection {
     pub zerofill: bool,
 }
 
+/// One output section's content digest (v4, M9 tier 2): SHA-256 over the
+/// section's **copy-run bytes** — the placed input content, pre-relocation,
+/// in placement order (tile-piece splitting included; the concatenation is
+/// placement-invariant). The relayout tier's shift-exemption compares a
+/// moved section's recorded digest against the new plan's: equality means
+/// the section's *content* is a pure move — its derived bytes (applied
+/// relocations, chain words) are re-emitted from the plan and re-proven by
+/// the byte-identity contract — while a content change must still answer
+/// to the propagation scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputSectionDigest {
+    /// Owning output segment (`__TEXT`).
+    pub seg: String,
+    /// Output section name (`__text`).
+    pub name: String,
+    /// SHA-256 over the section's copy-run bytes in placement order
+    /// (zero-fill and synthetic sections carry no runs and hash the empty
+    /// slice).
+    pub sha: [u8; 32],
+}
+
 /// The recorded state of one full link — everything the incremental relink
 /// needs to decide what changed and to patch only those bytes.
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +246,11 @@ pub struct LinkRecord {
     /// change-propagation seeds the next relink diffs against its own
     /// parse (§7.3 steps 1–3; `pgr_core::propagate::section_digests`).
     pub section_digests: Vec<pgr_core::propagate::SectionDigest>,
+    /// Every output section's content digest (v4, M9 tier 2), in section
+    /// order — the same order the layout places them and the skeleton
+    /// records them. The relayout tier's shift-exemption compares these
+    /// against the new plan's table.
+    pub content_digests: Vec<OutputSectionDigest>,
 }
 
 /// Why the incremental planner fell back to the full link. The fallback is
@@ -286,6 +328,25 @@ pub enum PatchDecision {
     Fallback(FallbackReason),
 }
 
+/// The §7.3 ladder tier-2 admission (architecture doc §7.3 "layout
+/// stability"): the skeleton moved, and the move is a pure suffix
+/// relayout. Every section before the first resize holds its placement,
+/// the resized section holds its base and grows within the ladder's
+/// segment-relayout bound ([`SlackPolicy::fits`]), an outgrown
+/// `__LINKEDIT` reservation moves the signature boundary without touching
+/// a content section, and everything behind the change only shifts.
+/// The planner vouches for the moved suffix: the patch rewrites it from
+/// the new plan, and the shift table translates old-side diff ranges into
+/// the new plan's coordinates for the propagation gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayoutDelta {
+    /// Per-section file-offset shift (new minus recorded), index-aligned
+    /// with the record's and the layout's section lists (equal lengths by
+    /// admission). Zero for held sections; zero-fill sections carry no
+    /// file placement and shift as zero.
+    pub shifts: Vec<i64>,
+}
+
 /// One planner product: the 16 KiB tiles emit must recompute, plus the new
 /// plan's span table (the digests the patch applier reuses when assembling
 /// the refreshed record — extracted once per relink, not twice). Tile 0 is
@@ -299,6 +360,13 @@ pub struct PatchPlan {
     pub total_tiles: u32,
     /// The new plan's byte-producing spans (see [`LinkRecord::assemble_from`]).
     pub spans: SpanTable,
+    /// The tier-2 admission ([`RelayoutDelta`]) when the skeleton shifted
+    /// and the planner vouches for the moved suffix; `None` is the tier-1
+    /// in-place plan over a frozen skeleton.
+    pub relayout: Option<RelayoutDelta>,
+    /// The new plan's output-section content digests (the refreshed
+    /// record's v4 field — extracted once per relink, not twice).
+    pub content_digests: Vec<OutputSectionDigest>,
 }
 
 impl PatchPlan {
@@ -447,10 +515,8 @@ fn patch_span(at: u64, op: &PatchOp) -> RecordedSpan {
 
 /// Flattens the fused emit's tile context into the recorded span table
 /// (the same spans the full emit would write, in the same sorted order).
-fn span_table(layout: &Layout, objects: &[InputObject]) -> Result<SpanTable, PatchError> {
-    let symtab = symtab_bytes(layout);
-    let indirect = indirect_bytes(layout);
-    let ctx = TileCtx::build(layout, objects, &symtab, &indirect)?;
+#[must_use]
+fn span_table_with(ctx: &TileCtx<'_>) -> SpanTable {
     let to_span = |&(dst, end, bytes): &(u64, u64, &[u8])| {
         debug_assert_eq!(end - dst, bytes.len() as u64);
         span_of(dst, bytes)
@@ -459,7 +525,7 @@ fn span_table(layout: &Layout, objects: &[InputObject]) -> Result<SpanTable, Pat
         debug_assert_eq!(end - dst, bytes.len() as u64);
         tile_piece_spans(dst, bytes)
     };
-    Ok(SpanTable {
+    SpanTable {
         // Copy runs and `__LINKEDIT` chunks are the only spans that can
         // dwarf a tile; their digests are per tile piece so the dirty-tile
         // set tracks the change, not the span. Synthetics, patch writes
@@ -477,7 +543,90 @@ fn span_table(layout: &Layout, objects: &[InputObject]) -> Result<SpanTable, Pat
             .iter()
             .map(|&(at, word)| span_of(at, &word.to_le_bytes()))
             .collect(),
-    })
+    }
+}
+
+/// One output section's content digest from the plan: the section's
+/// copy-run bytes hashed in placement order. Runs are coalesced inside
+/// sections (a run never straddles one) and both lists are sorted by
+/// destination, so the section's runs are a contiguous slice of the run
+/// list — no emitting, no scanning past it.
+fn section_content_sha(
+    sect: &pgr_core::layout::PlacedSection,
+    runs: &[crate::tile::Span<'_>],
+) -> [u8; 32] {
+    if sect.zerofill {
+        return Sha256::digest([]).into();
+    }
+    let end = sect.file_off + sect.size;
+    let first = runs.partition_point(|&(dst, _, _)| dst < sect.file_off);
+    let last = first
+        + runs[first..]
+            .iter()
+            .take_while(|&&(dst, _, _)| dst < end)
+            .count();
+    let mut h = Sha256::new();
+    for &(_, _, bytes) in &runs[first..last] {
+        h.update(bytes);
+    }
+    h.finalize().into()
+}
+
+/// The record path's content-digest table: every section hashed (no prior
+/// record to copy from), in parallel — the run bytes are borrowed input
+/// slices, so the hashes are schedule-independent (§4.3).
+fn content_digests_for(layout: &Layout, ctx: &TileCtx<'_>) -> Vec<OutputSectionDigest> {
+    layout
+        .sections
+        .par_iter()
+        .map(|s| OutputSectionDigest {
+            seg: s.seg_name.clone(),
+            name: s.name.clone(),
+            sha: section_content_sha(s, &ctx.run_spans),
+        })
+        .collect()
+}
+
+/// The planner paths' content-digest table: a section whose run content is
+/// provably unchanged copies the recorded digest (identical run spans mean
+/// identical run bytes — the placement-invariant concatenation), and only
+/// the sections a run diff touches re-hash. `run_changes` is the run-class
+/// diff (both sides); a tier-1 plan has no moved sections, so the
+/// old-extent test is exact, and a tier-2 plan over-approximates by
+/// touching sections whose old extent a moved-away range grazes.
+fn next_content_digests(
+    record: &LinkRecord,
+    layout: &Layout,
+    ctx: &TileCtx<'_>,
+    run_changes: &[Range<u64>],
+) -> Vec<OutputSectionDigest> {
+    let copyable = record.content_digests.len() == layout.sections.len();
+    layout
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let old = record.sections.get(i);
+            let new_extent = s.file_off..s.file_off + s.size;
+            let old_extent = old.map(|r| r.file_off..r.file_off + r.size);
+            let touched = run_changes.iter().any(|c| {
+                (c.start < new_extent.end && new_extent.start < c.end)
+                    || old_extent
+                        .as_ref()
+                        .is_some_and(|o| c.start < o.end && o.start < c.end)
+            });
+            let sha = if !touched && copyable && old.is_some_and(|r| r.zerofill == s.zerofill) {
+                record.content_digests[i].sha
+            } else {
+                section_content_sha(s, &ctx.run_spans)
+            };
+            OutputSectionDigest {
+                seg: s.seg_name.clone(),
+                name: s.name.clone(),
+                sha,
+            }
+        })
+        .collect()
 }
 
 /// The skeleton (identity + placement + `__LINKEDIT` plan) of a layout.
@@ -566,7 +715,13 @@ impl LinkRecord {
                 at += HASH_PAGE;
             }
         }
-        Self::assemble(layout, objects, page_hashes)
+        let symtab = symtab_bytes(layout);
+        let indirect = indirect_bytes(layout);
+        let ctx = TileCtx::build(layout, objects, &symtab, &indirect)?;
+        let content_digests = content_digests_for(layout, &ctx);
+        let spans = span_table_with(&ctx);
+        let digests = pgr_core::propagate::section_digests(objects);
+        Self::assemble_from(layout, spans, page_hashes, digests, content_digests)
     }
 
     /// [`LinkRecord::record`] with the hash table supplied by the patch
@@ -580,9 +735,13 @@ impl LinkRecord {
         objects: &[InputObject],
         page_hashes: Vec<[u8; 32]>,
     ) -> Result<Self, PatchError> {
-        let spans = span_table(layout, objects)?;
+        let symtab = symtab_bytes(layout);
+        let indirect = indirect_bytes(layout);
+        let ctx = TileCtx::build(layout, objects, &symtab, &indirect)?;
+        let content_digests = content_digests_for(layout, &ctx);
+        let spans = span_table_with(&ctx);
         let digests = pgr_core::propagate::section_digests(objects);
-        Self::assemble_from(layout, spans, page_hashes, digests)
+        Self::assemble_from(layout, spans, page_hashes, digests, content_digests)
     }
 
     /// [`LinkRecord::assemble`] with a pre-extracted span table — the patch
@@ -596,6 +755,7 @@ impl LinkRecord {
         spans: SpanTable,
         page_hashes: Vec<[u8; 32]>,
         section_digests: Vec<pgr_core::propagate::SectionDigest>,
+        content_digests: Vec<OutputSectionDigest>,
     ) -> Result<Self, PatchError> {
         let (segments, sections) = skeleton_of(layout);
         let header_sha: [u8; 32] = Sha256::digest(&layout.header_bytes).into();
@@ -620,6 +780,9 @@ impl LinkRecord {
             // The parse's change-detection table (M9 tier 2b): the
             // propagation seeds the next relink diffs against.
             section_digests,
+            // The output sections' content digests (M9 tier 2): the
+            // relayout shift-exemption's recorded side.
+            content_digests,
         })
     }
 
@@ -720,6 +883,16 @@ impl LinkRecord {
         for d in &self.section_digests {
             e(&mut p, u64::from(d.file));
             e(&mut p, d.in_sect as u64);
+            p.extend_from_slice(&d.sha);
+        }
+        // v4: the output-section content-digest table (M9 tier 2) — the
+        // relayout shift-exemption's recorded side.
+        e(&mut p, self.content_digests.len() as u64);
+        for d in &self.content_digests {
+            e(&mut p, d.seg.len() as u64);
+            p.extend_from_slice(d.seg.as_bytes());
+            e(&mut p, d.name.len() as u64);
+            p.extend_from_slice(d.name.as_bytes());
             p.extend_from_slice(&d.sha);
         }
 
@@ -873,7 +1046,15 @@ impl LinkRecord {
             })
         };
         let section_digests = d.list(&mut digest)?;
-        if d.at != d.b.len() {
+        let mut out_digest = |d: &mut Decoder<'_>| {
+            let seg = d.str()?;
+            let name = d.str()?;
+            let mut sha = [0u8; 32];
+            d.bytes(&mut sha)?;
+            Some(OutputSectionDigest { seg, name, sha })
+        };
+        let content_digests = d.list(&mut out_digest)?;
+        if d.at != d.b.len() || content_digests.len() != sections.len() {
             return None;
         }
         Some(Self {
@@ -893,6 +1074,7 @@ impl LinkRecord {
             spans,
             page_hashes,
             section_digests,
+            content_digests,
         })
     }
 }
@@ -1062,35 +1244,69 @@ fn ladder_tier(
 /// at its old position too — the zeros the new plan leaves behind differ
 /// from the old bytes).
 fn diff_spans(old: &[RecordedSpan], new: &[RecordedSpan], out: &mut Vec<Range<u64>>) {
+    for (r, _) in diff_spans_sided(old, new) {
+        out.push(r);
+    }
+}
+
+/// Which side of the diff a divergent range came from: a removed or moved
+/// span leaves its old position (`Old`); a changed or added span sits at
+/// the new plan's coordinates (`New`). Aligned positions report as `New`
+/// (the two sides coincide spatially; the new plan's coordinates are what
+/// the scope lookup reads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffSide {
+    Old,
+    New,
+}
+
+/// [`diff_spans`] with side attribution — the relayout gate translates
+/// old-side ranges by their section's shift before consulting the scope.
+fn diff_spans_sided(old: &[RecordedSpan], new: &[RecordedSpan]) -> Vec<(Range<u64>, DiffSide)> {
+    let mut out = Vec::new();
     let (mut i, mut j) = (0usize, 0usize);
     while i < old.len() && j < new.len() {
         let (o, n) = (&old[i], &new[j]);
         if o.dst == n.dst && o.len == n.len {
             if o.sha != n.sha {
-                out.push(o.dst..o.dst + o.len);
+                out.push((o.dst..o.dst + o.len, DiffSide::New));
             }
             i += 1;
             j += 1;
         } else if o.dst < n.dst {
-            out.push(o.dst..o.dst + o.len);
+            out.push((o.dst..o.dst + o.len, DiffSide::Old));
             i += 1;
         } else {
-            out.push(n.dst..n.dst + n.len);
+            out.push((n.dst..n.dst + n.len, DiffSide::New));
             j += 1;
         }
     }
     for o in &old[i..] {
-        out.push(o.dst..o.dst + o.len);
+        out.push((o.dst..o.dst + o.len, DiffSide::Old));
     }
     for n in &new[j..] {
-        out.push(n.dst..n.dst + n.len);
+        out.push((n.dst..n.dst + n.len, DiffSide::New));
     }
+    out
+}
+
+/// The output section containing file offset `at` in a skeleton list
+/// (recorded or fresh — both carry `(file_off, size, zerofill)`), skipping
+/// zero-fill sections (no file placement; their degenerate `[0, size)`
+/// extent must never claim a lookup).
+fn section_index_at(sections: &[RecordedSection], at: u64) -> Option<usize> {
+    sections
+        .iter()
+        .enumerate()
+        .find(|(_, s)| !s.zerofill && s.file_off <= at && at < s.file_off + s.size)
+        .map(|(i, _)| i)
 }
 
 /// Plans the incremental relink: skeleton gate, span diff, dirty tiles.
 ///
-/// `slack` is the link's active policy (used only to classify a skeleton
-/// fallback through the §7.3 ladder).
+/// `slack` is the link's active policy (used to admit a skeleton shift
+/// through the §7.3 relayout tier and to classify a refusal through the
+/// ladder).
 ///
 /// # Errors
 /// [`PatchError::Contract`] on plan shapes the full emit would also
@@ -1102,23 +1318,39 @@ pub fn plan_patch(
     slack: Option<&SlackPolicy>,
 ) -> Result<PatchDecision, PatchError> {
     if let Some(detail) = skeleton_mismatch(record, layout) {
+        if let Some(delta) = relayout_delta(record, layout, slack) {
+            return plan_relayout(record, layout, objects, delta);
+        }
         let tier = ladder_tier(record, layout, slack);
         return Ok(PatchDecision::Fallback(FallbackReason::Skeleton {
             detail,
             tier,
         }));
     }
-    let new_spans = span_table(layout, objects)?;
+    let symtab = symtab_bytes(layout);
+    let indirect = indirect_bytes(layout);
+    let ctx = TileCtx::build(layout, objects, &symtab, &indirect)?;
+    let new_spans = span_table_with(&ctx);
     // The content (copy-run) diff is kept apart: it is the span class the
     // propagation gate adjudicates (derived classes are re-emitted from
     // the plan and re-proven by the byte-identity contract).
-    let mut run_changes: Vec<Range<u64>> = Vec::new();
-    diff_spans(&record.spans.runs, &new_spans.runs, &mut run_changes);
-    let mut ranges: Vec<Range<u64>> = Vec::new();
-    diff_spans(&record.spans.synths, &new_spans.synths, &mut ranges);
-    diff_spans(&record.spans.blobs, &new_spans.blobs, &mut ranges);
-    diff_spans(&record.spans.patches, &new_spans.patches, &mut ranges);
-    diff_spans(&record.spans.words, &new_spans.words, &mut ranges);
+    let run_diffs = diff_spans_sided(&record.spans.runs, &new_spans.runs);
+    let mut span_changes: Vec<Range<u64>> = Vec::new();
+    for (r, _) in &run_diffs {
+        span_changes.push(r.clone());
+    }
+    // Every span class feeds the section-digest copy decision: a chain
+    // word or patch changes the section's final bytes exactly like a run.
+    let mut class_changes: Vec<Range<u64>> = span_changes.clone();
+    diff_spans(&record.spans.synths, &new_spans.synths, &mut class_changes);
+    diff_spans(&record.spans.blobs, &new_spans.blobs, &mut class_changes);
+    diff_spans(
+        &record.spans.patches,
+        &new_spans.patches,
+        &mut class_changes,
+    );
+    diff_spans(&record.spans.words, &new_spans.words, &mut class_changes);
+    let mut ranges: Vec<Range<u64>> = class_changes.clone();
     // The header bytes are written outside the span lists; a header change
     // (entryoff, load commands) dirties tile 0.
     let header_digest: [u8; 32] = Sha256::digest(&layout.header_bytes).into();
@@ -1135,9 +1367,9 @@ pub fn plan_patch(
     // whole change: the planner declines to the full link instead of
     // patching bytes nobody predicted. Skipped when nothing content-side
     // changed (the untouched relink pays no reverse-index build).
-    if !run_changes.is_empty() {
+    if !span_changes.is_empty() {
         let scope = pgr_core::propagate::predict(&record.section_digests, objects, layout);
-        let unexplained: Vec<&Range<u64>> = run_changes
+        let unexplained: Vec<&Range<u64>> = span_changes
             .iter()
             .filter(|r| {
                 !scope
@@ -1147,20 +1379,12 @@ pub fn plan_patch(
             })
             .collect();
         if !unexplained.is_empty() {
-            let listed = unexplained
-                .iter()
-                .map(|r| {
-                    let first = (r.start / TILE) as u32;
-                    let last = ((r.end - 1) / TILE) as u32;
-                    format!("{}..{} (tiles {first}..={last})", r.start, r.end)
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
             return Ok(PatchDecision::Fallback(
                 FallbackReason::PropagationMismatch {
                     detail: format!(
-                        "{} content change(s) outside the propagation scope: {listed}",
-                        unexplained.len()
+                        "{} content change(s) outside the propagation scope: {}",
+                        unexplained.len(),
+                        list_ranges(unexplained.iter().map(|r| (*r).clone()))
                     ),
                 },
             ));
@@ -1168,12 +1392,30 @@ pub fn plan_patch(
     }
 
     // The gate passed — the content changes join the derived ones in the
-    // dirty-tile computation.
-    ranges.extend(run_changes);
+    // dirty-tile computation. Only run-touched sections re-hash; the rest
+    // copy the recorded digest.
+    let content_digests = next_content_digests(record, layout, &ctx, &span_changes);
+    let plan = finish_plan(record, layout, ranges, new_spans, None, content_digests);
+    Ok(match plan {
+        Ok(plan) => PatchDecision::InPlace(plan),
+        Err(reason) => PatchDecision::Fallback(reason),
+    })
+}
 
+/// The dirty-tile arithmetic shared by the two planner paths: tiles from
+/// the diff ranges, tile 0 riding along for the UUID, and the §7.3
+/// economics gate. `Err` is the fallback the tier could not absorb.
+fn finish_plan(
+    record: &LinkRecord,
+    layout: &Layout,
+    mut ranges: Vec<Range<u64>>,
+    spans: SpanTable,
+    relayout: Option<RelayoutDelta>,
+    content_digests: Vec<OutputSectionDigest>,
+) -> Result<PatchPlan, FallbackReason> {
     let total = layout.file_size.div_ceil(TILE) as u32;
     let mut dirty: Vec<u32> = Vec::new();
-    for r in ranges {
+    for r in ranges.drain(..) {
         let first = (r.start / TILE) as u32;
         let last = ((r.end.saturating_sub(1)).max(r.start) / TILE) as u32;
         for t in first..=last.min(total - 1) {
@@ -1194,16 +1436,296 @@ pub fn plan_patch(
     // rides along (the UUID) and is not counted against the patch.
     let content_dirty = dirty.len() - usize::from(!dirty.is_empty());
     if u64::from(content_dirty as u32) >= u64::from(total.saturating_sub(1).max(1)) {
-        return Ok(PatchDecision::Fallback(FallbackReason::Economics {
+        return Err(FallbackReason::Economics {
             dirty: dirty.len() as u32,
             total,
-        }));
+        });
     }
-    Ok(PatchDecision::InPlace(PatchPlan {
+    Ok(PatchPlan {
         dirty_tiles: dirty,
         total_tiles: total,
-        spans: new_spans,
-    }))
+        spans,
+        relayout,
+        content_digests,
+    })
+}
+
+/// Formats diff ranges as their tile spread (the fallback diagnostics).
+fn list_ranges(ranges: impl Iterator<Item = Range<u64>>) -> String {
+    ranges
+        .map(|r| {
+            let first = (r.start / TILE) as u32;
+            let last = ((r.end - 1) / TILE) as u32;
+            format!("{}..{} (tiles {first}..={last})", r.start, r.end)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The §7.3 ladder tier-2 admission (architecture doc §7.3 "layout
+/// stability"): the skeleton moved, and the move is a pure suffix
+/// relayout. Two triggers map onto the tier:
+///
+/// * a section overflowed its anchor and re-padded naturally — it holds
+///   its base while everything behind it shifts, and the growth stays
+///   within the ladder's segment-relayout bound ([`SlackPolicy::fits`]
+///   says `SegmentRelayout` for *every* resized section);
+/// * the `__LINKEDIT` chunk stream outgrew its signature-boundary
+///   reservation — the boundary moves with it while every content
+///   section stays put.
+///
+/// Anything else (a segment base moving, a section swapping slots, a
+/// held section shifting, identity or image-base changes, a new
+/// `LC_UUID` slot off page 0, an image *shrink*) is structural and
+/// refuses the tier — the full link remains the always-correct fallback.
+fn relayout_delta(
+    record: &LinkRecord,
+    layout: &Layout,
+    policy: Option<&SlackPolicy>,
+) -> Option<RelayoutDelta> {
+    let policy = policy?;
+    if layout.file_size < record.file_size {
+        return None;
+    }
+    if record.ident != layout.ident
+        || record.filetype != layout.filetype
+        || record.image_base != layout.image_base
+    {
+        return None;
+    }
+    // The UUID field must stay inside the first hash page — the patch
+    // path rewrites it in tile 0 only.
+    if layout
+        .linkedit
+        .uuid_at
+        .checked_add(16)
+        .is_none_or(|end| end > HASH_PAGE)
+    {
+        return None;
+    }
+    let (_, sections) = skeleton_of(layout);
+    if record.segments.is_empty()
+        || record.sections.len() != sections.len()
+        || record.segments.len() != layout.segments.len()
+    {
+        return None;
+    }
+    // Slots hold everywhere: same names, order, flags, alignment,
+    // zero-fill class. Placement and size may only change behind the
+    // first resize.
+    for (r, n) in record.sections.iter().zip(&sections) {
+        if r.seg != n.seg
+            || r.name != n.name
+            || r.flags != n.flags
+            || r.align_log2 != n.align_log2
+            || r.zerofill != n.zerofill
+        {
+            return None;
+        }
+    }
+    // The first placement/size change; everything before it holds.
+    let mut first_change = None;
+    for (i, (r, n)) in record.sections.iter().zip(&sections).enumerate() {
+        if r.vm_addr != n.vm_addr || r.file_off != n.file_off || r.size != n.size {
+            first_change = Some(i);
+            break;
+        }
+    }
+    if let Some(k) = first_change {
+        let r = &record.sections[k];
+        let n = &sections[k];
+        // The overflowing section holds its base and grows.
+        if r.vm_addr != n.vm_addr || r.file_off != n.file_off || n.size <= r.size {
+            return None;
+        }
+        // Every resized section stays within the ladder's segment-relayout
+        // bound (growth beyond the max pad escalates to the clean link).
+        if policy.fits(r.content_size, n.content_size, r.size) != LayoutFallback::SegmentRelayout {
+            return None;
+        }
+        for (r, n) in record.sections.iter().zip(&sections).skip(k + 1) {
+            if r.size != n.size
+                && policy.fits(r.content_size, n.content_size, r.size)
+                    != LayoutFallback::SegmentRelayout
+            {
+                return None;
+            }
+        }
+    }
+    // Segments: sections before the overflowing one may not move a byte,
+    // the overflowing segment holds its base and may only grow, and the
+    // segments behind it shift with the suffix (the tier's whole point).
+    // `__LINKEDIT` is the tail the image grows into either way. The
+    // LINKEDIT-overflow trigger (no resized section) freezes every content
+    // segment and lets only the tail move.
+    let overflow_seg = first_change.map(|k| sections[k].seg.clone());
+    let overflow_idx = layout
+        .segments
+        .iter()
+        .position(|s| Some(&s.name) == overflow_seg.as_ref());
+    for (i, (r, n)) in record.segments.iter().zip(&layout.segments).enumerate() {
+        if r.name != n.name {
+            return None;
+        }
+        if n.name == "__LINKEDIT" {
+            continue;
+        }
+        match overflow_idx {
+            Some(k) if i > k => {}
+            Some(k) if i == k => {
+                if r.vmaddr != n.vmaddr
+                    || r.fileoff != n.fileoff
+                    || n.vmsize < r.vmsize
+                    || n.filesize < r.filesize
+                {
+                    return None;
+                }
+            }
+            _ => {
+                if r.vmaddr != n.vmaddr
+                    || r.vmsize != n.vmsize
+                    || r.fileoff != n.fileoff
+                    || r.filesize != n.filesize
+                    || r.maxprot != n.maxprot
+                    || r.initprot != n.initprot
+                {
+                    return None;
+                }
+            }
+        }
+    }
+    let shifts = record
+        .sections
+        .iter()
+        .zip(&sections)
+        .map(|(r, n)| {
+            let r = if r.zerofill { 0 } else { r.file_off };
+            let n = if n.zerofill { 0 } else { n.file_off };
+            n as i64 - r as i64
+        })
+        .collect();
+    Some(RelayoutDelta { shifts })
+}
+
+/// Plans the relayout tier: the skeleton shifted and [`relayout_delta`]
+/// vouched for the shape. The span diff runs as in the in-place tier, but
+/// the propagation gate learns two relayout-specific explanations — a
+/// moved section whose final bytes are unchanged (the recorded v4 digest
+/// equals the new plan's) rides the shift, and a genuinely changed
+/// section's *old-side* ranges are translated into the new coordinates by
+/// its shift before the scope is consulted. The moved-away
+/// `CodeDirectory` location joins the diff so its bytes do not survive
+/// the patch.
+///
+/// # Errors
+/// [`PatchError::Contract`] on plan shapes the full emit would also
+/// reject.
+fn plan_relayout(
+    record: &LinkRecord,
+    layout: &Layout,
+    objects: &[InputObject],
+    delta: RelayoutDelta,
+) -> Result<PatchDecision, PatchError> {
+    let symtab = symtab_bytes(layout);
+    let indirect = indirect_bytes(layout);
+    let ctx = TileCtx::build(layout, objects, &symtab, &indirect)?;
+    let new_spans = span_table_with(&ctx);
+    let (_, new_sections) = skeleton_of(layout);
+    let run_diffs = diff_spans_sided(&record.spans.runs, &new_spans.runs);
+    let mut span_changes: Vec<Range<u64>> = Vec::new();
+    for (r, _) in &run_diffs {
+        span_changes.push(r.clone());
+    }
+    let mut class_changes: Vec<Range<u64>> = span_changes.clone();
+    diff_spans(&record.spans.synths, &new_spans.synths, &mut class_changes);
+    diff_spans(&record.spans.blobs, &new_spans.blobs, &mut class_changes);
+    diff_spans(
+        &record.spans.patches,
+        &new_spans.patches,
+        &mut class_changes,
+    );
+    diff_spans(&record.spans.words, &new_spans.words, &mut class_changes);
+    let mut ranges: Vec<Range<u64>> = class_changes.clone();
+    let header_digest: [u8; 32] = Sha256::digest(&layout.header_bytes).into();
+    if record.header_sha != header_digest {
+        ranges.push(0..layout.header_bytes.len() as u64);
+    }
+    // The boundary moved (the tier's second trigger): everything between
+    // the previous CodeDirectory's start and the new one — the old
+    // signature's bytes, the grown chunk tail, the zero padding — joins
+    // the diff. These tiles hold no recorded page hashes (they were past
+    // the old hashed prefix), so they must be re-emitted, not reused; the
+    // new blob itself is rebuilt by the patch path.
+    if record.code_limit > 0 && record.code_limit < layout.linkedit.sig_off {
+        ranges.push(record.code_limit..layout.linkedit.sig_off);
+    }
+
+    let content_digests = next_content_digests(record, layout, &ctx, &span_changes);
+
+    // The propagation gate, relayout-aware: a byte-identical move is
+    // explained by the skeleton shift; genuine content churn must still
+    // sit inside the propagation scope (old-side ranges translated by
+    // their section's shift).
+    if !span_changes.is_empty() {
+        let scope = pgr_core::propagate::predict(&record.section_digests, objects, layout);
+        let mut unexplained: Vec<Range<u64>> = Vec::new();
+        for (range, side) in &run_diffs {
+            // Each side's coordinates read its own skeleton — the two
+            // lists are index-aligned (the admission checked the slots),
+            // so the digest comparison pairs the same section either way.
+            let index = match side {
+                DiffSide::New => section_index_at(&new_sections, range.start),
+                DiffSide::Old => section_index_at(&record.sections, range.start),
+            };
+            let Some(i) = index else {
+                unexplained.push(range.clone());
+                continue;
+            };
+            if record.content_digests[i].sha == content_digests[i].sha {
+                continue;
+            }
+            let probe = match side {
+                DiffSide::New => range.clone(),
+                DiffSide::Old => {
+                    let shift = delta.shifts[i];
+                    let start = (range.start as i64 + shift).max(0) as u64;
+                    let end = (range.end as i64 + shift).max(0) as u64;
+                    start..end.max(start)
+                }
+            };
+            if !scope
+                .ranges
+                .iter()
+                .any(|p| p.start < probe.end && probe.start < p.end)
+            {
+                unexplained.push(probe);
+            }
+        }
+        if !unexplained.is_empty() {
+            return Ok(PatchDecision::Fallback(
+                FallbackReason::PropagationMismatch {
+                    detail: format!(
+                        "{} content change(s) outside the propagation scope: {}",
+                        unexplained.len(),
+                        list_ranges(unexplained.into_iter())
+                    ),
+                },
+            ));
+        }
+    }
+
+    let plan = finish_plan(
+        record,
+        layout,
+        ranges,
+        new_spans,
+        Some(delta),
+        content_digests,
+    );
+    Ok(match plan {
+        Ok(plan) => PatchDecision::InPlace(plan),
+        Err(reason) => PatchDecision::Fallback(reason),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,6 +1795,7 @@ pub fn check_output(prev_path: &Path, record: &LinkRecord) -> Result<Integrity, 
 // ---------------------------------------------------------------------------
 
 /// Applies an in-place [`PatchDecision`]: clones the previous output,
+/// resizes the clone when the plan grew the image (the relayout tier),
 /// `pwrite`s the dirty tiles, rebuilds page 0 (new `LC_UUID`) and the
 /// `CodeDirectory` (merged hash table), renames over the destination, and
 /// returns the outcome *plus the record of the new state* (the next
@@ -1300,7 +1823,10 @@ pub fn apply_patch(
         }));
     }
     let code_limit = content_limit(layout);
-    if code_limit != record.code_limit {
+    // The signature boundary moves only under the relayout tier's second
+    // trigger (the `__LINKEDIT` tail outgrew its reservation); a tier-1
+    // plan with a moved boundary is a planner bug.
+    if plan.relayout.is_none() && code_limit != record.code_limit {
         return Err(PatchError::Contract {
             message: "plan passed the skeleton gate but the code limit moved".into(),
         });
@@ -1344,6 +1870,19 @@ pub fn apply_patch(
             path: tmp_path.display().to_string(),
             source,
         })?;
+    // The relayout tier grew the image: the clone extends to the new file
+    // size before the dirty tiles land (the extension is zeros; the moved
+    // suffix's tiles rewrite everything the new plan places there).
+    if layout.file_size != record.file_size {
+        if let Err(source) = file.set_len(layout.file_size) {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(PatchError::Io {
+                path: tmp_path.display().to_string(),
+                source,
+            });
+        }
+    }
 
     let (outcome, page_hashes) = match patch_file(&mut file, record, plan, layout, &ctx, code_limit)
     {
@@ -1375,6 +1914,7 @@ pub fn apply_patch(
         plan.spans.clone(),
         page_hashes,
         pgr_core::propagate::section_digests(objects),
+        plan.content_digests.clone(),
     )?;
     Ok((outcome, new_record))
 }
@@ -1617,6 +2157,11 @@ mod tests {
                 file: 0,
                 in_sect: 0,
                 sha: [3; 32],
+            }],
+            content_digests: vec![OutputSectionDigest {
+                seg: "__TEXT".into(),
+                name: "__text".into(),
+                sha: [4; 32],
             }],
             spans: SpanTable {
                 runs: vec![RecordedSpan {
