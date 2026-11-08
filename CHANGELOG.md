@@ -5,6 +5,71 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 
+## [1.2.0] - 2026-11-08
+
+### Features
+
+- **emit:** M9 in-place incremental relink engine (architecture doc §10.4
+  row M9, §7.3 Stage C tier 1) — the new `pgr-emit::incremental` module
+  records a full link's state (`LinkRecord`: the emit plan's byte-producing
+  spans with per-tile-piece SHA-256 digests, the frozen skeleton, the
+  signature's final page-hash table) into a versioned, checksum-framed,
+  pointer-free sidecar; plans the next relink by diffing the new plan's
+  spans against the record (dirty 16 KiB tiles + the §7.3 skeleton gate);
+  and patches the output in place — clone the previous image (APFS
+  copy-on-write via `fclonefileat` on macOS, `copy_file_range` on Linux),
+  `pwrite` only the dirty tiles, rebuild page 0 with the derived `LC_UUID`,
+  re-sign from the merged hash table (recorded hashes for clean pages,
+  recomputed for dirty ones), rename. **Contract: the patched file is
+  byte-identical to the full fused emit of the same plan** — gated in
+  tests, auditable per link
+- **emit:** the planner's fallback ladder — any skeleton move (section or
+  segment placement, signature boundary, file size, identity), output
+  change (missing, resized, or failed the sampled integrity gate), or
+  record problem (missing, corrupt, foreign format) falls back to the full
+  link, which is always available and always correct; when every content
+  tile is dirty the planner declines on economics; §7.3 ladder tiers are
+  classified through `SlackPolicy::fits` for the diagnostics
+- **core:** M9 slack anchors (`LinkConfig::slack_anchor` +
+  `SlackPolicy::pad_section_anchored`) — the previous link's reserved
+  section sizes are a layout input, so a changed section keeps its on-disk
+  place while its content fits (the in-place patch tier's precondition);
+  an empty anchor list reproduces M8-c exactly (gated)
+- **driver:** `-incremental` / `-no_incremental` / `-incremental-verify` —
+  the relink loop over real files with the record sidecar
+  (`<output>.pgr-inc`, `PGR_INCREMENTAL_RECORD`), silent fallbacks
+  (`PGR_INCREMENTAL_DEBUG=1` prints reasons), and the audit gate
+  (byte-identity against the full emit, then a strict `pgr-verify` pass on
+  the patched bytes; a divergence never ships). `-incremental` implies
+  slack layout for the whole link cycle so the cold full link reserves
+  exactly what its record describes
+- **daemon:** wire protocol v2 — the config carries the M9 slack anchors
+  (a version mismatch stays a hard proto error; clients fall back to the
+  one-shot link)
+
+### Tests
+
+- `pgr-core/tests/m9_foundations.rs` (4): anchored relink stability,
+  overflow to the natural pad, anchor determinism, M8-c reproduction
+- `pgr-emit/tests/incremental.rs` (9) + `pgr-emit::incremental` unit tests
+  (16): the byte-identity contract across executables, dylibs, no-slack
+  and unsigned corpora; growth within slack patches in place (LINKEDIT
+  churn included — the skeleton freezes the segment extent, not the chunk
+  offsets); no-op relinks; symbol-count and ladder fallbacks; the
+  integrity gate's honest sampling; codec roundtrip and corruption
+  tolerance (never a panic)
+- `pgr-driver/tests/m9_incremental.rs` (11): the end-to-end loop — record,
+  patch, no-op, every fallback path, verifier-clean patched output,
+  `-incremental-verify`, option surface, error propagation
+
+### Performance
+
+- `pgr-driver/incremental` bench: full relink 16.4 ms vs incremental
+  17.6 ms on the 8.53 MiB sandbox corpus (a wash — ext4 has no reflink, so
+  the clone degrades to a full copy; recorded as-is), untouched relink
+  13.3 ms, and the §7.3 bytes-written gate met: **1.2% of the image bytes
+  per one-function edit** (105 KB: two dirty tiles + the CodeDirectory)
+
 ## [1.1.0] - 2026-11-08
 
 ### Features
