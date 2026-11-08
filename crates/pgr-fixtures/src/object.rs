@@ -445,6 +445,11 @@ impl ObjectBuilder {
     /// symtab | strtab. Section addresses and symbol `n_value`s are
     /// offsets into the blob; zero-fill sections advance the blob address
     /// but commit no file bytes.
+    ///
+    /// # Errors
+    /// A descriptive `String` when the spec exceeds a Mach-O object limit
+    /// (section/symbol counts) or a relocation references a missing
+    /// symbol or a section beyond the section table.
     pub fn build(&self) -> Result<Vec<u8>, String> {
         if self.sections.len() > u8::MAX as usize {
             return Err(format!("{}: too many sections", self.name));
@@ -568,7 +573,7 @@ impl ObjectBuilder {
             }
         }
         let nsyms = entries.len() as u32;
-        let stroff = symoff + nsyms as u64 * 16;
+        let stroff = symoff + u64::from(nsyms) * 16;
         let file_len = stroff + strtab.len() as u64;
 
         // ---- assemble ------------------------------------------------------
