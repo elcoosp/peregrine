@@ -95,26 +95,25 @@ fn walk_chain_page(
 ) -> Result<u64, FormatError> {
     if start_off % 8 != 0 {
         return Err(FormatError::Invalid {
-            offset: page_base as usize,
+            offset: usize::try_from(page_base).unwrap_or(usize::MAX),
             what: "chain start offset not 8-byte aligned",
-            value: start_off as u64,
+            value: u64::from(start_off),
         });
     }
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let mut slot_off = u64::from(start_off);
     let mut visited = 0u64;
     loop {
         let slot_file = page_base + slot_off;
-        if slot_file
-            .checked_add(8)
-            .is_none_or(|end| end > bytes.len() as u64)
-        {
+        let slot_end = slot_file.saturating_add(8);
+        if slot_end > len {
             return Err(FormatError::Overrun {
-                offset: slot_file as usize,
-                overrun: (slot_file + 8) as usize - bytes.len(),
+                offset: usize::try_from(slot_file).unwrap_or(usize::MAX),
+                overrun: usize::try_from(slot_end - len).unwrap_or(usize::MAX),
             });
         }
         let mut c = Cursor::new(bytes);
-        c.seek(slot_file as usize)?;
+        c.seek(usize::try_from(slot_file).unwrap_or(usize::MAX))?;
         let word = fixups::ChainWord64::new(c.read_u64()?);
         visited += 1;
         let strides = u64::from(word.next());
@@ -124,7 +123,7 @@ fn walk_chain_page(
         let advance = strides * 4;
         if slot_off % 8 != 0 || slot_off + advance + 8 > page_size {
             return Err(FormatError::Invalid {
-                offset: slot_file as usize,
+                offset: usize::try_from(slot_file).unwrap_or(usize::MAX),
                 what: "chain stride leaves the page or misaligns the next slot",
                 value: strides,
             });
@@ -175,6 +174,9 @@ fn walk_fixup_payload(
 /// Parses an image structurally, counting every table the linking pipeline
 /// will later materialize.
 ///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
+///
 /// This is the M0 parser-throughput benchmark unit: it walks the header,
 /// every load command, all sections, the full symbol table, all relocation
 /// entries and — when present — the complete chained-fixup chain structure.
@@ -209,7 +211,7 @@ pub fn summarize(bytes: &[u8]) -> Result<ObjectSummary, FormatError> {
                             return Err(FormatError::Invalid {
                                 offset: off,
                                 what: "scattered relocation (not generated on arm64)",
-                                value: r.r_address as u64,
+                                value: u64::from(r.r_address),
                             });
                         }
                         // Touch the decoded fields: this is the per-reloc work
