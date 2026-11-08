@@ -294,7 +294,7 @@ fn m5_cstring_section_relative_pointers_remap_to_the_canonical_copy() {
                 let mut slot_off = u64::from(start);
                 loop {
                     let slot_file = u64::from(seg.page_size) * u64::from(page) + slot_off;
-                    let at = (file_off as u64 + slot_file) as usize;
+                    let at = (u64::from(file_off) + slot_file) as usize;
                     let word = u64::from_le_bytes(image[at..at + 8].try_into().unwrap());
                     let cw = pgr_format::fixups::ChainWord64::new(word);
                     let target = cw.rebase_target();
