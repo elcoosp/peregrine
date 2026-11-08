@@ -60,10 +60,10 @@ fn string_until(data: &[u8], at: usize, end: usize) -> Option<(&[u8], usize)> {
 }
 
 /// Walks the trie and collects every terminal node's export.
+/// offsets, cycles, unterminated strings). Never panics.
 ///
 /// # Errors
 /// [`FormatError`] on any structural violation (truncation, out-of-range
-/// offsets, cycles, unterminated strings). Never panics.
 pub fn exports(payload: &[u8]) -> Result<Vec<TrieExport>, FormatError> {
     if payload.is_empty() {
         return Ok(Vec::new());
@@ -74,6 +74,71 @@ pub fn exports(payload: &[u8]) -> Result<Vec<TrieExport>, FormatError> {
     Ok(out)
 }
 
+/// Typed [`FormatError::Invalid`] shorthand shared by the trie walkers.
+fn invalid(offset: usize, what: &'static str, value: u64) -> FormatError {
+    FormatError::Invalid {
+        offset,
+        what,
+        value,
+    }
+}
+
+/// Parses one node's terminal info — `ULEB flags` then a re-export ordinal
+/// plus an optional imported name, or a plain export address — bounded by
+/// `[terminal_start, info_end)`. Returns the export fields in walk order.
+fn parse_terminal(
+    data: &[u8],
+    prefix: &[u8],
+    terminal_start: usize,
+    info_end: usize,
+) -> Result<(u64, Option<u64>, Option<u64>, Vec<u8>), FormatError> {
+    let (flags, after_flags) = uleb_at(data, terminal_start)
+        .ok_or_else(|| invalid(terminal_start, "export flags ULEB overruns the terminal", 0))?;
+    let mut address = None;
+    let mut reexport_ordinal = None;
+    let mut imported_name = prefix.to_vec();
+    if flags & EXPORT_SYMBOL_FLAGS_REEXPORT != 0 {
+        let (ordinal, after) = uleb_at(data, after_flags).ok_or_else(|| {
+            invalid(
+                after_flags,
+                "re-export ordinal ULEB overruns the terminal",
+                0,
+            )
+        })?;
+        if ordinal == 0 {
+            return Err(invalid(after_flags, "re-export ordinal is zero", 0));
+        }
+        reexport_ordinal = Some(ordinal);
+        // The imported name is optional; when present it must fill the
+        // terminal exactly (NUL included).
+        if after < info_end {
+            let (name, end) = string_until(data, after, info_end).ok_or_else(|| {
+                invalid(after, "re-export imported name is not NUL-terminated", 0)
+            })?;
+            if end != info_end {
+                return Err(invalid(
+                    after,
+                    "re-export imported name leaves trailing bytes",
+                    0,
+                ));
+            }
+            imported_name = name.to_vec();
+        }
+    } else {
+        let (addr, after) = uleb_at(data, after_flags)
+            .ok_or_else(|| invalid(after_flags, "export address ULEB overruns the terminal", 0))?;
+        if after != info_end {
+            return Err(invalid(
+                after_flags,
+                "export info does not fill the declared terminal size",
+                0,
+            ));
+        }
+        address = Some(addr);
+    }
+    Ok((flags, address, reexport_ordinal, imported_name))
+}
+
 /// Recursive dyld-shaped walk with an explicit prefix accumulator.
 fn walk(
     data: &[u8],
@@ -82,11 +147,6 @@ fn walk(
     visited: &mut std::collections::BTreeSet<usize>,
     out: &mut Vec<TrieExport>,
 ) -> Result<(), FormatError> {
-    let invalid = |at: usize, what: &'static str, value: u64| FormatError::Invalid {
-        offset: at,
-        what,
-        value,
-    };
     if at >= data.len() {
         return Err(invalid(
             at,
@@ -105,7 +165,7 @@ fn walk(
         .ok_or_else(|| invalid(at, "terminal size ULEB overruns the payload", 0))?;
     let terminal_start = cur;
     let terminal_end = terminal_start
-        .checked_add(terminal_size as usize)
+        .checked_add(usize::try_from(terminal_size).unwrap_or(usize::MAX))
         .ok_or_else(|| {
             invalid(
                 terminal_start,
@@ -120,52 +180,8 @@ fn walk(
         });
     }
     if terminal_size > 0 {
-        let info_end = terminal_end;
-        let (flags, after_flags) = uleb_at(data, terminal_start)
-            .ok_or_else(|| invalid(terminal_start, "export flags ULEB overruns the terminal", 0))?;
-        let mut address = None;
-        let mut reexport_ordinal = None;
-        let mut imported_name = prefix.clone();
-        if flags & EXPORT_SYMBOL_FLAGS_REEXPORT != 0 {
-            let (ordinal, after) = uleb_at(data, after_flags).ok_or_else(|| {
-                invalid(
-                    after_flags,
-                    "re-export ordinal ULEB overruns the terminal",
-                    0,
-                )
-            })?;
-            if ordinal == 0 {
-                return Err(invalid(after_flags, "re-export ordinal is zero", 0));
-            }
-            reexport_ordinal = Some(ordinal);
-            // The imported name is optional; when present it must fill the
-            // terminal exactly (NUL included).
-            if after < info_end {
-                let (name, end) = string_until(data, after, info_end).ok_or_else(|| {
-                    invalid(after, "re-export imported name is not NUL-terminated", 0)
-                })?;
-                if end != info_end {
-                    return Err(invalid(
-                        after,
-                        "re-export imported name leaves trailing bytes",
-                        0,
-                    ));
-                }
-                imported_name = name.to_vec();
-            }
-        } else {
-            let (addr, after) = uleb_at(data, after_flags).ok_or_else(|| {
-                invalid(after_flags, "export address ULEB overruns the terminal", 0)
-            })?;
-            if after != info_end {
-                return Err(invalid(
-                    after_flags,
-                    "export info does not fill the declared terminal size",
-                    0,
-                ));
-            }
-            address = Some(addr);
-        }
+        let (flags, address, reexport_ordinal, imported_name) =
+            parse_terminal(data, prefix, terminal_start, terminal_end)?;
         out.push(TrieExport {
             name: prefix.clone(),
             flags,
@@ -196,7 +212,8 @@ fn walk(
         let (child_off, after) = uleb_at(data, cur)
             .ok_or_else(|| invalid(cur, "child offset ULEB overruns the payload", 0))?;
         cur = after;
-        if child_off as usize >= data.len() {
+        let child_at = usize::try_from(child_off).unwrap_or(usize::MAX);
+        if child_at >= data.len() {
             return Err(invalid(
                 cur - 1,
                 "child offset outside the payload",
@@ -204,7 +221,7 @@ fn walk(
             ));
         }
         prefix.extend_from_slice(sub);
-        walk(data, child_off as usize, prefix, visited, out)?;
+        walk(data, child_at, prefix, visited, out)?;
         prefix.truncate(prefix.len() - sub.len());
     }
     Ok(())
