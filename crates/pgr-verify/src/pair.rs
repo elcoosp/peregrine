@@ -67,12 +67,8 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
     };
 
     // Filetype sanity (parse-level failures already reported above).
-    let exec_type = pgr_format::MachHeader64::parse(exec_bytes)
-        .map(|h| h.filetype)
-        .unwrap_or(0);
-    let dylib_type = pgr_format::MachHeader64::parse(dylib_bytes)
-        .map(|h| h.filetype)
-        .unwrap_or(0);
+    let exec_type = pgr_format::MachHeader64::parse(exec_bytes).map_or(0, |h| h.filetype);
+    let dylib_type = pgr_format::MachHeader64::parse(dylib_bytes).map_or(0, |h| h.filetype);
     if exec_type != MH_EXECUTE {
         out.pair_issues.push(Issue::error(
             Code::HeaderInvalid,
@@ -92,16 +88,15 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
 
     // Re-parse both images structurally (the verify reports prove they
     // parse; failures here are already covered by the individual reports).
-    let (exec_img, dylib_img) = match (
+    let (Ok(exec_img), Ok(dylib_img)) = (
         crate::structural::parse_image(exec_bytes),
         crate::structural::parse_image(dylib_bytes),
-    ) {
-        (Ok(e), Ok(d)) => (e, d),
-        _ => return out,
+    ) else {
+        return out;
     };
 
     // The dylib's exported surface (trie walk; already validated).
-    let mut exports: std::collections::BTreeMap<String, ()> = std::collections::BTreeMap::new();
+    let mut exports: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for cmd in &dylib_img.commands {
         if let pgr_format::load_command::LoadCommandKind::LinkeditData(
             pgr_format::consts::LC_DYLD_EXPORTS_TRIE,
@@ -111,7 +106,7 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
                 if let Ok(payload) = lc.data(dylib_bytes) {
                     if let Ok(entries) = pgr_format::trie::exports(payload) {
                         for e in entries {
-                            exports.insert(String::from_utf8_lossy(&e.name).into_owned(), ());
+                            exports.insert(String::from_utf8_lossy(&e.name).into_owned());
                         }
                     }
                 }
@@ -128,7 +123,7 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
                 .commands
                 .iter()
                 .find(|c| c.kind == pgr_format::load_command::LoadCommandKind::IdDylib)?;
-            id.name(cmd.bytes).ok().map(|n| n.to_vec())
+            id.name(cmd.bytes).ok().map(<[u8]>::to_vec)
         })
         .map(|n| String::from_utf8_lossy(&n).into_owned());
     let Some(install_name) = dylib_install_name else {
@@ -194,12 +189,12 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
         // -no_fixup_chains image); the pair still links name-wise.
         return out;
     };
-    let (payload, hdr) = match (
+    // Payload errors are already in the exec report.
+    let (Ok(payload), Ok(hdr)) = (
         fixups_lc.data(exec_bytes),
         parse_header_payload(fixups_lc, exec_bytes),
-    ) {
-        (Ok(p), Ok(h)) => (p, h),
-        _ => return out, // payload errors already in the exec report
+    ) else {
+        return out;
     };
     let Ok(starts) = parse_starts_in_image(payload, hdr.starts_offset as usize) else {
         return out;
@@ -264,7 +259,7 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
                     if word.is_bind() {
                         let bind_ord = word.bind_ordinal() as usize;
                         if let Some(name) = import_name(bind_ord) {
-                            if bind_ord == ordinal && !exports.contains_key(&name) {
+                            if bind_ord == ordinal && !exports.contains(&name) {
                                 out.pair_issues.push(Issue::error(
                                     Code::FixupsImport,
                                     format!(
