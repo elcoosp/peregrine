@@ -9,6 +9,8 @@
 //! `.tbd` stub whose export covers every unresolved reference, so the GOT/
 //! stub synthesis, import-table build and bind chains run on every iteration.
 
+use core::fmt::Write as _;
+
 use criterion::{Criterion, Throughput};
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 
@@ -102,13 +104,13 @@ fn bench_link(c: &mut Criterion) {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
         group.bench_function(format!("{name}_reference"), |b| {
             b.iter(|| {
                 let image = pgr_driver::link_reference_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
     }
 
@@ -190,13 +192,13 @@ fn bench_link_dylib(c: &mut Criterion) {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
         group.bench_function(format!("{name}_reference"), |b| {
             b.iter(|| {
                 let image = pgr_driver::link_reference_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
     }
 
@@ -235,13 +237,13 @@ fn bench_link_outputs(c: &mut Criterion) {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
         group.bench_function(format!("{label}_reference"), |b| {
             b.iter(|| {
                 let image = pgr_driver::link_reference_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
     }
     group.finish();
@@ -319,7 +321,7 @@ fn bench_link_archive(c: &mut Criterion) {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
     }
     group.finish();
@@ -381,7 +383,7 @@ fn bench_link_dead_strip(c: &mut Criterion) {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
     }
     group.finish();
@@ -408,11 +410,11 @@ fn bench_cstring_object(seed: u64, strings: usize) -> ObjectBuilder {
     let mut data = String::new();
     // The shared pool: identical in every object (dedup collapses these).
     for i in 0..strings / 2 {
-        data.push_str(&format!("shared literal {i} the same everywhere\n"));
+        let _ = writeln!(data, "shared literal {i} the same everywhere");
     }
     // The private tail: unique per object.
     for i in 0..strings / 2 {
-        data.push_str(&format!("private literal {seed}_{i}\n"));
+        let _ = writeln!(data, "private literal {seed}_{i}");
     }
     b.add_section(ObjectSection::cstring(&data));
     b
@@ -448,7 +450,7 @@ fn bench_link_cstring(c: &mut Criterion) {
         b.iter(|| {
             let image = pgr_driver::link_to_bytes(&opts).unwrap();
             std::hint::black_box(image.len());
-        })
+        });
     });
     group.finish();
 }
@@ -526,7 +528,7 @@ fn bench_link_icf(c: &mut Criterion) {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
     }
     group.finish();
@@ -572,7 +574,7 @@ fn bench_link_cache(c: &mut Criterion) {
                 std::hint::black_box(image.len());
             },
             criterion::BatchSize::LargeInput,
-        )
+        );
     });
     // Warm: populate once, then every iteration is a full cache hit.
     let _ = pgr_driver::link_to_bytes(&opts).unwrap();
@@ -580,7 +582,7 @@ fn bench_link_cache(c: &mut Criterion) {
         b.iter(|| {
             let image = pgr_driver::link_to_bytes(&opts).unwrap();
             std::hint::black_box(image.len());
-        })
+        });
     });
     group.finish();
 }
@@ -606,14 +608,14 @@ fn bench_tbd_frozen(c: &mut Criterion) {
         b.iter(|| {
             let d = pgr_driver::tbd_to_dylib("libBench.tbd", &tbd, false).unwrap();
             std::hint::black_box(d.exports.len());
-        })
+        });
     });
     group.bench_function("libbench_frozen_load", |b| {
         b.iter(|| {
             let d =
                 pgr_driver::tbd_to_dylib_cached("libBench.tbd", &tbd, false, Some(&cache)).unwrap();
             std::hint::black_box(d.exports.len());
-        })
+        });
     });
     group.finish();
 }
@@ -652,7 +654,7 @@ fn bench_cache_evict(c: &mut Criterion) {
             b.iter(|| {
                 let image = pgr_driver::link_to_bytes(&opts).unwrap();
                 std::hint::black_box(image.len());
-            })
+            });
         });
     }
     group.finish();
