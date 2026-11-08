@@ -1087,7 +1087,9 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
     store_record(opts, &new_record);
     Ok(LinkOutcome {
         output: opts.output.clone(),
-        file_size: record.file_size,
+        // The patched state's size — the relayout tier grows the image, so
+        // this is the refreshed record's, not the previous link's.
+        file_size: new_record.file_size,
         entryoff: result.layout.entryoff,
         fixup_slots: result.layout.fixups.slot_count,
         patch: Some(outcome),
