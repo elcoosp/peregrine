@@ -208,8 +208,8 @@ fn index_entries_resolve_from_data_offsets_too() {
 #[test]
 fn empty_archive_has_no_members() {
     let arch = parse_archive(b"!<arch>\n").unwrap();
-    assert!(arch.members.is_empty());
-    assert!(arch.index.is_empty());
+    assert_eq!(arch.members, [] as [pgr_format::ArchiveMember; 0]);
+    assert_eq!(arch.index, [] as [pgr_format::ArchiveIndexEntry; 0]);
     assert!(!is_archive(b"!<arch>"));
 }
 
