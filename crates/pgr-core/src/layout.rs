@@ -18,7 +18,7 @@
 //! invariant under 16 KiB-aligned address shifts, so one re-run converges.
 
 use crate::LinkError;
-use crate::fixups::{FixupKind, FixupPlan, FixupSlot, plan_fixups};
+use crate::fixups::{FixupKind, FixupPlan, FixupSlot, plan_fixups_with_imports};
 use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
 use crate::object::{InputObject, RelocKind, RelocTarget};
@@ -153,6 +153,22 @@ pub struct LinkConfig {
     /// patch tier's precondition). Empty by default — with no anchors the
     /// M8-c recomputed-pad behavior is reproduced exactly.
     pub slack_anchor: Vec<crate::slack::SlackAnchor>,
+    /// M9 tier-2a import anchor (§7.3 step 5): the previous link's recorded
+    /// import table. When set, the chained-fixups planner keeps every
+    /// recorded bind ordinal and appends genuinely new imports — an edit
+    /// that adds a bind no longer renumbers the table. `None` (the default,
+    /// and every clean link) keeps first-use assignment bit-for-bit. The
+    /// M6 classic path (`-no_fixup_chains`) ignores the anchor: its bind
+    /// opcodes stay first-use (the tier-2a scope is the chained payload).
+    pub stable_imports: Option<Vec<crate::stable_imports::StableImport>>,
+    /// M9 tier-2a signature-boundary anchor: the previous link's `sig_off`.
+    /// With slack active, the `__LINKEDIT` tail reservation keeps the
+    /// signature where it was while the chunk stream grows into the
+    /// reserved gap — the precondition for patching symtab/import growth in
+    /// place. The boundary moves again (and the §7.3 ladder observes it)
+    /// only when the chunks outgrow the reservation. `None` computes the
+    /// boundary from the chunk stream alone (every clean link).
+    pub sig_anchor: Option<u64>,
 }
 
 impl Default for LinkConfig {
@@ -183,6 +199,8 @@ impl Default for LinkConfig {
             icf: crate::icf::IcfMode::default(),
             layout_slack: None,
             slack_anchor: Vec::new(),
+            stable_imports: None,
+            sig_anchor: None,
         }
     }
 }
@@ -556,7 +574,7 @@ fn scan_needs(
                 match r.kind {
                     RelocKind::Branch26 => needs.push_stub(id),
                     RelocKind::GotLoadPage21 { .. } | RelocKind::GotLoadPageOff12 { .. } => {
-                        needs.push_got(id)
+                        needs.push_got(id);
                     }
                     RelocKind::PointerToGot => needs.push_got(id),
                     RelocKind::Unsigned => {} // direct bind, no slot needed
@@ -710,18 +728,15 @@ fn bucket_for(
         .filter(|r| r.kind == RelocKind::Unsigned)
         .count();
     Ok(
-        match buckets
+        if let Some(i) = buckets
             .iter()
             .position(|(seg, n, _, _)| seg == &in_sect.segment && n == &name)
         {
-            Some(i) => {
-                buckets[i].2 |= in_sect.flags;
-                i
-            }
-            None => {
-                buckets.push((in_sect.segment.clone(), name, in_sect.flags, zerofill));
-                buckets.len() - 1
-            }
+            buckets[i].2 |= in_sect.flags;
+            i
+        } else {
+            buckets.push((in_sect.segment.clone(), name, in_sect.flags, zerofill));
+            buckets.len() - 1
         },
     )
 }
@@ -772,7 +787,7 @@ fn prepare_buckets(
     }
 }
 
-/// Canonical rank: segments ordered TEXT < DATA_CONST < DATA; known section
+/// Canonical rank: segments ordered TEXT < `DATA_CONST` < DATA; known section
 /// names in the fixed canonical order; unknown names follow in first-seen
 /// order (deterministic; TDD §8.4).
 fn canonical_rank(segment: &str, name: &str) -> u64 {
@@ -783,16 +798,11 @@ fn canonical_rank(segment: &str, name: &str) -> u64 {
         _ => 3,
     };
     let name: u64 = match (segment, name) {
-        ("__TEXT", "__text") => 0,
-        ("__TEXT", "__stubs") => 1,
-        ("__TEXT", "__const") => 2,
+        ("__TEXT", "__text") | ("__DATA_CONST", "__const") | ("__DATA", "__data") => 0,
+        ("__TEXT", "__stubs") | ("__DATA_CONST", "__got") | ("__DATA", "__bss") => 1,
+        ("__TEXT", "__const") | ("__DATA", "__common") => 2,
         ("__TEXT", "__cstring") => 3,
         ("__TEXT", "__chain_starts") => 4,
-        ("__DATA_CONST", "__const") => 0,
-        ("__DATA_CONST", "__got") => 1,
-        ("__DATA", "__data") => 0,
-        ("__DATA", "__bss") => 1,
-        ("__DATA", "__common") => 2,
         _ => 100,
     };
     seg * 1000 + name
@@ -836,6 +846,15 @@ struct FlatPiece {
 /// deployment targets and `-no_fixup_chains` fall back to the classic
 /// `LC_DYLD_INFO_ONLY` streams (M6).
 pub const CHAINED_FIXUPS_MIN_MINOS: u32 = 0x000C_0000;
+
+/// The `__LINKEDIT` tail reservation (M9 tier-2a, slack-mode links only):
+/// room between the last chunk and the code signature for the chunk stream
+/// to grow into — symtab entries (16 B each), import-table entries (8 B),
+/// longer strings, longer streams. One 4 KiB hash page of headroom absorbs
+/// ~250 symbol-table edits before the boundary moves and the §7.3 ladder
+/// re-runs the full link; the reservation costs 4 KiB of zeros per
+/// `-incremental` image and nothing on clean links.
+pub const LINKEDIT_SLACK: u64 = 4096;
 
 /// Lays out the image (Pass 3). See the module docs for the fixed-point
 /// structure.
@@ -961,17 +980,29 @@ pub fn layout(
                 imports: Vec::new(),
                 import_names: Vec::new(),
                 has_weak_binds: false,
+                stable_keys: Vec::new(),
             }
         } else if chains_enabled {
-            plan_fixups(slots, &segs, image_base, PAGE_SIZE_16K, interner)?
+            plan_fixups_with_imports(
+                slots,
+                &segs,
+                image_base,
+                PAGE_SIZE_16K,
+                interner,
+                cfg.stable_imports.as_deref(),
+            )?
         } else {
             // M6 legacy: the classic opcode streams replace the chained
             // payload (no `__chain_starts`; slot bytes stay zero). The
             // import metadata (symtab/indirect construction reads it) is
             // built identically to the chained path.
             slots.sort_by_key(|s| s.vaddr);
-            let (imports, import_names, has_weak, _keys) =
+            let (imports, import_names, has_weak, keys) =
                 crate::fixups::build_import_table(&slots, interner);
+            let stable_keys = keys
+                .iter()
+                .map(crate::fixups::import_key_identity)
+                .collect();
             let info = crate::dyld_info::plan_dyld_info(slots, &segs, interner)?;
             if info.is_present() {
                 final_dyld_info = Some(info.clone());
@@ -985,6 +1016,7 @@ pub fn layout(
                 imports,
                 import_names,
                 has_weak_binds: has_weak || info.has_weak_binds,
+                stable_keys,
             }
         };
         let actual = if chains_enabled {
@@ -1049,8 +1081,7 @@ pub fn layout(
         .segments
         .iter()
         .find(|s| s.name == "__TEXT")
-        .map(|s| s.vmaddr)
-        .unwrap_or(PAGEZERO_SIZE_64);
+        .map_or(PAGEZERO_SIZE_64, |s| s.vmaddr);
     let mh_header_sect = state
         .sections
         .iter()
@@ -1296,7 +1327,21 @@ pub fn layout(
     let str_off = take(strtab.len(), 8, &mut cur);
     let indirect_off = take(indirect_syms.len() * 4, 4, &mut cur);
     let (sig_off, sig_size, file_size) = if cfg.adhoc {
-        let aligned = cur.div_ceil(16) * 16;
+        // M9 tier-2a (§7.3 "Rebuild LINKEDIT pieces that changed — each is
+        // a local edit when slack exists"): with slack active, the chunk
+        // stream gets a tail reservation before the signature — the first
+        // slack link reserves [`LINKEDIT_SLACK`] bytes, and an anchored
+        // relink keeps the boundary while the chunks grow into the gap
+        // (symtab entries, import-table growth, longer strings). Chunks
+        // beyond the reservation move the boundary and the ladder observes
+        // it. Without slack the boundary hugs the chunks exactly (the v1.0
+        // bytes, bit-for-bit).
+        let raw = match (cfg.layout_slack.is_some(), cfg.sig_anchor) {
+            (true, Some(anchor)) if cur <= anchor => anchor,
+            (true, None) => cur + LINKEDIT_SLACK,
+            (_, _) => cur,
+        };
+        let aligned = raw.div_ceil(16) * 16;
         let nblocks = aligned.div_ceil(4096);
         let ident_padded = align_up_usize(cfg.ident.len() + 1, 4);
         let dir_len = 88 + ident_padded + (nblocks as usize) * 32;
@@ -1315,8 +1360,7 @@ pub fn layout(
         .segments
         .iter()
         .find(|s| s.name == "__TEXT")
-        .map(|s| s.vmsize)
-        .unwrap_or(0);
+        .map_or(0, |s| s.vmsize);
 
     // ---- header + load commands -----------------------------------------------------
     let header_inputs = HeaderInputs {
@@ -1576,7 +1620,6 @@ pub struct CStringInstance {
 /// section) is preserved byte-for-byte. `S_CSTRING_LITERALS` buckets always
 /// take the D4 path: one piece per unique string (first live instance
 /// canonical), every instance recorded for the remap table.
-#[allow(clippy::type_complexity)]
 fn build_bucket_pieces(
     objects: &[InputObject],
     buckets: &BucketTable,
@@ -1633,39 +1676,38 @@ fn build_bucket_pieces(
                         ..in_sect.data.start as usize + range.end as usize]
                         .to_vec();
                     let per_bucket = cstring_dedup.entry(bi).or_default();
-                    match per_bucket.get(&content).copied() {
-                        Some(ci) => list.push(CStringInstance {
+                    if let Some(ci) = per_bucket.get(&content).copied() {
+                        list.push(CStringInstance {
                             file: obj.file.0,
                             sect: si,
                             start: range.start,
                             end: range.end,
                             canonical: ci,
-                        }),
-                        None => {
-                            // New unique string: emit the canonical piece.
-                            per_bucket.insert(content, list.len());
-                            list.push(CStringInstance {
-                                file: obj.file.0,
-                                sect: si,
-                                start: range.start,
-                                end: range.end,
-                                canonical: list.len(),
-                            });
-                            bucket.push(Piece {
-                                file: obj.file,
-                                in_sect: si,
-                                in_range: in_sect.data.start + range.start
-                                    ..in_sect.data.start + range.end,
-                                offset: 0,
-                                size: range.end - range.start,
-                                align_log2: in_sect.align_log2,
-                                zerofill: false,
-                                common_name: None,
-                                patches: Vec::new(),
-                                fixup_slots: Vec::new(),
-                                synth: None,
-                            });
-                        }
+                        });
+                    } else {
+                        // New unique string: emit the canonical piece.
+                        per_bucket.insert(content, list.len());
+                        list.push(CStringInstance {
+                            file: obj.file.0,
+                            sect: si,
+                            start: range.start,
+                            end: range.end,
+                            canonical: list.len(),
+                        });
+                        bucket.push(Piece {
+                            file: obj.file,
+                            in_sect: si,
+                            in_range: in_sect.data.start + range.start
+                                ..in_sect.data.start + range.end,
+                            offset: 0,
+                            size: range.end - range.start,
+                            align_log2: in_sect.align_log2,
+                            zerofill: false,
+                            common_name: None,
+                            patches: Vec::new(),
+                            fixup_slots: Vec::new(),
+                            synth: None,
+                        });
                     }
                 }
                 continue;
@@ -1761,7 +1803,6 @@ fn stub_template() -> Vec<u8> {
 }
 
 /// Places every output section and packs segments (§8).
-#[allow(clippy::too_many_arguments)]
 fn place(
     cfg: &LinkConfig,
     objects: &[InputObject],
@@ -1930,8 +1971,7 @@ fn place(
         };
         let prev_end = segments
             .last()
-            .map(|s| s.fileoff + s.vmsize)
-            .unwrap_or(PAGE_SIZE_16K);
+            .map_or(PAGE_SIZE_16K, |s| s.fileoff + s.vmsize);
         let seg_fileoff = if seg_name == "__TEXT" {
             0
         } else {
@@ -1976,7 +2016,7 @@ fn place(
             sections: sects,
         });
     }
-    let prev_end = segments.last().map(|s| s.fileoff + s.vmsize).unwrap_or(0);
+    let prev_end = segments.last().map_or(0, |s| s.fileoff + s.vmsize);
     let le_fileoff = align_up_u64(prev_end.max(PAGE_SIZE_16K), PAGE_SIZE_16K);
     segments.push(SegmentPlan {
         name: "__LINKEDIT".into(),
@@ -2020,8 +2060,7 @@ fn place(
                 let data_start = objects
                     .get(p.file.0 as usize)
                     .and_then(|o| o.sections.get(p.in_sect))
-                    .map(|sect| sect.data.start)
-                    .unwrap_or(0);
+                    .map_or(0, |sect| sect.data.start);
                 if is_cstring {
                     // D4: the canonical instance's output address.
                     cstring_out.insert(
@@ -2210,25 +2249,24 @@ fn resolve_all(
                     atom_addr: &state.atom_addr,
                     veneer_of: &state.veneer_addr_of,
                 };
-                let target_addr = match lookup_opt(obj, target, 0, &space)? {
-                    Some(t) => t,
-                    None => {
-                        let RelocTarget::Extern(id) = target else {
-                            return Err(LinkError::Internal {
-                                message: "veneer without an external target".into(),
-                            });
-                        };
-                        space
-                            .stub_addr
-                            .get(&id.0)
-                            .copied()
-                            .ok_or(LinkError::Internal {
-                                message: format!(
-                                    "branch veneer to \"{}\" without a synthesized stub",
-                                    space.interner.name(id)
-                                ),
-                            })?
-                    }
+                let target_addr = if let Some(t) = lookup_opt(obj, target, 0, &space)? {
+                    t
+                } else {
+                    let RelocTarget::Extern(id) = target else {
+                        return Err(LinkError::Internal {
+                            message: "veneer without an external target".into(),
+                        });
+                    };
+                    space
+                        .stub_addr
+                        .get(&id.0)
+                        .copied()
+                        .ok_or(LinkError::Internal {
+                            message: format!(
+                                "branch veneer to \"{}\" without a synthesized stub",
+                                space.interner.name(id)
+                            ),
+                        })?
                 };
                 let page_delta = ((target_addr as i64) >> 12) - ((addr as i64) >> 12);
                 if page_delta.unsigned_abs() > 0xF_FFFF {
@@ -2321,8 +2359,9 @@ fn resolve_all(
     // `sections[*].pieces`).
     for fp in &state.flat {
         let s = &mut state.sections[fp.section];
-        s.pieces[fp.piece_idx].patches = fp.piece.patches.clone();
-        s.pieces[fp.piece_idx].fixup_slots = fp.piece.fixup_slots.clone();
+        let piece = &mut s.pieces[fp.piece_idx];
+        piece.patches.clone_from(&fp.piece.patches);
+        piece.fixup_slots.clone_from(&fp.piece.fixup_slots);
     }
     state.def_addr = def_addr;
     Ok(())
@@ -2392,7 +2431,6 @@ fn atom_or_section_addr(
 }
 
 /// Resolves one relocation into a static patch or a fixup slot.
-#[allow(clippy::too_many_arguments)]
 fn resolve_reloc(
     obj: &InputObject,
     in_sect_idx: usize,
@@ -2408,39 +2446,36 @@ fn resolve_reloc(
         RelocKind::Unsigned => {
             let at = in_sect.data.start as usize + r.offset as usize;
             let addend = read_slot_i64(&obj.bytes, at)?;
-            match lookup_opt(obj, r.target, addend, space)? {
-                Some(target) => {
-                    let value = (target as i64)
-                        .checked_add(addend)
-                        .ok_or(LinkError::Layout {
-                            message: "fixup target overflow".into(),
-                        })?;
-                    slots.push((
-                        r.offset,
-                        FixupKind::Rebase {
-                            target_vaddr: value as u64,
-                        },
-                    ));
-                }
-                None => {
-                    // External (dylib export or dynamic lookup): chained
-                    // bind. The full addend travels in the import entry /
-                    // inline word per plan_fixups' split.
-                    let RelocTarget::Extern(id) = r.target else {
-                        return Err(LinkError::Internal {
-                            message: "section target without an address".into(),
-                        });
-                    };
-                    slots.push((
-                        r.offset,
-                        FixupKind::Bind {
-                            lib_ordinal: bind_lib_ordinal(id, space)?,
-                            name: id,
-                            addend,
-                            weak: false,
-                        },
-                    ));
-                }
+            if let Some(target) = lookup_opt(obj, r.target, addend, space)? {
+                let value = (target as i64)
+                    .checked_add(addend)
+                    .ok_or(LinkError::Layout {
+                        message: "fixup target overflow".into(),
+                    })?;
+                slots.push((
+                    r.offset,
+                    FixupKind::Rebase {
+                        target_vaddr: value as u64,
+                    },
+                ));
+            } else {
+                // External (dylib export or dynamic lookup): chained
+                // bind. The full addend travels in the import entry /
+                // inline word per plan_fixups' split.
+                let RelocTarget::Extern(id) = r.target else {
+                    return Err(LinkError::Internal {
+                        message: "section target without an address".into(),
+                    });
+                };
+                slots.push((
+                    r.offset,
+                    FixupKind::Bind {
+                        lib_ordinal: bind_lib_ordinal(id, space)?,
+                        name: id,
+                        addend,
+                        weak: false,
+                    },
+                ));
             }
         }
         RelocKind::Page21 { addend } => {
@@ -2540,28 +2575,25 @@ fn resolve_reloc(
                 space.veneer_of.get(&(obj.file.0, in_sect_idx, r.offset))
             {
                 veneer_vaddr
+            } else if let Some(t) = lookup_opt(obj, r.target, 0, space)? {
+                t
             } else {
-                match lookup_opt(obj, r.target, 0, space)? {
-                    Some(t) => t,
-                    None => {
-                        // Dylib call: branch through the synthesized stub.
-                        let RelocTarget::Extern(id) = r.target else {
-                            return Err(LinkError::Internal {
-                                message: "external branch without a name".into(),
-                            });
-                        };
-                        space
-                            .stub_addr
-                            .get(&id.0)
-                            .copied()
-                            .ok_or(LinkError::Internal {
-                                message: format!(
-                                    "branch to \"{}\" without a synthesized stub",
-                                    space.interner.name(id)
-                                ),
-                            })?
-                    }
-                }
+                // Dylib call: branch through the synthesized stub.
+                let RelocTarget::Extern(id) = r.target else {
+                    return Err(LinkError::Internal {
+                        message: "external branch without a name".into(),
+                    });
+                };
+                space
+                    .stub_addr
+                    .get(&id.0)
+                    .copied()
+                    .ok_or(LinkError::Internal {
+                        message: format!(
+                            "branch to \"{}\" without a synthesized stub",
+                            space.interner.name(id)
+                        ),
+                    })?
             };
             let delta = (target as i64) - (slot_v as i64);
             // Out-of-range deltas are legal *mid-fixpoint* only: the layout
@@ -2767,14 +2799,14 @@ fn build_symtab(
     // M6 ICF: a symbol inside a folded atom reports the canonical copy's
     // output section (its own piece is not placed).
     let osect_of = |file: u32, sect: usize, value: u64| -> usize {
-        let key = if !fold.is_empty() {
+        let key = if fold.is_empty() {
+            (file, sect)
+        } else {
             objects
                 .get(file as usize)
                 .and_then(|obj| containing_atom_start(obj, sect, value))
                 .and_then(|start| fold.canonical_of(file, sect, start))
                 .map_or((file, sect), |(cf, cs, _)| (cf, cs))
-        } else {
-            (file, sect)
         };
         sect_of.get(&key).copied().unwrap_or(usize::MAX)
     };
@@ -2994,15 +3026,15 @@ impl FixupLc {
 /// Assembles header + load commands. Returns `(bytes, uuid_at, entryoff_at)`.
 /// `__LINKEDIT` chunk positions the header references.
 struct HeaderInputs {
-    /// The output image kind (drives filetype, LC_MAIN/LC_ID_DYLIB).
+    /// The output image kind (drives filetype, `LC_MAIN/LC_ID_DYLIB`).
     filetype: OutputType,
-    /// LC_SYMTAB: file offset, entry count.
+    /// `LC_SYMTAB`: file offset, entry count.
     sym_off: u64,
     nsyms: usize,
-    /// LC_SYMTAB string table: file offset, byte size.
+    /// `LC_SYMTAB` string table: file offset, byte size.
     str_off: u64,
     strsize: usize,
-    /// LC_DYLD_CHAINED_FIXUPS payload (0 size = absent).
+    /// `LC_DYLD_CHAINED_FIXUPS` payload (0 size = absent).
     fixup_off: u64,
     fixup_size: usize,
     /// M6 classic `LC_DYLD_INFO_ONLY` streams (0 size = absent).
@@ -3010,23 +3042,23 @@ struct HeaderInputs {
     dyld_rebase_size: usize,
     dyld_bind_off: u64,
     dyld_bind_size: usize,
-    /// LC_DYLD_EXPORTS_TRIE.
+    /// `LC_DYLD_EXPORTS_TRIE`.
     trie_off: u64,
     trie_len: usize,
-    /// LC_FUNCTION_STARTS.
+    /// `LC_FUNCTION_STARTS`.
     func_off: u64,
     func_len: usize,
-    /// LC_CODE_SIGNATURE (0 size = absent).
+    /// `LC_CODE_SIGNATURE` (0 size = absent).
     sig_off: u64,
     sig_size: u64,
-    /// LC_DYSYMTAB subranges.
+    /// `LC_DYSYMTAB` subranges.
     n_locals: usize,
     n_defs: usize,
     n_undef: usize,
-    /// LC_DYSYMTAB indirect symbol table.
+    /// `LC_DYSYMTAB` indirect symbol table.
     indirect_off: u64,
     indirect_count: usize,
-    /// LC_MAIN entry offset within `__TEXT` (executables only).
+    /// `LC_MAIN` entry offset within `__TEXT` (executables only).
     entryoff: u64,
     /// M3 `LC_ID_DYLIB` inputs (dylibs only).
     install_name: Option<String>,
