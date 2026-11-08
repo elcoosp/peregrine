@@ -324,6 +324,116 @@ fn bench_incremental(c: &mut Criterion) {
     });
     group.finish();
 
+    // The LINKEDIT-shrink bench (the relayout tier's shrink rung): an
+    // UNSIGNED corpus (`-no_adhoc` — no signature boundary to anchor the
+    // tail), object 1 alternating between a 512-local-symbol variant and
+    // the pristine one. The heavy→pristine step shrinks the symtab and
+    // string pool: the image tail comes down and the shrink rung patches
+    // it (clone truncated, chunk tail re-emitted) instead of the full
+    // link; the pristine→heavy step grows it back through the
+    // LINKEDIT-overflow trigger. The recorded mean is the honest mix (1
+    // shrink : 1 regrow); the accounting pass prints the per-direction
+    // split. Separate output path: the unsigned record must not meet the
+    // signed groups' accounting loops below.
+    let heavy = {
+        let mut b = bench_object(1, TEXT_KIB, false, false);
+        for i in 0..512u32 {
+            b.add_symbol(ObjectSymbol::Defined {
+                name: format!("_bench_local_{i:04}"),
+                section_index: 0,
+                value: u64::from(i % 16) * 4,
+                weak: false,
+            });
+        }
+        let bytes = b.build().unwrap();
+        let p = dir.join("inc_obj_1_heavy.o");
+        std::fs::write(&p, &bytes).unwrap();
+        p
+    };
+
+    let mut shrink = full.clone();
+    shrink.incremental = true;
+    shrink.config.adhoc = false;
+    let shrink_out = dir.join("app_shrink");
+    shrink.output = shrink_out.display().to_string();
+    let shrink_probe = pgr_driver::link_to_image(&shrink).unwrap();
+    let shrink_bytes = shrink_probe.image.len() as u64;
+    // Warm the unsigned record (cold links fall back by design).
+    let warm = pgr_driver::run(&shrink).unwrap();
+    assert!(
+        warm.patch.is_none(),
+        "the shrink bench warm-up is the recorded full link"
+    );
+
+    let mut shrink_group = c.benchmark_group("pgr-driver/incremental_shrink");
+    shrink_group.sample_size(20);
+    shrink_group.measurement_time(core::time::Duration::from_secs(6));
+    shrink_group.throughput(Throughput::Bytes(shrink_bytes));
+
+    let mut shrink_alternator = 0u32;
+    shrink_group.bench_function("linkedit_shrink_relink_8mib", |b| {
+        b.iter(|| {
+            shrink_alternator += 1;
+            let mut edited = shrink.clone();
+            edited.inputs[1] = dir
+                .join(if shrink_alternator % 2 == 0 {
+                    "inc_obj_1.o"
+                } else {
+                    "inc_obj_1_heavy.o"
+                })
+                .display()
+                .to_string();
+            let outcome = pgr_driver::run(&edited).unwrap();
+            let patch = outcome.patch.expect("the shrink/regrow relink patches");
+            assert!(
+                patch.dirty_tiles < patch.total_tiles,
+                "the tail edit must not rewrite the content tiles"
+            );
+            std::hint::black_box(patch);
+        });
+    });
+    shrink_group.finish();
+
+    // The shrink rung's accounting pass (reported, not timed): the
+    // heavy→pristine direction is the shrink; its pwritten bytes are the
+    // §7.3 "bytes ∝ change size" evidence for the rung. The timed loop's
+    // parity is unknown, so the pass pins the state first (one pristine
+    // relink), then measures the regrow and the shrink directions.
+    let mut edited = shrink.clone();
+    edited.inputs[1] = dir.join("inc_obj_1.o").display().to_string();
+    let _parity = pgr_driver::run(&edited).unwrap();
+    let mut edited = shrink.clone();
+    edited.inputs[1] = heavy.display().to_string();
+    let regrow = pgr_driver::run(&edited).unwrap();
+    let regrow_patch = regrow.patch.expect("the regrow relink patches");
+    assert!(
+        regrow_patch.bytes_patched > 0 && !regrow_patch.untouched,
+        "the regrow step must be a real edit→patch cycle"
+    );
+    let mut edited = shrink.clone();
+    edited.inputs[1] = dir.join("inc_obj_1.o").display().to_string();
+    let shrink_step = pgr_driver::run(&edited).unwrap();
+    let shrink_patch = shrink_step.patch.expect("the shrink relink patches");
+    assert!(
+        shrink_patch.bytes_patched > 0 && !shrink_patch.untouched,
+        "the shrink step must be a real edit→patch cycle"
+    );
+    eprintln!(
+        "shrink accounting: image {shrink_bytes} bytes; heavy→pristine {} bytes patched ({} of {} tiles, size {} → {}); pristine→heavy {} bytes patched",
+        shrink_patch.bytes_patched,
+        shrink_patch.dirty_tiles,
+        shrink_patch.total_tiles,
+        regrow.file_size,
+        shrink_step.file_size,
+        regrow_patch.bytes_patched
+    );
+    assert!(
+        shrink_step.file_size < regrow.file_size,
+        "the shrink step must shrink the image ({} → {})",
+        regrow.file_size,
+        shrink_step.file_size
+    );
+
     // The bytes-written accounting (reported, not timed): the §7.3 gate is
     // "bytes written ∝ change size", and the patch outcome measures exactly
     // the pwritten bytes per relink. Input 1 is the alternated object
