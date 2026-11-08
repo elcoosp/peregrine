@@ -147,6 +147,12 @@ pub struct LinkConfig {
     /// default `None` keeps the v1.0 exact packing — clean links stay
     /// bit-deterministic either way (padding is a pure function of size).
     pub layout_slack: Option<crate::slack::SlackPolicy>,
+    /// M9 cross-link anchors (§7.3 "layout stability"): the padded sizes the
+    /// *previous* link reserved, consulted when slack is active so a changed
+    /// section keeps its on-disk size while its content fits (the in-place
+    /// patch tier's precondition). Empty by default — with no anchors the
+    /// M8-c recomputed-pad behavior is reproduced exactly.
+    pub slack_anchor: Vec<crate::slack::SlackAnchor>,
 }
 
 impl Default for LinkConfig {
@@ -176,6 +182,7 @@ impl Default for LinkConfig {
             load_symbols: Vec::new(),
             icf: crate::icf::IcfMode::default(),
             layout_slack: None,
+            slack_anchor: Vec::new(),
         }
     }
 }
@@ -324,7 +331,7 @@ pub struct SegmentPlan {
 
 /// `__LINKEDIT` chunk plan (§8.2 fixed order: fixup payload → trie →
 /// function starts → symtab → strtab → UUID → signature).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LinkeditPlan {
     /// File offset of the chained-fixups payload (0 when absent).
     pub fixup_payload_off: u64,
@@ -1848,10 +1855,19 @@ fn place(
         // M8-c slack: user-content sections reserve growth room. Synthetic
         // sections (`__got`/`__stubs`/`__chain_starts`) are contract-coupled
         // to the fixup plan and stay exact; zero-fill tails are virtual and
-        // need no reservation.
+        // need no reservation. M9: anchors from the previous link keep a
+        // section's reserved size while its content still fits (§7.3
+        // "layout stability" — the in-place patch tier's precondition).
         let size = match (&cfg.layout_slack, name.as_str()) {
             (Some(_), "__got" | "__stubs" | "__chain_starts") => size,
-            (Some(policy), _) if size > 0 && !zerofill => policy.pad_section(seg_name, size, align),
+            (Some(policy), _) if size > 0 && !zerofill => {
+                let anchor = cfg
+                    .slack_anchor
+                    .iter()
+                    .find(|a| a.seg == *seg_name && a.name == *name)
+                    .map(|a| a.padded);
+                policy.pad_section_anchored(seg_name, name, size, align, anchor)
+            }
             _ => size,
         };
         sections.push(PlacedSection {
