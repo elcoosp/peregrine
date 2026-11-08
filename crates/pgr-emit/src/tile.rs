@@ -58,21 +58,21 @@ const TILE: u64 = PAGE_SIZE_16K;
 const HASH_PAGE: u64 = 4096;
 
 /// One placed span: output range `[start, end)` and its bytes.
-type Span<'a> = (u64, u64, &'a [u8]);
+pub(crate) type Span<'a> = (u64, u64, &'a [u8]);
 
 /// Read-only tile context shared by every tile task (no locks: every task
 /// writes a disjoint buffer slice and returns its own hash slices).
-struct TileCtx<'a> {
+pub(crate) struct TileCtx<'a> {
     /// Coalesced copy runs as spans into the input objects, sorted by `dst`.
-    run_spans: Vec<Span<'a>>,
+    pub(crate) run_spans: Vec<Span<'a>>,
     /// Synthetic piece spans (`__got`/`__stubs` bytes), sorted by `dst`.
-    synth_spans: Vec<Span<'a>>,
+    pub(crate) synth_spans: Vec<Span<'a>>,
     /// Placed chunk spans (`__chain_starts` + `__LINKEDIT`), sorted by `dst`.
-    blob_spans: Vec<Span<'a>>,
+    pub(crate) blob_spans: Vec<Span<'a>>,
     /// The absolute-position patch stream, sorted by `at`.
-    patches: Vec<(u64, PatchOp)>,
+    pub(crate) patches: Vec<(u64, PatchOp)>,
     /// Encoded fixup slot words as `(file offset, word)`, sorted by offset.
-    words: Vec<(u64, u64)>,
+    pub(crate) words: Vec<(u64, u64)>,
 }
 
 /// Builds the complete output image with the fused tile pipeline.
@@ -243,7 +243,7 @@ fn span(dst: u64, len: u64, bytes: &[u8]) -> Span<'_> {
 
 /// Collects the read-only tile context (flatten + sort, once per emit).
 impl<'a> TileCtx<'a> {
-    fn build(
+    pub(crate) fn build(
         layout: &'a Layout,
         objects: &'a [InputObject],
         symtab: &'a [u8],
@@ -429,7 +429,7 @@ fn copy_spans(tile: &mut [u8], lo: u64, spans: &[Span<'_>], what: &str) -> Resul
 /// place, all within one disjoint 16 KiB slice. (Step 5, hashing, runs on
 /// the tile slice before this — see `tile_hashes` — so the bytes are hashed
 /// while hot in cache.)
-fn emit_tile(tile: &mut [u8], lo: u64, ctx: &TileCtx<'_>) -> Result<(), EmitError> {
+pub(crate) fn emit_tile(tile: &mut [u8], lo: u64, ctx: &TileCtx<'_>) -> Result<(), EmitError> {
     if tile.is_empty() {
         return Ok(());
     }
@@ -472,7 +472,7 @@ fn emit_tile(tile: &mut [u8], lo: u64, ctx: &TileCtx<'_>) -> Result<(), EmitErro
 
 /// Hashes this tile's 4 KiB sub-pages (clipped to `content_end`), returning
 /// the hashes in the global page order (the reference chunk sequence).
-fn tile_hashes(tile: &[u8], lo: u64, content_end: u64) -> Vec<[u8; 32]> {
+pub(crate) fn tile_hashes(tile: &[u8], lo: u64, content_end: u64) -> Vec<[u8; 32]> {
     let mut out = Vec::new();
     let end = (lo + tile.len() as u64).min(content_end);
     let mut start = lo;
