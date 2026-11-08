@@ -66,6 +66,24 @@ fn hello(text_bytes: usize, body_flip: bool) -> ObjectBuilder {
     b
 }
 
+/// hello.o plus `locals` unreferenced local symbols pinned into `__text`:
+/// they land in the output symtab and string pool, so removing them
+/// shrinks the `__LINKEDIT` chunk stream — and, on an unsigned image
+/// (`-no_adhoc`: no signature boundary to anchor the tail), the whole
+/// image tail with it. The text bytes are invariant under `locals`.
+fn hello_with_locals(text_bytes: usize, body_flip: bool, locals: usize) -> ObjectBuilder {
+    let mut b = hello(text_bytes, body_flip);
+    for i in 0..locals {
+        b.add_symbol(ObjectSymbol::Defined {
+            name: format!("_pgr_local_{i:04}"),
+            section_index: 0,
+            value: u64::try_from(i % 16).unwrap_or(0) * 4,
+            weak: false,
+        });
+    }
+    b
+}
+
 /// greet.o (never edited): `_greet` + a `__data` pointer to `_greet`.
 fn greet() -> ObjectBuilder {
     let mut b = ObjectBuilder::new("greet.o");
@@ -120,6 +138,19 @@ impl Corpus {
         std::fs::write(&self.hello, hello(text_bytes, body_flip).build().unwrap()).unwrap();
     }
 
+    /// Overwrites hello.o with the requested body AND local-symbol block
+    /// (the LINKEDIT-shrink edit: `locals` shrinking moves the unsigned
+    /// image's tail).
+    fn edit_symbols(&self, text_bytes: usize, body_flip: bool, locals: usize) {
+        std::fs::write(
+            &self.hello,
+            hello_with_locals(text_bytes, body_flip, locals)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    }
+
     fn opts(&self, incremental: bool, verify: bool) -> pgr_driver::opts::Options {
         pgr_driver::opts::Options {
             output: self.out.display().to_string(),
@@ -151,6 +182,29 @@ fn strict_verify(path: &Path) -> bool {
         skip_hash_recompute: false,
     };
     pgr_verify::verify(&bytes, &opts).is_ok(&opts)
+}
+
+/// The verifier's stance for the unsigned (`-no_adhoc`) corpus: every
+/// issue except the deliberate "no ad-hoc code signature" layout error
+/// must be clean (the shrink-rung corpus is unsigned because a signed
+/// relink pins the signature boundary — the tail can never shrink).
+/// Returns the unexpected issues (empty = clean).
+fn unsigned_verify_issues(path: &Path) -> Vec<String> {
+    let bytes = std::fs::read(path).unwrap();
+    let opts = VerifyOptions {
+        strict_warnings: true,
+        skip_hash_recompute: false,
+    };
+    pgr_verify::verify(&bytes, &opts)
+        .issues
+        .iter()
+        .filter(|i| {
+            !(i.severity == pgr_verify::Severity::Error
+                && i.code == pgr_verify::Code::SignatureLayout
+                && i.message.contains("require an ad-hoc code signature"))
+        })
+        .map(|i| format!("{:?} [{}] {}", i.severity, i.code.as_str(), i.message))
+        .collect()
 }
 
 /// The canonical edit-relink loop: link → edit → relink in place.
@@ -342,6 +396,68 @@ fn no_incremental_always_links_full() {
     let second = run(&c.opts(false, false)).unwrap();
     assert!(second.patch.is_none(), "-no_incremental links full");
     assert!(strict_verify(&c.out));
+}
+
+#[test]
+fn shrinking_edit_patches_through_the_relayout_tier_and_verifies() {
+    // The §7.3 ladder's shrink rung, end to end: an unsigned corpus
+    // (`-no_adhoc`) whose symtab/string-pool shrink moves the image tail
+    // down. The relink must patch through the relayout tier (the full link
+    // would re-emit every byte — the tier exists to avoid exactly that),
+    // the patched image must verify strict, and the shrunk state must
+    // remain a relinkable baseline.
+    let c = Corpus::new("shrink");
+    c.edit_symbols(32 * 1024, false, 512);
+    let mut o = c.opts(true, false);
+    o.config.adhoc = false;
+    let first = run(&o).unwrap();
+    assert!(first.patch.is_none(), "the first link is a full link");
+    assert!(c.record().exists());
+    assert!(
+        unsigned_verify_issues(&c.out).is_empty(),
+        "the full link verifies clean: {:?}",
+        unsigned_verify_issues(&c.out)
+    );
+
+    // The edit: the locals block goes away — the image shrinks.
+    c.edit_symbols(32 * 1024, false, 0);
+    let mut o_verify = o.clone();
+    o_verify.incremental_verify = true;
+    let second = run(&o_verify).unwrap();
+    let patch = second
+        .patch
+        .expect("the shrinking relink patches through the relayout tier");
+    assert!(!patch.untouched);
+    assert!(
+        second.file_size < first.file_size,
+        "the image shrank ({} -> {})",
+        first.file_size,
+        second.file_size
+    );
+    assert!(
+        patch.dirty_tiles < patch.total_tiles,
+        "a LINKEDIT shrink must not rewrite the content tiles ({} of {})",
+        patch.dirty_tiles,
+        patch.total_tiles
+    );
+    assert!(
+        unsigned_verify_issues(&c.out).is_empty(),
+        "the shrunk output verifies clean: {:?}",
+        unsigned_verify_issues(&c.out)
+    );
+
+    // The shrunk state is a relinkable baseline: a body edit on top still
+    // patches and verifies.
+    c.edit_symbols(32 * 1024, true, 0);
+    let third = run(&o).unwrap();
+    let patch3 = third.patch.expect("the baseline relink still patches");
+    assert!(!patch3.untouched);
+    assert_eq!(third.file_size, second.file_size);
+    assert!(
+        unsigned_verify_issues(&c.out).is_empty(),
+        "the baseline relink verifies clean: {:?}",
+        unsigned_verify_issues(&c.out)
+    );
 }
 
 #[test]

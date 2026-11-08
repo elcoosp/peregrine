@@ -1066,9 +1066,24 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
             skip_hash_recompute: false,
         };
         let report = pgr_verify::verify(&final_bytes, &vopts);
-        if !report.is_ok(&vopts) {
-            let detail = report
-                .issues
+        // A deliberately unsigned link (`-no_adhoc`) has no signature LC:
+        // the verifier's "arm64 images require an ad-hoc code signature"
+        // error is the expected shape, not a patch defect — the audit
+        // gates everything else (fixups, chains, segments, symtab) at
+        // full strictness. Signed links keep the signature gate.
+        let signature_expected = !cfg.adhoc;
+        let blocking: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| match i.severity {
+                pgr_verify::Severity::Error => {
+                    !(signature_expected && i.code == pgr_verify::Code::SignatureLayout)
+                }
+                pgr_verify::Severity::Warning => vopts.strict_warnings,
+            })
+            .collect();
+        if !blocking.is_empty() {
+            let detail = blocking
                 .iter()
                 .map(|i| format!("{:?} [{}] {}", i.severity, i.code.as_str(), i.message))
                 .collect::<Vec<_>>()
