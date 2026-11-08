@@ -98,13 +98,13 @@ fn main() {
         b.iter(|| {
             let image = pgr_emit::build_image(&result.layout, &result.objects).unwrap();
             std::hint::black_box(image.len());
-        })
+        });
     });
     group.bench_function("fused_tile_pass4", |b| {
         b.iter(|| {
             let image = pgr_emit::build_image_fused(&result.layout, &result.objects).unwrap();
             std::hint::black_box(image.len());
-        })
+        });
     });
     group.finish();
     let _ = total;
