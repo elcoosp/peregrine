@@ -12,6 +12,7 @@ publish = false
 pgr-format = { workspace = true }
 pgr-core = { workspace = true }
 pgr-emit = { workspace = true }
+pgr-verify = { workspace = true }
 pgr-daemon = { workspace = true }
 thiserror = { workspace = true }
 
@@ -33,4 +34,8 @@ harness = false
 
 [[bench]]
 name = "resident"
+harness = false
+
+[[bench]]
+name = "incremental"
 harness = false
