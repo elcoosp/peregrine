@@ -72,6 +72,20 @@ pub struct Options {
     /// M8 `-resident_socket <path>`: the daemon socket (default:
     /// `$PGR_DAEMON_SOCK`, else `{tmpdir}/pgr-<uid>.sock`).
     pub resident_socket: Option<String>,
+    /// M9 `-incremental` (architecture doc §7.3): the in-place incremental
+    /// relink. Records the link state next to the output
+    /// (`<output>.pgr-inc`) and, on the next link, patches only the changed
+    /// 16 KiB tiles into a clone of the previous output. Any skeleton
+    /// move, output change or record problem silently falls back to the
+    /// full link (the fallback must always be available). Implies slack
+    /// layout (`LinkConfig::layout_slack`) when the caller left it unset.
+    pub incremental: bool,
+    /// M9 `-incremental-verify`: after a successful in-place patch, audit
+    /// it — byte-identity against the full fused emit of the same plan,
+    /// then a strict `pgr-verify` pass on the patched bytes (the §7.3
+    /// "no stale-signature or stale-fixup failures" gate). A divergence
+    /// never ships: the output is rewritten from the full emit.
+    pub incremental_verify: bool,
 }
 
 impl Default for Options {
@@ -101,6 +115,8 @@ impl Default for Options {
             syslibroots: Vec::new(),
             resident: false,
             resident_socket: None,
+            incremental: false,
+            incremental_verify: false,
         }
     }
 }
@@ -606,6 +622,13 @@ fn apply_flag(
         "-resident_socket" => {
             let v = next_value(args, i, arg)?;
             opts.resident_socket = Some(v);
+        }
+        "-incremental" => opts.incremental = true,
+        "-no_incremental" => opts.incremental = false,
+        // The §7.3 audit gate implies the in-place tier.
+        "-incremental-verify" => {
+            opts.incremental = true;
+            opts.incremental_verify = true;
         }
         "-all_load" => opts.all_load = true,
         "-force_load" => {
