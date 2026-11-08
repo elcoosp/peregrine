@@ -156,7 +156,7 @@ mod tests {
     fn empty_and_singleton() {
         let (interner, ids) = Interner::build(&[]);
         assert!(interner.is_empty());
-        assert!(ids.is_empty());
+        assert_eq!(ids, [] as [crate::ids::StringId; 0]);
         let (i2, ids2) = Interner::build(&[b"only".to_vec()]);
         assert_eq!(i2.len(), 1);
         assert_eq!(ids2.len(), 1);
