@@ -32,14 +32,17 @@ pub fn worker_count() -> usize {
             return n.max(MIN_JOBS);
         }
     }
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(MIN_JOBS)
+    std::thread::available_parallelism().map_or(MIN_JOBS, std::num::NonZero::get)
 }
 
 /// The shared compute pool (D9). Every parallel pass installs itself into
 /// this pool so the process carries exactly one set of worker threads.
 #[must_use]
+///
+/// # Panics
+/// Panics only if rayon cannot spawn the configured worker count (a
+/// zero/negative `PGR_JOBS` value is clamped by [`worker_count`], so the
+/// practical trigger is resource exhaustion at first-link time).
 pub fn compute_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
