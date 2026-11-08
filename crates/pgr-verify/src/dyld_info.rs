@@ -140,8 +140,7 @@ fn check_bind_entries(
                     report.issues.push(Issue::error(
                         Code::DyldInfoStreams,
                         format!(
-                            "bind ordinal {ord} outside the {} LC_LOAD_DYLIB command(s)",
-                            n_dylibs
+                            "bind ordinal {ord} outside the {n_dylibs} LC_LOAD_DYLIB command(s)"
                         ),
                         None,
                     ));
@@ -199,7 +198,7 @@ mod tests {
         let segs = vec![(0x100u64, 0x1000u64)];
         let mut r = Report::default();
         check_slot(0, 0x800, &segs, &mut r);
-        assert!(r.issues.is_empty());
+        assert!(r.issues.is_empty(), "first slot fits");
         check_slot(0, 0xFF8, &segs, &mut r);
         assert!(r.issues.is_empty(), "last aligned slot fits");
         r.issues.clear();
