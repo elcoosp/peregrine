@@ -8,10 +8,10 @@
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 
 fn main() {
-    let dir = std::env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("link-inputs"));
+    let dir = std::env::args().nth(1).map_or_else(
+        || std::path::PathBuf::from("link-inputs"),
+        std::path::PathBuf::from,
+    );
     std::fs::create_dir_all(&dir).expect("output dir");
 
     // hello_main.o
