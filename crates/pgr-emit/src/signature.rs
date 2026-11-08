@@ -1,11 +1,11 @@
-//! Ad-hoc code signature (TDD §9): big-endian SuperBlob + v0x20400
-//! CodeDirectory of SHA-256 page hashes over 4 KiB code pages.
+//! Ad-hoc code signature (TDD §9): big-endian `SuperBlob` + v0x20400
+//! `CodeDirectory` of SHA-256 page hashes over 4 KiB code pages.
 //!
 //! Invariants this module keeps (the verifier recomputes every hash):
 //!
 //! * `codeLimit == signature file offset` (everything before is signed),
 //! * `nCodeSlots == ceil(codeLimit / 4096)`,
-//! * hash pages are 4 KiB (CS_PAGE_SIZE_LOG2 = 12), independent of the
+//! * hash pages are 4 KiB (`CS_PAGE_SIZE_LOG2` = 12), independent of the
 //!   16 KiB VM pages,
 //! * the blob is the last thing in the file,
 //! * UUID derivation (mold's rule): first 16 bytes of SHA-256 over the page
@@ -24,10 +24,7 @@ use sha2::{Digest, Sha256};
 #[must_use]
 pub fn blob_size(ident_len: usize, code_limit: u64) -> usize {
     let nblocks = code_limit.div_ceil(CS_PAGE_SIZE) as usize;
-    let ident_padded = ident_len
-        .checked_add(1)
-        .map(|v| v.div_ceil(4) * 4)
-        .unwrap_or(0);
+    let ident_padded = ident_len.checked_add(1).map_or(0, |v| v.div_ceil(4) * 4);
     let dir_len = 88 + ident_padded + nblocks * CS_SHA256_LEN as usize;
     (12 + 8 + dir_len).div_ceil(8) * 8
 }
@@ -72,7 +69,7 @@ pub fn derive_uuid(zeroed_hashes: &[u8]) -> [u8; 16] {
     out
 }
 
-/// Builds the ad-hoc SuperBlob covering `code_limit` bytes with `hashes`
+/// Builds the ad-hoc `SuperBlob` covering `code_limit` bytes with `hashes`
 /// (concatenated 32-byte page hashes).
 ///
 /// # Errors
