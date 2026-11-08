@@ -27,6 +27,9 @@ const _: () = assert!(core::mem::size_of::<RelocationInfo>() == 8);
 
 impl RelocationInfo {
     /// Parses one entry at `offset`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(bytes: &[u8], offset: usize) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(bytes, offset)
     }
