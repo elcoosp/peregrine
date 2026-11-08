@@ -62,7 +62,7 @@ pub(crate) fn check_chain_starts(bytes: &[u8], img: &ParsedImage<'_>, report: &m
                     .segment_offset
                     .saturating_add(u64::from(page).saturating_mul(u64::from(seg.page_size)))
                     .saturating_add(u64::from(h));
-                if file <= u64::from(u32::MAX) {
+                if u32::try_from(file).is_ok() {
                     payload_heads.push(file as u32);
                 }
             }
