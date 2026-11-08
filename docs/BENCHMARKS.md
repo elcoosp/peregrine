@@ -714,3 +714,53 @@ pass; a reset now precedes the group).
 ```sh
 cargo bench -p pgr-driver --bench incremental
 ```
+
+## Recorded baseline (M9 GA hardening — the shrink rung + the randomized edit gate)
+
+The GA hardening milestone (architecture doc §10.4 row M9; risk register
+P4) adds two pieces to the relink ladder. The **shrink rung**: the
+tier-2 trigger's mirror — an unsigned relink (`-no_adhoc`) has no
+signature boundary to anchor the `__LINKEDIT` tail, so a
+symtab/string-pool shrink moves the chunk-stream end down and the image
+shrinks with it; the planner now admits that shape (frozen content
+skeleton, clone truncated, moved chunk tail re-emitted) instead of
+falling back to the full link. The **randomized edit gate**: the seeded
+xorshift64* edit walk ships at two levels — the engine API walk in
+`pgr-emit/tests/incremental.rs` (5 edits/sequence: body growth, import
+add, retarget, oversized growth, symtab churn, no-op) and the
+end-to-end driver walk in `pgr-driver/tests/m9_randomized.rs` (the real
+`-incremental -incremental-verify` loop over files, record sidecar and
+fallback ladder in the mix, unsigned corpus so symtab churn exercises
+the shrink rung's side). `PGR_RANDOMIZED_STEPS` sizes both walks; the
+CI subsets (80 engine steps, 24 driver steps) and the roadmap's 10⁴-step
+GA profile (2000 sequences × 5 steps) use the same deterministic seed,
+so a failure reproduces exactly.
+
+The 10⁴-step GA profile was run on the dev sandbox (release, engine-level
+walk): **10 000 steps in 11.4 s, every step byte-identical to the full
+fused emit or an honest fallback that re-records, with the
+in-place/fallback/symtab-grow/symtab-shrink dimensions all exercised**.
+The 10⁴-step *driver*-level profile and the hardware verdicts belong to
+the P0 rig (each driver step re-runs the pipeline over an ~8 MiB image;
+the sandbox profile is recorded here as evidence, not as the GA bar).
+
+| `pgr-driver/incremental_shrink` (container sandbox, ext4 — no reflink) | time |
+|---|---|
+| `linkedit_shrink_relink_8mib` (alternating shrink : regrow mix) | **23.4 ms** |
+
+Bytes written (the §7.3 gate, accounting pass): the shrink direction
+patches **56 624 bytes of an 8.46 MiB image (4 of 568 tiles, ~0.67%)**
+while the image shrinks 9 319 592 → 9 297 200 bytes — the moved
+`__LINKEDIT` chunks and the truncated tail, where the fallback full link
+would have re-emitted and re-written every byte; the regrow direction
+patches 79 016 bytes through the LINKEDIT-overflow trigger. Reading the
+23.4 ms mean honestly: the shrink corpus is **unsigned** (no page-hash
+table, no CodeDirectory rebuild) and ext4's clone is a full copy, so the
+wall clock is not comparable with the signed tier-1/tier-2 groups above —
+the bytes-written gate is the sandbox verdict, the APFS wall-clock
+verdict is decided on the P0 rig.
+
+```sh
+cargo bench -p pgr-driver --bench incremental -- linkedit_shrink
+PGR_RANDOMIZED_STEPS=2000 cargo test -p pgr-emit --release --test incremental -- randomized
+```
