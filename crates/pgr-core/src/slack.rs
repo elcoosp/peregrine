@@ -53,6 +53,26 @@ impl Default for SlackPolicy {
     }
 }
 
+/// One cross-link placement anchor (M9, §7.3 "layout stability"): the
+/// *padded output size* a section carried at the previous link. Layout
+/// keeps the anchored size while the section's content still fits inside
+/// it, so a changed atom relinks without moving a single downstream byte —
+/// the precondition the M9 in-place patch path needs. An empty anchor list
+/// reproduces the M8-c behavior exactly (pad recomputed every link).
+///
+/// The driver derives anchors from the previous link's record
+/// (`pgr-emit::incremental`); they are a pure layout input — same config,
+/// same anchors, same bytes (§4.3 determinism holds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackAnchor {
+    /// Owning output segment (`__TEXT`).
+    pub seg: String,
+    /// Output section name (`__text`).
+    pub name: String,
+    /// The section's previously reserved (padded) output size.
+    pub padded: u64,
+}
+
 /// The §7.3 fallback ladder for a changed section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutFallback {
@@ -85,6 +105,32 @@ impl SlackPolicy {
             .clamp(self.min_bytes, self.max_bytes);
         let align = 1u64 << align_log2.min(31);
         (size.saturating_add(pad)).div_ceil(align) * align
+    }
+
+    /// [`SlackPolicy::pad_section`] with an M9 cross-link anchor (§7.3
+    /// "layout stability"): while the section's content still fits the
+    /// previous link's padded size, that size is kept — nothing downstream
+    /// moves. Content beyond the anchor overflows the reservation and the
+    /// natural (recomputed) pad applies; the section's size change is what
+    /// the incremental planner's fallback ladder observes. Non-padded
+    /// sections (synthetics, zero-fill) ignore anchors, exactly as they
+    /// ignore padding.
+    #[must_use]
+    pub fn pad_section_anchored(
+        &self,
+        segment: &str,
+        name: &str,
+        size: u64,
+        align_log2: u32,
+        anchor: Option<u64>,
+    ) -> u64 {
+        if !Self::is_padded_section(segment, name) || size == 0 {
+            return size;
+        }
+        match anchor {
+            Some(prev) if size <= prev => prev,
+            _ => self.pad_section(segment, size, align_log2),
+        }
     }
 
     /// The §7.3 fallback decision for one changed section: `prev_content`
