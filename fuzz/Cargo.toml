@@ -19,6 +19,9 @@ path = "../crates/pgr-core"
 [dependencies.pgr-verify]
 path = "../crates/pgr-verify"
 
+[dependencies.pgr-emit]
+path = "../crates/pgr-emit"
+
 # Keep fuzz targets out of the main workspace's test runs; they build with
 # the nightly-only libFuzzer runtime.
 [[bin]]
@@ -59,6 +62,13 @@ bench = false
 [[bin]]
 name = "cache_entries"
 path = "fuzz_targets/cache_entries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "link_record"
+path = "fuzz_targets/link_record.rs"
 test = false
 doc = false
 bench = false
