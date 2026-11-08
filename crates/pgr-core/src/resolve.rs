@@ -308,8 +308,7 @@ impl Resolution {
                     }
                     let file_name = objects
                         .get(file.0 as usize)
-                        .map(|o| o.name.clone())
-                        .unwrap_or_else(|| format!("input {}", file.0));
+                        .map_or_else(|| format!("input {}", file.0), |o| o.name.clone());
                     missing.push(format!(
                         "\"{}\" (referenced from {file_name})",
                         interner.name(crate::ids::StringId(*key))
@@ -374,8 +373,7 @@ impl Resolution {
     pub fn reference_sites(&self, id: StringId) -> &[(FileId, usize)] {
         self.references
             .get(&id.0)
-            .map(std::vec::Vec::as_slice)
-            .unwrap_or(&[])
+            .map_or(&[], std::vec::Vec::as_slice)
     }
 
     /// All winning definitions keyed by name.
