@@ -41,8 +41,7 @@ fn data_const_segment() -> SegmentSpec {
 fn main() {
     let dir = std::env::args()
         .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("fuzz/corpus"));
+        .map_or_else(|| PathBuf::from("fuzz/corpus"), PathBuf::from);
     std::fs::create_dir_all(&dir).expect("corpus dir");
 
     let mut b = ImageBuilder::executable("fuzz-seed-exec");
