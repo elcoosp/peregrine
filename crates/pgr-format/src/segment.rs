@@ -70,11 +70,17 @@ impl SegmentCommand64 {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 
     /// Parses a segment command from the 72 bytes at `offset`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(bytes: &[u8], offset: usize) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(bytes, offset)
     }
 
     /// The segment name, trimmed at its NUL terminator.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn name(&self) -> Result<&str, FormatError> {
         let end = self
             .segname
@@ -90,6 +96,9 @@ impl SegmentCommand64 {
 
     /// Parses the `nsects` section records that follow this command at
     /// `sections_offset` (usually `cmd_offset + 72`).
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn sections<'a>(
         &self,
         bytes: &'a [u8],
@@ -97,11 +106,11 @@ impl SegmentCommand64 {
     ) -> Result<&'a [Section64], FormatError> {
         let total = self
             .nsects
-            .checked_mul(core::mem::size_of::<Section64>() as u32)
+            .checked_mul(u32::try_from(core::mem::size_of::<Section64>()).unwrap_or(u32::MAX))
             .ok_or(FormatError::Invalid {
                 offset: sections_offset,
                 what: "section array size overflow",
-                value: self.nsects as u64,
+                value: u64::from(self.nsects),
             })? as usize;
         let end = sections_offset
             .checked_add(total)
@@ -140,6 +149,9 @@ impl SegmentCommand64 {
 
 impl Section64 {
     /// The section name, trimmed at its NUL terminator.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn name(&self) -> Result<&str, FormatError> {
         let end = self
             .sectname
