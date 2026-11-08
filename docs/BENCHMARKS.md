@@ -529,3 +529,94 @@ the output is byte-identical to the one-shot link on every iteration
 ```sh
 cargo bench -p pgr-driver --bench resident
 ```
+
+## Recorded baseline (M9 — in-place incremental relink, tier 1)
+
+The M9 milestone (architecture doc §10.4 row M9, §7.3 Stage C tier 1)
+ships the incremental relink engine: the versioned link record
+(`pgr-emit::incremental::LinkRecord`), the span-diff patch planner, the
+clone-and-patch output path with the merged-hash CodeDirectory rebuild,
+slack anchors, and the driver loop (`-incremental`,
+`-incremental-verify`). New bench (`pgr-driver/incremental`) plus the M9
+gates (`pgr-core/tests/m9_foundations.rs`, `pgr-emit/tests/incremental.rs`,
+`m9_incremental.rs`). Recorded on the same 2-core KVM dev sandbox
+(`cargo bench`, default sampling).
+
+### Edit–relink loop (`pgr-driver/incremental`, new bench)
+
+Corpus: 32 objects × 256 KiB text — the *write-heavy* shape (the output
+pages dominate; the image is 8.53 MiB / 521 tiles of 16 KiB). The timed
+edit flips eight words of one function mid-corpus (same size — the frozen
+skeleton is the tier-1 contract). Every timed incremental iteration is a
+real edit→patch cycle (the input alternates between the pristine and
+edited object variants).
+
+| Bench | Median | Throughput | Notes |
+|---|---|---|---|
+| `full_relink_8mib` | **16.4 ms** | 496 MiB/s | the complete pipeline + fused emit + write (v1.1 path) |
+| `incremental_relink_8mib` | **17.6 ms** | 461 MiB/s | record → plan → clone-and-patch → re-sign |
+| `untouched_relink_8mib` | **13.3 ms** | 610 MiB/s | identical inputs: plan says *untouched*, the output is left alone |
+
+**Bytes written (the §7.3 gate "bytes written ∝ change size"): the mean
+patch is 105 536 bytes per edited relink — 1.2% of the image.** Of that,
+72.7 KiB is the rebuilt CodeDirectory (the signature's page-hash table is
+contractually whole), the rest is the two dirty tiles (the edited content
+tile + the UUID page). Max dirty tiles across 20 iterations: 2 of 521.
+
+**Honest verdict: wall-time parity-to-slight-loss on this sandbox,
+bytes-written win by 80×, recorded as-is.** Three physical reasons, each
+bounded by the sandbox rather than the design:
+
+1. **The clone degrades to a full copy.** On APFS, `std::fs::copy`
+   resolves to `fclonefileat` — an instant copy-on-write clone, which is
+   the §7.3 output path's foundation. This sandbox's ext4 has no reflink,
+   so the clone reads and writes all 8.53 MiB — roughly the full link's
+   own write cost, before any patch. Spike S8 (clone + dirty-page
+   `pwrite` vs full write on APFS) is exactly the measurement this bench
+   cannot make.
+2. **The span digests are SHA-256 over the input bytes.** The planner
+   hashes every copy-run tile piece and `__LINKEDIT` chunk once per
+   relink (~8.6 MiB here) — comparable to the full emit's own page
+   hashing. A faster non-crypto change-detection digest is a tuning knob,
+   deliberately not pulled at tier 1 (a hash collision would mean reused
+   stale bytes; the signature catches it at load, but the engine holds
+   itself to the no-collision standard).
+3. **The corpus is compute-bound.** Like the M6/M8 corpora, Passes 2–3
+   dominate the pipeline share; the tier-1 engine deliberately re-runs
+   them (per-symbol change propagation over the M8 reverse index is the
+   M9 GA ladder).
+
+What the bench *does* prove functionally: the dirty-tile set tracks the
+change (2 tiles for a one-function edit, 0 for an unchanged relink), the
+patched output is byte-identical to the full fused emit of the same plan
+(gated in `pgr-emit/tests/incremental.rs` and `m9_incremental.rs`, and
+re-proven per link under `-incremental-verify`), and the untouched path
+costs 19% less than the full relink even before the clone question
+arises. The §10.4 M9 hardware gate — "< 100 ms for a one-function edit at
+1 GiB output; ≥ 10× vs ld-prime relink" — is decided on the P0 rig, where
+the 1.2%-of-image patch bytes and the COW clone are the whole story.
+
+### The M9 correctness gates (all green)
+
+* `pgr-core/tests/m9_foundations.rs` (4): anchored relinks keep every
+  section's reserved size, overflow falls to the natural pad through the
+  §7.3 ladder, anchors are pure deterministic layout inputs, and the empty
+  anchor list reproduces M8-c exactly.
+* `pgr-emit/tests/incremental.rs` (9) + unit tests (16): the byte-identity
+  contract (body edit, growth within slack, dylib image-base, no-slack
+  and unsigned corpora), the no-op relink, symbol-count and
+  overflow-ladder fallbacks, the integrity gate's honest sampling (caught:
+  page 0, last page, resize; pinned: unsampled-page tampering is the
+  signature's job), and the record codec's roundtrip + corruption
+  tolerance (flip, truncate, append, foreign magic, arbitrary garbage —
+  never a panic).
+* `m9_incremental.rs` (11): the driver loop end to end — first link
+  records, edited relink patches in place and verifies strict, no-op
+  relink reports untouched, deleted/corrupt record and deleted output
+  fall back, skeleton moves fall back *and* recover incrementally on the
+  next link, `-incremental-verify` audits, `-no_incremental` stays full,
+  link errors propagate, and the option surface parses.
+
+```sh
+cargo bench -p pgr-driver --bench incremental
+```
