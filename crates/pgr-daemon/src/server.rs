@@ -151,24 +151,13 @@ fn handle_connection(
     session: &mut ResidentSession,
 ) -> ConnectionOutcome {
     loop {
-        let (tag, body) = match read_frame(stream) {
-            Ok(Some(frame)) => frame,
-            Ok(None) => return ConnectionOutcome::Done,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::ConnectionReset
-                ) =>
-            {
-                // Idle timeout or dead peer: drop the connection, keep the
-                // session (the daemon itself idles out on the accept loop).
-                return ConnectionOutcome::Done;
-            }
-            Err(_) => return ConnectionOutcome::Done,
+        // Idle timeout, dead peer, or any other I/O failure: drop the
+        // connection, keep the session (the daemon itself idles out on the
+        // accept loop).
+        let Ok(Some(frame)) = read_frame(stream) else {
+            return ConnectionOutcome::Done;
         };
+        let (tag, body) = frame;
         match tag {
             TAG_HELLO => {
                 let mut ok = false;
@@ -187,8 +176,7 @@ fn handle_connection(
                     (
                         TAG_ERROR,
                         error_body(&format!(
-                            "protocol version mismatch (daemon {})",
-                            PROTO_VERSION
+                            "protocol version mismatch (daemon {PROTO_VERSION})"
                         )),
                     )
                 };
@@ -239,9 +227,8 @@ fn serve_link(
         write_frame(stream, TAG_NEED, &b)?;
         let mut remaining = needed.len();
         while remaining > 0 {
-            let (tag, body) = match read_frame(stream)? {
-                Some(frame) => frame,
-                None => return Ok(()),
+            let Some((tag, body)) = read_frame(stream)? else {
+                return Ok(());
             };
             if tag != TAG_BLOB {
                 let _ = write_frame(stream, TAG_ERROR, &error_body("expected BLOB"));
