@@ -1,4 +1,4 @@
-//! Code-signature structures: SuperBlob, BlobIndex and CodeDirectory.
+//! Code-signature structures: `SuperBlob`, `BlobIndex` and `CodeDirectory`.
 //!
 //! Signature structures are **big-endian** (TDD §9); everything else in a
 //! Mach-O file is little-endian. The verifier recomputes SHA-256 page hashes
@@ -9,16 +9,16 @@ use crate::consts::{CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE};
 use crate::cursor::Cursor;
 use crate::error::FormatError;
 
-/// One SuperBlob index entry (8 bytes, big-endian).
+/// One `SuperBlob` index entry (8 bytes, big-endian).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlobIndex {
     /// `CSSLOT_*` slot type.
     pub slot_type: u32,
-    /// Offset of the blob within the SuperBlob.
+    /// Offset of the blob within the `SuperBlob`.
     pub offset: u32,
 }
 
-/// A parsed SuperBlob over borrowed bytes.
+/// A parsed `SuperBlob` over borrowed bytes.
 #[derive(Debug)]
 pub struct SuperBlob<'a> {
     bytes: &'a [u8],
@@ -26,7 +26,10 @@ pub struct SuperBlob<'a> {
 }
 
 impl<'a> SuperBlob<'a> {
-    /// Parses the SuperBlob head at `bytes[0..12]` and validates the magic.
+    /// Parses the `SuperBlob` head at `bytes[0..12]` and validates the magic.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, FormatError> {
         if bytes.len() < 12 {
             return Err(FormatError::Truncated {
@@ -69,12 +72,15 @@ impl<'a> SuperBlob<'a> {
     }
 
     /// The index entry `i`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn index(&self, i: u32) -> Result<BlobIndex, FormatError> {
         if i >= self.count {
             return Err(FormatError::Invalid {
                 offset: 12 + i as usize * 8,
                 what: "blob index out of range",
-                value: i as u64,
+                value: u64::from(i),
             });
         }
         let mut c = Cursor::new(self.bytes);
@@ -86,6 +92,9 @@ impl<'a> SuperBlob<'a> {
     }
 
     /// Finds the first blob occupying `slot_type`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn blob_for_slot(&self, slot_type: u32) -> Result<Option<&'a [u8]>, FormatError> {
         for i in 0..self.count {
             let idx = self.index(i)?;
@@ -97,14 +106,14 @@ impl<'a> SuperBlob<'a> {
     }
 
     /// The bytes of the blob at `offset`, bounded by the blob's own length
-    /// header and the SuperBlob end.
+    /// header and the `SuperBlob` end.
     fn blob_at(&self, offset: u32) -> Result<&'a [u8], FormatError> {
         let start = offset as usize;
         if start < 12 || start + 4 > self.bytes.len() {
             return Err(FormatError::Invalid {
                 offset: start,
                 what: "blob offset outside SuperBlob",
-                value: offset as u64,
+                value: u64::from(offset),
             });
         }
         let mut c = Cursor::new(self.bytes);
@@ -129,7 +138,7 @@ impl<'a> SuperBlob<'a> {
     }
 }
 
-/// A parsed CodeDirectory (v0x20400 layout; optional tail fields are `None`
+/// A parsed `CodeDirectory` (v0x20400 layout; optional tail fields are `None`
 /// for older versions).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeDirectory {
@@ -166,7 +175,10 @@ pub struct CodeDirectory {
 }
 
 impl CodeDirectory {
-    /// Parses a CodeDirectory from blob bytes (big-endian fields).
+    /// Parses a `CodeDirectory` from blob bytes (big-endian fields).
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(blob: &[u8]) -> Result<Self, FormatError> {
         let mut c = Cursor::new(blob);
         let magic = c.read_u32be()?;
@@ -239,13 +251,16 @@ impl CodeDirectory {
     }
 
     /// The identifier string (NUL-terminated at `ident_offset * 4`).
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn identifier<'a>(&self, blob: &'a [u8]) -> Result<&'a [u8], FormatError> {
         let start = self.ident_offset as usize * 4;
         if start == 0 || start >= blob.len() {
             return Err(FormatError::Invalid {
                 offset: start,
                 what: "CodeDirectory identifier offset outside blob",
-                value: self.ident_offset as u64,
+                value: u64::from(self.ident_offset),
             });
         }
         let mut c = Cursor::new(blob);
@@ -256,6 +271,9 @@ impl CodeDirectory {
 
     /// The code-slot hash slice: `n_code_slots * hash_size` bytes at
     /// `hash_offset * 4`, bounded by the blob.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn code_hashes<'a>(&self, blob: &'a [u8]) -> Result<&'a [u8], FormatError> {
         let start = self.hash_offset as usize * 4;
         let len = self
@@ -264,7 +282,7 @@ impl CodeDirectory {
             .ok_or(FormatError::Invalid {
                 offset: start,
                 what: "code hash array size overflow",
-                value: self.n_code_slots as u64,
+                value: u64::from(self.n_code_slots),
             })? as usize;
         let end = start.checked_add(len).ok_or(FormatError::Invalid {
             offset: start,
@@ -308,7 +326,7 @@ mod tests {
 
     const IDENT: &[u8] = b"peregrine-fixture";
 
-    /// Builds a valid SuperBlob: one code directory over `nblocks` fake
+    /// Builds a valid `SuperBlob`: one code directory over `nblocks` fake
     /// page hashes, big-endian fields (fixtures-side encoder logic).
     pub fn build_superblob(code_limit: u32, hashes: &[u8]) -> Vec<u8> {
         let nblocks = hashes.len() / CS_SHA256_LEN as usize;
@@ -335,7 +353,7 @@ mod tests {
         cd.extend_from_slice(&be32(0)); // scatter
         cd.extend_from_slice(&be32(0)); // team
         cd.extend_from_slice(&be32(0)); // spare3
-        cd.extend_from_slice(&(code_limit as u64).to_be_bytes());
+        cd.extend_from_slice(&u64::from(code_limit).to_be_bytes());
         cd.extend_from_slice(&0u64.to_be_bytes()); // execSegBase
         cd.extend_from_slice(&0x4000u64.to_be_bytes()); // execSegLimit
         cd.extend_from_slice(&1u64.to_be_bytes()); // execSegFlags = MAIN_BINARY
