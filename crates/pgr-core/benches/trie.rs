@@ -31,7 +31,7 @@ fn corpus(n: usize) -> Vec<Case> {
             });
         } else {
             out.push(Case {
-                name: format!("_pgr_fn_{:06}_body", i).into_bytes(),
+                name: format!("_pgr_fn_{i:06}_body").into_bytes(),
                 address: (i * 8) as u64,
             });
         }
@@ -82,6 +82,11 @@ fn legacy_build(symbols: &[(Vec<u8>, u64)], image_base: u64) -> Vec<u8> {
     struct Node {
         export: Option<(u32, u64)>,
         children: Vec<(Vec<u8>, usize)>,
+    }
+    #[derive(Clone, Default)]
+    struct Offsets {
+        offset: Vec<usize>,
+        total: usize,
     }
     let mut nodes: Vec<Node> = vec![Node {
         export: None,
@@ -144,11 +149,6 @@ fn legacy_build(symbols: &[(Vec<u8>, u64)], image_base: u64) -> Vec<u8> {
         nodes[cur].export = Some((flags, address));
     }
 
-    #[derive(Clone, Default)]
-    struct Offsets {
-        offset: Vec<usize>,
-        total: usize,
-    }
     let mut off = Offsets {
         offset: vec![0usize; nodes.len()],
         total: 0,
@@ -229,8 +229,9 @@ fn legacy_build(symbols: &[(Vec<u8>, u64)], image_base: u64) -> Vec<u8> {
 
 /// Measures both builders over the 10³/10⁴/10⁵ export corpora.
 fn bench_trie(c: &mut Criterion) {
+    // dylib convention (M3); exec adds 4 GiB of zeroes
+    const IMAGE_BASE: u64 = 0;
     let mut group = c.benchmark_group("export_trie_build");
-    const IMAGE_BASE: u64 = 0; // dylib convention (M3); exec adds 4 GiB of zeroes
     for n in [1_000usize, 10_000, 100_000] {
         let cases = corpus(n);
         let bytes: u64 = cases.iter().map(|c| c.name.len() as u64).sum();
