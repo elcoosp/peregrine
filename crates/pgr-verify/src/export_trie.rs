@@ -73,7 +73,6 @@ fn uleb_at(data: &[u8], at: usize) -> Option<(u64, usize)> {
 
 /// Recursive node walk (mirrors dyld's parse; iteration via an explicit
 /// stack-free recursion bounded by the payload size).
-#[allow(clippy::too_many_arguments)]
 fn walk(
     data: &[u8],
     at: usize,
@@ -254,17 +253,15 @@ fn walk(
         };
         cur = after;
         let prefix_len = prefix.len();
-        match std::str::from_utf8(sub) {
-            Ok(s) => prefix.push_str(s),
-            Err(_) => {
-                report.issues.push(Issue::error(
-                    Code::ExportTrie,
-                    "edge substring is not UTF-8",
-                    Some(substr_start as u64),
-                ));
-                return;
-            }
-        }
+        let Ok(s) = std::str::from_utf8(sub) else {
+            report.issues.push(Issue::error(
+                Code::ExportTrie,
+                "edge substring is not UTF-8",
+                Some(substr_start as u64),
+            ));
+            return;
+        };
+        prefix.push_str(s);
         walk(data, child_off as usize, prefix, visited, out, report);
         prefix.truncate(prefix_len);
     }
@@ -291,7 +288,7 @@ mod tests {
         out
     }
 
-    /// Builds the M2 minimal trie shape: root → "_m" → {"ain", "h_execute_header"}.
+    /// Builds the M2 minimal trie shape: root → `_m` → `ain` / `h_execute_header`.
     fn sample_trie() -> Vec<u8> {
         // Node layout: [term][flags][addr][nchildren][edges: sub 0 off]
         let mut ain = Vec::new();
