@@ -143,12 +143,12 @@ fn start_daemon(sock: &Path) {
     std::thread::spawn(move || {
         let _ = pgr_daemon::serve(&owned, Duration::from_secs(120));
     });
-    wait_for_socket(sock.to_path_buf());
+    wait_for_socket(sock);
 }
 
-fn wait_for_socket(sock: PathBuf) {
+fn wait_for_socket(sock: &Path) {
     for _ in 0..500 {
-        if UnixStream::connect(&sock).is_ok() {
+        if UnixStream::connect(sock).is_ok() {
             return;
         }
         std::thread::sleep(Duration::from_millis(5));
