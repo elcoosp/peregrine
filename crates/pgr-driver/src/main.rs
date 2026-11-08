@@ -29,6 +29,19 @@ fn main() -> ExitCode {
                 "{PROGRAM}: wrote {} ({} bytes, entryoff {:#x}, {} fixup slot(s))",
                 outcome.output, outcome.file_size, outcome.entryoff, outcome.fixup_slots
             );
+            if let Some(patch) = &outcome.patch {
+                if patch.untouched {
+                    println!(
+                        "{PROGRAM}: incremental: untouched (0 of {} tiles, 0 bytes patched)",
+                        patch.total_tiles
+                    );
+                } else {
+                    println!(
+                        "{PROGRAM}: incremental: {} of {} tiles patched ({} bytes)",
+                        patch.dirty_tiles, patch.total_tiles, patch.bytes_patched
+                    );
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(pgr_driver::DriverError::Opts(_)) | Err(pgr_driver::DriverError::Io { .. }) => {
