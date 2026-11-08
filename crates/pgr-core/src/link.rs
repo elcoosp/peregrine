@@ -14,7 +14,7 @@
 //! fixpoint walks the unresolved-name set against the index in archive
 //! command order, parsing only members that resolve something (`-all_load`
 //! and `-force_load` short-circuit to eager). The pull order is a pure
-//! function of the inputs, so FileIds — and every later pass — stay
+//! function of the inputs, so `FileIds` — and every later pass — stay
 //! schedule- and environment-independent.
 
 use crate::LinkError;
@@ -315,7 +315,7 @@ fn parse_inputs(
 /// it uses, not the members it ships (`-all_load`/`-force_load` parse all).
 ///
 /// Determinism: archives are scanned in command order, members in index
-/// order; FileIds continue after the direct inputs in pull order.
+/// order; `FileIds` continue after the direct inputs in pull order.
 fn pull_archive_members(
     direct: &[InputObject],
     archives: &[LinkArchive],
@@ -444,13 +444,13 @@ fn parse_member(
         let key = crate::cache::PoiCache::content_key(&bytes, split_symbols);
         if let Some(mut hit) = cache.load(&key, FileId(file), &name, bytes.clone(), split_symbols) {
             hit.from_archive = true;
-            hit.archive_name = arch.name.clone();
+            hit.archive_name.clone_from(&arch.name);
             return Ok(hit);
         }
     }
     let mut obj = InputObject::parse(FileId(file), &name, bytes)?;
     obj.from_archive = true;
-    obj.archive_name = arch.name.clone();
+    obj.archive_name.clone_from(&arch.name);
     obj.compute_atoms(split_symbols);
     if let Some(cache) = cache {
         let key = crate::cache::PoiCache::content_key(&obj.bytes, split_symbols);
@@ -639,8 +639,7 @@ mod tests {
             .sections
             .iter()
             .find(|s| s.name == "__text")
-            .map(|s| s.file_off)
-            .unwrap_or(u64::MAX);
+            .map_or(u64::MAX, |s| s.file_off);
         assert_eq!(layout.entryoff, text_file_off);
         // One fixup slot: greet.o's __data pointer to _main.
         assert_eq!(layout.fixups.slot_count, 1);
