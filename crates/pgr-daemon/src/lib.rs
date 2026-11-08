@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn version_is_wired() {
-        assert!(!crate::VERSION.is_empty());
+        assert!(!crate::VERSION.is_empty(), "version line built");
         // v2 (M9): the wire carries the M9 slack anchors with the config.
         assert_eq!(crate::PROTO_VERSION, 2);
     }
@@ -67,7 +67,7 @@ mod tests {
             inputs: Vec::new(),
             archives: Vec::new(),
         };
-        assert!(req.blob_hashes().is_empty());
+        assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
     }
 }
