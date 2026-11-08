@@ -174,13 +174,14 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "pgr-core",
+ "pgr-emit",
  "pgr-format",
  "pgr-verify",
 ]
 
 [[package]]
 name = "pgr-core"
-version = "0.7.0"
+version = "1.2.0"
 dependencies = [
  "pgr-format",
  "rayon",
@@ -189,8 +190,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgr-emit"
+version = "1.2.0"
+dependencies = [
+ "pgr-core",
+ "pgr-format",
+ "rayon",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "pgr-format"
-version = "0.7.0"
+version = "1.2.0"
 dependencies = [
  "bytemuck",
  "thiserror",
@@ -198,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-verify"
-version = "0.7.0"
+version = "1.2.0"
 dependencies = [
  "pgr-format",
  "sha2",
