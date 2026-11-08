@@ -1,7 +1,8 @@
 //! M9 end-to-end gates (architecture doc §10.4 row M9, §7.3 Stage C
-//! tier 1): the `pgr -incremental` driver loop over real files — first
+//! tiers 1–2): the `pgr -incremental` driver loop over real files — first
 //! link records, edited relink patches in place, unchanged relink is a
-//! no-op, every fallback path lands on the full link, and
+//! no-op, a slack overflow patches through the segment-relayout tier
+//! while oversized growth still lands on the full link, and
 //! `-incremental-verify` audits the result with the in-repo verifier.
 //!
 //! The e2e suite's standing rule applies to every patched output here:
@@ -94,6 +95,13 @@ struct Corpus {
 
 impl Corpus {
     fn new(tag: &str) -> Self {
+        Self::with_text(tag, 32 * 1024)
+    }
+
+    /// A corpus whose hello.o carries `text_bytes` of `__text` (the tier-2
+    /// gates use a larger base so the moved suffix stays a minority of the
+    /// image — the relayout patch exists to avoid whole-image work).
+    fn with_text(tag: &str, text_bytes: usize) -> Self {
         let dir = std::env::temp_dir().join(format!("pgr_m9_e2e_{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -103,7 +111,7 @@ impl Corpus {
             out: dir.join("app"),
             dir,
         };
-        std::fs::write(&corpus.hello, hello(32 * 1024, false).build().unwrap()).unwrap();
+        std::fs::write(&corpus.hello, hello(text_bytes, false).build().unwrap()).unwrap();
         corpus
     }
 
@@ -238,24 +246,78 @@ fn deleted_output_falls_back_to_a_full_link() {
 }
 
 #[test]
-fn skeleton_move_falls_back_to_a_full_link() {
-    let c = Corpus::new("skeleton");
+fn skeleton_move_patches_through_segment_relayout_and_recovers() {
+    let c = Corpus::with_text("relayout", 256 * 1024);
     run(&c.opts(true, false)).unwrap();
-    // 96 KiB of new text blows way past the reserved slack: __text resizes.
-    c.edit(96 * 1024, false);
+    let first_size = std::fs::metadata(&c.out).unwrap().len();
+    // 64 KiB of new text blows past the reserved slack: __text resizes and
+    // everything behind it shifts — the §7.3 ladder's segment-relayout
+    // tier. The relink patches the moved suffix instead of re-running the
+    // full link.
+    c.edit(256 * 1024 + 64 * 1024, false);
+    let second = run(&c.opts(true, false)).unwrap();
+    let patch = second
+        .patch
+        .expect("an overflow within the relayout bound must patch (the §7.3 ladder tier 2)");
+    assert!(!patch.untouched);
+    assert!(
+        second.file_size > first_size,
+        "the section grew: the patched image grows with it"
+    );
+    assert!(
+        patch.dirty_tiles < patch.total_tiles,
+        "the relayout rewrites the moved suffix, not the whole image ({} of {})",
+        patch.dirty_tiles,
+        patch.total_tiles
+    );
+    assert!(
+        strict_verify(&c.out),
+        "the relayout-patched output must verify strict"
+    );
+    // And the *next* link is incremental again (the patched state
+    // re-recorded): a same-size body edit on top patches in place.
+    c.edit(256 * 1024 + 64 * 1024, true);
+    let third = run(&c.opts(true, false)).unwrap();
+    let patch3 = third.patch.expect("the re-recorded state patches again");
+    assert!(!patch3.untouched);
+    assert!(strict_verify(&c.out));
+}
+
+#[test]
+fn oversized_growth_falls_back_to_the_clean_link() {
+    // The ladder's top rung: growth beyond the policy's max pad escalates
+    // to the full link even under `-incremental`.
+    let c = Corpus::new("oversize");
+    run(&c.opts(true, false)).unwrap();
+    c.edit(4 * 1024 * 1024, false);
     let second = run(&c.opts(true, false)).unwrap();
     assert!(
         second.patch.is_none(),
-        "an overflowing section must fall back (the §7.3 ladder)"
+        "multi-megabyte growth must fall back to the full link"
     );
     assert!(strict_verify(&c.out), "the clean relink verifies strict");
-    // And the *next* link is incremental again (the full link re-recorded
-    // the new skeleton): a same-size body edit on top patches in place.
-    c.edit(96 * 1024, true);
+    // The re-recorded state is incremental again.
+    c.edit(4 * 1024 * 1024, true);
     let third = run(&c.opts(true, false)).unwrap();
     let patch = third.patch.expect("the re-recorded state patches again");
     assert!(!patch.untouched);
     assert!(strict_verify(&c.out));
+}
+
+#[test]
+fn incremental_verify_audits_the_segment_relayout() {
+    // The audit gate over the tier-2 path: the patched output must be
+    // byte-identical to the full fused emit of the same plan (checked by
+    // the driver) and pass the strict verifier afterwards.
+    let c = Corpus::with_text("verify_relayout", 256 * 1024);
+    run(&c.opts(true, false)).unwrap();
+    c.edit(256 * 1024 + 64 * 1024, false);
+    let second = run(&c.opts(true, true)).unwrap();
+    let patch = second
+        .patch
+        .expect("the audited relink patches through the relayout tier");
+    assert!(!patch.untouched);
+    assert!(strict_verify(&c.out), "the audited output verifies strict");
 }
 
 #[test]
