@@ -10,7 +10,7 @@ use pgr_format::consts as pc;
 
 macro_rules! check {
     ($($ours:ident),* $(,)?) => {
-        $(assert_eq!(pc::$ours as u64, om::$ours as u64, stringify!($ours));)*
+        $(assert_eq!(u64::from(pc::$ours), u64::from(om::$ours), stringify!($ours));)*
     };
 }
 
