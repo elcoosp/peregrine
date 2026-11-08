@@ -81,6 +81,9 @@ pub struct Import {
 }
 
 /// Decodes the payload header at `payload[0..28]`.
+///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
 pub fn parse_header(payload: &[u8]) -> Result<ChainedFixupsHeader, FormatError> {
     if payload.len() < 28 {
         return Err(FormatError::Truncated {
@@ -101,14 +104,14 @@ pub fn parse_header(payload: &[u8]) -> Result<ChainedFixupsHeader, FormatError> 
         return Err(FormatError::Invalid {
             offset: 0,
             what: "dyld_chained_fixups_header.fixups_version",
-            value: fixups_version as u64,
+            value: u64::from(fixups_version),
         });
     }
     if symbols_format != 0 {
         return Err(FormatError::Invalid {
             offset: 24,
             what: "dyld_chained_fixups_header.symbols_format (compressed symbol blobs unsupported)",
-            value: symbols_format as u64,
+            value: u64::from(symbols_format),
         });
     }
     Ok(ChainedFixupsHeader {
@@ -143,6 +146,9 @@ fn read_u32_slice(bytes: &[u8], offset: usize, count: usize) -> Result<Vec<u32>,
 }
 
 /// Parses `dyld_chained_starts_in_image` at `offset` within the payload.
+///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
 pub fn parse_starts_in_image(
     payload: &[u8],
     offset: usize,
@@ -152,11 +158,11 @@ pub fn parse_starts_in_image(
     let seg_count = c.read_u32()?;
     // Guard against absurd counts before allocating: the offsets table must
     // fit within the payload that declares it.
-    if seg_count > payload.len() as u32 / 4 {
+    if seg_count > u32::try_from(payload.len()).unwrap_or(u32::MAX) / 4 {
         return Err(FormatError::Invalid {
             offset,
             what: "dyld_chained_starts_in_image.seg_count exceeds payload size",
-            value: seg_count as u64,
+            value: u64::from(seg_count),
         });
     }
     let seg_info_offset = read_u32_slice(payload, offset + 4, seg_count as usize)?;
@@ -167,6 +173,9 @@ pub fn parse_starts_in_image(
 }
 
 /// Parses `dyld_chained_starts_in_segment` at `offset` within the payload.
+///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
 pub fn parse_starts_in_segment(
     payload: &[u8],
     offset: usize,
@@ -185,7 +194,7 @@ pub fn parse_starts_in_segment(
         return Err(FormatError::Invalid {
             offset,
             what: "dyld_chained_starts_in_segment.size smaller than its page_start array",
-            value: size as u64,
+            value: u64::from(size),
         });
     }
     if u64::from(size) > payload.len() as u64 - offset as u64 {
@@ -212,6 +221,9 @@ pub fn parse_starts_in_segment(
 /// The byte offset, within a page, where the first chain starts — expanding
 /// the `DYLD_CHAINED_PTR_START_MULTI` marker when present.
 ///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
+///
 /// `record_offset` is the offset of the `dyld_chained_starts_in_segment`
 /// record within the payload; multi-start offsets are relative to it.
 pub fn page_chain_starts(
@@ -226,7 +238,7 @@ pub fn page_chain_starts(
         .ok_or(FormatError::Invalid {
             offset: record_offset,
             what: "page_start index out of range",
-            value: page as u64,
+            value: u64::from(page),
         })?;
     if *raw == DYLD_CHAINED_PTR_START_NONE {
         return Ok(Vec::new());
@@ -307,6 +319,9 @@ impl ChainWord64 {
 
 /// Encodes a rebase chain word: `target | high8 << 36 | next << 51` (bit 63
 /// clear). `target` must fit in 36 bits — the emit path errors on overflow.
+///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
 pub fn encode_rebase_word(target: u64, high8: u8, next: u32) -> Result<u64, FormatError> {
     if target >> 36 != 0 {
         return Err(FormatError::Invalid {
@@ -319,13 +334,16 @@ pub fn encode_rebase_word(target: u64, high8: u8, next: u32) -> Result<u64, Form
         return Err(FormatError::Invalid {
             offset: 0,
             what: "chain next exceeds 12-bit stride count",
-            value: next as u64,
+            value: u64::from(next),
         });
     }
     Ok(u64::from(high8) << 36 | target | u64::from(next) << 51)
 }
 
 /// Encodes a bind chain word: `ordinal | addend << 24 | next << 51 | 1 << 63`.
+///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
 ///
 /// `addend` is the 8-bit *unsigned* inline addend (`dyld_chained_ptr_64_bind.addend`);
 /// larger addends travel in the import entry (`DYLD_CHAINED_IMPORT_ADDEND`).
@@ -334,20 +352,23 @@ pub fn encode_bind_word(ordinal: u32, addend: u8, next: u32) -> Result<u64, Form
         return Err(FormatError::Invalid {
             offset: 0,
             what: "bind ordinal exceeds 24-bit field",
-            value: ordinal as u64,
+            value: u64::from(ordinal),
         });
     }
     if next > 0xfff {
         return Err(FormatError::Invalid {
             offset: 0,
             what: "chain next exceeds 12-bit stride count",
-            value: next as u64,
+            value: u64::from(next),
         });
     }
     Ok(u64::from(ordinal) | u64::from(addend) << 24 | u64::from(next) << 51 | 1 << 63)
 }
 
 /// Parses the import table (`imports_count` entries at `imports_offset`).
+///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
 ///
 /// The count is validated against the payload *before* any pre-allocation:
 /// each format has a fixed minimum entry size, so a mutated or truncated
@@ -365,7 +386,7 @@ pub fn parse_imports(
             return Err(FormatError::Invalid {
                 offset: header.imports_offset as usize,
                 what: "unknown dyld_chained_import format",
-                value: other as u64,
+                value: u64::from(other),
             });
         }
     };
@@ -399,7 +420,7 @@ pub fn parse_imports(
                     lib_ordinal: (word & 0xff) as u16,
                     weak_import: (word >> 8) & 1 != 0,
                     name_offset: word >> 9,
-                    addend: addend as i64,
+                    addend: i64::from(addend),
                 }
             }
             DYLD_CHAINED_IMPORT_ADDEND64 => {
@@ -416,7 +437,7 @@ pub fn parse_imports(
                 return Err(FormatError::Invalid {
                     offset: header.imports_offset as usize,
                     what: "unknown dyld_chained_import format",
-                    value: other as u64,
+                    value: u64::from(other),
                 });
             }
         };
@@ -607,7 +628,7 @@ mod tests {
         let page0 = page_chain_starts(&payload, rec_off, &seg, 0).unwrap();
         assert_eq!(page0, vec![0x10]);
         let page1 = page_chain_starts(&payload, rec_off, &seg, 1).unwrap();
-        assert!(page1.is_empty());
+        assert_eq!(page1, [] as [u16; 0]);
     }
 
     /// A multi-start page encodes 0x8000 | offset and the offsets table
