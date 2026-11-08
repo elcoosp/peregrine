@@ -397,17 +397,86 @@ fn ident_change_falls_back_to_the_clean_link() {
 }
 
 #[test]
-fn growth_past_the_anchor_falls_back_through_the_ladder() {
-    let old = inputs(&hello(64, false));
+fn overflow_past_the_anchor_patches_through_segment_relayout() {
+    // §7.3 ladder tier 2: the edit overflows the reserved slack, the
+    // section re-pads naturally, and everything behind it shifts — the
+    // ladder's segment-relayout tier. The planner admits the shifted
+    // skeleton as a patch plan (record v4 carries the output-section
+    // digests the shift-exemption gate leans on), the patch rewrites the
+    // moved suffix, and the byte-identity contract still holds.
+    let old = inputs(&hello(32 * 1024, false));
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
     let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
 
     // 64 KiB of new text blows way past the min-pad anchor: the section
-    // resizes — the ladder classifies it (segment re-layout tier; the v1
-    // engine escalates straight to the clean link).
-    let new = inputs(&hello(64 * 1024, false));
+    // resizes (growth within the ladder's segment-relayout bound).
+    let new = inputs(&hello(96 * 1024, false));
+    let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
+    let (layout2, objects2) = link(&new, &cfg_new);
+    let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
+    let plan = match decision {
+        PatchDecision::InPlace(plan) => plan,
+        PatchDecision::Fallback(reason) => panic!(
+            "a slack overflow within the relayout bound must patch (tier 2), got Fallback({reason:?})"
+        ),
+    };
+    assert!(
+        plan.relayout.is_some(),
+        "the shifted skeleton is a segment-relayout plan"
+    );
+    assert!(
+        layout2.file_size > layout1.file_size,
+        "the section grew: the image grows with it"
+    );
+
+    let dir = workdir("relayout");
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+    let (outcome, next_record) =
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+    assert!(!outcome.untouched);
+    let full = build_image_fused(&layout2, &objects2).unwrap();
+    assert_eq!(
+        std::fs::read(&prev).unwrap(),
+        full,
+        "the relayout patch must stay byte-identical to the full fused emit"
+    );
+    assert_eq!(
+        next_record,
+        LinkRecord::record(&layout2, &objects2, &full).unwrap()
+    );
+
+    // The refreshed record is the next relink's baseline: a same-size body
+    // edit on top patches in place (tier 1 again), and an unchanged relink
+    // is a no-op.
+    let decision3 = plan_patch(
+        &next_record,
+        &layout2,
+        &objects2,
+        cfg_new.layout_slack.as_ref(),
+    )
+    .unwrap();
+    assert!(
+        matches!(decision3, PatchDecision::InPlace(ref p) if p.is_untouched()),
+        "the relayout state is a fixpoint"
+    );
+}
+
+#[test]
+fn oversized_growth_still_falls_back_to_the_clean_link() {
+    // The ladder's top rung stays honest: growth beyond the policy's
+    // max pad escalates to the clean link (always available, always
+    // correct) — the relayout tier does not absorb arbitrary growth.
+    let old = inputs(&hello(64, false));
+    let cfg_old = cfg(OutputType::Execute, true, Vec::new());
+    let (layout1, objects1) = link(&old, &cfg_old);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+
+    let new = inputs(&hello(4 * 1024 * 1024, false));
     let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
     cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
     let (layout2, objects2) = link(&new, &cfg_new);
@@ -415,9 +484,149 @@ fn growth_past_the_anchor_falls_back_through_the_ladder() {
     match decision {
         PatchDecision::Fallback(FallbackReason::Skeleton {
             tier: Some(tier), ..
-        }) => assert_ne!(tier, pgr_core::slack::LayoutFallback::InPlace),
-        other => panic!("expected a ladder-classified fallback, got {other:?}"),
+        }) => assert_eq!(
+            tier,
+            pgr_core::slack::LayoutFallback::CleanLink,
+            "multi-megabyte growth must escalate past the relayout tier"
+        ),
+        other => panic!("expected a clean-link fallback, got {other:?}"),
     }
+}
+
+/// The §7.3 tier-2 loop over an edited corpus (an overflow beyond the
+/// anchor within the relayout bound), asserting the same contract as the
+/// tier-1 helper: byte-identity, the refreshed record, the fixpoint.
+fn relayout_and_assert_identity(
+    tag: &str,
+    kind: OutputType,
+    adhoc: bool,
+    old_text: usize,
+    new_text: usize,
+) {
+    let cfg_old = cfg_adhoc(kind, true, Vec::new(), adhoc);
+    let (layout1, objects1) = link(&inputs(&hello(old_text, false)), &cfg_old);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+
+    let mut cfg_new = cfg_adhoc(kind, true, anchors_of(&layout1), adhoc);
+    cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
+    let (layout2, objects2) = link(&inputs(&hello(new_text, false)), &cfg_new);
+    let image2_full = build_image_fused(&layout2, &objects2).unwrap();
+
+    let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
+    let plan = match &decision {
+        PatchDecision::InPlace(p) => p.clone(),
+        PatchDecision::Fallback(r) => panic!("expected a relayout plan, fell back: {r}"),
+    };
+    assert!(plan.relayout.is_some(), "the overflow must admit tier 2");
+
+    let dir = workdir(tag);
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+    let (outcome, next_record) =
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+    assert!(!outcome.untouched);
+    let patched = std::fs::read(&prev).unwrap();
+    assert_eq!(
+        patched, image2_full,
+        "the relayout patch must be byte-identical to the full fused emit"
+    );
+    assert_eq!(
+        next_record,
+        LinkRecord::record(&layout2, &objects2, &image2_full).unwrap()
+    );
+    let decision3 = plan_patch(
+        &next_record,
+        &layout2,
+        &objects2,
+        cfg_new.layout_slack.as_ref(),
+    )
+    .unwrap();
+    assert!(matches!(decision3, PatchDecision::InPlace(ref p) if p.is_untouched()));
+}
+
+#[test]
+fn unsigned_output_relayout_matches_the_full_emit() {
+    // `-no_adhoc`: the relayout tier without a signature — no hash table,
+    // no CodeDirectory rebuild, the patch is the moved suffix alone. The
+    // corpus keeps the moved suffix a minority of the image (the §7.3
+    // economics gate declines a whole-image patch by design).
+    relayout_and_assert_identity(
+        "unsigned_relayout",
+        OutputType::Execute,
+        false,
+        256 * 1024,
+        256 * 1024 + 64 * 1024,
+    );
+}
+
+#[test]
+fn dylib_output_relayout_matches_the_full_emit() {
+    // The image-base-0 path across a moved skeleton: downstream vaddrs
+    // shift without an image base, the load commands and the CodeDirectory
+    // (execSegLimit) ride the header diff.
+    relayout_and_assert_identity(
+        "dylib_relayout",
+        OutputType::Dylib,
+        true,
+        256 * 1024,
+        256 * 1024 + 64 * 1024,
+    );
+}
+
+#[test]
+fn linkedit_overflow_patches_through_segment_relayout() {
+    // The second tier-2 trigger: the `__LINKEDIT` chunk stream outgrows
+    // the signature-boundary reservation — `sig_off` moves with it. No
+    // section resizes; the ladder's relayout tier still applies (the
+    // moved LINKEDIT tail is the shifted suffix the patch rewrites).
+    let mut b = hello(64 * 1024, false);
+    for i in 0..300 {
+        b.add_symbol(ObjectSymbol::Defined {
+            name: format!("_added_local_{i}"),
+            section_index: 0,
+            value: 64,
+            weak: false,
+        });
+    }
+    let old = inputs(&hello(64 * 1024, false));
+    let cfg_old = cfg(OutputType::Execute, true, Vec::new());
+    let (layout1, objects1) = link(&old, &cfg_old);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+
+    let new = inputs(&b);
+    let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
+    let (layout2, objects2) = link(&new, &cfg_new);
+    assert_ne!(
+        layout2.linkedit.sig_off, layout1.linkedit.sig_off,
+        "the chunk stream outgrows the reservation: the boundary moves"
+    );
+    let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
+    let plan = match decision {
+        PatchDecision::InPlace(plan) => plan,
+        PatchDecision::Fallback(reason) => panic!(
+            "a LINKEDIT overflow within the relayout tier must patch, got Fallback({reason:?})"
+        ),
+    };
+    assert!(plan.relayout.is_some());
+
+    let dir = workdir("linkedit_overflow");
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+    let (_outcome, next_record) =
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+    let full = build_image_fused(&layout2, &objects2).unwrap();
+    assert_eq!(
+        std::fs::read(&prev).unwrap(),
+        full,
+        "the LINKEDIT-overflow patch must stay byte-identical to the full emit"
+    );
+    assert_eq!(
+        next_record,
+        LinkRecord::record(&layout2, &objects2, &full).unwrap()
+    );
 }
 
 #[test]
