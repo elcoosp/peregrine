@@ -23,5 +23,9 @@ criterion = { workspace = true }
 name = "emit"
 harness = false
 
+[[bench]]
+name = "propagate"
+harness = false
+
 [lints]
 workspace = true
