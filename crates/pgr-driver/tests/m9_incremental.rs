@@ -173,7 +173,10 @@ fn edited_relink_patches_in_place_and_verifies() {
     assert_eq!(second.file_size, first.file_size, "the skeleton is frozen");
     // The standing e2e rule: the patched output passes the strict verifier
     // (chain walk, signature page-hash recompute, trie, branch ranges).
-    assert!(strict_verify(&c.out), "the patched output must verify strict");
+    assert!(
+        strict_verify(&c.out),
+        "the patched output must verify strict"
+    );
 }
 
 #[test]
@@ -181,7 +184,9 @@ fn unchanged_relink_is_a_reported_noop() {
     let c = Corpus::new("noop");
     run(&c.opts(true, false)).unwrap();
     let second = run(&c.opts(true, false)).unwrap();
-    let patch = second.patch.expect("the relink still goes through the engine");
+    let patch = second
+        .patch
+        .expect("the relink still goes through the engine");
     assert!(patch.untouched, "identical inputs must touch nothing");
     assert_eq!(patch.bytes_patched, 0);
     assert!(strict_verify(&c.out));
@@ -212,7 +217,10 @@ fn corrupt_record_falls_back_to_a_full_link() {
     std::fs::write(c.record(), &junk).unwrap();
     let second = run(&c.opts(true, false)).unwrap();
     assert!(second.patch.is_none(), "a corrupt record must fall back");
-    assert!(strict_verify(&c.out), "the fallback rewrites the image cleanly");
+    assert!(
+        strict_verify(&c.out),
+        "the fallback rewrites the image cleanly"
+    );
     // The sidecar was replaced with a fresh, decodable record.
     let fresh = std::fs::read(c.record()).unwrap();
     assert_ne!(fresh, junk, "the full link re-recorded");
@@ -290,7 +298,10 @@ fn resident_and_incremental_do_not_collide() {
         assert!(strict_verify(&c.out));
         return;
     }
-    assert!(c.record().exists(), "the full link recorded after the fallback");
+    assert!(
+        c.record().exists(),
+        "the full link recorded after the fallback"
+    );
     c.edit(32 * 1024, true);
     let second = run(&o).unwrap();
     if second.patch.is_none() {
@@ -348,3 +359,207 @@ fn link_errors_propagate_through_the_incremental_path() {
 
 /// Silence the unused-import lint when `LinkOutcome` fields evolve.
 const _: fn(&LinkOutcome) -> u64 = |o| o.file_size;
+
+// ---------------------------------------------------------------------------
+// M9 tier-2a — stable import ordinals across the incremental cycle
+// (§7.3 step 5, the D7 architecture delta closed). The record captures the
+// link's import table; the anchored relink keeps every recorded ordinal and
+// appends new imports — an edit that adds a bind no longer renumbers the
+// existing ones (which would dirty every page holding a rewritten word).
+// ---------------------------------------------------------------------------
+
+/// A linkable dylib file exporting `exports`: built with the linker's own
+/// `-dylib` path over a one-section object (the linked image carries a real
+/// export trie, exactly what `scan_dylib` reads back).
+fn write_dylib(dir: &Path, exports: &[&str]) {
+    let src = dir.join("liblog.o");
+    let mut b = ObjectBuilder::new("liblog.o");
+    let text = b.add_section(
+        ObjectSection::text("__text", vec![0xC0, 0x03, 0x5F, 0xD6], vec![]), // ret
+    );
+    for (i, name) in exports.iter().enumerate() {
+        b.add_symbol(ObjectSymbol::Defined {
+            name: (*name).into(),
+            section_index: text,
+            value: u64::try_from(i * 4).unwrap(),
+            weak: false,
+        });
+    }
+    std::fs::write(&src, b.build().unwrap()).unwrap();
+    let opts = pgr_driver::opts::Options {
+        output: dir.join("liblog.dylib").display().to_string(),
+        inputs: vec![src.display().to_string()],
+        config: pgr_core::layout::LinkConfig {
+            filetype: pgr_core::layout::OutputType::Dylib,
+            install_name: Some("@rpath/liblog.dylib".into()),
+            ident: "pgr-m9-tier2a-lib".into(),
+            ..pgr_core::layout::LinkConfig::default()
+        },
+        ..pgr_driver::opts::Options::default()
+    };
+    pgr_driver::run(&opts).unwrap();
+}
+
+/// hello.o whose `__data` carries one external pointer per `binds` entry
+/// (undefined externs, bound to liblog.dylib at link time) plus `_main`.
+fn pointer_hello(binds: &[&str]) -> ObjectBuilder {
+    let mut b = ObjectBuilder::new("hello.o");
+    let text = b.add_section(ObjectSection::text(
+        "__text",
+        vec![0xC0, 0x03, 0x5F, 0xD6], // ret
+        vec![],
+    ));
+    let data = b.add_section(ObjectSection::data(
+        "__data",
+        vec![0u8; binds.len() * 8],
+        vec![],
+    ));
+    for name in binds {
+        b.add_symbol(ObjectSymbol::Undefined {
+            name: (*name).into(),
+            weak_ref: false,
+        });
+    }
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: text,
+        value: 0,
+        weak: false,
+    });
+    for (i, _) in binds.iter().enumerate() {
+        // The symtab groups locals/defs/undefs; `sym_index` maps the
+        // declaration index onto the relocation's table index.
+        let sym = b.sym_index(i);
+        b.section_mut(data)
+            .relocs
+            .push(ObjectReloc::unsigned(sym).at((i * 8) as u32));
+    }
+    b
+}
+
+/// The decoded record's import names, in ordinal order.
+fn record_imports(out: &Path) -> Vec<String> {
+    let mut name = out.as_os_str().to_owned();
+    name.push(".pgr-inc");
+    let bytes = std::fs::read(PathBuf::from(name)).unwrap();
+    let record = pgr_emit::incremental::LinkRecord::decode(&bytes).expect("record decodes");
+    record
+        .imports
+        .iter()
+        .map(|k| String::from_utf8_lossy(&k.name).into_owned())
+        .collect()
+}
+
+#[test]
+fn import_adding_edit_relinks_in_place_with_stable_ordinals() {
+    let dir = std::env::temp_dir().join("pgr_m9_tier2a");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_dylib(&dir, &["_log", "_warn"]);
+
+    let hello = dir.join("hello.o");
+    let out = dir.join("app");
+    std::fs::write(&hello, pointer_hello(&["_log"]).build().unwrap()).unwrap();
+
+    let opts = pgr_driver::opts::Options {
+        output: out.display().to_string(),
+        inputs: vec![hello.display().to_string()],
+        lib_dirs: vec![dir.display().to_string()],
+        libs: vec!["log".into()],
+        config: pgr_core::layout::LinkConfig {
+            ident: "pgr-m9-tier2a".into(),
+            ..pgr_core::layout::LinkConfig::default()
+        },
+        incremental: true,
+        incremental_verify: true,
+        ..pgr_driver::opts::Options::default()
+    };
+
+    // Link 1: the full link records the v2 record — table [_log].
+    let first = run(&opts).unwrap();
+    assert!(first.patch.is_none(), "the first link is a full link");
+    assert_eq!(
+        record_imports(&out),
+        ["_log"],
+        "the record carries the import table"
+    );
+    assert!(strict_verify(&out));
+
+    // Link 2: the edit re-points slot 0 at a NEW import (_warn) and binds
+    // _log one slot later. First-use renumbering would reorder the table
+    // to [_warn, _log]; the anchored relink keeps [_log] and appends.
+    std::fs::write(&hello, pointer_hello(&["_warn", "_log"]).build().unwrap()).unwrap();
+    let second = run(&opts).unwrap();
+    let patch = second
+        .patch
+        .expect("the import-adding edit patches in place");
+    assert!(!patch.untouched);
+    assert!(
+        patch.dirty_tiles < patch.total_tiles,
+        "one new bind must reuse most tiles ({} of {})",
+        patch.dirty_tiles,
+        patch.total_tiles
+    );
+    assert_eq!(
+        record_imports(&out),
+        ["_log", "_warn"],
+        "recorded ordinals hold; the new import appends"
+    );
+    assert!(strict_verify(&out), "the patched output must verify strict");
+
+    // Link 3: same inputs — the anchored state is a fixpoint.
+    let third = run(&opts).unwrap();
+    let patch3 = third.patch.expect("the warm relink plans");
+    assert!(patch3.untouched, "the same inputs must be a no-op");
+}
+
+#[test]
+fn older_format_record_falls_back_and_re_records() {
+    let dir = std::env::temp_dir().join("pgr_m9_tier2a_v1");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_dylib(&dir, &["_log"]);
+    let hello = dir.join("hello.o");
+    let out = dir.join("app");
+    std::fs::write(&hello, pointer_hello(&["_log"]).build().unwrap()).unwrap();
+
+    let opts = pgr_driver::opts::Options {
+        output: out.display().to_string(),
+        inputs: vec![hello.display().to_string()],
+        lib_dirs: vec![dir.display().to_string()],
+        libs: vec!["log".into()],
+        config: pgr_core::layout::LinkConfig {
+            ident: "pgr-m9-tier2a-v1".into(),
+            ..pgr_core::layout::LinkConfig::default()
+        },
+        incremental: true,
+        ..pgr_driver::opts::Options::default()
+    };
+    run(&opts).unwrap();
+
+    // Downgrade the record's format version to 1: a foreign record for the
+    // v2 engine. The relink must fall back (silently, per §7.3), run the
+    // full link, and re-record in the current format.
+    let sidecar = dir.join("app.pgr-inc");
+    let mut bytes = std::fs::read(&sidecar).unwrap();
+    assert!(
+        bytes.len() > 52,
+        "the record carries the fixed 52-byte framing plus payload"
+    );
+    bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+    std::fs::write(&sidecar, &bytes).unwrap();
+
+    let outcome = run(&opts).unwrap();
+    assert!(
+        outcome.patch.is_none(),
+        "a v1 record falls back to the full link"
+    );
+    bytes = std::fs::read(&sidecar).unwrap();
+    let record = pgr_emit::incremental::LinkRecord::decode(&bytes).expect("re-recorded");
+    assert_eq!(
+        record.format_version,
+        pgr_emit::incremental::FORMAT_VERSION,
+        "the sidecar is refreshed to the current format"
+    );
+    assert_eq!(record.imports.len(), 1, "the table is re-recorded");
+}

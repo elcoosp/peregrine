@@ -415,8 +415,7 @@ fn link_to_image_recorded(
         let socket = opts
             .resident_socket
             .clone()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(pgr_daemon::default_socket);
+            .map_or_else(pgr_daemon::default_socket, std::path::PathBuf::from);
         let exe_hint = std::env::current_exe().ok();
         match pgr_daemon::link_via_daemon(&socket, exe_hint.as_deref(), &job) {
             Ok(img) => {
@@ -914,12 +913,14 @@ fn record_path(opts: &opts::Options) -> std::path::PathBuf {
     std::env::var("PGR_INCREMENTAL_RECORD")
         .ok()
         .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            let mut name = std::path::PathBuf::from(&opts.output).into_os_string();
-            name.push(".pgr-inc");
-            std::path::PathBuf::from(name)
-        })
+        .map_or_else(
+            || {
+                let mut name = std::path::PathBuf::from(&opts.output).into_os_string();
+                name.push(".pgr-inc");
+                std::path::PathBuf::from(name)
+            },
+            std::path::PathBuf::from,
+        )
 }
 
 /// The M9 in-place relink (architecture doc §7.3, tier 1): load the
@@ -928,9 +929,8 @@ fn record_path(opts: &opts::Options) -> std::path::PathBuf {
 /// pages and rename. Returns the patch outcome plus the refreshed record
 /// (written here so the *next* relink starts from the new state).
 fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt> {
-    let record_bytes = std::fs::read(record_path(opts)).map_err(|_| {
-        RelinkAttempt::Fallback(pgr_emit::incremental::FallbackReason::NoRecord)
-    })?;
+    let record_bytes = std::fs::read(record_path(opts))
+        .map_err(|_| RelinkAttempt::Fallback(pgr_emit::incremental::FallbackReason::NoRecord))?;
     let Some(record) = pgr_emit::incremental::LinkRecord::decode(&record_bytes) else {
         return Err(pgr_emit::incremental::FallbackReason::RecordUnreadable.into());
     };
@@ -940,10 +940,7 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
     match pgr_emit::incremental::check_output(output, &record) {
         Ok(pgr_emit::incremental::Integrity::Match) => {}
         Ok(pgr_emit::incremental::Integrity::Mismatch { detail }) => {
-            return Err(pgr_emit::incremental::FallbackReason::OutputChanged {
-                detail,
-            }
-            .into());
+            return Err(pgr_emit::incremental::FallbackReason::OutputChanged { detail }.into());
         }
         Err(e) => {
             return Err(pgr_emit::incremental::FallbackReason::OutputChanged {
@@ -958,7 +955,9 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
     // anchors — the driver implies the M8-c policy when the caller left it
     // unset and anchors every recorded section at its reserved size.
     let mut cfg = prepared.config.clone();
-    cfg.layout_slack = cfg.layout_slack.or_else(|| Some(pgr_core::slack::SlackPolicy::default()));
+    cfg.layout_slack = cfg
+        .layout_slack
+        .or_else(|| Some(pgr_core::slack::SlackPolicy::default()));
     cfg.slack_anchor = record
         .sections
         .iter()
@@ -968,6 +967,15 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
             padded: s.size,
         })
         .collect();
+    // M9 tier-2a (§7.3 step 5): the recorded import table anchors the
+    // chained-bind ordinals — recorded entries keep them, new binds append,
+    // and an import-adding edit stops renumbering the table (which would
+    // dirty every page holding a rewritten bind word).
+    cfg.stable_imports = Some(record.imports.clone());
+    // M9 tier-2a: the signature boundary anchors too — the LINKEDIT tail
+    // reservation lets the chunk stream grow (symtab, imports, strings)
+    // without moving `sig_off`, so those edits patch in place.
+    cfg.sig_anchor = (record.linkedit.sig_off > 0).then_some(record.linkedit.sig_off);
     let result = pgr_core::link_cached(
         &prepared.inputs,
         &prepared.archives,
@@ -1008,14 +1016,18 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
             }),
         });
     }
-    let (mut outcome, new_record) =
-        pgr_emit::incremental::apply_patch(output, &record, &plan, &result.layout, &result.objects, output)
-            .map_err(|e| match e {
-                pgr_emit::incremental::PatchError::Fallback(reason) => {
-                    RelinkAttempt::Fallback(reason)
-                }
-                other => RelinkAttempt::Error(other.into()),
-            })?;
+    let (mut outcome, new_record) = pgr_emit::incremental::apply_patch(
+        output,
+        &record,
+        &plan,
+        &result.layout,
+        &result.objects,
+        output,
+    )
+    .map_err(|e| match e {
+        pgr_emit::incremental::PatchError::Fallback(reason) => RelinkAttempt::Fallback(reason),
+        other => RelinkAttempt::Error(other.into()),
+    })?;
 
     // `-incremental-verify` (§7.3): the audit gate. Byte-identity against
     // the full fused emit of the same plan first (the engine's contract);
@@ -1036,12 +1048,9 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
                 eprintln!("pgr: incremental-verify: patched output diverged; healing");
             }
             write_image(&full, output).map_err(|e| RelinkAttempt::Error(e.into()))?;
-            let healed = pgr_emit::incremental::LinkRecord::record(
-                &result.layout,
-                &result.objects,
-                &full,
-            )
-            .map_err(|e| RelinkAttempt::Error(e.into()))?;
+            let healed =
+                pgr_emit::incremental::LinkRecord::record(&result.layout, &result.objects, &full)
+                    .map_err(|e| RelinkAttempt::Error(e.into()))?;
             store_record(opts, &healed);
             outcome.bytes_patched = full.len() as u64;
             outcome.dirty_tiles = plan.total_tiles;
@@ -1067,7 +1076,9 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
             return Err(RelinkAttempt::Error(DriverError::Tbd {
                 path: opts.output.clone(),
                 source: pgr_format::FormatError::Malformed {
-                    what: format!("-incremental-verify: the patched image failed the strict verifier: {detail}"),
+                    what: format!(
+                        "-incremental-verify: the patched image failed the strict verifier: {detail}"
+                    ),
                 },
             }));
         }
@@ -1233,7 +1244,7 @@ mod tests {
             vec![],
         ));
         // __data: [ptr to _greet][subtractor result ptr_a - ptr_b]
-        let _data = b.add_section(ObjectSection::data("__data", vec![0u8; 16], vec![]));
+        let data_sect = b.add_section(ObjectSection::data("__data", vec![0u8; 16], vec![]));
         let greet_sym = b.add_symbol(ObjectSymbol::Defined {
             name: "_greet".into(),
             section_index: text,
@@ -1242,17 +1253,17 @@ mod tests {
         });
         let ptr_a = b.add_symbol(ObjectSymbol::Defined {
             name: "_ptr_a".into(),
-            section_index: _data,
+            section_index: data_sect,
             value: 8,
             weak: false,
         });
         let ptr_b = b.add_symbol(ObjectSymbol::Defined {
             name: "_ptr_b".into(),
-            section_index: _data,
+            section_index: data_sect,
             value: 8,
             weak: false,
         });
-        b.section_mut(_data).relocs = vec![
+        b.section_mut(data_sect).relocs = vec![
             ObjectReloc::unsigned(greet_sym as u32).at(0),
             ObjectReloc::subtractor(ptr_a as u32).at(8),
             ObjectReloc::unsigned(ptr_b as u32).at(8),
