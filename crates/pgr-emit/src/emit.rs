@@ -54,25 +54,24 @@ fn copy_and_patch(
             let dest = sect.file_off + piece.offset;
             // Synthetic pieces (__got slots, __stubs entries) carry their
             // own bytes; input pieces copy from the object file.
-            let bytes: &[u8] = match &piece.synth {
-                Some(synth) => &synth.bytes,
-                None => {
-                    let src = &objects
-                        .get(piece.file.0 as usize)
-                        .ok_or(EmitError::Internal {
-                            message: format!("piece file {} missing", piece.file.0),
-                        })?
-                        .bytes;
-                    src.get(piece.in_range.start as usize..piece.in_range.end as usize)
-                        .ok_or(EmitError::Internal {
-                            message: format!(
-                                "piece range {}..{} leaves its input",
-                                piece.in_range.start, piece.in_range.end
-                            ),
-                        })?
-                }
+            let bytes: &[u8] = if let Some(synth) = &piece.synth {
+                &synth.bytes
+            } else {
+                let src = &objects
+                    .get(piece.file.0 as usize)
+                    .ok_or(EmitError::Internal {
+                        message: format!("piece file {} missing", piece.file.0),
+                    })?
+                    .bytes;
+                src.get(piece.in_range.start as usize..piece.in_range.end as usize)
+                    .ok_or(EmitError::Internal {
+                        message: format!(
+                            "piece range {}..{} leaves its input",
+                            piece.in_range.start, piece.in_range.end
+                        ),
+                    })?
             };
-            let dst = buf
+            let tile = buf
                 .get_mut(dest as usize..(dest + piece.size) as usize)
                 .ok_or(EmitError::Contract {
                     message: format!(
@@ -80,7 +79,7 @@ fn copy_and_patch(
                         sect.name, piece.size
                     ),
                 })?;
-            dst.copy_from_slice(bytes);
+            tile.copy_from_slice(bytes);
             // Patches in place, piece-relative offsets.
             for op in &piece.patches {
                 reloc::apply(buf, op, dest + u64::from(patch_offset(op)))?;
@@ -101,7 +100,7 @@ fn patch_offset(op: &PatchOp) -> u32 {
 }
 
 /// Writes the encoded chained-fixup words into their pointer slots (file
-/// offset == vaddr − image_base under the constant-delta contract; M3:
+/// offset == vaddr − `image_base` under the constant-delta contract; M3:
 /// the base is 0 for dylibs/bundles).
 fn write_chain_words(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     for (vaddr, word) in &layout.fixups.slot_words {
@@ -218,7 +217,7 @@ fn write_linkedit(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     Ok(())
 }
 
-/// Two-pass content-derived UUID (§9) + the ad-hoc SuperBlob, last in file.
+/// Two-pass content-derived UUID (§9) + the ad-hoc `SuperBlob`, last in file.
 fn write_signature(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     let le = &layout.linkedit;
     if le.sig_size == 0 {
