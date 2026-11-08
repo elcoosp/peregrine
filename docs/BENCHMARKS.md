@@ -653,3 +653,64 @@ resolve over the same index) is what turns this from a *gate* into a
 ```sh
 cargo bench -p pgr-emit --bench propagate
 ```
+
+## Recorded baseline (M9 tier 2 — the segment-relayout patch tier)
+
+The tier-2 milestone (architecture doc §7.3 "layout stability", roadmap
+row M9 GA) executes the fallback ladder's middle rung: a skeleton shift
+that the ladder classifies as `SegmentRelayout` — a section overflowing
+its slack anchor within the policy's max pad, or the `__LINKEDIT` chunk
+stream outgrowing its signature-boundary reservation — is admitted as a
+relayout patch plan instead of falling to the full link. The record grows
+the output-section content digest table (v4: SHA-256 per output section
+over its copy-run bytes, a placement-invariant concatenation), which is
+what lets the propagation gate exempt a *byte-identical* move (the
+section's derived bytes — relocations, chain words — re-emit from the plan
+and re-prove under the byte-identity contract) while genuine content churn
+inside the moved suffix still answers to the propagation scope.
+
+The bench (`pgr-driver/incremental::segment_relayout_relink_8mib`) climbs
+a monotone ladder — eight +64 KiB growth steps of object 1, each beyond
+the current anchor and each within the ladder's bound, then one reset
+link back to pristine. The ladder shape is not cosmetic: the anchored
+skeleton holds any size a section has already carried, so an alternating
+grown↔pristine cycle degenerates to tier 1 after the first round trip;
+only climbing growth re-triggers the tier. The recorded mean is therefore
+the honest 8 tier-2 : 1 tier-1 mix, and the accounting pass prints the
+per-step split.
+
+| `pgr-driver/incremental` (container sandbox, ext4 — no reflink, the clone degrades to a full copy) | time |
+|---|---|
+| `full_relink_8mib` | **17.4 ms** |
+| `incremental_relink_8mib` (tier 1, one-function edit) | 32.2 ms |
+| `incremental_add_import_8mib` (tier 1, anchored ordinals) | 22.4 ms |
+| `segment_relayout_relink_8mib` (8 tier-2 : 1 tier-1 mix) | **34.2 ms** |
+| `untouched_relink_8mib` | 12.8 ms |
+
+Bytes written (the §7.3 gate, accounting pass, 8.53 → 9.37 MiB image over
+the ladder): each +64 KiB growth step patches **1.2 MiB (69–70 of 573
+tiles, ~13% of the image)** — exactly the moved suffix (the re-padded
+section's tail, the shifted downstream sections, the grown `__LINKEDIT`
+chunks, the relocated `CodeDirectory` and the UUID page) — where the full
+relink writes every byte. The wall-clock verdict is the same honest wash
+the tier-1 bench recorded: ext4 has no reflink, so the clone is a full
+copy and the patch path cannot win wall time on this filesystem; the
+tier-2 mean lands within noise of the tier-1 mean and the APFS verdict is
+decided on the P0 rig, where clonefile is instant and the 13%-of-image
+patch is the whole story.
+
+Regression discipline: the record-time content-digest hash (parallel over
+sections) adds no measurable full-link cost (full relink 17.4 ms vs the
+pre-tier-2 17.4 ms measured back-to-back), and the tier-1 relink carries
+only the copy-or-rehash digest table (a pure-copy experiment measured
+32.0 ms vs 32.2 ms with hashing — noise). The bench file also gained two
+correctness fixes: the bytes-written accounting loop indexed input 0 (the
+extern-provider dylib) instead of the alternated object — replacing the
+dylib would have failed the link if the loop had ever run — and the
+import-churn warm-up asserted a full link on a state whose parity the
+previous bench's timed loop had already consumed (the assert could never
+pass; a reset now precedes the group).
+
+```sh
+cargo bench -p pgr-driver --bench incremental
+```
