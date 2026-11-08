@@ -146,8 +146,7 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
 
     let total_vmsize = segments
         .last()
-        .map(|s| s.vmaddr.saturating_add(s.vmsize))
-        .unwrap_or(0);
+        .map_or(0, |s| s.vmaddr.saturating_add(s.vmsize));
 
     Ok(ParsedImage {
         header,
@@ -171,6 +170,15 @@ pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
 
 /// Counts fixup slots cheaply (pre-pass) without validating: full validation
 /// happens in [`crate::dynamic`]. Returns 0 when anything is malformed.
+/// The canonical executable segment order (dyld's load order).
+const CANONICAL: [&str; 5] = [
+    "__PAGEZERO",
+    "__TEXT",
+    "__DATA_CONST",
+    "__DATA",
+    "__LINKEDIT",
+];
+
 fn count_fixup_slots(bytes: &[u8], lc: &LinkeditDataCommand, nsegments: usize) -> u64 {
     let Ok(payload) = lc.data(bytes) else {
         return 0;
@@ -440,13 +448,6 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                 None,
             ));
         }
-        const CANONICAL: [&str; 5] = [
-            "__PAGEZERO",
-            "__TEXT",
-            "__DATA_CONST",
-            "__DATA",
-            "__LINKEDIT",
-        ];
         // The present segments must appear in canonical relative order.
         let mut next = 0usize;
         let mut ordered = true;
@@ -583,7 +584,7 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
         if seg.initprot & !seg.maxprot != 0 {
             report.issues.push(Issue::error(
                 Code::SegmentContract,
-                format!("segment {name}: initprot has bits outside maxprot",),
+                format!("segment {name}: initprot has bits outside maxprot"),
                 None,
             ));
         }
@@ -663,13 +664,13 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                             Some(s.addr),
                         ));
                     }
-                    if s.offset as u64 >= seg.fileoff.saturating_add(seg.filesize)
-                        || s.offset.saturating_add(s.size as u32) as u64 > file_len
+                    if u64::from(s.offset) >= seg.fileoff.saturating_add(seg.filesize)
+                        || u64::from(s.offset.saturating_add(s.size as u32)) > file_len
                     {
                         report.issues.push(Issue::error(
                             Code::SectionBounds,
                             format!("section {sname}: file range exceeds the segment or file"),
-                            Some(s.offset as u64),
+                            Some(u64::from(s.offset)),
                         ));
                     }
                 }
@@ -735,19 +736,19 @@ pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &m
         }
         return;
     };
-    if st.symoff as u64 + u64::from(st.nsyms) * 16 > file_len {
+    if u64::from(st.symoff) + u64::from(st.nsyms) * 16 > file_len {
         report.issues.push(Issue::error(
             Code::SymbolTable,
             "symbol table extends past EOF",
-            Some(st.symoff as u64),
+            Some(u64::from(st.symoff)),
         ));
         return;
     }
-    if st.stroff as u64 + u64::from(st.strsize) > file_len {
+    if u64::from(st.stroff) + u64::from(st.strsize) > file_len {
         report.issues.push(Issue::error(
             Code::SymbolTable,
             "string table extends past EOF",
-            Some(st.stroff as u64),
+            Some(u64::from(st.stroff)),
         ));
         return;
     }
@@ -756,7 +757,7 @@ pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &m
         report.issues.push(Issue::warning(
             Code::SymbolTable,
             "string table does not end with NUL",
-            Some(st.stroff as u64 + u64::from(st.strsize)),
+            Some(u64::from(st.stroff) + u64::from(st.strsize)),
         ));
     }
 
@@ -772,7 +773,7 @@ pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &m
         if sym.is_stab() {
             continue;
         }
-        if sym.n_strx as u64 >= u64::from(st.strsize) && st.strsize > 0 {
+        if u64::from(sym.n_strx) >= u64::from(st.strsize) && st.strsize > 0 {
             report.issues.push(Issue::error(
                 Code::SymbolTable,
                 format!(
@@ -808,7 +809,8 @@ pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &m
                     ));
                 }
             }
-        } else if sym.is_section_defined() && (sym.n_sect == 0 || sym.n_sect as u32 > img.nsections)
+        } else if sym.is_section_defined()
+            && (sym.n_sect == 0 || u32::from(sym.n_sect) > img.nsections)
         {
             report.issues.push(Issue::error(
                 Code::SymbolTable,
@@ -836,7 +838,7 @@ pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &m
                             report.issues.push(Issue::error(
                                 Code::SymbolTable,
                                 format!("indirect symbol {i}: index {e} beyond nsyms {}", st.nsyms),
-                                Some(dys.indirectsymoff as u64 + i as u64 * 4),
+                                Some(u64::from(dys.indirectsymoff) + i as u64 * 4),
                             ));
                         }
                     }
