@@ -57,7 +57,7 @@ pub fn section_object(seg: &str, sect: &str, data: &[u8]) -> Result<Vec<u8>, Str
     out.extend_from_slice(b"__PGR\0\0\0\0\0\0\0\0\0\0\0"); // segname (unused)
     out.extend_from_slice(&0u64.to_le_bytes()); // vmaddr
     out.extend_from_slice(&0u64.to_le_bytes()); // vmsize
-    out.extend_from_slice(&(data_off as u64).to_le_bytes()); // fileoff
+    out.extend_from_slice(&u64::from(data_off).to_le_bytes()); // fileoff
     out.extend_from_slice(&(data.len() as u64).to_le_bytes()); // filesize
     out.extend_from_slice(&0x07u32.to_le_bytes()); // maxprot RWX
     out.extend_from_slice(&0x07u32.to_le_bytes()); // initprot RWX
@@ -67,7 +67,7 @@ pub fn section_object(seg: &str, sect: &str, data: &[u8]) -> Result<Vec<u8>, Str
     // The one section.
     out.extend_from_slice(&sect_name);
     out.extend_from_slice(&seg_name);
-    out.extend_from_slice(&(data_off as u64).to_le_bytes()); // addr (blob-relative)
+    out.extend_from_slice(&u64::from(data_off).to_le_bytes()); // addr (blob-relative)
     out.extend_from_slice(&(data.len() as u64).to_le_bytes()); // size
     out.extend_from_slice(&data_off.to_le_bytes()); // offset
     out.extend_from_slice(&0u32.to_le_bytes()); // align (1-byte)
