@@ -126,6 +126,6 @@ fn index_is_sorted_and_covers_every_defined_symbol() {
 fn empty_archive_builds_and_parses() {
     let arch = ArchiveBuilder::new("libempty.a");
     let parsed = pgr_format::parse_archive(&arch.build()).unwrap();
-    assert!(parsed.members.is_empty());
-    assert!(parsed.index.is_empty());
+    assert_eq!(parsed.members, [] as [pgr_format::ArchiveMember; 0]);
+    assert_eq!(parsed.index, [] as [pgr_format::ArchiveIndexEntry; 0]);
 }
