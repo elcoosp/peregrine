@@ -25,7 +25,7 @@
 //!
 //! Only the header page (UUID) and the signature blob are finished late: the
 //! UUID derives from the fused hash table (§9 two-pass derivation), the
-//! header page re-hashes, and the SuperBlob lands last — byte-identical to
+//! header page re-hashes, and the `SuperBlob` lands last — byte-identical to
 //! the reference by the M4 gate (gated in `tests/m4_fused.rs` and e2e).
 //!
 //! Output allocation (D10): `vec![0u8; n]` reaches the allocator's
@@ -193,7 +193,7 @@ fn hash_table_len(code_limit: u64) -> usize {
     code_limit.div_ceil(HASH_PAGE) as usize * 32
 }
 
-/// The ad-hoc SuperBlob (M3 flag rules: `CS_EXECSEG_MAIN_BINARY` only for
+/// The ad-hoc `SuperBlob` (M3 flag rules: `CS_EXECSEG_MAIN_BINARY` only for
 /// executables), written at `sig_off`.
 fn write_superblob(layout: &Layout, buf: &mut [u8], hashes: &[u8]) -> Result<(), EmitError> {
     let le = &layout.linkedit;
