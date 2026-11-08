@@ -127,7 +127,7 @@ fn dylib_caller(seed: usize, calls: usize) -> Vec<u8> {
             2 => 0xD63F_0000u32, // blr x0
             _ => 0xD65F_03C0u32, // ret
         })
-        .flat_map(|w| w.to_le_bytes())
+        .flat_map(u32::to_le_bytes)
         .collect();
     let mut b = ObjectBuilder::new(&format!("caller_{seed}.o"));
     let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
