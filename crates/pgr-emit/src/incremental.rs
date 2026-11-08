@@ -22,7 +22,15 @@
 //!    * the **span diff** marks every 16 KiB tile whose byte-producing
 //!      spans changed; the dirty-tile set *is* the patch plan. When every
 //!      content tile is dirty the full emit is cheaper and the planner
-//!      falls back (the patch path exists to avoid work, not to hoist it).
+//!      falls back (the patch path exists to avoid work, not to hoist it);
+//!    * the **propagation gate** (tier 2b, §7.3 step 3) requires the span
+//!      diff to be *explainable*: every changed content span must sit
+//!      inside the change-propagation scope (`pgr_core::propagate::predict`)
+//!      — the changed input sections' own placements plus the reverse-index
+//!      closure of their dependents. A content change the recorded parse
+//!      cannot vouch for (the stale-record shape, or literal-pool dedup
+//!      churn the scope does not model yet — GA scope) falls back instead
+//!      of patching bytes nobody predicted.
 //! 3. **patch** ([`apply_patch`]) — clone the previous output (on macOS
 //!    `std::fs::copy` resolves to `fclonefileat`: an instant APFS
 //!    copy-on-write clone; on Linux to `copy_file_range`), `pwrite` only
@@ -73,11 +81,14 @@ const MAGIC: &[u8; 8] = b"PGRINC1\0";
 
 /// Record format revision. Bump when the payload layout changes; older
 /// records then fail to decode and the relink silently falls back to the
-/// full link (the fallback must always be available — §7.3). **v2** adds
+/// full link (the fallback must always be available — §7.3). **v2** added
 /// the link's import table ([`LinkRecord::imports`], M9 tier 2a): the
 /// anchored relink keeps recorded bind ordinals instead of renumbering
-/// them (§7.3 step 5); v1 records decode to `None` and re-record.
-pub const FORMAT_VERSION: u32 = 2;
+/// them (§7.3 step 5). **v3** adds the parse's section-digest table
+/// ([`LinkRecord::section_digests`], M9 tier 2b): the propagation gate
+/// diffs it against the relink's parse to scope the change (§7.3 step 3);
+/// v1/v2 records decode to `None` and re-record.
+pub const FORMAT_VERSION: u32 = 3;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -194,6 +205,10 @@ pub struct LinkRecord {
     /// to — recorded entries keep their ordinals, new binds append, and no
     /// edit renumbers the table (§7.3 step 5; `LinkConfig::stable_imports`).
     pub imports: Vec<pgr_core::stable_imports::StableImport>,
+    /// The linked parse's section-digest table (v3, M9 tier 2b): the
+    /// change-propagation seeds the next relink diffs against its own
+    /// parse (§7.3 steps 1–3; `pgr_core::propagate::section_digests`).
+    pub section_digests: Vec<pgr_core::propagate::SectionDigest>,
 }
 
 /// Why the incremental planner fell back to the full link. The fallback is
@@ -228,6 +243,14 @@ pub enum FallbackReason {
         /// Total tiles in the image.
         total: u32,
     },
+    /// The span diff moved content the change-propagation scope cannot
+    /// explain (M9 tier 2b, §7.3 step 3): the changed parse does not vouch
+    /// for the recorded output's bytes — the stale-record shape. The full
+    /// link re-records from scratch.
+    PropagationMismatch {
+        /// What escaped the scope.
+        detail: String,
+    },
     /// The caller disabled the in-place tier.
     Disabled,
 }
@@ -244,6 +267,9 @@ impl std::fmt::Display for FallbackReason {
             },
             Self::Economics { dirty, total } => {
                 write!(f, "{dirty}/{total} tiles dirty; the full emit is cheaper")
+            }
+            Self::PropagationMismatch { detail } => {
+                write!(f, "propagation mismatch: {detail}")
             }
             Self::Disabled => write!(f, "in-place tier disabled"),
         }
@@ -555,7 +581,8 @@ impl LinkRecord {
         page_hashes: Vec<[u8; 32]>,
     ) -> Result<Self, PatchError> {
         let spans = span_table(layout, objects)?;
-        Self::assemble_from(layout, spans, page_hashes)
+        let digests = pgr_core::propagate::section_digests(objects);
+        Self::assemble_from(layout, spans, page_hashes, digests)
     }
 
     /// [`LinkRecord::assemble`] with a pre-extracted span table — the patch
@@ -568,6 +595,7 @@ impl LinkRecord {
         layout: &Layout,
         spans: SpanTable,
         page_hashes: Vec<[u8; 32]>,
+        section_digests: Vec<pgr_core::propagate::SectionDigest>,
     ) -> Result<Self, PatchError> {
         let (segments, sections) = skeleton_of(layout);
         let header_sha: [u8; 32] = Sha256::digest(&layout.header_bytes).into();
@@ -589,6 +617,9 @@ impl LinkRecord {
             // The import identities the next relink anchors its ordinals
             // to (M9 tier 2a; the planner's assigned order).
             imports: layout.fixups.stable_keys.clone(),
+            // The parse's change-detection table (M9 tier 2b): the
+            // propagation seeds the next relink diffs against.
+            section_digests,
         })
     }
 
@@ -682,6 +713,14 @@ impl LinkRecord {
         e(&mut p, self.page_hashes.len() as u64);
         for h in &self.page_hashes {
             p.extend_from_slice(h);
+        }
+        // v3: the parse's section-digest table (M9 tier 2b) — the
+        // propagation seeds the next relink diffs against.
+        e(&mut p, self.section_digests.len() as u64);
+        for d in &self.section_digests {
+            e(&mut p, u64::from(d.file));
+            e(&mut p, d.in_sect as u64);
+            p.extend_from_slice(&d.sha);
         }
 
         let mut out = Vec::with_capacity(HEADER_LEN + p.len());
@@ -819,6 +858,21 @@ impl LinkRecord {
             d.bytes(&mut h)?;
             page_hashes.push(h);
         }
+        let mut digest = |d: &mut Decoder<'_>| {
+            let file = d.u64()?;
+            let in_sect = usize::try_from(d.u64()?).ok()?;
+            if file > u64::from(u32::MAX) || in_sect > 1 << 20 {
+                return None;
+            }
+            let mut sha = [0u8; 32];
+            d.bytes(&mut sha)?;
+            Some(pgr_core::propagate::SectionDigest {
+                file: u32::try_from(file).ok()?,
+                in_sect,
+                sha,
+            })
+        };
+        let section_digests = d.list(&mut digest)?;
         if d.at != d.b.len() {
             return None;
         }
@@ -838,6 +892,7 @@ impl LinkRecord {
             sections,
             spans,
             page_hashes,
+            section_digests,
         })
     }
 }
@@ -1054,8 +1109,12 @@ pub fn plan_patch(
         }));
     }
     let new_spans = span_table(layout, objects)?;
+    // The content (copy-run) diff is kept apart: it is the span class the
+    // propagation gate adjudicates (derived classes are re-emitted from
+    // the plan and re-proven by the byte-identity contract).
+    let mut run_changes: Vec<Range<u64>> = Vec::new();
+    diff_spans(&record.spans.runs, &new_spans.runs, &mut run_changes);
     let mut ranges: Vec<Range<u64>> = Vec::new();
-    diff_spans(&record.spans.runs, &new_spans.runs, &mut ranges);
     diff_spans(&record.spans.synths, &new_spans.synths, &mut ranges);
     diff_spans(&record.spans.blobs, &new_spans.blobs, &mut ranges);
     diff_spans(&record.spans.patches, &new_spans.patches, &mut ranges);
@@ -1066,6 +1125,51 @@ pub fn plan_patch(
     if record.header_sha != header_digest {
         ranges.push(0..layout.header_bytes.len() as u64);
     }
+
+    // The propagation gate (M9 tier 2b, §7.3 step 3): every changed
+    // content span must sit inside the change-propagation scope — the
+    // changed input sections' own placements plus the reverse-index
+    // closure of their dependents. A content change the recorded parse
+    // does not vouch for (the stale-record shape; literal-pool dedup
+    // churn is GA scope) means the diff cannot be trusted to be the
+    // whole change: the planner declines to the full link instead of
+    // patching bytes nobody predicted. Skipped when nothing content-side
+    // changed (the untouched relink pays no reverse-index build).
+    if !run_changes.is_empty() {
+        let scope = pgr_core::propagate::predict(&record.section_digests, objects, layout);
+        let unexplained: Vec<&Range<u64>> = run_changes
+            .iter()
+            .filter(|r| {
+                !scope
+                    .ranges
+                    .iter()
+                    .any(|p| p.start < r.end && r.start < p.end)
+            })
+            .collect();
+        if !unexplained.is_empty() {
+            let listed = unexplained
+                .iter()
+                .map(|r| {
+                    let first = (r.start / TILE) as u32;
+                    let last = ((r.end - 1) / TILE) as u32;
+                    format!("{}..{} (tiles {first}..={last})", r.start, r.end)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(PatchDecision::Fallback(
+                FallbackReason::PropagationMismatch {
+                    detail: format!(
+                        "{} content change(s) outside the propagation scope: {listed}",
+                        unexplained.len()
+                    ),
+                },
+            ));
+        }
+    }
+
+    // The gate passed — the content changes join the derived ones in the
+    // dirty-tile computation.
+    ranges.extend(run_changes);
 
     let total = layout.file_size.div_ceil(TILE) as u32;
     let mut dirty: Vec<u32> = Vec::new();
@@ -1107,9 +1211,8 @@ pub fn plan_patch(
 // ---------------------------------------------------------------------------
 
 /// Cheaply verifies the previous output still matches the record: the file
-/// length and the SHA-256 of page 0, every [`SAMPLE_STRIDE`]th hashed page
-/// and the last hashed page. [`Integrity::Mismatch`] falls back — never
-/// overwrites.
+/// length and the SHA-256 of page 0, every 64th hashed page and the last
+/// hashed page. [`Integrity::Mismatch`] falls back — never overwrites.
 ///
 /// # Errors
 /// [`PatchError::Io`] when the file cannot be read (missing output → the
@@ -1267,7 +1370,12 @@ pub fn apply_patch(
             source,
         }
     })?;
-    let new_record = LinkRecord::assemble_from(layout, plan.spans.clone(), page_hashes)?;
+    let new_record = LinkRecord::assemble_from(
+        layout,
+        plan.spans.clone(),
+        page_hashes,
+        pgr_core::propagate::section_digests(objects),
+    )?;
     Ok((outcome, new_record))
 }
 
@@ -1504,6 +1612,11 @@ mod tests {
                 name: b"_log".to_vec(),
                 outlined_addend: 0,
                 weak: false,
+            }],
+            section_digests: vec![pgr_core::propagate::SectionDigest {
+                file: 0,
+                in_sect: 0,
+                sha: [3; 32],
             }],
             spans: SpanTable {
                 runs: vec![RecordedSpan {
