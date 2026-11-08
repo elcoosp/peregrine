@@ -34,7 +34,7 @@ pub fn decode_branch(word: u32) -> Option<(bool, i64)> {
 
 /// Sign-extends the 26-bit immediate field.
 fn sign_extend_26(word: u32) -> i64 {
-    let imm = (word & 0x03FF_FFFF) as i64;
+    let imm = i64::from(word & 0x03FF_FFFF);
     if imm & (1 << 25) != 0 {
         imm - (1 << 26)
     } else {
@@ -44,7 +44,7 @@ fn sign_extend_26(word: u32) -> i64 {
 
 /// Walks one executable section's words: every `B`/`BL` target must stay
 /// inside `[lo, hi)` (the image's executable span) and 4-byte aligned.
-/// `base` is the section's vm_addr; findings anchor at the word's file
+/// `base` is the section's `vm_addr`; findings anchor at the word's file
 /// offset when `file_off` is meaningful (`Some`), else section-relative.
 pub(crate) fn check_branch_words(
     words: &[u8],
@@ -228,6 +228,6 @@ mod tests {
         words.extend_from_slice(&[0x00]); // 1 stray byte
         let mut report = Report::default();
         check_branch_words(&words, 0x100, 0, 0x1000, None, &mut report);
-        assert!(report.issues.is_empty());
+        assert!(report.issues.is_empty(), "no issues");
     }
 }
