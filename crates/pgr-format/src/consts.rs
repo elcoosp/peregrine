@@ -81,7 +81,7 @@ pub const MH_APP_EXTENSION_SAFE: u32 = 0x0200_0000;
 pub const MH_WEAK_DEFINES: u32 = 0x8000;
 /// Image binds to weak symbols.
 pub const MH_BINDS_TO_WEAK: u32 = 0x1_0000;
-/// Stack is executable (note: arm64 requires MAP_JIT instead).
+/// Stack is executable (note: arm64 requires `MAP_JIT` instead).
 pub const MH_ALLOW_STACK_EXECUTION: u32 = 0x2_0000;
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ pub const LC_SEGMENT_64: u32 = 0x19;
 pub const LC_UUID: u32 = 0x1b;
 /// Runtime search path (`-rpath`).
 pub const LC_RPATH: u32 = 0x1c | LC_REQ_DYLD;
-/// Code signature (SuperBlob), always the last bytes of the file.
+/// Code signature (`SuperBlob`), always the last bytes of the file.
 pub const LC_CODE_SIGNATURE: u32 = 0x1d;
 /// Segment split info (used by caches).
 pub const LC_SEGMENT_SPLIT_INFO: u32 = 0x1e;
@@ -210,7 +210,7 @@ pub const S_GB_ZEROFILL: u32 = 0xc;
 pub const S_INTERPOSING: u32 = 0xd;
 /// 16-byte literals.
 pub const S_16BYTE_LITERALS: u32 = 0xe;
-/// DTrace DOF section.
+/// `DTrace` `DOF` section.
 pub const S_DTRACE_DOF: u32 = 0xf;
 /// Lazy dylib symbol pointers.
 pub const S_LAZY_DYLIB_SYMBOL_POINTERS: u32 = 0x10;
@@ -412,9 +412,9 @@ pub const DYLD_CHAINED_PTR_START_MULTI_MASK: u16 = 0x7fff;
 // Code signature (TDD §9; all signature structures are big-endian)
 // ---------------------------------------------------------------------------
 
-/// SuperBlob magic (`CSMAGIC_EMBEDDED_SIGNATURE`).
+/// `SuperBlob` magic (`CSMAGIC_EMBEDDED_SIGNATURE`).
 pub const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
-/// CodeDirectory blob magic (`CSMAGIC_CODEDIRECTORY`).
+/// `CodeDirectory` blob magic (`CSMAGIC_CODEDIRECTORY`).
 pub const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
 /// Requirements blob magic (`CSMAGIC_REQUIREMENTS`).
 pub const CSMAGIC_REQUIREMENTS: u32 = 0xfade_0c01;
@@ -423,46 +423,46 @@ pub const CSMAGIC_ENTITLEMENTS: u32 = 0xfade_0c07;
 /// Blob wrapper (CMS data) magic.
 pub const CSMAGIC_BLOBWRAPPER: u32 = 0xfade_0b01;
 
-/// BlobIndex slot: the code directory.
+/// `BlobIndex` slot: the code directory.
 pub const CSSLOT_CODEDIRECTORY: u32 = 0;
-/// BlobIndex slot: the Info.plist hash slot.
+/// `BlobIndex` slot: the `Info.plist` hash slot.
 pub const CSSLOT_INFO: u32 = 1;
-/// BlobIndex slot: requirements set.
+/// `BlobIndex` slot: requirements set.
 pub const CSSLOT_REQUIREMENTS: u32 = 2;
-/// BlobIndex slot: resource directory hash.
+/// `BlobIndex` slot: resource directory hash.
 pub const CSSLOT_RESOURCEDIR: u32 = 3;
-/// BlobIndex slot: application-specific hash.
+/// `BlobIndex` slot: application-specific hash.
 pub const CSSLOT_APPLICATION: u32 = 4;
-/// BlobIndex slot: entitlements CMS blob.
+/// `BlobIndex` slot: entitlements `CMS` blob.
 pub const CSSLOT_ENTITLEMENTS: u32 = 5;
-/// BlobIndex slot: alternate code directories start here.
+/// `BlobIndex` slot: alternate code directories start here.
 pub const CSSLOT_ALTERNATE_CODEDIRECTORIES: u32 = 0x1000;
 /// Number of alternate code directory slots.
 pub const CSSLOT_ALTERNATE_CODEDIRECTORY_LIMIT: u32 = 5;
-/// BlobIndex slot: CMS signature wrapper.
+/// `BlobIndex` slot: `CMS` signature wrapper.
 pub const CSSLOT_SIGNATURESLOT: u32 = 0x1_0000;
 
-/// CodeDirectory flags: ad-hoc signature (`CS_ADHOC`).
+/// `CodeDirectory` flags: ad-hoc signature (`CS_ADHOC`).
 pub const CS_ADHOC: u32 = 0x2;
-/// CodeDirectory flags: linker-signed image.
+/// `CodeDirectory` flags: linker-signed image.
 pub const CS_LINKER_SIGNED: u32 = 0x0002_0000;
-/// CodeDirectory `execSegFlags`: main binary (`CS_EXECSEG_MAIN_BINARY`).
+/// `CodeDirectory` `execSegFlags`: main binary (`CS_EXECSEG_MAIN_BINARY`).
 pub const CS_EXECSEG_MAIN_BINARY: u64 = 0x1;
 
-/// CodeDirectory hash type: SHA-256 (the type Peregrine emits).
+/// `CodeDirectory` hash type: SHA-256 (the type Peregrine emits).
 pub const CS_HASHTYPE_SHA256: u8 = 2;
-/// CodeDirectory hash type: SHA-1.
+/// `CodeDirectory` hash type: SHA-1.
 pub const CS_HASHTYPE_SHA1: u8 = 1;
-/// CodeDirectory hash type: truncated SHA-256.
+/// `CodeDirectory` hash type: truncated SHA-256.
 pub const CS_HASHTYPE_SHA256_TRUNCATED: u8 = 3;
 
-/// CodeDirectory version introducing scatter support.
+/// `CodeDirectory` version introducing scatter support.
 pub const CS_CODEDIRECTORY_VERSION_SCATTER: u32 = 0x20100;
-/// CodeDirectory version introducing team IDs.
+/// `CodeDirectory` version introducing team IDs.
 pub const CS_CODEDIRECTORY_VERSION_TEAMID: u32 = 0x20200;
-/// CodeDirectory version introducing `codeLimit64`.
+/// `CodeDirectory` version introducing `codeLimit64`.
 pub const CS_CODEDIRECTORY_VERSION_REST: u32 = 0x20300;
-/// CodeDirectory version introducing exec-segment fields.
+/// `CodeDirectory` version introducing exec-segment fields.
 pub const CS_CODEDIRECTORY_VERSION_EXECSEG: u32 = 0x20400;
 
 /// Code signature page size: log2 of 4096 (`pageSize` field), independent of
@@ -496,7 +496,7 @@ pub const TOOL_LD: u32 = 3;
 // Platform contract constants (TDD §3.6)
 // ---------------------------------------------------------------------------
 
-/// arm64 segment page size (16 KiB; 4 KiB on x86_64 macOS).
+/// arm64 segment page size (16 KiB; 4 KiB on `x86_64` macOS).
 pub const PAGE_SIZE_16K: u64 = 0x4000;
 /// 64-bit `__PAGEZERO` size (4 GiB, unmapped).
 pub const PAGEZERO_SIZE_64: u64 = 0x1_0000_0000;
