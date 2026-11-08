@@ -7,3 +7,4 @@ Cargo.lock.bak
 *.profdata
 .DS_Store
 commit.sh
+ship.sh
