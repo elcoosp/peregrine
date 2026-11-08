@@ -9,15 +9,26 @@
 //! * chained fixups (`DYLD_CHAINED_PTR_64_OFFSET`) with the mold-style
 //!   payload: header | starts-in-image | imports | name blob,
 //! * ad-hoc code signature: SHA-256 over 4 KiB pages, big-endian
-//!   CodeDirectory v0x20400, SuperBlob last in the file,
+//!   `CodeDirectory` v0x20400, `SuperBlob` last in the file,
 //! * UUID derived from page hashes (two-pass: hashes with the UUID zeroed
-//!   select the UUID, then final hashes go into the CodeDirectory).
+//!   select the UUID, then final hashes go into the `CodeDirectory`).
 //!
 //! Everything is deterministic: no clocks, no entropy, fixed pseudo-random
 //! fill (xorshift64*). Building the same spec twice yields identical bytes —
 //! the determinism test asserts it.
 
-use pgr_format::consts::*;
+use pgr_format::consts::{
+    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, CS_ADHOC, CS_CODEDIRECTORY_VERSION_EXECSEG,
+    CS_EXECSEG_MAIN_BINARY, CS_HASHTYPE_SHA256, CS_PAGE_SIZE_LOG2, CS_SHA256_LEN,
+    CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE, CSSLOT_CODEDIRECTORY, DYLD_CHAINED_IMPORT,
+    DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_START_NONE,
+    INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE, LC_DYLD_CHAINED_FIXUPS,
+    LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB,
+    LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SYMTAB, LC_UUID, MH_DYLDLINK, MH_DYLIB,
+    MH_EXECUTE, MH_MAGIC_64, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT, N_SECT, N_UNDF, N_WEAK_REF,
+    PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO,
+    SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
+};
 use pgr_format::fixups::{Import, encode_bind_word, encode_rebase_word};
 use sha2::{Digest, Sha256};
 
@@ -207,6 +218,7 @@ pub struct ImageBuilder {
 impl ImageBuilder {
     /// Starts an executable fixture; add `__TEXT` (and optionally
     /// `__DATA_CONST`/`__DATA`) via `add_segment`.
+    #[must_use]
     pub fn executable(ident: &str) -> Self {
         Self {
             kind: ImageKind::Exec,
@@ -223,6 +235,7 @@ impl ImageBuilder {
     }
 
     /// Starts a dylib fixture with the given install name.
+    #[must_use]
     pub fn dylib(install_name: &str, ident: &str) -> Self {
         Self {
             kind: ImageKind::Dylib,
@@ -279,7 +292,7 @@ impl ImageBuilder {
         self.keep_relocs = keep;
     }
 
-    fn prot(&self, seg_name: &str) -> (u32, u32) {
+    fn prot(seg_name: &str) -> (u32, u32) {
         match seg_name {
             "__TEXT" => (
                 VM_PROT_READ | VM_PROT_EXECUTE,
@@ -293,6 +306,18 @@ impl ImageBuilder {
     }
 
     /// Assembles the image.
+    ///
+    /// # Errors
+    /// [`BuildError`] on a structurally invalid spec (no leading `__TEXT`
+    /// segment, a `__TEXT` after the first segment, an entry outside
+    /// `__TEXT`, imports without a dylib list, or a GOT slot referencing a
+    /// defined symbol).
+    ///
+    /// # Panics
+    /// Never on well-formed builders; the deterministic filler and the
+    /// digest math allocate but do not panic. A symbol referencing a
+    /// section index beyond the segments aborts the build with a
+    /// [`BuildError`], not a panic.
     pub fn build(&self) -> Result<Image, BuildError> {
         let exec = self.kind == ImageKind::Exec;
         if self.segments.is_empty() || self.segments[0].name != "__TEXT" {
@@ -383,10 +408,7 @@ impl ImageBuilder {
             let seg_fileoff = if seg_i == 0 {
                 0
             } else {
-                align_up(
-                    placed.last().map(|(_, f, v)| f + v).unwrap_or(0),
-                    PAGE_SIZE_16K,
-                )
+                align_up(placed.last().map_or(0, |(_, f, v)| f + v), PAGE_SIZE_16K)
             };
             let mut cursor = if seg_i == 0 {
                 align_up(header_len as u64, 16)
@@ -499,7 +521,7 @@ impl ImageBuilder {
         let (got_seg_index, got_seg_fileoff) = if self.got.is_empty() {
             (0usize, 0u64)
         } else {
-            let idx = data_const_index.expect("checked above") + if exec { 1 } else { 0 };
+            let idx = data_const_index.expect("checked above") + usize::from(exec);
             (idx, placed[idx].1)
         };
         let (payload, slot_words) = if self.got.is_empty() {
@@ -523,10 +545,7 @@ impl ImageBuilder {
         let func_starts: Vec<u8> = vec![0x00]; // one ULEB delta: entry at 0
 
         // ---- __LINKEDIT segment + content layout ------------------------
-        let linkedit_fileoff = align_up(
-            placed.last().map(|(_, f, v)| f + v).unwrap_or(0),
-            PAGE_SIZE_16K,
-        );
+        let linkedit_fileoff = align_up(placed.last().map_or(0, |(_, f, v)| f + v), PAGE_SIZE_16K);
         placed.push(("__LINKEDIT".into(), linkedit_fileoff, 0)); // vmsize patched below
         let mut cur = linkedit_fileoff;
         let mut take = |size: u64, align: u64| {
@@ -539,7 +558,7 @@ impl ImageBuilder {
         let stroff = take(strtab.len() as u64, 8);
         let nindirect = self.got.len() as u32;
         let indirectsymoff = if nindirect > 0 {
-            take(nindirect as u64 * 4, 4)
+            take(u64::from(nindirect) * 4, 4)
         } else {
             0
         };
@@ -601,9 +620,9 @@ impl ImageBuilder {
             lc += 72;
         }
         for (seg_i, seg) in segments.iter().enumerate() {
-            let map_i = seg_i + if exec { 1 } else { 0 };
+            let map_i = seg_i + usize::from(exec);
             let (_, fileoff, vmsize) = &placed[map_i];
-            let (maxprot, initprot) = self.prot(&seg.name);
+            let (maxprot, initprot) = Self::prot(&seg.name);
             w32(&mut buf, lc, LC_SEGMENT_64);
             w32(&mut buf, lc + 4, (72 + 80 * seg.sections.len()) as u32);
             buf[lc + 8..lc + 24].copy_from_slice(&pad_name(seg.name.as_bytes()));
@@ -819,8 +838,7 @@ impl ImageBuilder {
             placed
                 .iter()
                 .find(|(n, _, _)| n == "__TEXT")
-                .map(|(_, _, v)| *v)
-                .unwrap_or(0),
+                .map_or(0, |(_, _, v)| *v),
             exec,
         );
         debug_assert_eq!(sig.len(), blob_len, "signature sizing must be exact");
@@ -839,8 +857,7 @@ impl ImageBuilder {
                 text_vmsize: placed
                     .iter()
                     .find(|(n, _, _)| n == "__TEXT")
-                    .map(|(_, _, v)| *v)
-                    .unwrap_or(0),
+                    .map_or(0, |(_, _, v)| *v),
                 imports_format: match self.imports_format {
                     ImportsFormat::Plain => DYLD_CHAINED_IMPORT,
                     ImportsFormat::Addend64 => DYLD_CHAINED_IMPORT_ADDEND64,
@@ -1019,7 +1036,7 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
     // name blob
     let symbols_offset = b.len();
     b.push(0);
-    for name in names.iter() {
+    for name in names {
         b.extend_from_slice(name.as_bytes());
         b.push(0);
     }
@@ -1058,7 +1075,7 @@ fn build_minimal_trie(
     } else {
         let def = symbols.iter().find_map(|s| match s {
             SymbolSpec::Defined { section_index, .. } => Some(*section_index),
-            _ => None,
+            SymbolSpec::Undefined { .. } => None,
         });
         let idx = def.ok_or_else(|| BuildError("dylib fixture needs a defined symbol".into()))?;
         sect_infos
@@ -1094,7 +1111,7 @@ fn uleb(mut v: u64) -> Vec<u8> {
     out
 }
 
-/// Builds the ad-hoc SuperBlob (big-endian): one v0x20400 CodeDirectory
+/// Builds the ad-hoc `SuperBlob` (big-endian): one v0x20400 `CodeDirectory`
 /// whose SHA-256 page hashes cover `code_limit` bytes.
 fn build_superblob(
     ident: &str,
@@ -1229,7 +1246,7 @@ mod tests {
                 name: "__text".into(),
                 align_log2: 2,
                 flags: S_REGULAR | S_ATTR_PURE_INSTRUCTIONS,
-                data: filler(0xC0FFEE, 64),
+                data: filler(0xC0_FFEE, 64),
                 relocs: Vec::new(),
             }],
         });
