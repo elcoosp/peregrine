@@ -29,7 +29,7 @@ fn main() -> ExitCode {
                     eprintln!("pgrd: missing value for --socket");
                     return ExitCode::from(2);
                 };
-                socket = v.clone();
+                socket.clone_from(v);
                 i += 1;
             }
             "--idle-secs" => {
@@ -37,12 +37,11 @@ fn main() -> ExitCode {
                     eprintln!("pgrd: missing value for --idle-secs");
                     return ExitCode::from(2);
                 };
-                match v.trim().parse::<u64>() {
-                    Ok(n) => idle_secs = n,
-                    Err(_) => {
-                        eprintln!("pgrd: invalid --idle-secs value {v:?}");
-                        return ExitCode::from(2);
-                    }
+                if let Ok(n) = v.trim().parse::<u64>() {
+                    idle_secs = n;
+                } else {
+                    eprintln!("pgrd: invalid --idle-secs value {v:?}");
+                    return ExitCode::from(2);
                 }
                 i += 1;
             }
