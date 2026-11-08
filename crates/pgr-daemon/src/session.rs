@@ -142,6 +142,11 @@ impl ResidentSession {
     }
 
     /// The resident blob (Arc clone — no copy).
+    /// The bytes for a previously transferred hash.
+    ///
+    /// # Errors
+    /// [`SessionError::MissingBlob`] when the hash was never transferred;
+    /// [`SessionError::HashMismatch`] is checked at transfer time.
     pub fn blob(&mut self, hash: &[u8; 32]) -> Result<std::sync::Arc<Vec<u8>>, SessionError> {
         let use_at = self.tick();
         self.blob_uses.insert(*hash, use_at);
@@ -170,7 +175,7 @@ impl ResidentSession {
         if let Some((frame, stamp)) = self.pois.get_mut(&(key, split_symbols)) {
             *stamp = use_at;
             if let Some(mut obj) = decode_poi(frame, file, name, split_symbols) {
-                obj.bytes = bytes.as_ref().clone();
+                obj.bytes.clone_from(bytes.as_ref());
                 self.hits += 1;
                 return Ok(obj);
             }
@@ -510,7 +515,7 @@ mod tests {
         // The session still links correctly after eviction (a re-parse
         // repopulates what it needs).
         let (image, _, _) = session.link(&req).unwrap();
-        assert!(!image.is_empty());
+        assert!(!image.is_empty(), "image built");
     }
 
     #[test]
@@ -567,7 +572,7 @@ mod tests {
         let (image1, _, _) = session.link(&req).unwrap();
         let (image2, _, _) = session.link(&req).unwrap();
         assert_eq!(image1, image2);
-        assert!(!image1.is_empty());
+        assert!(!image1.is_empty(), "image built");
     }
 
     fn hello_main_only() -> Vec<u8> {
