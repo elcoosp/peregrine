@@ -196,12 +196,12 @@ impl PoiCache {
         let cached = std::fs::read(&path).ok()?;
         let mut obj = decode_poi(&cached, file, name, split_symbols)?;
         obj.bytes = bytes;
-        self.touch(&path);
+        Self::touch(&path);
         Some(obj)
     }
 
     /// Refreshes one entry's mtime (the LRU recency mark). Best effort.
-    fn touch(&self, path: &Path) {
+    fn touch(path: &Path) {
         if let Ok(f) = std::fs::File::options().write(true).open(path) {
             let _ = f.set_modified(std::time::SystemTime::now());
         }
@@ -326,9 +326,9 @@ impl From<FrozenDylib> for Dylib {
 
 // ---- framing ----------------------------------------------------------------
 
-fn frame(magic: &[u8; 8], payload: &[u8]) -> Vec<u8> {
+fn frame(magic: [u8; 8], payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
-    out.extend_from_slice(magic);
+    out.extend_from_slice(&magic);
     out.extend_from_slice(&CACHE_FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&PARSER_REVISION.to_le_bytes());
     out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
@@ -344,8 +344,8 @@ struct Unframed<'a> {
 
 /// Validates the frame (magic, both revisions, length, checksum) and returns
 /// the payload slice; `None` on any mismatch (silent cache miss).
-fn unframe<'a>(bytes: &'a [u8], magic: &[u8; 8]) -> Option<Unframed<'a>> {
-    if bytes.len() < HEADER_LEN || &bytes[0..8] != magic {
+fn unframe(bytes: &[u8], magic: [u8; 8]) -> Option<Unframed<'_>> {
+    if bytes.len() < HEADER_LEN || bytes[0..8] != magic {
         return None;
     }
     let format = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
@@ -478,7 +478,7 @@ pub fn encode_poi(obj: &InputObject, split_symbols: bool) -> Vec<u8> {
             put_u64(&mut p, r.end);
         }
     }
-    frame(POI_MAGIC, &p)
+    frame(*POI_MAGIC, &p)
 }
 
 /// Rebuilds one object from its POI bytes. `want_split` must match the flag
@@ -486,7 +486,7 @@ pub fn encode_poi(obj: &InputObject, split_symbols: bool) -> Vec<u8> {
 /// bounds, revision or flag mismatch) yields `None` — the caller re-parses.
 #[must_use]
 pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> Option<InputObject> {
-    let Unframed { payload } = unframe(bytes, POI_MAGIC)?;
+    let Unframed { payload } = unframe(bytes, *POI_MAGIC)?;
     let mut r = Reader { b: payload, at: 0 };
     let stored_split = r.u8()? != 0;
     if stored_split != want_split {
@@ -533,8 +533,8 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
         let stab = r.u8()? != 0;
         let section_raw = r.u32()?;
         let value = r.u64()?;
-        let weak_def = r.u8()? != 0;
-        let weak_ref = r.u8()? != 0;
+        let weakly_defined = r.u8()? != 0;
+        let weakly_referenced = r.u8()? != 0;
         let common_raw = r.u32()?;
         let alt_entry = r.u8()? != 0;
         symbols.push(InputSymbol {
@@ -543,8 +543,8 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
             stab,
             section: (section_raw != u32::MAX).then_some(section_raw as usize),
             value,
-            weak_def,
-            weak_ref,
+            weak_def: weakly_defined,
+            weak_ref: weakly_referenced,
             common_align: (common_raw != u32::MAX).then_some(common_raw),
             alt_entry,
         });
@@ -598,13 +598,13 @@ pub fn encode_frozen_dylib(d: &FrozenDylib) -> Vec<u8> {
     for e in &d.exports {
         put_bytes(&mut p, e);
     }
-    frame(FROZEN_TBD_MAGIC, &p)
+    frame(*FROZEN_TBD_MAGIC, &p)
 }
 
 /// Rebuilds one parsed `.tbd`; `None` on any inconsistency.
 #[must_use]
 pub fn decode_frozen_dylib(bytes: &[u8]) -> Option<FrozenDylib> {
-    let Unframed { payload } = unframe(bytes, FROZEN_TBD_MAGIC)?;
+    let Unframed { payload } = unframe(bytes, *FROZEN_TBD_MAGIC)?;
     let mut r = Reader { b: payload, at: 0 };
     let install_name = r.str()?;
     let current_version = r.u32()?;
