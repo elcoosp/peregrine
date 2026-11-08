@@ -94,6 +94,9 @@ const _: () = assert!(core::mem::size_of::<Nlist64>() == 16);
 
 impl SymtabCommand {
     /// Parses the command from its 24 bytes at `offset`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(bytes: &[u8], offset: usize) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(bytes, offset)
     }
@@ -101,11 +104,17 @@ impl SymtabCommand {
 
 impl DysymtabCommand {
     /// Parses the command from its 80 bytes at `offset`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(bytes: &[u8], offset: usize) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(bytes, offset)
     }
 
     /// Parses the `nindirectsyms` `u32` entries at `indirectsymoff`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn indirect_symbols<'a>(&self, bytes: &'a [u8]) -> Result<&'a [u32], FormatError> {
         let total = self
             .nindirectsyms
@@ -113,7 +122,7 @@ impl DysymtabCommand {
             .ok_or(FormatError::Invalid {
                 offset: self.indirectsymoff as usize,
                 what: "indirect symbol array size overflow",
-                value: self.nindirectsyms as u64,
+                value: u64::from(self.nindirectsyms),
             })? as usize;
         let start = self.indirectsymoff as usize;
         let end = start.checked_add(total).ok_or(FormatError::Invalid {
