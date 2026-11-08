@@ -48,7 +48,7 @@ fn main_object() -> Vec<u8> {
     b.build().unwrap()
 }
 
-/// lib.o (subsections): _live (4 bytes) then _dead_fn with a distinctive
+/// lib.o (subsections): _live (4 bytes) then _`dead_fn` with a distinctive
 /// 8-byte marker, then dead data with another marker.
 fn lib_object() -> Vec<u8> {
     let mut b = ObjectBuilder::new("lib.o").set_subsections_via_symbols(true);
