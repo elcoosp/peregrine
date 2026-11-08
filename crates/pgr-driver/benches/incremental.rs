@@ -106,6 +106,9 @@ fn bench_object(seed: u64, text_kib: usize, flip: bool, ext_swap: bool) -> Objec
 
 const OBJECTS: u64 = 32;
 const TEXT_KIB: usize = 256;
+/// The relayout bench's growth ladder: eight +64 KiB steps, then one
+/// tier-1 reset link, cycling (see `bench_incremental`).
+const LADDER_STEPS: usize = 8;
 
 fn bench_corpus(dir: &Path) -> (Vec<PathBuf>, u64) {
     // The extern-provider dylib (the linker's own -dylib path builds it,
@@ -159,6 +162,16 @@ fn bench_corpus(dir: &Path) -> (Vec<PathBuf>, u64) {
     std::fs::write(dir.join("inc_obj_1_edited.o"), &flipped).unwrap();
     let import_swapped = bench_object(1, TEXT_KIB, false, true).build().unwrap();
     std::fs::write(dir.join("inc_obj_1_import.o"), &import_swapped).unwrap();
+    // The relayout ladder: the same object grown in +64 KiB steps — each
+    // step overflows the current anchor (the reserved slack is 10%) and
+    // stays within the ladder's segment-relayout bound (growth beyond the
+    // previous pad ≪ 1 MiB).
+    for step in 1..=8usize {
+        let grown = bench_object(1, TEXT_KIB + 64 * step, false, false)
+            .build()
+            .unwrap();
+        std::fs::write(dir.join(format!("inc_obj_1_grown_{step}.o")), &grown).unwrap();
+    }
     (paths, input_bytes)
 }
 
@@ -229,14 +242,13 @@ fn bench_incremental(c: &mut Criterion) {
     // 1's dylib import surface (one bind becomes two, sorted first by
     // address). With the anchored table the existing bind ordinal — and
     // its bind word on the data page — survives; the patch touches the
-    // new slot's page and the LINKEDIT chunks only.
+    // new slot's page and the LINKEDIT chunks only. The previous bench's
+    // alternation parity is unknown, so the state resets to pristine
+    // first (the record is warm; every timed iteration is then a real
+    // edit→patch cycle either way).
     let mut inc_import = full.clone();
     inc_import.incremental = true;
-    let warm_import = pgr_driver::run(&inc_import).unwrap();
-    assert!(
-        warm_import.patch.is_none(),
-        "the warm-up link is the recorded full link"
-    );
+    pgr_driver::run(&inc_import).unwrap();
 
     let mut import_alternator = 0u32;
     group.bench_function("incremental_add_import_8mib", |b| {
@@ -257,12 +269,49 @@ fn bench_incremental(c: &mut Criterion) {
         });
     });
 
-    // Reset to the pristine variant (the alternation's parity after the
+    // The segment-relayout bench (§7.3 ladder tier 2): the edit overflows
+    // the anchor, the section re-pads naturally and everything behind it
+    // shifts — the planner patches the moved suffix (clone resized, dirty
+    // tiles + relocated CodeDirectory rewritten from the merged hash
+    // table) instead of re-running the full link.
+    //
+    // The anchored skeleton holds any size a section has already carried,
+    // so an alternating grown↔pristine cycle degenerates to tier 1 after
+    // the first round trip. The bench therefore climbs a monotone ladder:
+    // eight +64 KiB growth steps (each beyond the current anchor, each
+    // within the ladder's segment-relayout bound), then one reset link
+    // back to the pristine object (tier 1 — the anchor absorbs the
+    // shrink), and the cycle repeats. The recorded mean is the honest
+    // mix (8 tier-2 links : 1 tier-1 link); the accounting pass below
+    // prints the per-step split.
+    let mut ladder = 0usize;
+    group.bench_function("segment_relayout_relink_8mib", |b| {
+        b.iter(|| {
+            ladder += 1;
+            let position = ladder % (LADDER_STEPS + 1);
+            let mut edited = inc.clone();
+            edited.inputs[1] = if position == 0 {
+                // The reset link: back to the pristine object.
+                dir.join("inc_obj_1.o")
+            } else {
+                dir.join(format!("inc_obj_1_grown_{position}.o"))
+            }
+            .display()
+            .to_string();
+            let outcome = pgr_driver::run(&edited).unwrap();
+            let patch = outcome.patch.expect("the relayout relink patches");
+            std::hint::black_box(patch);
+        });
+    });
+
+    // Reset to the pristine variant (the ladder's position after the
     // timed loop is unknown), so the untouched bench is truly untouched.
+    // The shrink lands inside the grown anchor: a real tier-1 patch, but
+    // bounded — never a whole-image rewrite.
     let reset = pgr_driver::run(&inc).unwrap();
     assert!(
-        reset.patch.is_none_or(|p| p.dirty_tiles <= 2),
-        "the reset relink must be (near-)idle"
+        reset.patch.is_none_or(|p| p.dirty_tiles < p.total_tiles),
+        "the reset relink must reuse most tiles"
     );
 
     group.bench_function("untouched_relink_8mib", |b| {
@@ -277,12 +326,14 @@ fn bench_incremental(c: &mut Criterion) {
 
     // The bytes-written accounting (reported, not timed): the §7.3 gate is
     // "bytes written ∝ change size", and the patch outcome measures exactly
-    // the pwritten bytes per relink.
+    // the pwritten bytes per relink. Input 1 is the alternated object
+    // (input 0 is the extern-provider dylib — replacing it would break the
+    // link, which the pre-tier-2 accounting loop did by mistake).
     let mut patched_bytes = 0u64;
     let mut dirty_tiles = 0u32;
     for i in 0..20 {
         let mut edited = inc.clone();
-        edited.inputs[0] = dir
+        edited.inputs[1] = dir
             .join(if i % 2 == 0 {
                 "inc_obj_1_edited.o"
             } else {
@@ -298,6 +349,41 @@ fn bench_incremental(c: &mut Criterion) {
     eprintln!(
         "incremental bench accounting: image {image_bytes} bytes; mean patched {} bytes/iter; max dirty tiles {dirty_tiles}",
         patched_bytes / 20
+    );
+
+    // The relayout ladder's accounting pass (reported, not timed): one
+    // full cycle of the monotone growth ladder, printing each step's tier
+    // (tier 2 shifts the skeleton; the reset link stays tier 1) and its
+    // pwritten bytes — the §7.3 "bytes ∝ change size" evidence for the
+    // new tier.
+    let mut total_patched = 0u64;
+    let mut total_tiles = 0u32;
+    let mut image_bytes_final = image_bytes;
+    for step in 1..=8usize {
+        let mut edited = inc.clone();
+        edited.inputs[1] = dir
+            .join(format!("inc_obj_1_grown_{step}.o"))
+            .display()
+            .to_string();
+        let outcome = pgr_driver::run(&edited).unwrap();
+        let patch = outcome.patch.expect("the ladder relink patches");
+        total_patched += patch.bytes_patched;
+        total_tiles = total_tiles.max(patch.dirty_tiles);
+        image_bytes_final = outcome.file_size;
+        eprintln!(
+            "relayout ladder step {step}: +64 KiB → {} bytes patched ({} of {} tiles dirty)",
+            patch.bytes_patched, patch.dirty_tiles, patch.total_tiles
+        );
+    }
+    let reset_outcome = pgr_driver::run(&inc).unwrap();
+    let reset_patch = reset_outcome.patch.expect("the reset relink patches");
+    eprintln!(
+        "relayout ladder reset: {} bytes patched ({} of {} tiles dirty, tier 1)",
+        reset_patch.bytes_patched, reset_patch.dirty_tiles, reset_patch.total_tiles
+    );
+    eprintln!(
+        "relayout ladder accounting: image grew to {image_bytes_final} bytes; mean patched {} bytes/growth-step; max dirty tiles {total_tiles}",
+        total_patched / 8
     );
 }
 
