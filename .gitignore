@@ -6,3 +6,4 @@ Cargo.lock.bak
 *.profraw
 *.profdata
 .DS_Store
+commit.sh
