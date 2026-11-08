@@ -93,7 +93,7 @@ fn bench_parse(c: &mut Criterion) {
         b.iter(|| {
             let s = pgr_format::summarize(std::hint::black_box(&single)).unwrap();
             std::hint::black_box((s.symbols, s.relocations, s.fixup_slots));
-        })
+        });
     });
 
     group.throughput(Throughput::Bytes(corpus_total));
@@ -103,7 +103,7 @@ fn bench_parse(c: &mut Criterion) {
                 let s = pgr_format::summarize(std::hint::black_box(img)).unwrap();
                 std::hint::black_box((s.symbols, s.relocations, s.fixup_slots));
             }
-        })
+        });
     });
 
     group.finish();
@@ -150,7 +150,7 @@ fn bench_archive_parse(c: &mut Criterion) {
         b.iter(|| {
             let a = pgr_format::parse_archive(std::hint::black_box(&archive)).unwrap();
             std::hint::black_box((a.members.len(), a.index.len()));
-        })
+        });
     });
     group.finish();
 }
