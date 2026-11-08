@@ -128,7 +128,7 @@ fn bench_resident(c: &mut Criterion) {
         b.iter(|| {
             let image = pgr_driver::link_to_bytes(&base).unwrap();
             std::hint::black_box(image.len());
-        })
+        });
     });
     // Warm relink: the daemon's session is hot from the first call; every
     // iteration measures prepare → hash → negotiate → decode → link → emit
@@ -137,7 +137,7 @@ fn bench_resident(c: &mut Criterion) {
         b.iter(|| {
             let image = pgr_driver::link_to_bytes(&resident).unwrap();
             std::hint::black_box(image.len());
-        })
+        });
     });
     group.finish();
 }
