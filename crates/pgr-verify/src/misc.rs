@@ -17,8 +17,7 @@ pub(crate) fn check_entry_and_version(bytes: &[u8], img: &ParsedImage<'_>, repor
                     .segments
                     .iter()
                     .find(|s| s.name() == Ok("__TEXT"))
-                    .map(|s| s.vmsize)
-                    .unwrap_or(0);
+                    .map_or(0, |s| s.vmsize);
                 if ep.entryoff >= text_vmsize {
                     report.issues.push(Issue::error(
                         Code::LinkeditPayload,
@@ -90,8 +89,7 @@ pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, repor
         .segments
         .iter()
         .find(|s| s.name() == Ok("__TEXT"))
-        .map(|s| s.vmsize)
-        .unwrap_or(0);
+        .map_or(0, |s| s.vmsize);
     let mut uuid_present = false;
     for cmd in &img.commands {
         match cmd.kind {
@@ -115,7 +113,7 @@ pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, repor
                         report.issues.push(Issue::error(
                             Code::LinkeditPayload,
                             "LC_DATA_IN_CODE payload is not a multiple of 8 bytes",
-                            Some(lc.dataoff as u64),
+                            Some(u64::from(lc.dataoff)),
                         ));
                     }
                     for i in 0..data.len() / 8 {
@@ -135,7 +133,7 @@ pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, repor
                             report.issues.push(Issue::warning(
                                 Code::LinkeditPayload,
                                 format!("data-in-code entry {i} beyond __TEXT"),
-                                Some(lc.dataoff as u64),
+                                Some(u64::from(lc.dataoff)),
                             ));
                         }
                     }
