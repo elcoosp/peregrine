@@ -66,7 +66,7 @@ fn main() -> ExitCode {
                 any_io = true;
             }
         } else if !quiet {
-            let _ = writeln!(out, "{}: {}", file.display(), report_label(&report, &opts));
+            let _ = writeln!(out, "{}: {}", file.display(), report_label(&report, opts));
             for issue in &report.issues {
                 let sev = match issue.severity {
                     Severity::Error => "error",
@@ -97,8 +97,8 @@ fn main() -> ExitCode {
     }
 }
 
-fn report_label(report: &pgr_verify::Report, opts: &Options) -> &'static str {
-    if report.is_ok(opts) { "OK" } else { "FAILED" }
+fn report_label(report: &pgr_verify::Report, opts: Options) -> &'static str {
+    if report.is_ok(&opts) { "OK" } else { "FAILED" }
 }
 
 /// Minimal dependency-free JSON writer with proper string escaping.
@@ -117,7 +117,7 @@ fn write_json<W: std::io::Write>(
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
                 '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c if (c as u32) < 0x20 => out.push_str(format!("\\u{:04x}", c as u32).as_str()),
                 c => out.push(c),
             }
         }
