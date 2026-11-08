@@ -37,6 +37,9 @@ impl MachHeader64 {
 
     /// Parses and validates the header from the start of `bytes`.
     ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
+    ///
     /// Only little-endian (`MH_MAGIC_64`) images are supported: arm64
     /// Mach-O is little-endian, and big-endian slices are rejected with
     /// [`FormatError::BadMagic`] so downstream code can never misparse one.
@@ -55,7 +58,7 @@ impl MachHeader64 {
                 return Err(FormatError::Invalid {
                     offset: 0,
                     what: "big-endian Mach-O is not supported on arm64",
-                    value: magic as u64,
+                    value: u64::from(magic),
                 });
             }
             return Err(FormatError::BadMagic { offset: 0, magic });
