@@ -38,14 +38,50 @@ rayon = "1"
 #   * `unsafe` is forbidden everywhere at M0. When `pgr-emit`/`pgr-format` later
 #     need audited `unsafe` blocks (perf doc rule 9), they must opt in per crate
 #     with a design note — never blanket-allowed.
-#   * No lint suppression anywhere: CI runs `cargo clippy -- -D warnings` and the
-#     codebase carries no `#[allow]`/`#[expect]` attributes.
+#   * No inline lint suppression anywhere: CI runs
+#     `cargo clippy --workspace --all-targets --all-features -- -D warnings
+#     -W clippy::pedantic`, pedantic rides in through the workspace lints
+#     below, and the tree carries no `#[allow]`/`#[expect]` attributes.
+#     Every pedantic exception is recorded HERE, with its rationale, so the
+#     suppression surface is one auditable block.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "deny"
 
 [workspace.lints.clippy]
-all = "deny"
+# The `all` group runs at a lower priority than the specific entries below
+# (clippy::lint_groups_priority: a group must not share a priority with a
+# lint it could shadow).
+all = { level = "deny", priority = -2 }
+# Pedantic is the gate (warn here + `-D warnings` in CI == deny).
+pedantic = { level = "warn", priority = -1 }
+# -- Curated pedantic exceptions (rationale per line) ----------------------
+# Binary-format arithmetic: every narrowing cast sits behind an explicit
+# range/bounds check in the decoders (TDD §2 "typed errors, never panic"),
+# so `as` is the checked narrowing; `try_from` would only add unreachable
+# error arms to the hot parse path. `usize`↔fixed-width mirrors the Mach-O
+# field widths themselves (32-bit file offsets, 16-bit counts).
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+# Pass-3's `place`/`resolve_reloc` thread the fully-resolved layout context
+# (segments, sections, fixup state, veneers) accumulated across M3–M6;
+# regrouping them into a context struct is churn without a behavior gain —
+# recorded here rather than suppressed inline at the call sites.
+too_many_arguments = "allow"
+# The fixup payload assembly builds deeply-typed iterator pipelines over
+# `(offset, kind)` slot streams; a named intermediate struct per stage
+# would restate the pipeline it documents.
+type_complexity = "allow"
+# `pgr-format`'s export-trie walk mirrors dyld's binary walk step-for-step
+# (node encoding, prefix accumulation, child edges in one pass); splitting
+# it into helpers would separate the code from the format it decodes.
+too_many_lines = "allow"
+# Header-mirror structs (`HeaderInputs`, `InputSymbol`, the fixture specs)
+# carry the Mach-O header's own flag bits one bool per `n_type`/`n_desc`
+# bit; grouping them into a bitflags type would trade a struct the format
+# documents for an abstraction it does not.
+struct_excessive_bools = "allow"
 
 # TDD §8: build the linker itself for speed. `panic = "abort"` is deferred to the
 # M4 speed pass (it interferes with criterion's catch_unwind in benches).
