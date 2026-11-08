@@ -1159,7 +1159,7 @@ mod tests {
     #[test]
     fn m7_response_files_nest_and_flags_flow() {
         let inner = write_rf("pgr_opts_m7", "inner.rsp", "-L innerdir\n-L second\n");
-        let outer = write_rf("pgr_opts_m7", "outer.rsp", &format!("a.o @{}", inner));
+        let outer = write_rf("pgr_opts_m7", "outer.rsp", &format!("a.o @{inner}"));
         let o = parse(&args(&["-o", "out", &format!("@{outer}")])).unwrap();
         assert_eq!(o.inputs, ["a.o"]);
         assert_eq!(o.lib_dirs, ["innerdir", "second"]);
