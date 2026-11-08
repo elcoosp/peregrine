@@ -121,6 +121,9 @@ impl<'a> LoadCommandIter<'a> {
     /// Opens the load-command region starting at `offset` with `ncmds`
     /// commands of total size `sizeofcmds`; the whole region must lie
     /// within `bytes`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn new(
         bytes: &'a [u8],
         offset: usize,
@@ -132,7 +135,7 @@ impl<'a> LoadCommandIter<'a> {
             .ok_or(FormatError::Invalid {
                 offset,
                 what: "sizeofcmds overflow",
-                value: sizeofcmds as u64,
+                value: u64::from(sizeofcmds),
             })?;
         if end > bytes.len() {
             return Err(FormatError::Overrun {
@@ -149,6 +152,9 @@ impl<'a> LoadCommandIter<'a> {
     }
 
     /// Advances to the next command, validating its size fields.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn next_command(&mut self) -> Result<Option<ParsedCommand<'a>>, FormatError> {
         if self.remaining == 0 {
             if self.pos != self.region.len() {
@@ -169,14 +175,14 @@ impl<'a> LoadCommandIter<'a> {
             return Err(FormatError::Invalid {
                 offset: here,
                 what: "cmdsize smaller than the 8-byte command header",
-                value: cmdsize as u64,
+                value: u64::from(cmdsize),
             });
         }
         if cmdsize % 8 != 0 {
             return Err(FormatError::Invalid {
                 offset: here,
                 what: "cmdsize not 8-byte aligned (64-bit Mach-O contract)",
-                value: cmdsize as u64,
+                value: u64::from(cmdsize),
             });
         }
         let end = here + cmdsize as usize;
