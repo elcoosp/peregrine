@@ -142,7 +142,7 @@ fn pgrd_serves_strict_verifiable_images_and_exits_cleanly() {
     assert!(!banner.is_empty(), "version banner: {banner}");
     let job = job();
     let image = client.link(&job).unwrap();
-    assert!(!image.image.is_empty());
+    assert_ne!(image.image, [] as [u8; 0]);
 
     // The §10.4 M8 gate's verifier half: the resident bytes pass the
     // strict checker.
@@ -255,7 +255,7 @@ fn pgrd_reports_link_errors_and_keeps_serving() {
 
     // Still serving: a good link succeeds on the same daemon.
     let good = client.link(&job()).unwrap();
-    assert!(!good.image.is_empty());
+    assert_ne!(good.image, [] as [u8; 0]);
     client.shutdown().unwrap();
     let _ = child.wait();
 }
