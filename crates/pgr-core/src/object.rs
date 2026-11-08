@@ -214,7 +214,7 @@ pub struct InputSymbol {
     pub weak_ref: bool,
     /// Common-symbol alignment exponent (`GET_COMM_ALIGN`) when tentative.
     pub common_align: Option<u32>,
-    /// `N_ALT_ENTRY` (n_desc): merges into the preceding atom (M5/D1).
+    /// `N_ALT_ENTRY` (`n_desc)`: merges into the preceding atom (M5/D1).
     pub alt_entry: bool,
 }
 
@@ -290,6 +290,9 @@ pub struct InputObject {
     /// flag is absent.
     pub atoms: Vec<Vec<core::ops::Range<u64>>>,
 }
+
+/// One parallel-decode worker result (the symbol table slice).
+type DecodedPart = Result<(Vec<InputSymbol>, Vec<Vec<u8>>), LinkError>;
 
 impl InputObject {
     /// Rebuilds a parsed object from cached parts (M6 POI cache path).
@@ -405,7 +408,7 @@ impl InputObject {
     /// stays one whole-section atom. A pure function of the parsed input.
     pub fn compute_atoms(&mut self, split_symbols: bool) {
         self.atoms = Vec::with_capacity(self.sections.len());
-        for sect in self.sections.iter() {
+        for sect in &self.sections {
             if sect.zerofill || sect.size == 0 {
                 self.atoms.push(Vec::new());
                 continue;
@@ -576,7 +579,6 @@ impl InputObject {
             .map(|w| w[0]..w[1])
             .filter(|r| !r.is_empty())
             .collect();
-        type DecodedPart = Result<(Vec<InputSymbol>, Vec<Vec<u8>>), LinkError>;
         let parts: Vec<DecodedPart> = crate::pool::compute_pool().install(|| {
             ranges
                 .par_iter()
@@ -651,7 +653,7 @@ impl InputObject {
                     ARM64_RELOC_ADDEND => {
                         // r_symbolnum carries the addend value here, not a
                         // symbol/section reference.
-                        let addend = r.symbolnum() as i32 as i64;
+                        let addend = i64::from(r.symbolnum() as i32);
                         let Some(r2) = table.get(i + 1) else {
                             return Err(fail(
                                 "ADDEND relocation is not followed by its target".into(),
@@ -670,7 +672,7 @@ impl InputObject {
                                 )));
                             }
                         };
-                        let t2 = self.reloc_target(r2, &fail)?;
+                        let t2 = self.reloc_target(*r2, &fail)?;
                         decoded.push(DecodedReloc {
                             offset: r.r_address,
                             kind,
@@ -681,7 +683,7 @@ impl InputObject {
                         i += 2;
                     }
                     ARM64_RELOC_SUBTRACTOR => {
-                        let minuend = self.reloc_target(&r, &fail)?;
+                        let minuend = self.reloc_target(r, &fail)?;
                         let Some(r2) = table.get(i + 1) else {
                             return Err(fail(
                                 "SUBTRACTOR relocation is not followed by its UNSIGNED".into(),
@@ -697,7 +699,7 @@ impl InputObject {
                                 "SUBTRACTOR pair must relocate an 8-byte pointer".into(),
                             ));
                         }
-                        let subtrahend = self.reloc_target(r2, &fail)?;
+                        let subtrahend = self.reloc_target(*r2, &fail)?;
                         decoded.push(DecodedReloc {
                             offset: r.r_address,
                             kind: RelocKind::Subtractor { minuend },
@@ -719,7 +721,7 @@ impl InputObject {
                                 r.length()
                             )));
                         }
-                        let target = self.reloc_target(&r, &fail)?;
+                        let target = self.reloc_target(r, &fail)?;
                         decoded.push(DecodedReloc {
                             offset: r.r_address,
                             kind: RelocKind::Unsigned,
@@ -730,7 +732,7 @@ impl InputObject {
                         i += 1;
                     }
                     ARM64_RELOC_BRANCH26 => {
-                        let target = self.reloc_target(&r, &fail)?;
+                        let target = self.reloc_target(r, &fail)?;
                         decoded.push(DecodedReloc {
                             offset: r.r_address,
                             kind: RelocKind::Branch26,
@@ -751,7 +753,7 @@ impl InputObject {
                         // Standalone GOT-load (no ADDEND pair): the addend
                         // is zero; clang emits the paired form, this shape
                         // appears in hand-built objects.
-                        let target = self.reloc_target(&r, &fail)?;
+                        let target = self.reloc_target(r, &fail)?;
                         let kind = if r.rtype() == ARM64_RELOC_GOT_LOAD_PAGE21 {
                             RelocKind::GotLoadPage21 { addend: 0 }
                         } else {
@@ -770,7 +772,7 @@ impl InputObject {
                         if r.pcrel() {
                             return Err(fail("POINTER_TO_GOT is not PC-relative".into()));
                         }
-                        let target = self.reloc_target(&r, &fail)?;
+                        let target = self.reloc_target(r, &fail)?;
                         decoded.push(DecodedReloc {
                             offset: r.r_address,
                             kind: RelocKind::PointerToGot,
@@ -797,7 +799,7 @@ impl InputObject {
     /// Resolves one relocation's target to an interned name or local section.
     fn reloc_target(
         &self,
-        r: &RelocationInfo,
+        r: RelocationInfo,
         fail: &dyn Fn(String) -> LinkError,
     ) -> Result<RelocTarget, LinkError> {
         if r.is_extern() {
@@ -841,7 +843,7 @@ fn convert_section(
 
     let mut data = 0u64..0u64;
     if !zerofill && size > 0 {
-        let start = s.offset as u64;
+        let start = u64::from(s.offset);
         let end = start
             .checked_add(size)
             .ok_or_else(|| fail(format!("section {name}: size overflow")))?;
