@@ -30,11 +30,17 @@ const _: () = assert!(core::mem::size_of::<DylibCommand>() == 24);
 
 impl DylibCommand {
     /// Parses the command head from `cmd_bytes` (the command's slice).
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(cmd_bytes: &[u8]) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(cmd_bytes, 0)
     }
 
     /// The install name (NUL-terminated string at `name_offset`).
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn name<'a>(&self, cmd_bytes: &'a [u8]) -> Result<&'a [u8], FormatError> {
         read_lc_str(self.name_offset, self.cmdsize as usize, cmd_bytes)
     }
@@ -56,11 +62,17 @@ const _: () = assert!(core::mem::size_of::<DylinkerCommand>() == 12);
 
 impl DylinkerCommand {
     /// Parses the command head from `cmd_bytes`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(cmd_bytes: &[u8]) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(cmd_bytes, 0)
     }
 
     /// The linker path string.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn name<'a>(&self, cmd_bytes: &'a [u8]) -> Result<&'a [u8], FormatError> {
         read_lc_str(self.name_offset, self.cmdsize as usize, cmd_bytes)
     }
@@ -84,6 +96,9 @@ const _: () = assert!(core::mem::size_of::<EntryPointCommand>() == 24);
 
 impl EntryPointCommand {
     /// Parses the command from `cmd_bytes`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(cmd_bytes: &[u8]) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(cmd_bytes, 0)
     }
@@ -111,6 +126,9 @@ const _: () = assert!(core::mem::size_of::<BuildVersionCommand>() == 24);
 
 impl BuildVersionCommand {
     /// Parses the command head from `cmd_bytes`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(cmd_bytes: &[u8]) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(cmd_bytes, 0)
     }
@@ -144,6 +162,9 @@ const _: () = assert!(core::mem::size_of::<UuidCommand>() == 24);
 
 impl UuidCommand {
     /// Parses the command from `cmd_bytes`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(cmd_bytes: &[u8]) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(cmd_bytes, 0)
     }
@@ -168,11 +189,17 @@ const _: () = assert!(core::mem::size_of::<LinkeditDataCommand>() == 16);
 
 impl LinkeditDataCommand {
     /// Parses the command from `cmd_bytes`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn parse(cmd_bytes: &[u8]) -> Result<Self, FormatError> {
         pod_read_unaligned_at::<Self>(cmd_bytes, 0)
     }
 
     /// The payload slice, bounds-checked against the image.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn data<'a>(&self, image: &'a [u8]) -> Result<&'a [u8], FormatError> {
         let start = self.dataoff as usize;
         let end = start
@@ -180,7 +207,7 @@ impl LinkeditDataCommand {
             .ok_or(FormatError::Invalid {
                 offset: start,
                 what: "linkedit payload size overflow",
-                value: self.datasize as u64,
+                value: u64::from(self.datasize),
             })?;
         if end > image.len() {
             return Err(FormatError::Overrun {
@@ -229,7 +256,7 @@ fn read_lc_str(offset: u32, cmdsize: usize, cmd_bytes: &[u8]) -> Result<&[u8], F
         return Err(FormatError::Invalid {
             offset: start,
             what: "lc_str offset outside its load command",
-            value: offset as u64,
+            value: u64::from(offset),
         });
     }
     let mut c = Cursor::new(&cmd_bytes[..cmdsize.min(cmd_bytes.len())]);
