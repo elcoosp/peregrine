@@ -54,7 +54,8 @@ mod tests {
     #[test]
     fn version_is_wired() {
         assert!(!crate::VERSION.is_empty());
-        assert_eq!(crate::PROTO_VERSION, 1);
+        // v2 (M9): the wire carries the M9 slack anchors with the config.
+        assert_eq!(crate::PROTO_VERSION, 2);
     }
 
     #[test]
