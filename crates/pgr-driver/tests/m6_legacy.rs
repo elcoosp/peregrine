@@ -263,14 +263,14 @@ fn m6_classic_bind_stream_names_the_dylib_export() {
         ..Options::default()
     };
     // A .tbd stub for the dylib: install name + one export.
-    let tbd = r#"--- !tapi-tbd
+    let tbd = r"--- !tapi-tbd
 tbd-version: 4
 targets:         [ arm64-macos ]
 install-name:    /usr/lib/libgreet.dylib
 exports:
   - targets:         [ arm64-macos ]
     symbols:         [ _greet ]
-..."#;
+...";
     let tbd_p = dir.join("libgreet.tbd");
     std::fs::write(&tbd_p, tbd).unwrap();
     opts.lib_dirs = vec![dir.display().to_string()];
