@@ -375,7 +375,7 @@ fn multi_start_page_supported() {
     );
 }
 
-/// segment_offset inconsistent with the segment fileoff must be flagged.
+/// `segment_offset` inconsistent with the segment fileoff must be flagged.
 #[test]
 fn segment_offset_mismatch_detected() {
     let img = exec_builder().build().unwrap();
