@@ -144,8 +144,7 @@ pub fn compute(
                 obj.bytes
                     .get(at..at + 8)
                     .and_then(|b| <[u8; 8]>::try_from(b).ok())
-                    .map(u64::from_le_bytes)
-                    .unwrap_or(u64::MAX)
+                    .map_or(u64::MAX, u64::from_le_bytes)
             }
             _ => 0,
         }
@@ -254,12 +253,12 @@ pub fn compute(
         }
     }
     while let Some(node) = work.pop() {
-        let (targets, refs) = (
+        let (outgoing, common_syms) = (
             &edges[node.file as usize][node.sect as usize][node.atom as usize],
             &common_refs[node.file as usize][node.sect as usize][node.atom as usize],
         );
-        commons.extend(refs.iter().copied());
-        for &target in targets {
+        commons.extend(common_syms.iter().copied());
+        for &target in outgoing {
             if let Some(slot) = live
                 .get_mut(target.file as usize)
                 .and_then(|f| f.get_mut(target.sect as usize))
