@@ -42,6 +42,9 @@ impl<'a> Cursor<'a> {
     }
 
     /// Moves the cursor to `pos`, which must be within the input.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn seek(&mut self, pos: usize) -> Result<(), FormatError> {
         if pos > self.bytes.len() {
             return Err(FormatError::Truncated {
@@ -55,6 +58,9 @@ impl<'a> Cursor<'a> {
     }
 
     /// Advances by `n` checked bytes.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn skip(&mut self, n: usize) -> Result<(), FormatError> {
         let new_pos = self.pos.checked_add(n).ok_or(FormatError::Invalid {
             offset: self.pos,
@@ -65,6 +71,9 @@ impl<'a> Cursor<'a> {
     }
 
     /// Reads one `u8`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_u8(&mut self) -> Result<u8, FormatError> {
         let here = self.pos;
         let b = *self.bytes.get(self.pos).ok_or(FormatError::Truncated {
@@ -77,24 +86,36 @@ impl<'a> Cursor<'a> {
     }
 
     /// Reads a little-endian `u16`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_u16(&mut self) -> Result<u16, FormatError> {
         let b = self.read_bytes(2)?;
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
 
     /// Reads a little-endian `u32`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_u32(&mut self) -> Result<u32, FormatError> {
         let b = self.read_bytes(4)?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
     /// Reads a big-endian `u32` (code-signature structures are big-endian).
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_u32be(&mut self) -> Result<u32, FormatError> {
         let b = self.read_bytes(4)?;
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
 
     /// Reads a big-endian `u64` (code-signature structures are big-endian).
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_u64be(&mut self) -> Result<u64, FormatError> {
         let b = self.read_bytes(8)?;
         Ok(u64::from_be_bytes([
@@ -103,6 +124,9 @@ impl<'a> Cursor<'a> {
     }
 
     /// Reads a little-endian `u64`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_u64(&mut self) -> Result<u64, FormatError> {
         let b = self.read_bytes(8)?;
         Ok(u64::from_le_bytes([
@@ -111,21 +135,33 @@ impl<'a> Cursor<'a> {
     }
 
     /// Reads a little-endian `i8`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_i8(&mut self) -> Result<i8, FormatError> {
-        Ok(self.read_u8()? as i8)
+        Ok(i8::from_le_bytes([self.read_u8()?]))
     }
 
     /// Reads a little-endian `i32`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_i32(&mut self) -> Result<i32, FormatError> {
-        Ok(self.read_u32()? as i32)
+        Ok(i32::from_le_bytes(self.read_u32()?.to_le_bytes()))
     }
 
     /// Reads a little-endian `i64`.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_i64(&mut self) -> Result<i64, FormatError> {
-        Ok(self.read_u64()? as i64)
+        Ok(i64::from_le_bytes(self.read_u64()?.to_le_bytes()))
     }
 
     /// Reads a checked slice of `len` bytes.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], FormatError> {
         let here = self.pos;
         let end = here.checked_add(len).ok_or(FormatError::Invalid {
@@ -146,6 +182,9 @@ impl<'a> Cursor<'a> {
 
     /// Reads a fixed-width name field (segment/section names) and trims the
     /// trailing NUL padding, returning the name bytes.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_name16(&mut self) -> Result<&'a [u8], FormatError> {
         let raw = self.read_bytes(16)?;
         let len = raw.iter().position(|&b| b == 0).unwrap_or(16);
@@ -153,6 +192,9 @@ impl<'a> Cursor<'a> {
     }
 
     /// Reads a NUL-terminated string starting at the cursor.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the input structure is malformed or truncated.
     pub fn read_cstr(&mut self) -> Result<&'a [u8], FormatError> {
         let start = self.pos;
         let rest = &self.bytes[start..];
@@ -172,6 +214,9 @@ impl<'a> Cursor<'a> {
 /// Reads a `bytemuck::Pod` structure at an absolute offset without moving a
 /// cursor, checking bounds only (alignment is not required: the bytes are
 /// copied field-wise, which keeps malformed inputs panic-free).
+///
+/// # Errors
+/// [`FormatError`] when the input structure is malformed or truncated.
 pub fn pod_read_unaligned_at<T: bytemuck::Pod>(
     bytes: &[u8],
     offset: usize,
