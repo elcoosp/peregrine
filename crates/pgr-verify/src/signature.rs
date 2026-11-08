@@ -1,4 +1,4 @@
-//! Code-signature verification: SuperBlob layout and SHA-256 page-hash
+//! Code-signature verification: `SuperBlob` layout and SHA-256 page-hash
 //! recomputation (TDD §9, §11 "signature recompute").
 
 use crate::structural::ParsedImage;
@@ -8,9 +8,9 @@ use pgr_format::consts::{
 };
 use sha2::{Digest, Sha256};
 
-/// Validates the `LC_CODE_SIGNATURE` SuperBlob and, when `recompute` is set,
+/// Validates the `LC_CODE_SIGNATURE` `SuperBlob` and, when `recompute` is set,
 /// recomputes every 4 KiB page hash and compares it against the
-/// CodeDirectory.
+/// `CodeDirectory`.
 pub(crate) fn check_signature(
     bytes: &[u8],
     img: &ParsedImage<'_>,
@@ -26,22 +26,24 @@ pub(crate) fn check_signature(
         return;
     };
     let file_len = bytes.len() as u64;
-    if lc.dataoff as u64 >= file_len || lc.dataoff as u64 + u64::from(lc.datasize) != file_len {
+    if u64::from(lc.dataoff) >= file_len
+        || u64::from(lc.dataoff) + u64::from(lc.datasize) != file_len
+    {
         report.issues.push(Issue::error(
             Code::SignatureLayout,
             format!(
                 "signature must be the last bytes of the file (ends {:#x}, file size {:#x})",
-                lc.dataoff as u64 + u64::from(lc.datasize),
+                u64::from(lc.dataoff) + u64::from(lc.datasize),
                 file_len
             ),
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
     }
     if lc.dataoff == 0 || lc.datasize == 0 {
         report.issues.push(Issue::error(
             Code::SignatureLayout,
             "signature dataoff/datasize must be nonzero",
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
         return;
     }
@@ -65,7 +67,7 @@ pub(crate) fn check_signature(
             report.issues.push(Issue::error(
                 Code::SignatureLayout,
                 "SuperBlob carries no code directory slot",
-                Some(lc.dataoff as u64),
+                Some(u64::from(lc.dataoff)),
             ));
             return;
         }
@@ -85,7 +87,7 @@ pub(crate) fn check_signature(
         report.issues.push(Issue::error(
             Code::SignatureLayout,
             format!("hash size {} is not SHA-256 (32)", cd.hash_size),
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
     }
     if cd.hash_type != CS_HASHTYPE_SHA256 {
@@ -95,7 +97,7 @@ pub(crate) fn check_signature(
                 "hash type {} is not SHA-256 ({CS_HASHTYPE_SHA256})",
                 cd.hash_type
             ),
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
     }
     if cd.page_size_log2 != CS_PAGE_SIZE_LOG2 {
@@ -105,20 +107,20 @@ pub(crate) fn check_signature(
                 "page size exponent {} != {CS_PAGE_SIZE_LOG2} (4 KiB code pages, TDD §3.6)",
                 cd.page_size_log2
             ),
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
     }
-    if cd.code_limit as u64 != lc.dataoff as u64 {
+    if u64::from(cd.code_limit) != u64::from(lc.dataoff) {
         report.issues.push(Issue::error(
             Code::SignatureLayout,
             format!(
                 "codeLimit {:#x} must equal the signature offset {:#x}",
                 cd.code_limit, lc.dataoff
             ),
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
     }
-    let expected_slots = (cd.code_limit as u64).div_ceil(CS_PAGE_SIZE) as u32;
+    let expected_slots = u64::from(cd.code_limit).div_ceil(CS_PAGE_SIZE) as u32;
     if cd.n_code_slots != expected_slots {
         report.issues.push(Issue::error(
             Code::SignatureLayout,
@@ -126,14 +128,14 @@ pub(crate) fn check_signature(
                 "nCodeSlots {} != ceil(codeLimit / 4096) = {expected_slots}",
                 cd.n_code_slots
             ),
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
     }
     if cd.identifier(blob).is_err() {
         report.issues.push(Issue::error(
             Code::SignatureLayout,
             "CodeDirectory identifier is missing or unterminated",
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
     }
     if let Some(limit) = cd.exec_seg_limit {
@@ -141,13 +143,12 @@ pub(crate) fn check_signature(
             .segments
             .iter()
             .find(|s| s.name() == Ok("__TEXT"))
-            .map(|s| s.vmsize)
-            .unwrap_or(0);
+            .map_or(0, |s| s.vmsize);
         if limit != text_vmsize {
             report.issues.push(Issue::warning(
                 Code::Suspicious,
                 format!("execSegLimit {limit:#x} != __TEXT vmsize {text_vmsize:#x}"),
-                Some(lc.dataoff as u64),
+                Some(u64::from(lc.dataoff)),
             ));
         }
     }
@@ -155,7 +156,7 @@ pub(crate) fn check_signature(
         report.issues.push(Issue::error(
             Code::SignatureLayout,
             "code hash array extends beyond the code directory blob",
-            Some(lc.dataoff as u64),
+            Some(u64::from(lc.dataoff)),
         ));
         return;
     }
