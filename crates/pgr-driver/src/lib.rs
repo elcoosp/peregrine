@@ -32,6 +32,8 @@ pub struct LinkOutcome {
     pub entryoff: u64,
     /// Chained-fixup slots packed.
     pub fixup_slots: usize,
+    /// M9: the in-place patch report (`None` on a full link).
+    pub patch: Option<pgr_emit::incremental::PatchOutcome>,
 }
 
 /// A driver failure: options, I/O, or link errors.
@@ -70,6 +72,11 @@ pub enum DriverError {
         /// What failed.
         message: String,
     },
+    /// An M9 incremental patch failed outside the fallback contract (I/O
+    /// or a plan contract). The relink falls back to the full link, which
+    /// then surfaced this error too, or the patch itself was unrecoverable.
+    #[error("incremental relink: {0}")]
+    Incremental(#[from] pgr_emit::incremental::PatchError),
     /// An input is an LLVM bitcode object (LTO): the M6 scope detects it
     /// and diagnoses clearly instead of failing deep in the Mach-O parser.
     #[error(
@@ -386,6 +393,17 @@ pub fn resolve_framework(
 /// # Errors
 /// [`DriverError`] on option, link, emit, tbd or I/O failures.
 pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> {
+    Ok(link_to_image_recorded(opts)?.0)
+}
+
+/// [`link_to_image`] plus the M9 record: when `-incremental` is active and
+/// the one-shot pipeline produced the image, the link's record is built in
+/// the same pass (no pipeline re-run). The resident daemon path returns no
+/// record (resident + incremental is GA scope — the daemon holds its own
+/// state, §7.2).
+fn link_to_image_recorded(
+    opts: &opts::Options,
+) -> Result<(ImageAndPlan, Option<pgr_emit::incremental::LinkRecord>), DriverError> {
     let (prepared, cache) = prepare_link(opts)?;
     if opts.resident {
         let job = pgr_daemon::LinkJob::build(
@@ -402,11 +420,14 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
         let exe_hint = std::env::current_exe().ok();
         match pgr_daemon::link_via_daemon(&socket, exe_hint.as_deref(), &job) {
             Ok(img) => {
-                return Ok(ImageAndPlan {
-                    image: img.image,
-                    entryoff: img.entryoff,
-                    fixup_slots: usize::try_from(img.fixup_slots).unwrap_or(usize::MAX),
-                });
+                return Ok((
+                    ImageAndPlan {
+                        image: img.image,
+                        entryoff: img.entryoff,
+                        fixup_slots: usize::try_from(img.fixup_slots).unwrap_or(usize::MAX),
+                    },
+                    None,
+                ));
             }
             Err(e) => {
                 if std::env::var_os("PGR_RESIDENT_DEBUG").is_some() {
@@ -424,11 +445,23 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
     )?;
     check_force_load(&result, &prepared.force_load)?;
     let image = pgr_emit::build_image_fused(&result.layout, &result.objects)?;
-    Ok(ImageAndPlan {
-        entryoff: result.layout.entryoff,
-        fixup_slots: result.layout.fixups.slot_count,
-        image,
-    })
+    let record = if opts.incremental {
+        Some(pgr_emit::incremental::LinkRecord::record(
+            &result.layout,
+            &result.objects,
+            &image,
+        )?)
+    } else {
+        None
+    };
+    Ok((
+        ImageAndPlan {
+            entryoff: result.layout.entryoff,
+            fixup_slots: result.layout.fixups.slot_count,
+            image,
+        },
+        record,
+    ))
 }
 
 /// Links the option inputs through the **pre-fusion reference emit** (the
@@ -818,17 +851,246 @@ pub fn link_reference_bytes(opts: &opts::Options) -> Result<Vec<u8>, DriverError
 
 /// Runs the full driver: link and write the output file.
 ///
+/// M9 `-incremental`: the in-place relink is attempted first (record →
+/// plan → patch → re-sign); any §7.3 fallback — no record, changed output,
+/// moved skeleton, everything-dirty — silently re-runs the full link, and
+/// the full link (re-)records the state for the next round. The fallback
+/// is always available and always correct.
+///
 /// # Errors
 /// [`DriverError`] on option, link, emit or filesystem failures.
 pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
-    let linked = link_to_image(opts)?;
+    if opts.incremental {
+        match incremental_relink(opts) {
+            Ok(outcome) => return Ok(outcome),
+            Err(RelinkAttempt::Error(e)) => return Err(e),
+            Err(RelinkAttempt::Fallback(reason)) => {
+                if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
+                    eprintln!("pgr: incremental fallback: {reason}");
+                }
+            }
+        }
+    }
+    // §7.3 "layout stability": the in-place tier stands on slack anchors,
+    // so `-incremental` implies slack layout for the whole link cycle —
+    // the cold full link reserves the same padding its record describes,
+    // and the first edited relink can patch in place.
+    let (linked, record) = if opts.incremental && opts.config.layout_slack.is_none() {
+        let mut slacked = opts.clone();
+        slacked.config.layout_slack = Some(pgr_core::slack::SlackPolicy::default());
+        link_to_image_recorded(&slacked)?
+    } else {
+        link_to_image_recorded(opts)?
+    };
     write_image(&linked.image, Path::new(&opts.output))?;
+    if let Some(record) = record {
+        store_record(opts, &record);
+    }
     Ok(LinkOutcome {
         output: opts.output.clone(),
         file_size: linked.image.len() as u64,
         entryoff: linked.entryoff,
         fixup_slots: linked.fixup_slots,
+        patch: None,
     })
+}
+
+/// Why the M9 incremental attempt did not produce the outcome: a §7.3
+/// fallback (the full link follows) or a real driver error (propagated).
+enum RelinkAttempt {
+    Fallback(pgr_emit::incremental::FallbackReason),
+    Error(DriverError),
+}
+
+impl From<pgr_emit::incremental::FallbackReason> for RelinkAttempt {
+    fn from(reason: pgr_emit::incremental::FallbackReason) -> Self {
+        Self::Fallback(reason)
+    }
+}
+
+/// The record sidecar path: `<output>.pgr-inc`, or `PGR_INCREMENTAL_RECORD`
+/// when set (build systems pin it next to their own state).
+fn record_path(opts: &opts::Options) -> std::path::PathBuf {
+    std::env::var("PGR_INCREMENTAL_RECORD")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut name = std::path::PathBuf::from(&opts.output).into_os_string();
+            name.push(".pgr-inc");
+            std::path::PathBuf::from(name)
+        })
+}
+
+/// The M9 in-place relink (architecture doc §7.3, tier 1): load the
+/// record, gate the previous output, re-run the pipeline with slack
+/// anchors, plan the patch, clone-and-patch the output, re-sign the dirty
+/// pages and rename. Returns the patch outcome plus the refreshed record
+/// (written here so the *next* relink starts from the new state).
+fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt> {
+    let record_bytes = std::fs::read(record_path(opts)).map_err(|_| {
+        RelinkAttempt::Fallback(pgr_emit::incremental::FallbackReason::NoRecord)
+    })?;
+    let Some(record) = pgr_emit::incremental::LinkRecord::decode(&record_bytes) else {
+        return Err(pgr_emit::incremental::FallbackReason::RecordUnreadable.into());
+    };
+    let output = Path::new(&opts.output);
+    // Any integrity-gate failure — missing, resized, corrupt — falls back:
+    // the full link never needs the previous output.
+    match pgr_emit::incremental::check_output(output, &record) {
+        Ok(pgr_emit::incremental::Integrity::Match) => {}
+        Ok(pgr_emit::incremental::Integrity::Mismatch { detail }) => {
+            return Err(pgr_emit::incremental::FallbackReason::OutputChanged {
+                detail,
+            }
+            .into());
+        }
+        Err(e) => {
+            return Err(pgr_emit::incremental::FallbackReason::OutputChanged {
+                detail: e.to_string(),
+            }
+            .into());
+        }
+    }
+
+    let (prepared, cache) = prepare_link(opts).map_err(RelinkAttempt::Error)?;
+    // §7.3 "layout stability": the in-place tier stands on the slack
+    // anchors — the driver implies the M8-c policy when the caller left it
+    // unset and anchors every recorded section at its reserved size.
+    let mut cfg = prepared.config.clone();
+    cfg.layout_slack = cfg.layout_slack.or_else(|| Some(pgr_core::slack::SlackPolicy::default()));
+    cfg.slack_anchor = record
+        .sections
+        .iter()
+        .map(|s| pgr_core::slack::SlackAnchor {
+            seg: s.seg.clone(),
+            name: s.name.clone(),
+            padded: s.size,
+        })
+        .collect();
+    let result = pgr_core::link_cached(
+        &prepared.inputs,
+        &prepared.archives,
+        &cfg,
+        pgr_core::Parallelism::Auto,
+        cache.as_ref(),
+    )
+    .map_err(|e| RelinkAttempt::Error(e.into()))?;
+    check_force_load(&result, &prepared.force_load).map_err(RelinkAttempt::Error)?;
+
+    let decision = pgr_emit::incremental::plan_patch(
+        &record,
+        &result.layout,
+        &result.objects,
+        cfg.layout_slack.as_ref(),
+    )
+    .map_err(|e| RelinkAttempt::Error(e.into()))?;
+    let plan = match decision {
+        pgr_emit::incremental::PatchDecision::InPlace(plan) => plan,
+        pgr_emit::incremental::PatchDecision::Fallback(reason) => {
+            return Err(RelinkAttempt::Fallback(reason));
+        }
+    };
+    // Nothing changed: leave the output byte-for-byte alone (§7.3 — the
+    // relink's job is done), refresh the record, report the no-op.
+    if plan.is_untouched() {
+        store_record(opts, &record);
+        return Ok(LinkOutcome {
+            output: opts.output.clone(),
+            file_size: record.file_size,
+            entryoff: result.layout.entryoff,
+            fixup_slots: result.layout.fixups.slot_count,
+            patch: Some(pgr_emit::incremental::PatchOutcome {
+                bytes_patched: 0,
+                dirty_tiles: 0,
+                total_tiles: plan.total_tiles,
+                untouched: true,
+            }),
+        });
+    }
+    let (mut outcome, new_record) =
+        pgr_emit::incremental::apply_patch(output, &record, &plan, &result.layout, &result.objects, output)
+            .map_err(|e| match e {
+                pgr_emit::incremental::PatchError::Fallback(reason) => {
+                    RelinkAttempt::Fallback(reason)
+                }
+                other => RelinkAttempt::Error(other.into()),
+            })?;
+
+    // `-incremental-verify` (§7.3): the audit gate. Byte-identity against
+    // the full fused emit of the same plan first (the engine's contract);
+    // a divergence never ships — the output is rewritten from the full
+    // emit and re-recorded. Then the strict verifier pass (no stale
+    // signature, no stale fixup, no bad chain) on the final bytes.
+    if opts.incremental_verify {
+        let full = pgr_emit::build_image_fused(&result.layout, &result.objects)
+            .map_err(|e| RelinkAttempt::Error(e.into()))?;
+        let patched = std::fs::read(output)
+            .map_err(|source| DriverError::Io {
+                path: opts.output.clone(),
+                source,
+            })
+            .map_err(RelinkAttempt::Error)?;
+        if patched != full {
+            if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
+                eprintln!("pgr: incremental-verify: patched output diverged; healing");
+            }
+            write_image(&full, output).map_err(|e| RelinkAttempt::Error(e.into()))?;
+            let healed = pgr_emit::incremental::LinkRecord::record(
+                &result.layout,
+                &result.objects,
+                &full,
+            )
+            .map_err(|e| RelinkAttempt::Error(e.into()))?;
+            store_record(opts, &healed);
+            outcome.bytes_patched = full.len() as u64;
+            outcome.dirty_tiles = plan.total_tiles;
+        }
+        let final_bytes = std::fs::read(output)
+            .map_err(|source| DriverError::Io {
+                path: opts.output.clone(),
+                source,
+            })
+            .map_err(RelinkAttempt::Error)?;
+        let vopts = pgr_verify::Options {
+            strict_warnings: true,
+            skip_hash_recompute: false,
+        };
+        let report = pgr_verify::verify(&final_bytes, &vopts);
+        if !report.is_ok(&vopts) {
+            let detail = report
+                .issues
+                .iter()
+                .map(|i| format!("{:?} [{}] {}", i.severity, i.code.as_str(), i.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(RelinkAttempt::Error(DriverError::Tbd {
+                path: opts.output.clone(),
+                source: pgr_format::FormatError::Malformed {
+                    what: format!("-incremental-verify: the patched image failed the strict verifier: {detail}"),
+                },
+            }));
+        }
+    }
+
+    store_record(opts, &new_record);
+    Ok(LinkOutcome {
+        output: opts.output.clone(),
+        file_size: record.file_size,
+        entryoff: result.layout.entryoff,
+        fixup_slots: result.layout.fixups.slot_count,
+        patch: Some(outcome),
+    })
+}
+
+/// Best-effort record store (a failed write only costs the next link a
+/// fallback, and is reported under `PGR_INCREMENTAL_DEBUG`).
+fn store_record(opts: &opts::Options, record: &pgr_emit::incremental::LinkRecord) {
+    if let Err(e) = std::fs::write(record_path(opts), record.encode()) {
+        if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
+            eprintln!("pgr: storing link record failed: {e}");
+        }
+    }
 }
 
 /// The one-line version banner.
@@ -884,6 +1146,16 @@ pub fn usage() -> String {
     s.push_str("                               default 2 GiB, 0 = unbounded)\n");
     s.push_str("  -no_cache                    disable the link cache\n");
     s.push_str("  -icf=safe|-icf=all|-no_icf   identical code folding (default none)\n");
+    s.push_str("  -incremental                 M9 in-place relink: patch only the\n");
+    s.push_str("                               changed 16 KiB tiles into a clone of\n");
+    s.push_str("                               the previous output and re-sign the\n");
+    s.push_str("                               dirty pages (record: <output>.pgr-inc;\n");
+    s.push_str("                               any structure move falls back to the\n");
+    s.push_str("                               full link silently)\n");
+    s.push_str("  -no_incremental              disable the in-place relink\n");
+    s.push_str("  -incremental-verify          after patching, audit byte-identity\n");
+    s.push_str("                               against the full emit and run the\n");
+    s.push_str("                               strict verifier on the result\n");
     s.push_str("  -resident                    route the link through the resident\n");
     s.push_str("                               daemon (pgrd); falls back to the\n");
     s.push_str("                               one-shot link when unreachable\n");
