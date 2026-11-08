@@ -5,6 +5,71 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 
+## [Unreleased]
+
+### Features
+
+- **emit:** M9 tier 2 — the **segment-relayout patch tier** executes (the
+  §7.3 ladder's middle rung; architecture doc §10.4 row M9 GA). A skeleton
+  shift no longer falls straight to the clean link: a section that
+  overflows its slack anchor within the ladder's bound (growth beyond the
+  previous pad ≤ the policy max — `SlackPolicy::fits` says
+  `SegmentRelayout` for every resized section) holds its base while
+  everything behind it shifts, and an outgrown `__LINKEDIT` reservation
+  moves the signature boundary with it. The planner admits the shifted
+  skeleton as a relayout patch plan (`pgr_emit::incremental::RelayoutDelta`,
+  `PatchPlan::relayout`): the previous output is cloned and resized, the
+  moved suffix's tiles are re-emitted from the new plan, page 0 is rebuilt
+  with the derived `LC_UUID`, and the `CodeDirectory` is re-signed from the
+  merged hash table at the moved boundary — the byte-identity contract
+  (patched == full fused emit of the same plan) is unchanged and gated
+- **emit:** the record's **v4 output-section content digest table**
+  (`LinkRecord::content_digests`): SHA-256 over each output section's
+  copy-run bytes (placement-invariant concatenation), computed in parallel
+  at record time and copy-or-rehash per plan (only run-touched sections
+  hash). The relayout tier's **shift-exemption** compares a moved section's
+  recorded digest against the new plan's: a byte-identical move is
+  explained by the skeleton shift alone — its derived bytes (relocations,
+  chain words) are re-emitted and re-proven — while genuine content churn
+  inside the moved suffix must still sit inside the propagation scope (the
+  tier-2b gate, with old-side diff ranges translated by the section's
+  shift). The moved-away `CodeDirectory` span joins the diff so the patch
+  overwrites it; oversized growth (beyond the policy max) still escalates
+  to the clean link, and the §7.3 economics gate still declines
+  whole-image patches
+- **driver:** `-incremental` reports the patched state's file size (the
+  relayout tier grows the image) and the relayout path is exercised
+  end-to-end with `-incremental-verify`
+
+### Tests
+
+- `pgr-emit/tests/incremental.rs` (6 new): the tier-2 byte-identity loop
+  over an overflowing corpus (exec, unsigned, dylib), the `__LINKEDIT`
+  overflow trigger, the ladder's honest top rung (growth beyond the policy
+  max still falls back), and the relayout state as a fixpoint
+- `pgr-driver/tests/m9_incremental.rs` (3 new, 1 rewritten): the e2e
+  relink patches through the relayout tier and recovers incrementally,
+  oversized growth still falls back and re-records, and
+  `-incremental-verify` audits the relayout patch; the old
+  "skeleton move falls back" gate now pins the tier-2 patch
+
+### Performance
+
+- `pgr-driver/incremental` bench: new `segment_relayout_relink_8mib` group
+  (a monotone +64 KiB growth ladder — anchors absorb alternating
+  same-size cycles, so the bench climbs) with a per-step bytes-written
+  accounting pass; the tier-1 accounting loop's input-index bug fixed
+  (it swapped the extern-provider dylib out of input 0, which would have
+  broken the link if run). Sandbox numbers (2-core-class container, ext4 —
+  no reflink, so the clone is a full copy): each +64 KiB growth step
+  patches **1.2 MiB of 9.4 MiB image bytes (13%)** where the full relink
+  writes every byte; the tier-2 relink mean (34.2 ms, 8 tier-2 : 1 tier-1
+  mix) is a wash against the tier-1 mean (32.2 ms) and the full relink
+  (17.4 ms) on this filesystem — the same ext4-clone verdict the tier-1
+  bench recorded, with the bytes-written gate met; the record-time
+  content-digest hash adds no measurable full-link cost (parallel; full
+  relink 17.4 ms vs 17.4 ms baseline)
+
 ## [1.2.0] - 2026-11-08
 
 ### Features
