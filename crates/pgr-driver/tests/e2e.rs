@@ -118,11 +118,11 @@ fn unique_dir(tag: &str) -> std::path::PathBuf {
 
 /// Materializes the corpus and links it in-memory.
 fn link_corpus() -> (Vec<u8>, pgr_driver::ImageAndPlan) {
-    link_corpus_in(unique_dir("corpus"))
+    link_corpus_in(&unique_dir("corpus"))
 }
 
 /// Links the corpus from `dir` (test-controlled paths).
-fn link_corpus_in(dir: std::path::PathBuf) -> (Vec<u8>, pgr_driver::ImageAndPlan) {
+fn link_corpus_in(dir: &std::path::Path) -> (Vec<u8>, pgr_driver::ImageAndPlan) {
     let mut opts = Options::default();
     for (i, bytes) in [hello_main(), greet()].iter().enumerate() {
         let p = dir.join(format!("e2e_{i}.o"));
@@ -230,7 +230,7 @@ fn simulate_dyld(image: &[u8], payload: &[u8]) -> std::collections::HashMap<u64,
     let hdr = parse_header(payload).unwrap();
     assert_eq!(hdr.imports_count, 0, "static link: no imports");
     let imports = parse_imports(payload, &hdr).unwrap();
-    assert!(imports.is_empty());
+    assert_eq!(imports, [] as [pgr_format::fixups::Import; 0]);
     let starts = parse_starts_in_image(payload, hdr.starts_offset as usize).unwrap();
     let mut out = std::collections::HashMap::new();
     for &off in &starts.seg_info_offset {
@@ -596,7 +596,7 @@ fn libsystem_tbd() -> &'static str {
 
 /// Writes the tbd stub into `dir` and links `printf_main.o` against it.
 fn link_printf_in(
-    dir: std::path::PathBuf,
+    dir: &std::path::Path,
     tweak: impl FnOnce(&mut Options),
 ) -> (Vec<u8>, pgr_driver::ImageAndPlan) {
     let obj = dir.join("printf_main.o");
@@ -704,7 +704,7 @@ fn load_commands(bytes: &[u8]) -> Vec<(pgr_format::LoadCommandKind, Vec<u8>)> {
 
 #[test]
 fn m2_links_printf_from_tbd() {
-    let (image, linked) = link_printf_in(unique_dir("m2printf"), |_| {});
+    let (image, linked) = link_printf_in(&unique_dir("m2printf"), |_| {});
     // The verifier's full simulation accepts the dynamic image.
     let vopts = pgr_verify::Options {
         strict_warnings: true,
@@ -869,7 +869,7 @@ fn m2_links_printf_from_tbd() {
 
 #[test]
 fn m2_flat_namespace_binds_dyld_flat() {
-    let (image, _) = link_printf_in(unique_dir("m2flat"), |o| {
+    let (image, _) = link_printf_in(&unique_dir("m2flat"), |o| {
         o.config.flat_namespace = true;
     });
     let (_, imports, names) = walk_chains(&image, &find_fixup_payload(&image));
@@ -993,7 +993,7 @@ fn m2_import_ordinals_follow_first_use() {
 
 #[test]
 fn m2_rpath_and_source_version_commands_land() {
-    let (image, _) = link_printf_in(unique_dir("m2d13"), |o| {
+    let (image, _) = link_printf_in(&unique_dir("m2d13"), |o| {
         o.config.rpaths.push("@executable_path/../lib".into());
         o.config.rpaths.push("/opt/peregrine/lib".into());
         o.config.source_version = Some(1u64 << 40 | 2 << 30 | 3 << 20);
@@ -1121,7 +1121,7 @@ fn m2_lld_golden_binds_slot_for_slot() {
     assert!(status.success(), "ld64.lld failed to link the corpus");
 
     let lld_image = std::fs::read(&lld_out).unwrap();
-    let pgr_image = link_printf_in(dir.clone(), |_| {}).0;
+    let pgr_image = link_printf_in(&dir, |_| {}).0;
 
     // Semantic comparison: the multiset of (kind, lib, name, addend, weak)
     // over both images' fixup slots, plus each image's import table.
@@ -1236,7 +1236,7 @@ fn foo_object() -> Vec<u8> {
     b.build().unwrap()
 }
 
-/// foo_main.o: the client — calls `_foo_add` (stub), loads `_foo_value`
+/// `foo_main.o`: the client — calls `_foo_add` (stub), loads `_foo_value`
 /// through the GOT.
 fn foo_main_object() -> Vec<u8> {
     let text: Vec<u8> = [
@@ -1296,7 +1296,7 @@ fn verify_strict(bytes: &[u8]) -> pgr_verify::Report {
 /// Links the M3 dylib corpus: foo.o (+ optional bar re-export tbd) into
 /// `@rpath/libfoo.dylib`.
 fn link_foo_dylib_in(
-    dir: std::path::PathBuf,
+    dir: &std::path::Path,
     tweak: impl FnOnce(&mut Options),
 ) -> (Vec<u8>, pgr_driver::ImageAndPlan) {
     let obj = dir.join("foo.o");
@@ -1318,7 +1318,7 @@ fn link_foo_dylib_in(
 
 #[test]
 fn m3_dylib_output_passes_verifier_strict() {
-    let (image, _) = link_foo_dylib_in(unique_dir("m3dylib"), |_| {});
+    let (image, _) = link_foo_dylib_in(&unique_dir("m3dylib"), |_| {});
     let report = verify_strict(&image);
     assert!(
         report.is_ok(&pgr_verify::Options::default()),
@@ -1401,7 +1401,7 @@ fn m3_exec_against_pgr_dylib_passes_the_pair_gate() {
     let dir = unique_dir("m3pair");
     let lib_dir = dir.join("lib");
     std::fs::create_dir_all(&lib_dir).unwrap();
-    let (lib, _) = link_foo_dylib_in(lib_dir, |_| {});
+    let (lib, _) = link_foo_dylib_in(&lib_dir, |_| {});
     let lib_path = dir.join("libfoo.dylib");
     std::fs::write(&lib_path, &lib).unwrap();
 
@@ -1484,7 +1484,7 @@ fn m3_reexport_library_lands_in_the_trie() {
     let dir = unique_dir("m3reexport");
     let bar = dir.join("libbar.tbd");
     std::fs::write(&bar, bar_tbd()).unwrap();
-    let (image, _) = link_foo_dylib_in(dir, |o| {
+    let (image, _) = link_foo_dylib_in(&dir, |o| {
         o.inputs.push(bar.display().to_string());
         o.reexport_library_inputs.push(2); // third input: bar.tbd
     });
@@ -1536,7 +1536,7 @@ fn m3_export_filters_shape_trie_and_symtab() {
     // -unexported_symbols_list hides _foo_value: out of the trie, private
     // (N_PEXT) in the symtab.
     let dir = unique_dir("m3unexported");
-    let (image, _) = link_foo_dylib_in(dir, |o| {
+    let (image, _) = link_foo_dylib_in(&dir, |o| {
         o.config.unexported = vec![b"_foo_value".to_vec()];
     });
     let trie = find_trie(&image);
@@ -1560,7 +1560,7 @@ fn m3_export_filters_shape_trie_and_symtab() {
     // -exported_symbols_list whitelists: only _foo_add (+ the header
     // symbol) exports.
     let dir2 = unique_dir("m3exported");
-    let (image2, _) = link_foo_dylib_in(dir2, |o| {
+    let (image2, _) = link_foo_dylib_in(&dir2, |o| {
         o.config.exported_only = Some(vec![b"_foo_add".to_vec(), b"__mh_execute_header".to_vec()]);
     });
     let trie2 = find_trie(&image2);
@@ -1573,8 +1573,8 @@ fn m3_export_filters_shape_trie_and_symtab() {
 
 #[test]
 fn m3_dylib_link_is_deterministic() {
-    let (a, _) = link_foo_dylib_in(unique_dir("m3det1"), |_| {});
-    let (b, _) = link_foo_dylib_in(unique_dir("m3det2"), |_| {});
+    let (a, _) = link_foo_dylib_in(&unique_dir("m3det1"), |_| {});
+    let (b, _) = link_foo_dylib_in(&unique_dir("m3det2"), |_| {});
     assert_eq!(a, b, "double link must be byte-identical (TDD §4.3)");
 }
 
@@ -1585,7 +1585,7 @@ fn m3_driver_scans_dylib_exports_for_client_links() {
     let dir = unique_dir("m3scan");
     let lib_dir = dir.join("lib");
     std::fs::create_dir_all(&lib_dir).unwrap();
-    let (lib, _) = link_foo_dylib_in(lib_dir, |_| {});
+    let (lib, _) = link_foo_dylib_in(&lib_dir, |_| {});
     let lib_path = dir.join("libfoo.dylib");
     std::fs::write(&lib_path, &lib).unwrap();
     let scanned =
@@ -1669,8 +1669,8 @@ fn m4_fused_matches_reference_on_m2_and_m3_corpora() {
     );
 
     // M3: the foo dylib.
-    let (fused, _) = link_foo_dylib_in(unique_dir("m4m3"), |_| {});
-    let (reference, _) = link_foo_dylib_in(unique_dir("m4m3ref"), |_| {});
+    let (fused, _) = link_foo_dylib_in(&unique_dir("m4m3"), |_| {});
+    let (reference, _) = link_foo_dylib_in(&unique_dir("m4m3ref"), |_| {});
     assert_eq!(
         fused, reference,
         "M4 fused vs reference diverged on the M3 dylib corpus"
@@ -1682,19 +1682,19 @@ fn m4_fused_matches_reference_on_m2_and_m3_corpora() {
 #[test]
 fn m4_fused_outputs_pass_the_strict_verifier() {
     // Dynamic executable.
-    let (image, _) = link_corpus_in(unique_dir("m4vexec"));
+    let (image, _) = link_corpus_in(&unique_dir("m4vexec"));
     assert!(
         verify_strict(&image).is_ok(&pgr_verify::Options::default()),
         "fused executable failed strict verification"
     );
     // Dylib.
-    let (image, _) = link_foo_dylib_in(unique_dir("m4vdylib"), |_| {});
+    let (image, _) = link_foo_dylib_in(&unique_dir("m4vdylib"), |_| {});
     assert!(
         verify_strict(&image).is_ok(&pgr_verify::Options::default()),
         "fused dylib failed strict verification"
     );
     // Bundle.
-    let (image, _) = link_foo_dylib_in(unique_dir("m4vbundle"), |o| {
+    let (image, _) = link_foo_dylib_in(&unique_dir("m4vbundle"), |o| {
         o.config.filetype = pgr_core::layout::OutputType::Bundle;
         o.config.install_name = None;
     });
@@ -1708,8 +1708,8 @@ fn m4_fused_outputs_pass_the_strict_verifier() {
 /// byte-identical, including the parallel Pass 1 schedule.
 #[test]
 fn m4_fused_double_link_is_byte_identical() {
-    let (a, _) = link_corpus_in(unique_dir("m4det"));
-    let (b, _) = link_corpus_in(unique_dir("m4det"));
+    let (a, _) = link_corpus_in(&unique_dir("m4det"));
+    let (b, _) = link_corpus_in(&unique_dir("m4det"));
     assert_eq!(a, b, "double link must be byte-identical (TDD §4.3)");
 }
 
