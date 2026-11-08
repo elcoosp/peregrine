@@ -86,7 +86,7 @@ pub(crate) fn put_str(out: &mut Vec<u8>, s: &str) {
     put_bytes(out, s.as_bytes());
 }
 
-pub(crate) fn put_opt_str(out: &mut Vec<u8>, s: &Option<String>) {
+pub(crate) fn put_opt_str(out: &mut Vec<u8>, s: Option<&str>) {
     match s {
         Some(v) => {
             put_u8(out, 1);
@@ -335,7 +335,7 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         }
         None => put_u8(out, 0),
     }
-    put_opt_str(out, &cfg.install_name);
+    put_opt_str(out, cfg.install_name.as_deref());
     put_u32(out, cfg.current_version);
     put_u32(out, cfg.compatibility_version);
     match &cfg.exported_only {
@@ -507,6 +507,13 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         current_version,
         compatibility_version,
         exported_only,
+        // M9 tier-2a: the import and signature anchors are driver-side
+        // cross-link state (the record sidecar lives next to the output,
+        // §7.3) and the wire carries them deliberately not — the daemon
+        // links clean, and resident + incremental fusion is GA scope
+        // (roadmap row M9).
+        stable_imports: None,
+        sig_anchor: None,
         unexported,
         dead_strippable,
         dead_strip,
@@ -562,6 +569,10 @@ mod tests {
             load_symbols: vec![b"_kept".to_vec()],
             icf: pgr_core::icf::IcfMode::Safe,
             layout_slack: Some(pgr_core::SlackPolicy::default()),
+            // Not on the wire (see decode): the daemon links clean; the
+            // cross-link anchors stay driver-side state.
+            stable_imports: None,
+            sig_anchor: None,
             slack_anchor: vec![pgr_core::slack::SlackAnchor {
                 seg: "__TEXT".into(),
                 name: "__text".into(),
