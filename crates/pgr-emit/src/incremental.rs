@@ -1464,7 +1464,7 @@ fn list_ranges(ranges: impl Iterator<Item = Range<u64>>) -> String {
 
 /// The §7.3 ladder tier-2 admission (architecture doc §7.3 "layout
 /// stability"): the skeleton moved, and the move is a pure suffix
-/// relayout. Two triggers map onto the tier:
+/// relayout. Three triggers map onto the tier:
 ///
 /// * a section overflowed its anchor and re-padded naturally — it holds
 ///   its base while everything behind it shifts, and the growth stays
@@ -1472,21 +1472,28 @@ fn list_ranges(ranges: impl Iterator<Item = Range<u64>>) -> String {
 ///   says `SegmentRelayout` for *every* resized section);
 /// * the `__LINKEDIT` chunk stream outgrew its signature-boundary
 ///   reservation — the boundary moves with it while every content
-///   section stays put.
+///   section stays put;
+/// * the chunk stream *shrank* below its boundary with no signature
+///   reservation to absorb it (an unsigned image records `sig_off = 0`,
+///   so there is nothing to anchor the tail) — the boundary comes down
+///   and the image shrinks with it, while every content section and
+///   segment stays put. The clone is truncated to the new size; the
+///   moved chunk tail is re-emitted by the span diff.
 ///
 /// Anything else (a segment base moving, a section swapping slots, a
 /// held section shifting, identity or image-base changes, a new
-/// `LC_UUID` slot off page 0, an image *shrink*) is structural and
-/// refuses the tier — the full link remains the always-correct fallback.
+/// `LC_UUID` slot off page 0, an image *shrink* that moves any content
+/// byte) is structural and refuses the tier — the full link remains the
+/// always-correct fallback.
 fn relayout_delta(
     record: &LinkRecord,
     layout: &Layout,
     policy: Option<&SlackPolicy>,
 ) -> Option<RelayoutDelta> {
     let policy = policy?;
-    if layout.file_size < record.file_size {
-        return None;
-    }
+    // The shrink rung is admitted only for a frozen content skeleton —
+    // verified below by refusing every resized section while shrinking.
+    let shrinking = layout.file_size < record.file_size;
     if record.ident != layout.ident
         || record.filetype != layout.filetype
         || record.image_base != layout.image_base
@@ -1532,6 +1539,13 @@ fn relayout_delta(
         }
     }
     if let Some(k) = first_change {
+        // A shrinking image may not resize any section: under the M9
+        // anchors a content section only ever outgrows its reservation, so
+        // a resize beside a shrinking tail means something downstream
+        // moved backwards — structural (the full link re-derives it).
+        if shrinking {
+            return None;
+        }
         let r = &record.sections[k];
         let n = &sections[k];
         // The overflowing section holds its base and grows.
