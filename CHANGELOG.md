@@ -9,6 +9,55 @@ release automation.
 
 ### Features
 
+- **emit:** M9 GA hardening — the relayout tier's **shrink rung** (the
+  tier-2 trigger's mirror; architecture doc §7.3 "the fallback must
+  always be available" cuts both ways). An unsigned relink (`-no_adhoc`)
+  has no signature boundary to anchor the `__LINKEDIT` tail, so a
+  symtab/string-pool shrink — the local-symbol block removed — moves the
+  chunk-stream end down and the image shrinks with it. The planner now
+  admits that shape as a relayout patch plan when the content skeleton is
+  frozen end to end (any content-section resize beside a shrinking image
+  stays structural and falls back): the clone is truncated to the new
+  size, the moved chunk tail is re-emitted from the span diff, and the
+  byte-identity contract (patched == full fused emit of the same plan) is
+  unchanged. A signed relink never shrinks — the sig anchor pins the
+  boundary — so this rung serves exactly the corpus the signed tiers
+  could not
+- **driver:** `-incremental-verify`'s strict-verifier audit no longer
+  counts the deliberate "arm64 images require an ad-hoc code signature"
+  error against a deliberately unsigned link (`-no_adhoc`): the audit
+  gates fixups, chains, segments and symtab at full strictness, and the
+  missing-signature shape is the config's own choice, not a patch defect.
+  Signed links keep the signature gate unchanged
+
+### Tests
+
+- `pgr-emit/tests/incremental.rs` (1 new, 1 rewritten): the shrink-rung
+  byte-identity gate (shrink patches through the relayout tier, the
+  shrunk state is a relinkable baseline for a tier-1 body edit and a
+  tier-2 regrow), and the M9 GA randomized-edit walk grows the symtab
+  churn dimension (grow past / shrink below the boundary reservation) and
+  a `PGR_RANDOMIZED_STEPS` profile knob — 2000 sequences × 5 steps is the
+  roadmap's 10⁴-step GA bar
+- `pgr-driver/tests/m9_randomized.rs` (new): the GA randomized
+  edit-sequence gate end to end — a seeded xorshift64* walk over body
+  flips, growth within slack, symtab churn (the shrink rung's side) and
+  no-ops, driving the real `-incremental -incremental-verify` loop over
+  files with the record sidecar in the mix; every step must land on a
+  patch that reuses most tiles, an untouched no-op, or an honest
+  fallback that re-records, and every output must verify clean
+- `pgr-driver/tests/m9_incremental.rs` (1 new): the shrink rung end to
+  end — the unsigned shrinking relink patches through the relayout tier,
+  the image shrinks, the output verifies, and the shrunk baseline still
+  relinks
+
+### Performance
+
+- `pgr-driver/incremental_shrink` bench: new `linkedit_shrink_relink_8mib`
+  group (an unsigned 8 MiB corpus alternating a 512-local-symbol object
+  with the pristine one — shrink and regrow through the tail) with a
+  per-direction bytes-written accounting pass
+
 - **emit:** M9 tier 2 — the **segment-relayout patch tier** executes (the
   §7.3 ladder's middle rung; architecture doc §10.4 row M9 GA). A skeleton
   shift no longer falls straight to the clean link: a section that

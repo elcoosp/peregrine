@@ -99,6 +99,24 @@ fn greet() -> ObjectBuilder {
     b
 }
 
+/// hello.o plus `locals` unreferenced local symbols pinned into `__text`:
+/// the locals land in the output symtab and string pool (the tier-2a
+/// symbol-count gate proves they do), so adding them grows the
+/// `__LINKEDIT` chunk stream and removing it shrinks — the LINKEDIT-shrink
+/// corpus. The text bytes and relocations are invariant under `locals`.
+fn hello_with_locals(text_bytes: usize, body_flip: bool, locals: usize) -> ObjectBuilder {
+    let mut b = hello(text_bytes, body_flip);
+    for i in 0..locals {
+        b.add_symbol(ObjectSymbol::Defined {
+            name: format!("_pgr_local_{i:04}"),
+            section_index: 0,
+            value: u64::try_from(i % 16).unwrap_or(0) * 4,
+            weak: false,
+        });
+    }
+    b
+}
+
 fn inputs(hello: &ObjectBuilder) -> Vec<LinkInput> {
     vec![
         LinkInput {
@@ -369,6 +387,120 @@ fn symbol_count_change_patches_in_place_inside_the_linkedit_reservation() {
     assert_eq!(
         next_record,
         LinkRecord::record(&layout2, &objects2, &full).unwrap()
+    );
+}
+
+#[test]
+fn linkedit_shrink_patches_through_segment_relayout() {
+    // The §7.3 ladder's shrink rung (the tier-2 trigger's mirror): an
+    // unsigned image has no signature boundary to anchor the chunk tail
+    // (`adhoc = false` records `sig_off = 0`), so a symtab/string-pool
+    // shrink — the locals block removed — moves the `__LINKEDIT` end down
+    // and the image shrinks with it. The content skeleton is frozen end to
+    // end, so the relayout tier must admit the shape: the clone is
+    // truncated to the new size, the moved chunk tail is re-emitted, and
+    // the byte-identity contract holds. (The signed counterpart never
+    // shrinks — the sig anchor keeps the boundary — and stays tier-1.)
+    let old = inputs(&hello_with_locals(64, false, 256));
+    let cfg_old = cfg_adhoc(OutputType::Execute, true, Vec::new(), false);
+    let (layout1, objects1) = link(&old, &cfg_old);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    assert_eq!(record.linkedit.sig_off, 0, "the corpus is unsigned");
+
+    let new = inputs(&hello_with_locals(64, false, 0));
+    let mut cfg_new = cfg_adhoc(OutputType::Execute, true, anchors_of(&layout1), false);
+    cfg_new.sig_anchor = None;
+    let (layout2, objects2) = link(&new, &cfg_new);
+    assert!(
+        layout2.file_size < layout1.file_size,
+        "the chunk stream shrank the image ({} -> {})",
+        layout1.file_size,
+        layout2.file_size
+    );
+    let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
+    let plan = match decision {
+        PatchDecision::InPlace(plan) => plan,
+        PatchDecision::Fallback(reason) => panic!(
+            "a LINKEDIT shrink over a frozen content skeleton must patch (the shrink rung), got Fallback({reason:?})"
+        ),
+    };
+    assert!(
+        plan.relayout.is_some(),
+        "the shrinking tail is a segment-relayout plan"
+    );
+
+    let dir = workdir("linkedit_shrink");
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+    let (outcome, next_record) =
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+    assert!(!outcome.untouched);
+    assert!(
+        outcome.bytes_patched < image1.len() as u64,
+        "the shrink patch must not rewrite the whole image ({} of {})",
+        outcome.bytes_patched,
+        image1.len()
+    );
+    let full = build_image_fused(&layout2, &objects2).unwrap();
+    assert_eq!(
+        std::fs::read(&prev).unwrap(),
+        full,
+        "the shrink patch must stay byte-identical to the full fused emit"
+    );
+    assert_eq!(
+        next_record,
+        LinkRecord::record(&layout2, &objects2, &full).unwrap()
+    );
+    assert_eq!(next_record.file_size, layout2.file_size);
+
+    // The shrunk state is the next relink's baseline: a same-size body edit
+    // on top patches in place (tier 1), and the locals grow back through
+    // the LINKEDIT-overflow trigger (tier 2, the pre-existing direction).
+    let flipped = inputs(&hello_with_locals(64, true, 0));
+    let (layout3, objects3) = link(&flipped, &cfg_new);
+    let decision3 = plan_patch(
+        &next_record,
+        &layout3,
+        &objects3,
+        cfg_new.layout_slack.as_ref(),
+    )
+    .unwrap();
+    let plan3 = match decision3 {
+        PatchDecision::InPlace(plan) => plan,
+        PatchDecision::Fallback(reason) => panic!(
+            "a body edit on the shrunk baseline must patch in place, got Fallback({reason:?})"
+        ),
+    };
+    let (outcome3, record3) =
+        apply_patch(&prev, &next_record, &plan3, &layout3, &objects3, &prev).unwrap();
+    let full3 = build_image_fused(&layout3, &objects3).unwrap();
+    assert_eq!(std::fs::read(&prev).unwrap(), full3);
+    assert_eq!(
+        record3,
+        LinkRecord::record(&layout3, &objects3, &full3).unwrap()
+    );
+    assert!(
+        outcome3.bytes_patched < image1.len() as u64,
+        "the tier-1 patch on the shrunk baseline stays small"
+    );
+
+    let regrown = inputs(&hello_with_locals(64, true, 256));
+    let (layout4, objects4) = link(&regrown, &cfg_new);
+    let decision4 =
+        plan_patch(&record3, &layout4, &objects4, cfg_new.layout_slack.as_ref()).unwrap();
+    let plan4 = match decision4 {
+        PatchDecision::InPlace(plan) => plan,
+        PatchDecision::Fallback(reason) => panic!(
+            "the locals growing back is the LINKEDIT-overflow trigger, got Fallback({reason:?})"
+        ),
+    };
+    let (_, _) = apply_patch(&prev, &record3, &plan4, &layout4, &objects4, &prev).unwrap();
+    let full4 = build_image_fused(&layout4, &objects4).unwrap();
+    assert_eq!(
+        std::fs::read(&prev).unwrap(),
+        full4,
+        "the regrow patch must stay byte-identical to the full fused emit"
     );
 }
 
@@ -723,6 +855,13 @@ fn unsigned_output_patches_without_a_hash_table() {
 /// An object whose `__data` carries one external pointer per entry of
 /// `binds` (undefined externs resolved by `cfg.dylibs`), plus `_main`.
 fn pointer_main(text_bytes: usize, binds: &[&str]) -> ObjectBuilder {
+    pointer_main_with_locals(text_bytes, binds, 0)
+}
+
+/// `pointer_main` plus `locals` unreferenced local symbols pinned into
+/// `__text` (invariant text bytes; the symtab/string-pool churn rides the
+/// `__LINKEDIT` chunk stream).
+fn pointer_main_with_locals(text_bytes: usize, binds: &[&str], locals: usize) -> ObjectBuilder {
     let mut words: Vec<u32> = vec![0xD65F_03C0]; // ret
     words.resize(text_bytes / 4, 0xD503_201F);
     let text: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -734,6 +873,14 @@ fn pointer_main(text_bytes: usize, binds: &[&str]) -> ObjectBuilder {
         b.add_symbol(ObjectSymbol::Undefined {
             name: (*name).into(),
             weak_ref: false,
+        });
+    }
+    for i in 0..locals {
+        b.add_symbol(ObjectSymbol::Defined {
+            name: format!("_pgr_local_{i:04}"),
+            section_index: text_idx,
+            value: u64::try_from(i % 16).unwrap_or(0) * 4,
+            weak: false,
         });
     }
     b.add_symbol(ObjectSymbol::Defined {
@@ -881,10 +1028,14 @@ fn import_adding_edit_patches_byte_identically_with_stable_ordinals() {
 #[test]
 fn randomized_edit_sequences_keep_the_patch_byte_identical() {
     // The scaled-down M9 GA randomized gate (roadmap: 10⁴ sequences on the
-    // decision rig; CI runs this deterministic subset). A xorshift64* walk
-    // over edit kinds — body flip, import add, import retarget, no-op —
-    // must land every step on either an in-place patch that is byte-
-    // identical to the full emit, or an honest fallback that re-records.
+    // decision rig; CI runs this deterministic subset, and
+    // `PGR_RANDOMIZED_STEPS` scales the sequence count — 2000 sequences
+    // × 5 steps is the 10⁴ GA profile). A xorshift64* walk over edit
+    // kinds — body growth, import add, import retarget, oversized growth,
+    // symtab churn (grow past / shrink below the boundary reservation),
+    // no-op — must land every step on either an in-place patch that is
+    // byte-identical to the full emit, or an honest fallback that
+    // re-records.
     let kind = OutputType::Execute;
     let exports = ["_log", "_warn", "_trace"];
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -902,6 +1053,7 @@ fn randomized_edit_sequences_keep_the_patch_byte_identical() {
     let mut record = LinkRecord::record(&layout, &objects, &image).unwrap();
     let mut binds: usize = 1;
     let mut shift: usize = 0;
+    let mut locals: usize = 0;
 
     let dir = workdir("randomized");
     let prev = dir.join("out");
@@ -909,42 +1061,76 @@ fn randomized_edit_sequences_keep_the_patch_byte_identical() {
 
     let mut in_place_steps = 0u32;
     let mut fallback_steps = 0u32;
-    for _seq in 0..16 {
+    let mut symtab_grow_steps = 0u32;
+    let mut symtab_shrink_steps = 0u32;
+    let sequences: usize = std::env::var("PGR_RANDOMIZED_STEPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
+    for _seq in 0..sequences {
         for _step in 0..5 {
             // Pick the edit from the generator.
-            let roll = next() % 5;
+            let roll = next() % 7;
 
-            let (new_binds, new_shift, new_text) = match roll {
+            let (new_binds, new_shift, new_text, new_locals) = match roll {
                 0 => {
                     // Body growth within slack (same import surface).
                     (
                         binds,
                         shift,
                         8 * 1024 + usize::try_from(next() % 2048).unwrap(),
+                        locals,
                     )
                 }
                 1 => {
                     // Import add: an extra pointer to a (possibly new) export.
-                    ((binds + 1).min(exports.len() + 2), shift, 8 * 1024)
+                    ((binds + 1).min(exports.len() + 2), shift, 8 * 1024, locals)
                 }
                 2 => {
                     // Import retarget: same size, different ordinals.
-                    (binds.max(1), shift + 1, 8 * 1024)
+                    (binds.max(1), shift + 1, 8 * 1024, locals)
                 }
                 3 => {
                     // Big growth: blows the section's reservation — the
                     // ladder's honest exit (re-layout tier classification,
                     // the v1 engine re-runs the full link).
-                    (binds, shift, 8 * 1024 + 24 * 1024)
+                    (binds, shift, 8 * 1024 + 24 * 1024, locals)
+                }
+                4 => {
+                    // Symtab growth past the boundary reservation: the
+                    // LINKEDIT-overflow trigger (tier 2's first shape).
+                    (
+                        binds,
+                        shift,
+                        8 * 1024,
+                        usize::try_from(next() % 512).unwrap_or(0) + 256,
+                    )
+                }
+                5 => {
+                    // Symtab shrink: the chunk stream contracts under the
+                    // anchored signature boundary (the tier-1 absorb; the
+                    // unsigned shrink rung has its own deterministic gate).
+                    (
+                        binds,
+                        shift,
+                        8 * 1024,
+                        usize::try_from(next() % 128).unwrap_or(0),
+                    )
                 }
                 _ => {
                     // No-op: the untouched path must stay untouched.
-                    (binds, shift, 8 * 1024)
+                    (binds, shift, 8 * 1024, locals)
                 }
             };
             binds = new_binds;
             shift = new_shift % exports.len();
             let text_bytes = new_text;
+            if new_locals > locals {
+                symtab_grow_steps += 1;
+            } else if new_locals < locals {
+                symtab_shrink_steps += 1;
+            }
+            locals = new_locals;
             let build_binds: Vec<&str> = (0..binds)
                 .map(|i| exports[(i + shift) % exports.len()])
                 .collect();
@@ -954,7 +1140,10 @@ fn randomized_edit_sequences_keep_the_patch_byte_identical() {
                 Some(record.imports.clone()),
                 Some(layout.linkedit.sig_off),
             );
-            let (l2, o2) = link(&inputs(&pointer_main(text_bytes, &build_binds)), &cfg_n);
+            let (l2, o2) = link(
+                &inputs(&pointer_main_with_locals(text_bytes, &build_binds, locals)),
+                &cfg_n,
+            );
             let full = build_image_fused(&l2, &o2).unwrap();
 
             match plan_patch(&record, &l2, &o2, cfg_n.layout_slack.as_ref()).unwrap() {
@@ -997,6 +1186,11 @@ fn randomized_edit_sequences_keep_the_patch_byte_identical() {
     assert!(
         in_place_steps > 0 && fallback_steps > 0,
         "the walk must exercise both tiers (in place: {in_place_steps}, fallback: {fallback_steps})"
+    );
+    assert!(
+        symtab_grow_steps > 0 && symtab_shrink_steps > 0,
+        "the walk must exercise the symtab-churn dimension \
+         (grow: {symtab_grow_steps}, shrink: {symtab_shrink_steps})"
     );
 }
 

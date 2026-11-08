@@ -12,7 +12,8 @@ members = [
 # cargo-fuzz harness lives in its own workspace (nightly-only).
 exclude = ["fuzz"]
 
-version = "0.4.0"
+[workspace.package]
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
