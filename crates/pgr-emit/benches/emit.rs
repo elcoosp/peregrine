@@ -109,5 +109,42 @@ fn main() {
     group.finish();
     let _ = total;
 
+    // The §7.2 output-residency rung's transport price (wire v5): the
+    // changed-tile diff and the client-side replay over an 8 MiB image —
+    // the CPU cost the rung adds per relink against the megabytes it
+    // keeps off the wire. The one-tile edit is the warm-loop shape (the
+    // fusion benches' corpus); the untouched scan is the pure gate.
+    let image_8mib: Vec<u8> = (0..8 * 1024 * 1024usize)
+        .map(|i| (i * 31 % 251) as u8)
+        .collect();
+    let mut edited = image_8mib.clone();
+    edited[3 * 16 * 1024 + 7] ^= 0xff;
+    let stream = pgr_emit::incremental::diff_tiles(&image_8mib, &edited);
+    assert_eq!(stream.tiles.len(), 1, "the one-tile edit shapes one tile");
+
+    let mut tiles_group = criterion.benchmark_group("pgr-emit/wire-tiles");
+    tiles_group.sample_size(20);
+    tiles_group.measurement_time(core::time::Duration::from_secs(4));
+    tiles_group.throughput(Throughput::Bytes(image_8mib.len() as u64));
+    tiles_group.bench_function("diff_one_tile_edit_8mib", |b| {
+        b.iter(|| {
+            let s = pgr_emit::incremental::diff_tiles(&image_8mib, &edited);
+            std::hint::black_box(s.wire_bytes());
+        });
+    });
+    tiles_group.bench_function("replay_one_tile_edit_8mib", |b| {
+        b.iter(|| {
+            let out = pgr_emit::incremental::apply_tiles(&image_8mib, &stream);
+            std::hint::black_box(out.len());
+        });
+    });
+    tiles_group.bench_function("diff_untouched_8mib", |b| {
+        b.iter(|| {
+            let s = pgr_emit::incremental::diff_tiles(&image_8mib, &image_8mib);
+            std::hint::black_box(s.tiles.len());
+        });
+    });
+    tiles_group.finish();
+
     criterion.final_summary();
 }
