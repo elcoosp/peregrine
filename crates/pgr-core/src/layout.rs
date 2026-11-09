@@ -1704,11 +1704,21 @@ fn build_bucket_pieces(
                 // string. Deterministic: files in FileId order, strings in
                 // offset order.
                 let bucket = &mut pieces_of_bucket[bi];
-                if !cstring_instances.iter().any(|(b, _)| *b == bi) {
-                    cstring_instances.push((bi, Vec::new()));
-                }
-                let Some((_, list)) = cstring_instances.iter_mut().find(|(b, _)| *b == bi) else {
-                    unreachable!("cstring instance list was just inserted");
+                // D4's find-or-insert in one walk: the check-push-find-again
+                // dance it replaced re-scanned the list twice and named the
+                // borrow-checked gap with an `unreachable!` — a panic, not a
+                // typed refusal (TDD §2: typed errors, never panic).
+                let list = match cstring_instances.iter_mut().find(|(b, _)| *b == bi) {
+                    Some((_, list)) => list,
+                    None => {
+                        cstring_instances.push((bi, Vec::new()));
+                        let Some((_, list)) = cstring_instances.last_mut() else {
+                            return Err(LinkError::Internal {
+                                message: "cstring instance list refused its own insert".into(),
+                            });
+                        };
+                        list
+                    }
                 };
                 for range in obj.atoms_of(si) {
                     if live.is_active() && live.is_atom_dead(obj.file.0, si, range.start) {
@@ -2279,7 +2289,12 @@ fn resolve_all(
                 };
                 slots.push((0, kind));
             }
-            Some(SynthKind::StubSlot { .. }) => unreachable!("stubs resolved in pass B"),
+            Some(SynthKind::StubSlot { .. }) => {
+                return Err(LinkError::Internal {
+                    message: "a stub slot reached pass-C synthesis (stubs resolve in pass B)"
+                        .into(),
+                });
+            }
             Some(SynthKind::Veneer { target, .. }) => {
                 // M6: `adrp x16, target@page` + `add x16, x16,
                 // target@pageoff` — the `br x16` needs no patch. The target
