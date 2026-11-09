@@ -20,7 +20,8 @@ use pgr_core::resolve::Dylib;
 use pgr_core::slack::{SlackAnchor, SlackPolicy};
 use pgr_core::stable_imports::StableImport;
 use pgr_emit::incremental::{
-    FallbackReason, Integrity, LinkRecord, PatchDecision, apply_patch, check_output, plan_patch,
+    FallbackReason, Integrity, LinkRecord, PatchDecision, PatchError, apply_patch,
+    apply_patch_bytes, check_output, output_integrity, plan_patch,
 };
 use pgr_emit::{build_image_fused, write_image};
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
@@ -1415,4 +1416,125 @@ fn record_without_a_snapshot_round_trips_as_none() {
     let decoded = LinkRecord::decode(&bytes).expect("the record decodes");
     assert_eq!(decoded, record);
     assert!(decoded.resolution.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// M9 GA — the resident fusion rung: the patch engine's bytes-level twins.
+// The daemon serves the §7.3 ladder in memory (the session holds the
+// pipeline state), so the integrity gate and the patch body need byte-slice
+// forms that agree with the file paths exactly.
+// ---------------------------------------------------------------------------
+
+/// The bytes-level integrity gate agrees with the file gate on the same
+/// state: Match on the recorded image, Mismatch on any edited page and on
+/// a resize, errors on both sides travel together.
+#[test]
+fn output_integrity_matches_the_file_gate() {
+    let cfg_old = cfg(OutputType::Execute, true, Vec::new());
+    let (layout1, objects1) = link(&inputs(&hello(8192, false)), &cfg_old);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+
+    let dir = workdir("integrity_bytes");
+    let path = dir.join("out");
+    write_image(&image1, &path).unwrap();
+    assert!(matches!(
+        check_output(&path, &record).unwrap(),
+        Integrity::Match
+    ));
+    assert!(matches!(
+        output_integrity(&image1, &record).unwrap(),
+        Integrity::Match
+    ));
+
+    // A flipped page-0 byte trips both gates (page 0 is in every sample
+    // set: the stride walk starts at it).
+    let mut flipped = image1.clone();
+    flipped[0] ^= 0xFF;
+    assert!(matches!(
+        output_integrity(&flipped, &record).unwrap(),
+        Integrity::Mismatch { .. }
+    ));
+    std::fs::write(&path, &flipped).unwrap();
+    assert!(matches!(
+        check_output(&path, &record).unwrap(),
+        Integrity::Mismatch { .. }
+    ));
+
+    // A resized image mismatches before any hashing.
+    let mut resized = image1.clone();
+    resized.push(0);
+    assert!(matches!(
+        output_integrity(&resized, &record).unwrap(),
+        Integrity::Mismatch { .. }
+    ));
+}
+
+/// The bytes-level patch twin produces the same bytes and the same record
+/// as the file path — the daemon's in-memory ladder rides the same
+/// byte-identity contract the clone-and-patch path gates.
+#[test]
+fn apply_patch_bytes_matches_the_file_patch() {
+    let cfg_old = cfg(OutputType::Execute, true, Vec::new());
+    let (layout1, objects1) = link(&inputs(&hello(8192, false)), &cfg_old);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+
+    let dir = workdir("patch_bytes");
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+
+    let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg_new.sig_anchor = (layout1.linkedit.sig_off > 0).then_some(layout1.linkedit.sig_off);
+    let (layout2, objects2) = link(&inputs(&hello(8192, true)), &cfg_new);
+    let image2_full = build_image_fused(&layout2, &objects2).unwrap();
+    let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
+    let plan = match &decision {
+        PatchDecision::InPlace(p) => p.clone(),
+        PatchDecision::Fallback(r) => panic!("expected in place, fell back: {r}"),
+    };
+
+    let (file_outcome, file_record) =
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
+    let (bytes_outcome, bytes_record, bytes_image) =
+        apply_patch_bytes(&image1, &record, &plan, &layout2, &objects2, None).unwrap();
+    assert_eq!(file_outcome, bytes_outcome, "same writes, same counters");
+    assert_eq!(file_record, bytes_record, "same refreshed state");
+    let patched = std::fs::read(&prev).unwrap();
+    assert_eq!(patched, bytes_image, "file and bytes patches agree");
+    assert_eq!(
+        bytes_image, image2_full,
+        "the engine contract holds at bytes level"
+    );
+
+    // The untouched plan refuses exactly like the file path (callers
+    // short-circuit before either).
+    let decision3 = plan_patch(
+        &bytes_record,
+        &layout2,
+        &objects2,
+        cfg_new.layout_slack.as_ref(),
+    )
+    .unwrap();
+    let untouched = match &decision3 {
+        PatchDecision::InPlace(p) => p.clone(),
+        PatchDecision::Fallback(r) => panic!("expected in place, fell back: {r}"),
+    };
+    assert!(untouched.is_untouched());
+    let err = apply_patch_bytes(
+        &bytes_image,
+        &bytes_record,
+        &untouched,
+        &layout2,
+        &objects2,
+        None,
+    );
+    assert!(matches!(err, Err(PatchError::Fallback(_))), "{err:?}");
+
+    // A resized previous image is a fallback, not an error: the ladder's
+    // bottom rung (the full link) owns it.
+    let mut grown = image1.clone();
+    grown.push(0);
+    let err = apply_patch_bytes(&grown, &record, &plan, &layout2, &objects2, None);
+    assert!(matches!(err, Err(PatchError::Fallback(_))), "{err:?}");
 }

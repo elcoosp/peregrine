@@ -1969,6 +1969,17 @@ fn plan_relayout(
 // The output integrity gate
 // ---------------------------------------------------------------------------
 
+/// The sampled page set both integrity gates check: page 0, every
+/// `SAMPLE_STRIDE`-th hashed page, the last hashed page — sorted, deduped.
+fn sample_pages(pages: u64) -> Vec<u64> {
+    let last = pages - 1;
+    let mut sample: Vec<u64> = (0..pages).step_by(SAMPLE_STRIDE as usize).collect();
+    sample.push(last);
+    sample.sort_unstable();
+    sample.dedup();
+    sample
+}
+
 /// Cheaply verifies the previous output still matches the record: the file
 /// length and the SHA-256 of page 0, every 64th hashed page and the last
 /// hashed page. [`Integrity::Mismatch`] falls back — never overwrites.
@@ -1997,12 +2008,7 @@ pub fn check_output(prev_path: &Path, record: &LinkRecord) -> Result<Integrity, 
     if pages == 0 {
         return Ok(Integrity::Match);
     }
-    let last = pages - 1;
-    let mut sample: Vec<u64> = (0..pages).step_by(SAMPLE_STRIDE as usize).collect();
-    sample.push(last);
-    sample.sort_unstable();
-    sample.dedup();
-    for p in sample {
+    for p in sample_pages(pages) {
         let at = p * HASH_PAGE;
         let take = HASH_PAGE.min(record.code_limit - at);
         let mut buf = vec![0u8; take as usize];
@@ -2012,6 +2018,54 @@ pub fn check_output(prev_path: &Path, record: &LinkRecord) -> Result<Integrity, 
                 source,
             })?;
         let got: [u8; 32] = Sha256::digest(&buf).into();
+        let want = record
+            .page_hashes
+            .get(p as usize)
+            .ok_or_else(|| PatchError::Contract {
+                message: format!("record has no hash for sampled page {p}"),
+            })?;
+        if got != *want {
+            return Ok(Integrity::Mismatch {
+                detail: format!("page {p} hash diverges from the record"),
+            });
+        }
+    }
+    Ok(Integrity::Match)
+}
+
+/// The bytes-level twin of [`check_output`]: the same length and
+/// sampled-page-hash gate over an in-memory image — the resident session's
+/// ladder runs it on the previous output the client transferred as a blob.
+/// The two gates check the same sampled page set (page 0, every
+/// `SAMPLE_STRIDE`-th hashed page, the last) and answer identically on
+/// identical state.
+///
+/// # Errors
+/// [`PatchError::Contract`] when the record carries no hash for a sampled
+/// page (a decode-level bug, not a state mismatch).
+pub fn output_integrity(prev: &[u8], record: &LinkRecord) -> Result<Integrity, PatchError> {
+    if prev.len() as u64 != record.file_size {
+        return Ok(Integrity::Mismatch {
+            detail: format!(
+                "image is {} bytes, record says {}",
+                prev.len(),
+                record.file_size
+            ),
+        });
+    }
+    let pages = record.hashed_pages();
+    if pages == 0 {
+        return Ok(Integrity::Match);
+    }
+    for p in sample_pages(pages) {
+        let at = p * HASH_PAGE;
+        let end = at + HASH_PAGE.min(record.code_limit - at);
+        let buf = prev
+            .get(at as usize..end as usize)
+            .ok_or_else(|| PatchError::Contract {
+                message: format!("image shorter than the hashed page {p}"),
+            })?;
+        let got: [u8; 32] = Sha256::digest(buf).into();
         let want = record
             .page_hashes
             .get(p as usize)
@@ -2158,6 +2212,77 @@ pub fn apply_patch(
     Ok((outcome, new_record))
 }
 
+/// The bytes-level twin of [`apply_patch`]: the same plan contract and the
+/// same patch body (the shared, sink-generic `patch_file`), spliced into
+/// an in-memory copy of the previous
+/// output instead of a cloned file. The resident session's ladder runs it
+/// (§7.2 "the daemon holds no output state" survives: the patched bytes
+/// cross the wire like any image and the client's Pass 5 write owns the
+/// vnode). The result is byte-identical to the file path's output — the
+/// engine's contract, gated for both forms in `tests/incremental.rs`.
+///
+/// # Errors
+/// [`PatchError::Fallback`] when the plan is empty (untouched) or the
+/// previous bytes are not the recorded size; [`PatchError::Contract`] on
+/// plan shape bugs.
+pub fn apply_patch_bytes(
+    prev: &[u8],
+    record: &LinkRecord,
+    plan: &PatchPlan,
+    layout: &Layout,
+    objects: &[InputObject],
+    resolution: Option<pgr_core::resolve::ResolutionSnapshot>,
+) -> Result<(PatchOutcome, LinkRecord, Vec<u8>), PatchError> {
+    if plan.is_untouched() {
+        return Err(PatchError::Fallback(FallbackReason::OutputChanged {
+            detail: "plan says nothing changed".into(),
+        }));
+    }
+    let code_limit = content_limit(layout);
+    if plan.relayout.is_none() && code_limit != record.code_limit {
+        return Err(PatchError::Contract {
+            message: "plan passed the skeleton gate but the code limit moved".into(),
+        });
+    }
+    if plan.total_tiles != layout.file_size.div_ceil(TILE) as u32 {
+        return Err(PatchError::Contract {
+            message: "plan tile count disagrees with the layout".into(),
+        });
+    }
+    if prev.len() as u64 != record.file_size {
+        return Err(PatchError::Fallback(FallbackReason::OutputChanged {
+            detail: format!(
+                "previous output is {} bytes, record says {}",
+                prev.len(),
+                record.file_size
+            ),
+        }));
+    }
+    let symtab = symtab_bytes(layout);
+    let indirect = indirect_bytes(layout);
+    let ctx = TileCtx::build(layout, objects, &symtab, &indirect)?;
+    if code_limit > 0 && plan.dirty_tiles.first() != Some(&0) {
+        return Err(PatchError::Contract {
+            message: "plan must include tile 0 (the UUID page) when anything is dirty".into(),
+        });
+    }
+    // The relayout tier grew the image: the copy extends to the new size
+    // (zeros — the moved suffix's tiles rewrite everything placed there),
+    // exactly the clone path's `set_len` extension.
+    let mut out = prev.to_vec();
+    out.resize(layout.file_size as usize, 0);
+    let (outcome, page_hashes) = patch_file(&mut out, record, plan, layout, &ctx, code_limit)?;
+    let new_record = LinkRecord::assemble_from(
+        layout,
+        plan.spans.clone(),
+        page_hashes,
+        pgr_core::propagate::section_digests(objects),
+        plan.content_digests.clone(),
+        resolution,
+    )?;
+    Ok((outcome, new_record, out))
+}
+
 /// The clone's temp name (sibling, `pgr`-shaped, removed on failure).
 fn tmp_name(out_path: &Path) -> std::path::PathBuf {
     let mut name = out_path.as_os_str().to_owned();
@@ -2165,26 +2290,53 @@ fn tmp_name(out_path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-/// The patch body over an open temp file: emit dirty tiles, derive the
+/// The patch body's write target: positioned writes of tile/superblob
+/// bytes. `std::fs::File` implements it with `pwrite` (`write_all_at` —
+/// the clone-and-patch path's no-seek-races discipline); `Vec<u8>`
+/// implements it with a splice — the resident session patches in memory
+/// with the identical body ([`patch_file`] is generic over the sink).
+trait PatchSink {
+    fn write_at(&mut self, at: u64, bytes: &[u8]) -> Result<(), PatchError>;
+}
+
+impl PatchSink for std::fs::File {
+    fn write_at(&mut self, at: u64, bytes: &[u8]) -> Result<(), PatchError> {
+        self.write_all_at(bytes, at)
+            .map_err(|source| PatchError::Io {
+                path: "patch target".into(),
+                source,
+            })
+    }
+}
+
+impl PatchSink for Vec<u8> {
+    fn write_at(&mut self, at: u64, bytes: &[u8]) -> Result<(), PatchError> {
+        let end = at
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| PatchError::Contract {
+                message: "patch write overflows the image".into(),
+            })? as usize;
+        if end > self.len() {
+            self.resize(end, 0);
+        }
+        self[at as usize..end].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+/// The patch body over an open output sink: emit dirty tiles, derive the
 /// UUID, re-sign. Returns the outcome and the final (record-form) hash
-/// table.
-fn patch_file(
-    file: &mut std::fs::File,
+/// table. Generic over the sink: the file path (`pwrite` into the clone)
+/// and the bytes path (splice into the in-memory image) run the identical
+/// body, so the byte-identity contract covers both.
+fn patch_file<S: PatchSink>(
+    sink: &mut S,
     record: &LinkRecord,
     plan: &PatchPlan,
     layout: &Layout,
     ctx: &TileCtx<'_>,
     code_limit: u64,
 ) -> Result<(PatchOutcome, Vec<[u8; 32]>), PatchError> {
-    let write_at = |file: &mut std::fs::File, at: u64, bytes: &[u8]| -> Result<u64, PatchError> {
-        file.write_all_at(bytes, at)
-            .map_err(|source| PatchError::Io {
-                path: "patch target".into(),
-                source,
-            })?;
-        Ok(bytes.len() as u64)
-    };
-
     // Phase A: emit every dirty tile into the scratch, keep its bytes and
     // its (UUID-zeroed) page hashes. Tile 0 always rides in the dirty set,
     // so its page-0 hash (zeroed form) is part of the table from the start.
@@ -2262,7 +2414,8 @@ fn patch_file(
     // Phase C: pwrite the dirty tiles + the rebuilt CodeDirectory.
     let mut bytes_patched = 0u64;
     for (t, tile) in &scratches {
-        bytes_patched += write_at(file, u64::from(*t) * TILE, tile)?;
+        sink.write_at(u64::from(*t) * TILE, tile)?;
+        bytes_patched += tile.len() as u64;
     }
     if code_limit > 0 {
         let mut final_flat: Vec<u8> = Vec::with_capacity(merged.len() * 32);
@@ -2286,7 +2439,8 @@ fn patch_file(
                 ),
             });
         }
-        bytes_patched += write_at(file, layout.linkedit.sig_off, &blob)?;
+        sink.write_at(layout.linkedit.sig_off, &blob)?;
+        bytes_patched += blob.len() as u64;
     }
 
     Ok((
