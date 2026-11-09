@@ -919,6 +919,12 @@ pub fn link_reference_bytes(opts: &opts::Options) -> Result<Vec<u8>, DriverError
 /// # Errors
 /// [`DriverError`] on option, link, emit or filesystem failures.
 pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
+    // M10 rung 1: `-r` bypasses the image pipeline entirely — Passes 1–2
+    // plus the object emit; no segment layout, no record, no daemon, no
+    // signature (the conflicting knobs are refused at parse time).
+    if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+        return run_relocatable(opts);
+    }
     if opts.incremental && opts.resident {
         // M9 GA fusion rung: with a daemon reachable the relink runs
         // inside the resident session (warm POIs; the patched bytes cross
@@ -970,6 +976,34 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
         file_size: linked.image.len() as u64,
         entryoff: linked.entryoff,
         fixup_slots: linked.fixup_slots,
+        patch: None,
+        audit: None,
+        transport: None,
+    })
+}
+
+/// The `-r` path (M10 rung 1): Pass 0 maps the inputs exactly as the
+/// image pipeline does (filelists, archives, `.tbd` dylibs), Passes 1–2
+/// run through [`pgr_core::link_reloc`] — undefined externals stay open,
+/// the object is a link *input* — and `pgr_emit::build_object_image`
+/// assembles the `MH_OBJECT`. The `-u`/`-force_load` liveness roots ride
+/// the archive pull fixpoint through the config; the image-only
+/// force-load resolution gate has no object shape (nothing must resolve).
+fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
+    let (prepared, _cache) = prepare_link(opts)?;
+    let linked = pgr_core::link_reloc(
+        &prepared.inputs,
+        &prepared.archives,
+        &prepared.config,
+        pgr_core::Parallelism::Auto,
+    )?;
+    let image = pgr_emit::build_object_image(&linked, &prepared.config)?;
+    write_image(&image, Path::new(&opts.output))?;
+    Ok(LinkOutcome {
+        output: opts.output.clone(),
+        file_size: image.len() as u64,
+        entryoff: 0,
+        fixup_slots: 0,
         patch: None,
         audit: None,
         transport: None,
@@ -1401,15 +1435,16 @@ pub fn version_line() -> String {
     format!("pgr (Peregrine) {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// The `--help` text (the M3 flag surface).
+/// The `--help` text (the current flag surface).
 #[must_use]
 pub fn usage() -> String {
     let mut s = String::with_capacity(1600);
     s.push_str(&version_line());
     s.push_str("\n\nPeregrine: ultra-fast Mach-O linker for arm64-apple-darwin.\n\n");
-    s.push_str("M3 — dynamic executables, dylibs and bundles: .o/.tbd/.dylib inputs,\n");
-    s.push_str("two-level namespace, GOT/stub synthesis, chained fixups (rebase+bind),\n");
-    s.push_str("full export trie with re-exports, export filters, ad-hoc signature.\n\n");
+    s.push_str("Executables, dylibs, bundles and (M10) relocatable objects: .o/.tbd/.dylib\n");
+    s.push_str("inputs, two-level namespace, GOT/stub synthesis, chained fixups\n");
+    s.push_str("(rebase+bind), full export trie with re-exports, export filters,\n");
+    s.push_str("ad-hoc signature.\n\n");
     s.push_str("Usage: pgr [options] <object files>\n\n");
     s.push_str("Options:\n");
     s.push_str("  -o <path>                    output file (required)\n");
@@ -1419,6 +1454,10 @@ pub fn usage() -> String {
     s.push_str("  -static                      static semantics (M1 default)\n");
     s.push_str("  -dylib                       link a dylib (MH_DYLIB)\n");
     s.push_str("  -bundle                      link a bundle (MH_BUNDLE)\n");
+    s.push_str("  -r                           relocatable output (MH_OBJECT):\n");
+    s.push_str("                               merged sections, preserved relocation\n");
+    s.push_str("                               entries, open undefineds — the output\n");
+    s.push_str("                               is itself a link input (M10)\n");
     s.push_str("  -install_name <path>         LC_ID_DYLIB install name (with -dylib;\n");
     s.push_str("                               defaults to the output path)\n");
     s.push_str("  -current_version <X.Y.Z>     LC_ID_DYLIB current version\n");
