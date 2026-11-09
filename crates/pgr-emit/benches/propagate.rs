@@ -94,7 +94,7 @@ fn main() {
 
     let (layout1, objects1) = link(&old);
     let image1 = pgr_emit::build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
     let (layout2, objects2) = link(&new);
     let digests = section_digests(&objects1);
 

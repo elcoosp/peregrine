@@ -404,7 +404,7 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
 fn link_to_image_recorded(
     opts: &opts::Options,
 ) -> Result<(ImageAndPlan, Option<pgr_emit::incremental::LinkRecord>), DriverError> {
-    let (prepared, cache) = prepare_link(opts)?;
+    let (mut prepared, cache) = prepare_link(opts)?;
     if opts.resident {
         let job = pgr_daemon::LinkJob::build(
             &prepared.config,
@@ -435,6 +435,11 @@ fn link_to_image_recorded(
             }
         }
     }
+    // The M9 resolve wiring, capture half: the recording link carries its
+    // Pass-2 snapshot out of the pipeline so the record's v5 section can
+    // hold it. The resident path above returns no record (resident +
+    // incremental is GA scope), so the capture rides the one-shot path.
+    prepared.config.record_resolution = opts.incremental;
     let result = pgr_core::link_cached(
         &prepared.inputs,
         &prepared.archives,
@@ -449,6 +454,7 @@ fn link_to_image_recorded(
             &result.layout,
             &result.objects,
             &image,
+            result.resolve_snapshot.as_ref(),
         )?)
     } else {
         None
@@ -976,6 +982,17 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
     // reservation lets the chunk stream grow (symtab, imports, strings)
     // without moving `sig_off`, so those edits patch in place.
     cfg.sig_anchor = (record.linkedit.sig_off > 0).then_some(record.linkedit.sig_off);
+    // M9 GA rung — the resolve's record-side wiring, reuse half: the
+    // recorded Pass-2 snapshot hands the pipeline its decisions, and the
+    // capture flag re-records the fresh state for the next cycle. Records
+    // from before the wiring (no v5 section) resolve in full.
+    cfg.record_resolution = true;
+    if let Some(resolution) = &record.resolution {
+        cfg.resolve_reuse = Some(pgr_core::resolve_reuse::ResolveReuseSeed {
+            snapshot: resolution.clone(),
+            digests: record.section_digests.clone(),
+        });
+    }
     let result = pgr_core::link_cached(
         &prepared.inputs,
         &prepared.archives,
@@ -1023,6 +1040,7 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
         &result.layout,
         &result.objects,
         output,
+        result.resolve_snapshot.clone(),
     )
     .map_err(|e| match e {
         pgr_emit::incremental::PatchError::Fallback(reason) => RelinkAttempt::Fallback(reason),
@@ -1048,9 +1066,13 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
                 eprintln!("pgr: incremental-verify: patched output diverged; healing");
             }
             write_image(&full, output).map_err(|e| RelinkAttempt::Error(e.into()))?;
-            let healed =
-                pgr_emit::incremental::LinkRecord::record(&result.layout, &result.objects, &full)
-                    .map_err(|e| RelinkAttempt::Error(e.into()))?;
+            let healed = pgr_emit::incremental::LinkRecord::record(
+                &result.layout,
+                &result.objects,
+                &full,
+                result.resolve_snapshot.as_ref(),
+            )
+            .map_err(|e| RelinkAttempt::Error(e.into()))?;
             store_record(opts, &healed);
             outcome.bytes_patched = full.len() as u64;
             outcome.dirty_tiles = plan.total_tiles;

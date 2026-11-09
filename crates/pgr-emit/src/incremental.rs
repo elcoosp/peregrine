@@ -103,8 +103,13 @@ const MAGIC: &[u8; 8] = b"PGRINC1\0";
 /// the relayout tier's shift-exemption compares a moved section's final
 /// bytes against the recorded ones, so a pure move rides the ladder while
 /// content churn inside the moved suffix stays gated; v1–v3 records
-/// decode to `None` and re-record.
-pub const FORMAT_VERSION: u32 = 4;
+/// decode to `None` and re-record. **v5** adds the resolution snapshot
+/// ([`LinkRecord::resolution`], M9 GA rung — the resolve's record-side
+/// wiring): the relink's Pass 2 plans through the recorded decisions
+/// (`pgr_core::resolve_reuse`) instead of re-deciding every external, and
+/// falls back to the full resolve whenever the shape guard refuses;
+/// v1–v4 records decode to `None` and re-record.
+pub const FORMAT_VERSION: u32 = 5;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -251,6 +256,14 @@ pub struct LinkRecord {
     /// records them. The relayout tier's shift-exemption compares these
     /// against the new plan's table.
     pub content_digests: Vec<OutputSectionDigest>,
+    /// The linked parse's Pass-2 snapshot (v5, M9 GA rung — the resolve's
+    /// record-side wiring): the candidate stream and the winning decisions
+    /// the next relink's resolve plans from
+    /// (`pgr_core::resolve_reuse::plan_reuse` / `install_reused`), refusing
+    /// to the full resolve whenever the reuse shape moved. `None` on links
+    /// that did not capture (every clean link); those relinks resolve in
+    /// full.
+    pub resolution: Option<pgr_core::resolve::ResolutionSnapshot>,
 }
 
 /// Why the incremental planner fell back to the full link. The fallback is
@@ -679,7 +692,9 @@ fn content_limit(layout: &Layout) -> u64 {
 impl LinkRecord {
     /// Records a completed full link: the plan spans, the skeleton and the
     /// signature's final page-hash table, all derived from the finished
-    /// image (so what is recorded is what is on disk).
+    /// image (so what is recorded is what is on disk). The resolution
+    /// snapshot rides along when the link captured its Pass-2 state (the
+    /// M9 resolve wiring) — `None` keeps the record lean.
     ///
     /// # Errors
     /// [`PatchError::Contract`] when the image/plan shapes disagree (the
@@ -688,6 +703,7 @@ impl LinkRecord {
         layout: &Layout,
         objects: &[InputObject],
         image: &[u8],
+        resolution: Option<&pgr_core::resolve::ResolutionSnapshot>,
     ) -> Result<Self, PatchError> {
         if image.len() as u64 != layout.file_size {
             return Err(PatchError::Contract {
@@ -721,7 +737,14 @@ impl LinkRecord {
         let content_digests = content_digests_for(layout, &ctx);
         let spans = span_table_with(&ctx);
         let digests = pgr_core::propagate::section_digests(objects);
-        Self::assemble_from(layout, spans, page_hashes, digests, content_digests)
+        Self::assemble_from(
+            layout,
+            spans,
+            page_hashes,
+            digests,
+            content_digests,
+            resolution.cloned(),
+        )
     }
 
     /// [`LinkRecord::record`] with the hash table supplied by the patch
@@ -734,6 +757,7 @@ impl LinkRecord {
         layout: &Layout,
         objects: &[InputObject],
         page_hashes: Vec<[u8; 32]>,
+        resolution: Option<pgr_core::resolve::ResolutionSnapshot>,
     ) -> Result<Self, PatchError> {
         let symtab = symtab_bytes(layout);
         let indirect = indirect_bytes(layout);
@@ -741,7 +765,14 @@ impl LinkRecord {
         let content_digests = content_digests_for(layout, &ctx);
         let spans = span_table_with(&ctx);
         let digests = pgr_core::propagate::section_digests(objects);
-        Self::assemble_from(layout, spans, page_hashes, digests, content_digests)
+        Self::assemble_from(
+            layout,
+            spans,
+            page_hashes,
+            digests,
+            content_digests,
+            resolution,
+        )
     }
 
     /// [`LinkRecord::assemble`] with a pre-extracted span table — the patch
@@ -756,6 +787,7 @@ impl LinkRecord {
         page_hashes: Vec<[u8; 32]>,
         section_digests: Vec<pgr_core::propagate::SectionDigest>,
         content_digests: Vec<OutputSectionDigest>,
+        resolution: Option<pgr_core::resolve::ResolutionSnapshot>,
     ) -> Result<Self, PatchError> {
         let (segments, sections) = skeleton_of(layout);
         let header_sha: [u8; 32] = Sha256::digest(&layout.header_bytes).into();
@@ -783,6 +815,9 @@ impl LinkRecord {
             // The output sections' content digests (M9 tier 2): the
             // relayout shift-exemption's recorded side.
             content_digests,
+            // The Pass-2 snapshot the next relink's resolve plans from
+            // (M9 GA rung): `None` resolves in full.
+            resolution,
         })
     }
 
@@ -894,6 +929,16 @@ impl LinkRecord {
             e(&mut p, d.name.len() as u64);
             p.extend_from_slice(d.name.as_bytes());
             p.extend_from_slice(&d.sha);
+        }
+        // v5: the resolution snapshot (M9 GA rung) — the recorded Pass-2
+        // state the next relink's resolve plans from. Absent on links that
+        // did not capture (every clean link); those relinks resolve in full.
+        match &self.resolution {
+            None => e(&mut p, 0),
+            Some(snap) => {
+                e(&mut p, 1);
+                encode_snapshot(&mut p, snap);
+            }
         }
 
         let mut out = Vec::with_capacity(HEADER_LEN + p.len());
@@ -1054,6 +1099,13 @@ impl LinkRecord {
             Some(OutputSectionDigest { seg, name, sha })
         };
         let content_digests = d.list(&mut out_digest)?;
+        // v5: the resolution snapshot (M9 GA rung). 0 = absent, 1 = present;
+        // anything else is corruption.
+        let resolution = match d.u64()? {
+            0 => None,
+            1 => Some(decode_snapshot(&mut d)?),
+            _ => return None,
+        };
         if d.at != d.b.len() || content_digests.len() != sections.len() {
             return None;
         }
@@ -1075,6 +1127,7 @@ impl LinkRecord {
             page_hashes,
             section_digests,
             content_digests,
+            resolution,
         })
     }
 }
@@ -1125,6 +1178,176 @@ impl Decoder<'_> {
         }
         Some(out)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resolution-snapshot codec (v5, M9 GA rung)
+// ---------------------------------------------------------------------------
+
+/// The wire discriminant of a [`pgr_core::resolve::Rank`] (explicit — no
+/// transmute; an unknown discriminant fails the decode).
+fn rank_to_u64(rank: pgr_core::resolve::Rank) -> u64 {
+    match rank {
+        pgr_core::resolve::Rank::Strong => 1,
+        pgr_core::resolve::Rank::WeakDef => 2,
+        pgr_core::resolve::Rank::ArchiveStrong => 3,
+        pgr_core::resolve::Rank::ArchiveWeak => 4,
+        pgr_core::resolve::Rank::Common => 5,
+        pgr_core::resolve::Rank::DylibExport => 6,
+    }
+}
+
+/// The inverse of [`rank_to_u64`].
+fn rank_from_u64(v: u64) -> Option<pgr_core::resolve::Rank> {
+    match v {
+        1 => Some(pgr_core::resolve::Rank::Strong),
+        2 => Some(pgr_core::resolve::Rank::WeakDef),
+        3 => Some(pgr_core::resolve::Rank::ArchiveStrong),
+        4 => Some(pgr_core::resolve::Rank::ArchiveWeak),
+        5 => Some(pgr_core::resolve::Rank::Common),
+        6 => Some(pgr_core::resolve::Rank::DylibExport),
+        _ => None,
+    }
+}
+
+/// A length-capped raw byte string (the file/candidate names; the same
+/// 4 KiB cap the string decoder applies — an honest overflow decodes to
+/// `None` and the relink falls back, it never guesses).
+fn byte_string(d: &mut Decoder<'_>) -> Option<Vec<u8>> {
+    let len = usize::try_from(d.u64()?).ok()?;
+    if len > 4096 {
+        return None;
+    }
+    Some(d.take(len)?.to_vec())
+}
+
+/// Encodes one [`pgr_core::resolve::DefLite`]: the defining position, the
+/// precedence the replay applies, and the definition's own fields.
+fn encode_def(p: &mut Vec<u8>, def: &pgr_core::resolve::DefLite) {
+    let e = |p: &mut Vec<u8>, v: u64| p.extend_from_slice(&v.to_le_bytes());
+    e(p, u64::from(def.file));
+    e(p, def.sym as u64);
+    e(p, rank_to_u64(def.rank));
+    e(p, u64::from(def.weak));
+    e(p, def.value);
+    // `0` = no input section, `n + 1` = section `n` (the `Option` tag).
+    e(p, def.section.map_or(0, |s| s as u64 + 1));
+    e(p, u64::from(def.common_align));
+    e(p, def.common_size);
+}
+
+/// Decodes one [`pgr_core::resolve::DefLite`]. Every field is
+/// range-checked to the shapes `ResolutionSnapshot::capture` can produce —
+/// a hostile or truncated tail decodes to `None`, never a panic.
+fn decode_def(d: &mut Decoder<'_>) -> Option<pgr_core::resolve::DefLite> {
+    let file = d.u64()?;
+    let sym = d.u64()?;
+    let rank = rank_from_u64(d.u64()?)?;
+    let weak_byte = d.u64()?;
+    let value = d.u64()?;
+    let section = d.u64()?;
+    let common_align = d.u64()?;
+    let common_size = d.u64()?;
+    if file > u64::from(u32::MAX)
+        || sym > 1 << 32
+        || weak_byte > 1
+        || section > (1 << 20) + 1
+        || common_align > 15
+    {
+        return None;
+    }
+    Some(pgr_core::resolve::DefLite {
+        file: u32::try_from(file).ok()?,
+        sym: usize::try_from(sym).ok()?,
+        rank,
+        weak: weak_byte == 1,
+        value,
+        section: if section == 0 {
+            None
+        } else {
+            Some(usize::try_from(section - 1).ok()?)
+        },
+        common_align: u32::try_from(common_align).ok()?,
+        common_size,
+    })
+}
+
+/// Encodes the snapshot: the shape guard's file identities, the complete
+/// candidate stream (name-sorted; the replay's index), the dense winner
+/// matrix (a `None` slot is one flag byte's worth of "no recorded
+/// winner"), and the flattened dylib export surface.
+fn encode_snapshot(p: &mut Vec<u8>, snap: &pgr_core::resolve::ResolutionSnapshot) {
+    let e = |p: &mut Vec<u8>, v: u64| p.extend_from_slice(&v.to_le_bytes());
+    e(p, snap.file_names.len() as u64);
+    for name in &snap.file_names {
+        e(p, name.len() as u64);
+        p.extend_from_slice(name);
+    }
+    e(p, snap.candidates.len() as u64);
+    for (name, def) in &snap.candidates {
+        e(p, name.len() as u64);
+        p.extend_from_slice(name);
+        encode_def(p, def);
+    }
+    e(p, snap.winner_slots.len() as u64);
+    for slots in &snap.winner_slots {
+        e(p, slots.len() as u64);
+        for slot in slots {
+            match slot {
+                None => e(p, 0),
+                Some(def) => {
+                    e(p, 1);
+                    encode_def(p, def);
+                }
+            }
+        }
+    }
+    e(p, snap.dylib_export_names.len() as u64);
+    for name in &snap.dylib_export_names {
+        e(p, name.len() as u64);
+        p.extend_from_slice(name);
+    }
+}
+
+/// Decodes the snapshot (the inverse of [`encode_snapshot`]). The winner
+/// matrix's file count must line up with the shape guard's file list (the
+/// reuse path's first invariant); every other mismatch decodes to `None`
+/// and the relink resolves in full.
+fn decode_snapshot(d: &mut Decoder<'_>) -> Option<pgr_core::resolve::ResolutionSnapshot> {
+    let file_names = d.list(&mut byte_string)?;
+    let mut candidate = |d: &mut Decoder<'_>| {
+        let name = byte_string(d)?;
+        let def = decode_def(d)?;
+        Some((name, def))
+    };
+    let candidates = d.list(&mut candidate)?;
+    // Each slot costs at least its flag byte on the wire, so the per-file
+    // slot count is bounded by the remaining payload — a hostile count
+    // cannot inflate the allocation.
+    let mut slot_file = |d: &mut Decoder<'_>| {
+        let count = usize::try_from(d.u64()?).ok()?;
+        if count > d.b.len() / 8 {
+            return None;
+        }
+        let mut slots: Vec<Option<pgr_core::resolve::DefLite>> = vec![None; count];
+        for slot in &mut slots {
+            if d.u64()? == 1 {
+                *slot = Some(decode_def(d)?);
+            }
+        }
+        Some(slots)
+    };
+    let winner_slots = d.list(&mut slot_file)?;
+    if winner_slots.len() != file_names.len() {
+        return None;
+    }
+    let dylib_export_names = d.list(&mut byte_string)?;
+    Some(pgr_core::resolve::ResolutionSnapshot {
+        file_names,
+        candidates,
+        winner_slots,
+        dylib_export_names,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1830,6 +2053,7 @@ pub fn apply_patch(
     layout: &Layout,
     objects: &[InputObject],
     out_path: &Path,
+    resolution: Option<pgr_core::resolve::ResolutionSnapshot>,
 ) -> Result<(PatchOutcome, LinkRecord), PatchError> {
     if plan.is_untouched() {
         return Err(PatchError::Fallback(FallbackReason::OutputChanged {
@@ -1929,6 +2153,7 @@ pub fn apply_patch(
         page_hashes,
         pgr_core::propagate::section_digests(objects),
         plan.content_digests.clone(),
+        resolution,
     )?;
     Ok((outcome, new_record))
 }
@@ -2186,6 +2411,38 @@ mod tests {
                 ..Default::default()
             },
             page_hashes: vec![[2; 32]],
+            resolution: Some(pgr_core::resolve::ResolutionSnapshot {
+                file_names: vec![b"a.o".to_vec()],
+                candidates: vec![(
+                    b"_main".to_vec(),
+                    pgr_core::resolve::DefLite {
+                        file: 0,
+                        sym: 3,
+                        rank: pgr_core::resolve::Rank::Strong,
+                        weak: false,
+                        value: 0,
+                        section: Some(0),
+                        common_align: 0,
+                        common_size: 0,
+                    },
+                )],
+                winner_slots: vec![vec![
+                    None,
+                    None,
+                    None,
+                    Some(pgr_core::resolve::DefLite {
+                        file: 0,
+                        sym: 3,
+                        rank: pgr_core::resolve::Rank::Strong,
+                        weak: false,
+                        value: 0,
+                        section: Some(0),
+                        common_align: 0,
+                        common_size: 0,
+                    }),
+                ]],
+                dylib_export_names: Vec::new(),
+            }),
         };
         let bytes = r.encode();
         let back = LinkRecord::decode(&bytes).expect("roundtrip");
