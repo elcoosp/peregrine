@@ -165,49 +165,14 @@ pub fn link_cached(
 /// [`LinkError`] on malformed archive members, unresolvable/duplicate
 /// symbols, or layout contract violations.
 pub fn link_from_objects(
-    mut objects: Vec<InputObject>,
+    objects: Vec<InputObject>,
     archives: &[LinkArchive],
     cfg: &LinkConfig,
     parallel: Parallelism,
     cache: Option<&crate::cache::PoiCache>,
 ) -> Result<LinkResult, LinkError> {
-    // ---- S7 archive liveness (M5): pull only referenced members ------------
-    let pulled = pull_archive_members(&objects, archives, cfg, cache)?;
-    for obj in pulled {
-        objects.push(obj);
-    }
-
-    let mut names: Vec<Vec<u8>> = Vec::new();
-    for obj in &mut objects {
-        names.append(&mut obj.take_symbol_names());
-    }
-    // Dylib export names join the interner batch *after* the object symbol
-    // stream, so the object id slices stay stable (M2 two-level namespace).
-    let dylib_export_count: usize = cfg.dylibs.iter().map(|d| d.exports.len()).sum();
-    let mut export_names: Vec<Vec<u8>> = Vec::with_capacity(dylib_export_count);
-    for d in &cfg.dylibs {
-        export_names.extend(d.exports.iter().cloned());
-    }
-    names.extend(export_names.iter().cloned());
-    // `__mh_execute_header` is always interned so the layout pass can emit
-    // the executable's header symbol (ld64/lld convention).
-    names.push(b"__mh_execute_header".to_vec());
-    let header_symbol_slot = 1usize;
-
-    let (interner, ids) = Interner::build_with(&names, parallel.is_parallel());
-    let mut cursor = 0usize;
-    for obj in &mut objects {
-        let take = obj.symbols.len();
-        if cursor + take > ids.len() {
-            return Err(LinkError::Internal {
-                message: "interner table shorter than the symbol stream".into(),
-            });
-        }
-        obj.finish(&ids[cursor..cursor + take])?;
-        cursor += take;
-    }
-    let export_ids: Vec<StringId> = ids[cursor..cursor + dylib_export_count].to_vec();
-    let _ = header_symbol_slot;
+    let (objects, interner, export_ids) =
+        pull_and_intern(objects, archives, cfg, parallel, cache, true)?;
 
     // ---- Pass 2: resolution --------------------------------------------------
     // M9 GA rung — the resolve's record-side wiring: a relink whose record
@@ -265,6 +230,110 @@ pub fn link_from_objects(
         objects,
         interner,
         resolve_snapshot,
+    })
+}
+
+/// The Pass 1–2 front half both link shapes share: the S7 archive pull
+/// fixpoint, the interner batch (object symbols, then dylib exports; the
+/// executable-header symbol appended only on the image path), the
+/// `InputObject::finish` id patch and — for the caller's convenience —
+/// the dylib export ids. Pass 3 onward is where `-r` and the image
+/// pipeline diverge.
+fn pull_and_intern(
+    mut objects: Vec<InputObject>,
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    cache: Option<&crate::cache::PoiCache>,
+    intern_header_symbol: bool,
+) -> Result<(Vec<InputObject>, Interner, Vec<StringId>), LinkError> {
+    // ---- S7 archive liveness (M5): pull only referenced members ------------
+    let pulled = pull_archive_members(&objects, archives, cfg, cache)?;
+    for obj in pulled {
+        objects.push(obj);
+    }
+
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    for obj in &mut objects {
+        names.append(&mut obj.take_symbol_names());
+    }
+    // Dylib export names join the interner batch *after* the object symbol
+    // stream, so the object id slices stay stable (M2 two-level namespace).
+    let dylib_export_count: usize = cfg.dylibs.iter().map(|d| d.exports.len()).sum();
+    let mut export_names: Vec<Vec<u8>> = Vec::with_capacity(dylib_export_count);
+    for d in &cfg.dylibs {
+        export_names.extend(d.exports.iter().cloned());
+    }
+    names.extend(export_names.iter().cloned());
+    // `__mh_execute_header` is always interned so the layout pass can emit
+    // the executable's header symbol (ld64/lld convention). The `-r` path
+    // never emits one — the object emit consumes the batch without it.
+    if intern_header_symbol {
+        names.push(b"__mh_execute_header".to_vec());
+    }
+
+    let (interner, ids) = Interner::build_with(&names, parallel.is_parallel());
+    let mut cursor = 0usize;
+    for obj in &mut objects {
+        let take = obj.symbols.len();
+        if cursor + take > ids.len() {
+            return Err(LinkError::Internal {
+                message: "interner table shorter than the symbol stream".into(),
+            });
+        }
+        obj.finish(&ids[cursor..cursor + take])?;
+        cursor += take;
+    }
+    let export_ids: Vec<StringId> = ids[cursor..cursor + dylib_export_count].to_vec();
+    Ok((objects, interner, export_ids))
+}
+
+/// The Pass 1–2 product a `-r` output consumes (M10 rung 1): the parsed
+/// objects, the interner and the resolution — winners for the defined
+/// externs, references for the rest. Undefined externals stay open (the
+/// object is itself a link *input*; the next link resolves them), so the
+/// undefined policy and the dylib install never run on this path.
+#[derive(Debug)]
+pub struct RelocLink {
+    /// Parsed input objects (Pass 1 arenas; the emit copies section bytes
+    /// and re-encodes relocation entries from these).
+    pub objects: Vec<InputObject>,
+    /// The interner (name bytes for the output symbol table).
+    pub interner: Interner,
+    /// The Pass-2 winners (`Resolution::def` per interned name).
+    pub resolution: Resolution,
+}
+
+/// Runs Passes 1–2 for a `-r` relocatable output (M10 rung 1): the same
+/// parse (Pass 1, LPT-scheduled) and resolution (Pass 2) as [`link_cached`],
+/// stopping before the segment-shaped Pass 3 — a relocatable object has no
+/// pages, no `__PAGEZERO`, no entry point, no fixups and no signature.
+/// Duplicate strong definitions still refuse; undefined externals do not.
+/// The object bytes are assembled by `pgr-emit`'s `build_object_image`.
+///
+/// # Errors
+/// [`LinkError`] on malformed inputs or unresolvable duplicate symbols.
+pub fn link_reloc(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+) -> Result<RelocLink, LinkError> {
+    let span = tracing::info_span!("link_reloc", inputs = inputs.len());
+    let _entered = span.enter();
+    let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None)?;
+    let (objects, interner, _export_ids) =
+        pull_and_intern(objects, archives, cfg, parallel, None, false)?;
+    let mut res = Resolution::default();
+    res.install(&objects)?;
+    tracing::debug!(
+        objects = objects.len(),
+        "the relocatable front half finished (undefineds stay open)"
+    );
+    Ok(RelocLink {
+        objects,
+        interner,
+        resolution: res,
     })
 }
 

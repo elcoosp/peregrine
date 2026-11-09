@@ -45,12 +45,12 @@ pub use fixups::{FixupKind, FixupPlan, MAX_CHAIN_STRIDE_BYTES, pack_page};
 pub use ids::{FileId, StringId};
 pub use interner::Interner;
 pub use layout::{
-    CopyRun, Layout, LinkConfig, OutputSymbol, PatchOp, Piece, PlacedSection, ResolvedFile,
-    SegmentPlan,
+    CopyRun, Layout, LinkConfig, OutputSymbol, OutputType, PatchOp, Piece, PlacedSection,
+    ResolvedFile, SegmentPlan,
 };
 pub use link::{
-    LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, check_load_symbols, link,
-    link_cached, link_from_objects, link_with,
+    LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, RelocLink,
+    check_load_symbols, link, link_cached, link_from_objects, link_reloc, link_with,
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use propagate::{PropagationScope, SectionDigest};

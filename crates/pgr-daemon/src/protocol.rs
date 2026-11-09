@@ -409,6 +409,10 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
             OutputType::Execute => 0,
             OutputType::Dylib => 1,
             OutputType::Bundle => 2,
+            // Relocatable links never ride the daemon (the driver refuses
+            // `-r -resident` at parse time); the wire value is reserved so
+            // the encoding stays total.
+            OutputType::Relocatable => 3,
         },
     );
     put_str(out, &cfg.entry_symbol);

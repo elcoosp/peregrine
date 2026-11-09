@@ -48,6 +48,14 @@ pub enum OutputType {
     /// `MH_BUNDLE` (`-bundle`): dlopen-able, no `LC_ID_DYLIB`, no entry
     /// point.
     Bundle,
+    /// `MH_OBJECT` (`-r`, M10 rung 1): a relocatable object — the same
+    /// shape the pipeline consumes as input. Sections merge at their
+    /// declared alignments (no pages), relocation entries are preserved
+    /// (re-pointed at the output symbol table), undefined externals stay
+    /// open, and no fixups/signature/entry point exist. The emit lives in
+    /// `pgr-emit` (`build_object_image`); Pass 3's segment layout never
+    /// runs on this path.
+    Relocatable,
 }
 
 impl OutputType {
@@ -58,6 +66,7 @@ impl OutputType {
             Self::Execute => pgr_format::consts::MH_EXECUTE,
             Self::Dylib => pgr_format::consts::MH_DYLIB,
             Self::Bundle => pgr_format::consts::MH_BUNDLE,
+            Self::Relocatable => pgr_format::consts::MH_OBJECT,
         }
     }
 
@@ -69,7 +78,7 @@ impl OutputType {
     pub const fn image_base(self) -> u64 {
         match self {
             Self::Execute => PAGEZERO_SIZE_64,
-            Self::Dylib | Self::Bundle => 0,
+            Self::Dylib | Self::Bundle | Self::Relocatable => 0,
         }
     }
 
