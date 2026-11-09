@@ -9,6 +9,25 @@ release automation.
 
 ### Features
 
+- **daemon/driver:** M9 GA — the resident fusion wire rung (architecture
+  doc §7.3 + §7.2; the last open GA scope's first rung). The daemon wire
+  (protocol v3) carries the incremental halves: the request brings the
+  previous link record and the previous output's content hash (bytes ride
+  the `BLOB` exchange), the reply brings the refreshed record plus the
+  patch outcome. The session serves the §7.3 ladder in memory — integrity
+  gate on the transferred output, the anchored relink config derived from
+  the record (slack anchors, stable imports, signature boundary,
+  resolve-reuse seed), the pipeline warm over the session's POIs, the
+  patch plan, the in-memory patch through the engine's new bytes-level
+  twin (`apply_patch_bytes`, gated byte-identical to the file path) — and
+  any refusal falls back inside the daemon to its clean full link, which
+  captures whenever asked. The driver routes `-resident -incremental`
+  through the daemon first (standing down to the in-process relink, then
+  the full link — every rung always available), keeps `-incremental-verify`
+  on the audited in-process path, and stores the daemon's renewed record,
+  so the incremental cycle survives daemon fallbacks instead of silently
+  dead-looping on a stale sidecar. The daemon still holds no output state:
+  the client writes the file (§7.2 crash-safety unchanged)
 - **core:** M9 tier 2c — the incremental resolve over the propagation
   index (architecture doc §7.3 step 3, the GA rung the roadmap names
   before the resident fusion). The tier-2b planner scopes *bytes*; the
