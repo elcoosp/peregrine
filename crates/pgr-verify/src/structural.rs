@@ -4,12 +4,16 @@
 use crate::{Code, Issue, Report, issue_from};
 use pgr_format::LinkeditDataCommand;
 use pgr_format::consts::{
-    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, MH_BUNDLE, MH_DYLIB, MH_DYLINKER, MH_EXECUTE,
-    MH_FILESET, MH_KEXT_BUNDLE, MH_OBJECT, MH_PRELOAD, PAGE_SIZE_16K, PAGEZERO_SIZE_64,
-    S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL, VM_PROT_EXECUTE, VM_PROT_WRITE,
+    ARM64_RELOC_ADDEND, ARM64_RELOC_GOT_LOAD_PAGE21, ARM64_RELOC_GOT_LOAD_PAGEOFF12,
+    ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED,
+    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_CODE_SIGNATURE, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_INFO,
+    LC_DYLD_INFO_ONLY, MH_BUNDLE, MH_DYLIB, MH_DYLINKER, MH_EXECUTE, MH_FILESET, MH_KEXT_BUNDLE,
+    MH_OBJECT, MH_PRELOAD, PAGE_SIZE_16K, PAGEZERO_SIZE_64, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL,
+    S_ZEROFILL, VM_PROT_EXECUTE, VM_PROT_WRITE,
 };
 use pgr_format::header::MachHeader64;
 use pgr_format::load_command::{LoadCommandIter, LoadCommandKind, ParsedCommand};
+use pgr_format::reloc::RelocationInfo;
 use pgr_format::segment::SegmentCommand64;
 use pgr_format::symtab::{DysymtabCommand, Nlist64, SymtabCommand};
 
@@ -433,6 +437,11 @@ pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
 /// protections and file-coverage invariants.
 pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut Report) {
     let exec = img.header.filetype == MH_EXECUTE;
+    // Relocatable objects carry the LLVM single-segment convention: one
+    // anonymous segment, blob-relative addresses, zero `filesize` — the
+    // image-shaped invariants below do not apply (M10 rung 1; the object
+    // contract lives in [`check_object_contract`]).
+    let object = img.header.filetype == MH_OBJECT;
     let file_len = bytes.len() as u64;
 
     // Canonical ordering: __PAGEZERO (exec), __TEXT, __DATA_CONST, __DATA,
@@ -469,7 +478,7 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
             ));
         }
     }
-    if !names.contains(&"__LINKEDIT") {
+    if !object && !names.contains(&"__LINKEDIT") {
         report.issues.push(Issue::error(
             Code::SegmentLayout,
             "no __LINKEDIT segment",
@@ -545,9 +554,11 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
             ));
         }
         // Delta consistency: vmaddr - fileoff must equal the image delta
-        // (base = 0x1_0000_0000 for exec, 0 otherwise).
+        // (base = 0x1_0000_0000 for exec, 0 otherwise). Objects carry the
+        // blob-relative convention instead (vmaddr 0, fileoff = header
+        // end) — skipped, the object contract checks the sections.
         let delta = if exec { PAGEZERO_SIZE_64 } else { 0 };
-        if seg.vmaddr.checked_sub(delta) != Some(seg.fileoff) {
+        if !object && seg.vmaddr.checked_sub(delta) != Some(seg.fileoff) {
             report.issues.push(Issue::error(
                 Code::SegmentContract,
                 format!(
@@ -664,8 +675,9 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                             Some(s.addr),
                         ));
                     }
-                    if u64::from(s.offset) >= seg.fileoff.saturating_add(seg.filesize)
-                        || u64::from(s.offset.saturating_add(s.size as u32)) > file_len
+                    if u64::from(s.offset.saturating_add(s.size as u32)) > file_len
+                        || (!object
+                            && u64::from(s.offset) >= seg.fileoff.saturating_add(seg.filesize))
                     {
                         report.issues.push(Issue::error(
                             Code::SectionBounds,
@@ -704,6 +716,141 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                 ),
                 Some(le.fileoff),
             ));
+        }
+    }
+}
+
+/// The relocatable-object contract (M10 rung 1, `-r`): `MH_OBJECT` is
+/// neither loaded nor signed — fixup payloads, classic dyld-info streams
+/// and signatures have no voice there — and every relocation entry must
+/// name something the file actually carries: the section it rides in,
+/// the symbol table entry (or 1-based section ordinal) it points at, and
+/// the `ADDEND`/`SUBTRACTOR` pair shape the input decoder consumes.
+pub(crate) fn check_object_contract(bytes: &[u8], img: &ParsedImage<'_>, report: &mut Report) {
+    let file_len = bytes.len() as u64;
+    for cmd in &img.commands {
+        let banned = match cmd.kind {
+            LoadCommandKind::LinkeditData(LC_DYLD_CHAINED_FIXUPS) => "LC_DYLD_CHAINED_FIXUPS",
+            LoadCommandKind::LinkeditData(LC_DYLD_INFO_ONLY | LC_DYLD_INFO) => "LC_DYLD_INFO",
+            LoadCommandKind::LinkeditData(LC_CODE_SIGNATURE) => "LC_CODE_SIGNATURE",
+            _ => continue,
+        };
+        report.issues.push(Issue::error(
+            Code::LoadCommandMalformed,
+            format!("{banned} on an MH_OBJECT: relocatable objects are neither loaded nor signed"),
+            Some(cmd.offset as u64),
+        ));
+    }
+    let nsyms = img.symtab.map_or(0, |st| st.nsyms);
+    let nsects = img.nsections as usize;
+    for seg in &img.segments {
+        let cmd_off = section_table_offset(img, seg);
+        let Ok(sects) = seg.sections(bytes, cmd_off) else {
+            continue;
+        };
+        for s in sects {
+            let sname = s.name().unwrap_or("<non-utf8>");
+            if s.nreloc == 0 {
+                continue;
+            }
+            if u64::from(s.reloff.saturating_add(s.nreloc.saturating_mul(8))) > file_len {
+                report.issues.push(Issue::error(
+                    Code::SymbolTable,
+                    format!("section {sname}: relocation table extends past EOF"),
+                    Some(u64::from(s.reloff)),
+                ));
+                continue;
+            }
+            let mut i = 0u32;
+            while i < s.nreloc {
+                let at = s.reloff as usize + i as usize * 8;
+                let Ok(r) = RelocationInfo::parse(bytes, at) else {
+                    report.issues.push(Issue::error(
+                        Code::SymbolTable,
+                        format!("section {sname}: relocation entry {i} is truncated"),
+                        Some(u64::from(s.reloff) + u64::from(i) * 8),
+                    ));
+                    break;
+                };
+                if r.is_scattered() {
+                    report.issues.push(Issue::error(
+                        Code::SymbolTable,
+                        format!("section {sname}: relocation entry {i} is scattered (not generated by modern clang)"),
+                        Some(at as u64),
+                    ));
+                    break;
+                }
+                let sym = r.symbolnum();
+                if r.is_extern() {
+                    if sym >= nsyms {
+                        report.issues.push(Issue::error(
+                            Code::SymbolTable,
+                            format!(
+                                "section {sname}: relocation entry {i} names symbol {sym} past the symbol table ({nsyms} entries)"
+                            ),
+                            Some(at as u64),
+                        ));
+                        break;
+                    }
+                } else if r.rtype() != ARM64_RELOC_ADDEND && (sym == 0 || sym as usize > nsects) {
+                    report.issues.push(Issue::error(
+                        Code::SymbolTable,
+                        format!(
+                            "section {sname}: relocation entry {i} names section ordinal {sym} past the section table ({nsects} sections)"
+                        ),
+                        Some(at as u64),
+                    ));
+                    break;
+                }
+                // Pair shape: a leader entry owns the next one.
+                let paired = match r.rtype() {
+                    ARM64_RELOC_ADDEND => Some("an ADDEND"),
+                    ARM64_RELOC_SUBTRACTOR => Some("a SUBTRACTOR"),
+                    _ => None,
+                };
+                if let Some(leader) = paired {
+                    let Some(next) = s.nreloc.checked_sub(i + 1).filter(|rest| *rest > 0) else {
+                        report.issues.push(Issue::error(
+                            Code::SymbolTable,
+                            format!(
+                                "section {sname}: {leader} relocation is not followed by its target"
+                            ),
+                            Some(at as u64),
+                        ));
+                        break;
+                    };
+                    let _ = next;
+                    let Ok(r2) = RelocationInfo::parse(bytes, at + 8) else {
+                        report.issues.push(Issue::error(
+                            Code::SymbolTable,
+                            format!("section {sname}: {leader} relocation's target is truncated"),
+                            Some((at + 8) as u64),
+                        ));
+                        break;
+                    };
+                    let ok = match r.rtype() {
+                        ARM64_RELOC_ADDEND => matches!(
+                            r2.rtype(),
+                            ARM64_RELOC_PAGE21
+                                | ARM64_RELOC_PAGEOFF12
+                                | ARM64_RELOC_GOT_LOAD_PAGE21
+                                | ARM64_RELOC_GOT_LOAD_PAGEOFF12
+                        ),
+                        _ => r2.rtype() == ARM64_RELOC_UNSIGNED && r2.length_log2() == 3,
+                    };
+                    if !ok {
+                        report.issues.push(Issue::error(
+                            Code::SymbolTable,
+                            format!("section {sname}: {leader} relocation's pair target has the wrong type"),
+                            Some((at + 8) as u64),
+                        ));
+                        break;
+                    }
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
         }
     }
 }
