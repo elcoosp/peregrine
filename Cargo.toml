@@ -31,7 +31,13 @@ thiserror = "2"
 sha2 = "0.10"
 object = { version = "0.37", default-features = false, features = ["read"] }
 proptest = "1"
-criterion = { version = "0.7", default-features = false, features = ["html_reports"] }
+criterion = { version = "0.7", default-features = false, features = [
+    "html_reports",
+    # criterion 0.7 split the measuring harness out of the default
+    # features; without it every bench compiles, "passes" and measures
+    # nothing (docs/BENCHMARKS.md's recorded numbers need the harness).
+    "cargo_bench_support",
+] }
 rayon = "1"
 
 # Workspace-wide lint policy (Peregrine hot-path rules, perf doc §5):
