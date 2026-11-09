@@ -1,6 +1,8 @@
-//! Peregrine emit pipeline (M1–M4): output buffer, relocation application,
-//! chained-fixup words, `__LINKEDIT` assembly, ad-hoc code signature and the
-//! Pass 5 flush — TDD §5 Passes 4–5, §7, §9; perf doc §4.4/§4.5.
+//! Peregrine emit pipeline (M1–M4 fused image path, M9 incremental
+//! engine, M10 relocatable object emit): output buffer, relocation
+//! application, chained-fixup words, `__LINKEDIT` assembly, ad-hoc code
+//! signature and the Pass 5 flush — TDD §5 Passes 4–5, §7, §9; perf doc
+//! §4.4/§5.
 //!
 //! Contract reminders carried from the TDD (unchanged since M0):
 //!
@@ -15,6 +17,7 @@
 
 pub mod emit;
 pub mod incremental;
+pub mod object;
 pub mod reloc;
 pub mod signature;
 pub mod tile;
@@ -23,9 +26,10 @@ pub mod writer;
 pub use emit::build_image;
 pub use incremental::{
     FallbackReason, Integrity, LinkRecord, PatchDecision, PatchError, PatchOutcome, PatchPlan,
-    RecordedSection, RecordedSpan, SpanTable, apply_patch, check_output, plan_patch,
+    apply_patch, check_output, plan_patch,
 };
-pub use signature::{blob_size, build_superblob, derive_uuid, page_hashes};
+pub use object::{ObjectRelocRefusal, build_object_image};
+pub use signature::{build_superblob, derive_uuid, page_hashes};
 pub use tile::{build_image_fused, build_image_fused_into};
 pub use writer::write_image;
 
@@ -54,5 +58,12 @@ pub enum EmitError {
         path: String,
         /// The OS error.
         source: std::io::Error,
+    },
+    /// A relocation the relocatable-object emit cannot represent — the
+    /// miette-rendered refusal, help text included (M10 rung 1).
+    #[error("{refusal}")]
+    RelocRefusal {
+        /// The refusal (section, offset, reason, help).
+        refusal: crate::object::ObjectRelocRefusal,
     },
 }

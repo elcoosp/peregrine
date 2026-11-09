@@ -437,6 +437,12 @@ impl From<EmitError> for PatchError {
                 message: format!("internal: {message}"),
             },
             EmitError::Io { path, source } => Self::Io { path, source },
+            // A relocatable-object refusal cannot arise on the incremental
+            // path (the engine patches images, never `-r` objects); the
+            // arm keeps the match exhaustive and honest about it.
+            EmitError::RelocRefusal { refusal } => Self::Contract {
+                message: refusal.to_string(),
+            },
         }
     }
 }
