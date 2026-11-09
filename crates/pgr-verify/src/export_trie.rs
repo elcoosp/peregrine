@@ -27,7 +27,7 @@ pub struct TrieEntry {
     pub flags: u32,
     /// Export address (`None` for re-exports).
     pub address: Option<u64>,
-    /// Re-export ordinal (`flags & 0x08` nodes).
+    /// Re-export ordinal (`EXPORT_SYMBOL_FLAGS_REEXPORT` terminals).
     pub reexport_ordinal: Option<u64>,
     /// The original name in the re-exported dylib (equals `name` when the
     /// terminal omits the string).
@@ -106,24 +106,26 @@ fn walk(
         return;
     };
     let terminal_start = cur;
-    let terminal_end = terminal_start.checked_add(terminal_size as usize);
-    match terminal_end {
-        Some(end) if end <= data.len() => {}
-        _ => {
-            report.issues.push(Issue::error(
-                Code::ExportTrie,
-                "terminal info exceeds the payload",
-                Some(at as u64),
-            ));
-            return;
-        }
-    }
+    // The checked bound is *the* terminal end — the panics this once hid
+    // behind an infallible-looking `unwrap()` are the same refusal the
+    // verifier exists to name (TDD §2: typed errors, never panic).
+    let Some(terminal_end) = terminal_start
+        .checked_add(terminal_size as usize)
+        .filter(|&end| end <= data.len())
+    else {
+        report.issues.push(Issue::error(
+            Code::ExportTrie,
+            "terminal info exceeds the payload",
+            Some(at as u64),
+        ));
+        return;
+    };
     if terminal_size > 0 {
         // Terminal: `ULEB flags, ULEB address` — or, for M3 re-exports
-        // (`flags & 0x08`), `ULEB ordinal` plus an optional NUL imported
+        // (the REEXPORT flag), `ULEB ordinal` plus an optional NUL imported
         // name (absent = same name; dyld resolves via the re-exported
         // dylib).
-        let info = &data[terminal_start..terminal_end.unwrap()];
+        let info = &data[terminal_start..terminal_end];
         let Some((flags, after_flags)) = uleb_at(info, 0) else {
             report.issues.push(Issue::error(
                 Code::ExportTrie,
@@ -132,7 +134,9 @@ fn walk(
             ));
             return;
         };
-        let (address, reexport_ordinal, imported_name) = if flags & 0x8 != 0 {
+        let (address, reexport_ordinal, imported_name) = if flags & EXPORT_SYMBOL_FLAGS_REEXPORT
+            != 0
+        {
             let Some((ordinal, after)) = uleb_at(info, after_flags) else {
                 report.issues.push(Issue::error(
                     Code::ExportTrie,
@@ -188,7 +192,6 @@ fn walk(
                 Some(flags),
             ));
         }
-        let _ = EXPORT_SYMBOL_FLAGS_REEXPORT;
         out.entries.push(TrieEntry {
             name: prefix.clone(),
             flags: flags as u32,
@@ -197,7 +200,7 @@ fn walk(
             imported_name,
         });
     }
-    cur = terminal_end.unwrap();
+    cur = terminal_end;
     if cur >= data.len() {
         // No children byte (terminal-only payload end) — a trie must carry
         // the child count; running out here is malformed.
