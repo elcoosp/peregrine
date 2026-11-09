@@ -2466,6 +2466,139 @@ fn page_count_of(tile: u32, code_limit: u64) -> usize {
     ((lo + TILE).min(code_limit) - lo).div_ceil(HASH_PAGE) as usize
 }
 
+// ---- the wire's tile stream (M9 output-residency rung, wire v5) -------------
+
+/// The changed-tile stream the resident wire serves (protocol v5, the §7.2
+/// output-residency rung). When the session holds the previous output, a
+/// patched relink ships only the 16 KiB tiles whose bytes moved instead of
+/// the whole image. Tile granularity is lossless by construction — the
+/// fused emit's own tile invariant (chains never cross a tile, TDD §7.4)
+/// means every byte of the patched image lives in exactly one tile — so
+/// [`apply_tiles`] over the previous bytes reproduces the patched image
+/// byte for byte, and the stream carries that image's SHA-256 as the
+/// client's replay gate (a diverged replay is refused, never written).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TilePatch {
+    /// The patched image's size in bytes (the relayout tiers resize the
+    /// clone; the replay resizes to this before splicing).
+    pub final_size: u64,
+    /// Every changed tile as `(offset, bytes)`, offsets ascending; each
+    /// offset is 16 KiB-aligned and `bytes` reaches the next tile boundary
+    /// or the image end.
+    pub tiles: Vec<(u64, Vec<u8>)>,
+    /// SHA-256 of the patched image the stream reproduces (the client's
+    /// replay gate — a divergence never ships, §7.3).
+    pub image_hash: [u8; 32],
+}
+
+impl TilePatch {
+    /// The wire's honest price: the bytes the tile stream carries (what
+    /// the full image would have cost, minus what residency saved).
+    #[must_use]
+    pub fn wire_bytes(&self) -> u64 {
+        self.tiles.iter().map(|(_, b)| b.len() as u64).sum()
+    }
+}
+
+/// A refused-to-ship tile replay (v5, the §7.2 rung): the resident client
+/// rebuilt the patched image from the wire's tile stream and the result
+/// missed the stream's own content-hash gate. Nothing is written — the
+/// transparency contract stands the link down to the in-process path,
+/// which re-patches from the local record. Refusals render with miette
+/// help-text (the fix, not just the verdict), the same discipline as
+/// [`crate::incremental::audit::AuditRefusal`].
+#[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)]
+#[error(
+    "the resident tile replay did not reproduce the audited image (got {}, wanted {})",
+    .got,
+    .want
+)]
+#[diagnostic(help(
+    "a divergence never ships: the relink falls back to the in-process \
+     path, which re-patches from the local record; re-run with \
+     PGR_RESIDENT_DEBUG=1 to log the tile replay, or drop -resident once \
+     to rebuild the session's resident output state"
+))]
+pub struct TileReplayRefusal {
+    /// The replay gate's hash (what the stream vouched for).
+    pub want: String,
+    /// The hash of what the replay actually produced.
+    pub got: String,
+}
+
+impl TileReplayRefusal {
+    /// Renders the refusal with its help text (multi-line, no backtrace
+    /// noise) — the string the driver logs on the stand-down.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let report = miette::Report::new(self.clone());
+        format!("{report:?}")
+    }
+}
+
+/// The changed-tile stream between the previous output and the patched
+/// image, at 16 KiB granularity, deterministic. An unchanged image yields
+/// an empty stream (the untouched relink ships nothing); a resized image
+/// yields `final_size` plus the changed tail tiles.
+#[must_use]
+pub fn diff_tiles(prev: &[u8], patched: &[u8]) -> TilePatch {
+    let span = tracing::info_span!(
+        "diff_tiles",
+        prev_len = prev.len(),
+        patched_len = patched.len()
+    );
+    let _entered = span.enter();
+    let mut tiles: Vec<(u64, Vec<u8>)> = Vec::new();
+    let n = prev.len().max(patched.len());
+    let mut at = 0usize;
+    while at < n {
+        let end = (at + TILE as usize).min(n);
+        // A tile is dirty when either image's view of it differs (a tile
+        // past one image's end compares against nothing — the resize edge).
+        let old = prev.get(at..end).unwrap_or(&[]);
+        let new = patched.get(at..end).unwrap_or(&[]);
+        if old != new && !new.is_empty() {
+            // An empty `new` is pure truncation past the patched end —
+            // `final_size` carries it; a zero-byte tile would only pin a
+            // splice past the replay's own resize.
+            tiles.push((at as u64, new.to_vec()));
+        }
+        at = end;
+    }
+    tracing::debug!(tiles = tiles.len(), "the tile stream was diffed");
+    TilePatch {
+        final_size: patched.len() as u64,
+        tiles,
+        image_hash: Sha256::digest(patched).into(),
+    }
+}
+
+/// Applies a tile stream to the previous bytes — the client-side replay
+/// twin of [`diff_tiles`]: resize to `final_size` (the relayout tiers move
+/// the image end), then splice every tile. The caller verifies the replay
+/// against `TilePatch::image_hash` before anything is written (a
+/// divergence never ships).
+#[must_use]
+pub fn apply_tiles(prev: &[u8], patch: &TilePatch) -> Vec<u8> {
+    let span = tracing::info_span!(
+        "apply_tiles",
+        tiles = patch.tiles.len(),
+        final_size = patch.final_size
+    );
+    let _entered = span.enter();
+    let mut out = prev.to_vec();
+    out.resize(patch.final_size as usize, 0);
+    for (at, bytes) in &patch.tiles {
+        let start = *at as usize;
+        if start >= out.len() {
+            continue; // A stream that only shrinks past the replay's end.
+        }
+        let end = (start + bytes.len()).min(out.len());
+        out[start..end].copy_from_slice(&bytes[..end - start]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

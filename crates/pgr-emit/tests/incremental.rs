@@ -1627,3 +1627,72 @@ fn audit_refusal_renders_the_help_text() {
         "the help text renders: {rendered}"
     );
 }
+
+// ---- the wire's tile stream (M9 output-residency rung, wire v5) -------------
+
+use pgr_emit::incremental::{apply_tiles, diff_tiles};
+use sha2::{Digest, Sha256};
+
+/// The 16 KiB-tile stream is lossless: `apply_tiles(prev, diff_tiles(prev,
+/// patched)) == patched` for every transport shape the rung serves — an
+/// interior edit, a relayout-style grow, the shrink rung's truncation, and
+/// the untouched (zero-tile) case.
+#[test]
+fn tile_stream_replays_the_patch_losslessly() {
+    // A deterministic 3-tile-and-a-bit corpus (not a real image: the tile
+    // stream is bytes-level, plan-free by design).
+    let prev: Vec<u8> = (0..40 * 1024usize).map(|i| (i * 7 % 251) as u8).collect();
+
+    // Interior edit: two tiles change, everything between rides.
+    let mut patched = prev.clone();
+    patched[20 * 1024] ^= 0xff;
+    patched[35 * 1024 + 5] ^= 0x0f;
+    let stream = diff_tiles(&prev, &patched);
+    assert_eq!(stream.final_size, patched.len() as u64);
+    assert_eq!(stream.tiles.len(), 2, "only the changed tiles cross");
+    assert_eq!(apply_tiles(&prev, &stream), patched, "lossless replay");
+
+    // Grow (the relayout tier's resized clone): the tail tile extends.
+    let mut grown = patched.clone();
+    grown.extend_from_slice(&[0xAA; 8 * 1024]);
+    let grown_stream = diff_tiles(&patched, &grown);
+    assert_eq!(grown_stream.final_size, grown.len() as u64);
+    assert_eq!(apply_tiles(&patched, &grown_stream), grown);
+
+    // Shrink (the GA hardening rung): apply truncates to final_size.
+    let shrunk = patched[..30 * 1024].to_vec();
+    let shrink_stream = diff_tiles(&patched, &shrunk);
+    assert_eq!(shrink_stream.final_size, shrunk.len() as u64);
+    assert_eq!(apply_tiles(&patched, &shrink_stream), shrunk);
+
+    // Untouched: zero tiles, nothing to write.
+    let same = diff_tiles(&prev, &prev);
+    assert!(same.tiles.is_empty(), "an unchanged image ships no tiles");
+    assert_eq!(apply_tiles(&prev, &same), prev);
+}
+
+/// The stream carries its own replay gate: the patched image's content
+/// hash. A tampered tile (a wire betrayal) cannot reproduce the audited
+/// image — the client's hash check names the divergence before anything
+/// is written.
+#[test]
+fn tile_stream_carries_the_replay_hash() {
+    let prev: Vec<u8> = (0..32 * 1024u32).map(|i| i as u8).collect();
+    let mut patched = prev.clone();
+    patched[100] ^= 0xff;
+    let stream = diff_tiles(&prev, &patched);
+    // The gate is the patched image's own SHA-256 (the replay twin of the
+    // integrity the audit gives the patched bytes).
+    let want: [u8; 32] = Sha256::digest(&patched).into();
+    assert_eq!(stream.image_hash, want, "the hash covers the patched image");
+    let rebuilt = apply_tiles(&prev, &stream);
+    let got: [u8; 32] = Sha256::digest(&rebuilt).into();
+    assert_eq!(got, stream.image_hash, "a faithful replay passes the gate");
+
+    // A flipped tile byte is caught by the replay gate, not shipped.
+    let mut betrayed = stream.clone();
+    betrayed.tiles[0].1[0] ^= 0xff;
+    let rebuilt = apply_tiles(&prev, &betrayed);
+    let got: [u8; 32] = Sha256::digest(&rebuilt).into();
+    assert_ne!(got, betrayed.image_hash, "the tampered stream is named");
+}
