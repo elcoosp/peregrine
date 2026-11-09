@@ -4,8 +4,17 @@
 
 use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report};
-use pgr_format::consts::{LC_DATA_IN_CODE, LC_FUNCTION_STARTS, LC_MAIN, PLATFORM_MACOS};
+use pgr_format::consts::{
+    LC_DATA_IN_CODE, LC_FUNCTION_STARTS, LC_MAIN, PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS,
+    PLATFORM_VISIONOS, PLATFORM_WATCHOS,
+};
 use pgr_format::load_command::LoadCommandKind;
+
+/// Formats a packed `X.Y.Z` build-version word (`(X<<16)|(Y<<8)|Z`) the
+/// way the verifier's issue messages name it.
+fn fmt_packed_version(v: u32) -> String {
+    format!("{}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff)
+}
 
 /// Entry point, dylinker and build-version checks.
 pub(crate) fn check_entry_and_version(bytes: &[u8], img: &ParsedImage<'_>, report: &mut Report) {
@@ -55,12 +64,39 @@ pub(crate) fn check_entry_and_version(bytes: &[u8], img: &ParsedImage<'_>, repor
     }
 
     if let Some(bv) = img.build_version {
-        if bv.platform != PLATFORM_MACOS {
-            report.issues.push(Issue::warning(
+        // M10 rung 2: the platform gate checks the declared platform,
+        // not macOS. The five linked platforms are contract-clean; an
+        // unknown platform constant is an error (dyld would refuse the
+        // image), and the SDK must be at least the deployment target —
+        // the SDK ships the deployment target's interfaces.
+        let known = bv.platform == PLATFORM_MACOS
+            || bv.platform == PLATFORM_IOS
+            || bv.platform == PLATFORM_TVOS
+            || bv.platform == PLATFORM_WATCHOS
+            || bv.platform == PLATFORM_VISIONOS;
+        if !known {
+            report.issues.push(Issue::error(
                 Code::LinkeditPayload,
                 format!(
-                    "build platform {} is not macOS ({PLATFORM_MACOS})",
-                    bv.platform
+                    "build platform {} is not a known Mach-O platform \
+                     (linked platforms: macos {}, ios {}, tvos {}, watchos {}, visionos {})",
+                    bv.platform,
+                    PLATFORM_MACOS,
+                    PLATFORM_IOS,
+                    PLATFORM_TVOS,
+                    PLATFORM_WATCHOS,
+                    PLATFORM_VISIONOS
+                ),
+                None,
+            ));
+        }
+        if bv.sdk < bv.minos {
+            report.issues.push(Issue::error(
+                Code::LinkeditPayload,
+                format!(
+                    "SDK version {} is older than the deployment target {}",
+                    fmt_packed_version(bv.sdk),
+                    fmt_packed_version(bv.minos),
                 ),
                 None,
             ));
