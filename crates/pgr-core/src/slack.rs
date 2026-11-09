@@ -10,7 +10,8 @@
 //!
 //! Scope and honesty:
 //!
-//! * Slack is **opt-in** ([`LinkConfig::layout_slack`] stays `None` by
+//! * Slack is **opt-in** ([`crate::layout::LinkConfig::layout_slack`] stays
+//!   `None` by
 //!   default) — the deterministic clean-link bytes are untouched, per the
 //!   §7.3 determinism policy ("clean links remain bit-deterministic,
 //!   always").
@@ -23,8 +24,6 @@
 //! * The fallback ladder (`fits`) is the pure decision function the M9
 //!   change-propagation planner calls when a changed atom overflows its
 //!   section's slack.
-
-use crate::layout::LinkConfig;
 
 /// Section-growth reservation policy (M8-c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,16 +160,5 @@ impl SlackPolicy {
     #[must_use]
     pub fn is_padded_section(segment: &str, _name: &str) -> bool {
         matches!(segment, "__TEXT" | "__DATA_CONST" | "__DATA")
-    }
-}
-
-/// Convenience re-export so [`LinkConfig`] consumers can name the field
-/// type without importing the module.
-impl LinkConfig {
-    /// True when the layout reserves slack (M8-c; false = v1.0 exact
-    /// packing).
-    #[must_use]
-    pub const fn has_layout_slack(&self) -> bool {
-        self.layout_slack.is_some()
     }
 }

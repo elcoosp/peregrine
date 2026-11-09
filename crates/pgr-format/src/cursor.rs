@@ -134,14 +134,6 @@ impl<'a> Cursor<'a> {
         ]))
     }
 
-    /// Reads a little-endian `i8`.
-    ///
-    /// # Errors
-    /// [`FormatError`] when the input structure is malformed or truncated.
-    pub fn read_i8(&mut self) -> Result<i8, FormatError> {
-        Ok(i8::from_le_bytes([self.read_u8()?]))
-    }
-
     /// Reads a little-endian `i32`.
     ///
     /// # Errors

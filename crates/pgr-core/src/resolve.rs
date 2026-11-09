@@ -381,12 +381,6 @@ impl Resolution {
         self.defs.iter().map(|(k, d)| (crate::ids::StringId(*k), d))
     }
 
-    /// True when the name was referenced by some input.
-    #[must_use]
-    pub fn is_referenced(&self, id: crate::ids::StringId) -> bool {
-        self.references.contains_key(&id.0)
-    }
-
     /// Equality of the Pass-2 decision state, name by name: winners
     /// (definition, rank, file, values), reference sites, two-level dylib
     /// ordinals and the dynamic-lookup set. The M9 tier-2c reuse path must
