@@ -1,6 +1,8 @@
 //! Pass-2 resolve benchmark (M9 tier-2c): the full `Resolution::install`
 //! walk against the propagation-index reuse path (`plan_reuse` +
-//! `install_reused`) on a corpus where one input file changed.
+//! `install_reused`) on a corpus where one input file changed, plus the
+//! M9 GA record-side wiring's end-to-end pair (`resolve_pipeline`): the
+//! full Passes 1b–3 pipeline with and without the recorded seed.
 //!
 //! The reuse path's work is the shape guard, the seed-file replay and the
 //! recorded-winner copy (the digest diff itself is plan-side, computed
@@ -17,10 +19,13 @@
 use criterion::{BenchmarkId, Criterion, Throughput};
 use pgr_core::ids::FileId;
 use pgr_core::interner::Interner;
+use pgr_core::layout::LinkConfig;
+use pgr_core::link::Parallelism;
+use pgr_core::link::link_from_objects;
 use pgr_core::object::InputObject;
 use pgr_core::propagate::section_digests;
 use pgr_core::resolve::{Resolution, ResolutionSnapshot, UndefinedPolicy};
-use pgr_core::resolve_reuse::{install_reused, plan_reuse};
+use pgr_core::resolve_reuse::{ResolveReuseSeed, install_reused, plan_reuse};
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
 /// Symbols per input file: half defined externs, a quarter undefined
@@ -85,6 +90,111 @@ fn parse(builders: &[ObjectBuilder]) -> (Interner, Vec<InputObject>) {
         cursor += take;
     }
     (interner, objects)
+}
+
+/// Parses a corpus for the pipeline benches: parsed + atomized objects,
+/// ready for `link_from_objects` (which interns and finishes them itself —
+/// the same state `parse_inputs` hands the pipeline).
+fn parse_pipeline(builders: &[ObjectBuilder]) -> Vec<InputObject> {
+    builders
+        .iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            let bytes = spec.build().unwrap();
+            let mut obj = InputObject::parse(FileId(i as u32), spec.name(), bytes).unwrap();
+            obj.compute_atoms(false);
+            obj
+        })
+        .collect()
+}
+
+/// The pipeline bench's config: an executable whose entry is a defined
+/// corpus symbol, with the record-side capture always on (the record cost
+/// is part of the rung's own path).
+fn pipeline_cfg(seed: Option<ResolveReuseSeed>) -> LinkConfig {
+    LinkConfig {
+        ident: "bench-resolve-pipeline".into(),
+        entry_symbol: "_o0000_s000".into(),
+        record_resolution: true,
+        resolve_reuse: seed,
+        ..LinkConfig::default()
+    }
+}
+
+/// The M9 GA rung end to end (the record-side wiring): the full Passes
+/// 1b–3 pipeline over the same relink corpus with and without the recorded
+/// seed — the delta is exactly what the v5 record section buys the
+/// relink's Pass 2 (decision reuse + the parse-walk saving), measured
+/// through the same `link_from_objects` seam the driver hands its config to.
+fn bench_pipeline(c: &mut Criterion) {
+    let files = 64usize;
+    let baseline: Vec<ObjectBuilder> = (0..files).map(|i| corpus_object(i, files, false)).collect();
+    let relink: Vec<ObjectBuilder> = (0..files).map(|i| corpus_object(i, files, true)).collect();
+
+    // The recorded state: a full, capturing link of the baseline corpus —
+    // the snapshot the v5 record section carries plus the digest table the
+    // seeds diff against.
+    let recorded = link_from_objects(
+        parse_pipeline(&baseline),
+        &[],
+        &pipeline_cfg(None),
+        Parallelism::Serial,
+        None,
+    )
+    .unwrap();
+    let seed = ResolveReuseSeed {
+        snapshot: recorded.resolve_snapshot.expect("the capture ran"),
+        digests: section_digests(&recorded.objects),
+    };
+
+    let relink_objects = parse_pipeline(&relink);
+    let externals: usize = relink_objects
+        .iter()
+        .map(|o| o.symbols.iter().filter(|s| s.external && !s.stab).count())
+        .sum();
+
+    // Both configs build once (the driver shapes the seed once per
+    // relink); the timed unit is the pipeline, not the seed clone.
+    let full_cfg = pipeline_cfg(None);
+    let reuse_cfg = pipeline_cfg(Some(seed));
+
+    let mut group = c.benchmark_group("resolve_pipeline");
+    group.throughput(Throughput::Elements(externals as u64));
+
+    group.bench_with_input(
+        BenchmarkId::new("full_resolve", format!("{files} files")),
+        &(),
+        |b, ()| {
+            b.iter(|| {
+                link_from_objects(
+                    relink_objects.clone(),
+                    &[],
+                    &full_cfg,
+                    Parallelism::Serial,
+                    None,
+                )
+                .unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("reused_resolve", format!("{files} files")),
+        &(),
+        |b, ()| {
+            b.iter(|| {
+                link_from_objects(
+                    relink_objects.clone(),
+                    &[],
+                    &reuse_cfg,
+                    Parallelism::Serial,
+                    None,
+                )
+                .unwrap()
+            });
+        },
+    );
+    group.finish();
 }
 
 fn bench_resolve(c: &mut Criterion) {
@@ -160,5 +270,6 @@ fn bench_resolve(c: &mut Criterion) {
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     bench_resolve(&mut criterion);
+    bench_pipeline(&mut criterion);
     criterion.final_summary();
 }
