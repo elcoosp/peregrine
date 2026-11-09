@@ -20,7 +20,28 @@ release automation.
 
 ### Features
 
-- **daemon/driver:** M9 GA rung 2 — the daemon serves the
+- **daemon/driver/emit:** M9 output-residency rung (wire v5) — the §7.2
+  buffer-residency work, the last deferred fusion item. The session stores
+  every served image as resident output state (a content-addressed blob
+  under the same ceiling and LRU as every other blob), so the warm cycle's
+  previous output stops re-crossing the wire (the `BLOB` negotiation finds
+  it; eviction is harmless — the client re-uploads). A tiles-asking client
+  (the v5 request flag, set by `LinkJob::build_incremental`) receives a
+  patched relink as the changed 16 KiB-tile stream
+  (`pgr_emit::incremental::TilePatch` — `diff_tiles`, `apply_tiles`, the
+  bytes-level twin of the file patch) plus the patched image's content
+  hash; an untouched relink ships an empty stream and rewrites nothing.
+  The client replays the stream against its local previous output and
+  hash-verifies the result before the atomic write; a diverged replay is
+  refused with the miette-rendered `TileReplayRefusal` (help text, not
+  just a verdict) and stands down to the in-process relink. The daemon
+  still never touches the filesystem — residency is state, never a write
+  path — and `LinkOutcome` carries the transport (`Transport::Full` /
+  `Transport::Tiles`) that the CLI prints and the benches record. tracing
+  spans ride the new seams (`diff_tiles`, `apply_tiles`,
+  `resident_tile_replay`, the residency store).
+
+- **daemon/driver:** M9 GA rung 2 — the daemon serves the- **daemon/driver:** M9 GA rung 2 — the daemon serves the
   `-incremental-verify` audit (wire v4; the audited fusion rung, the last
   cheap rung before the §7.2 buffer-residency work). The request's
   `audit` flag asks the session to run the §7.3 gate's bytes-level twin
@@ -42,6 +63,21 @@ release automation.
 
 ### Tests
 
+- `pgr-emit/tests/incremental.rs` (2 new): the tile stream's gates — the
+  lossless replay over every transport shape (interior edit, grow, the
+  shrink rung's truncation, untouched) and the content-hash replay gate
+  (a tampered tile is named, never shipped)
+- `pgr-daemon` session gates (4 new): served images become resident
+  output (cold and patched), the tiles relink serves the changed-tile
+  stream (a fraction of the image, replaying losslessly), the untouched
+  relink ships an empty stream, and a flag-less request keeps the v4
+  shape; the memory-ceiling gate now replays the client's re-upload after
+  the served image's residency evicts (the designed loop)
+- `pgr-driver/tests/m9_resident_fusion.rs` (1 new): the residency cycle
+  end to end — the cold link's image becomes the session's state, the
+  patched relink rides `Transport::Tiles` (a fraction of the file size),
+  the output stays byte-identical to the one-shot cycle, and the
+  untouched relink rewrites nothing
 - `pgr-emit/tests/incremental.rs` (3 new): the audit twin's gates — the
   audited tier-1 loop (identity holds, a flipped byte breaks it), the
   strict pass with the unsigned carve-out (a tampered page is named, an
@@ -59,6 +95,14 @@ release automation.
 
 ### Performance
 
+- `pgr-emit/wire-tiles` bench (new): the rung's CPU price — `diff_tiles`
+  and the client-side `apply_tiles` replay over an 8 MiB image (one-tile
+  edit and the untouched scan), recorded in docs/BENCHMARKS.md next to
+  the wire bytes the rung saves
+- `pgr-driver/resident-fusion` bench: the warm relink now asserts the
+  tile-stream transport (the wire's honest record) and re-recorded on
+  the rung — the previous output's upload and the patched image's
+  download are gone from the loop
 - `pgr-driver/resident-fusion-audited` bench (new):
   `fusion_relink_audited_64_objects` — the audited warm relink against
   the unaudited fusion group; the overhead is the rung's honest price

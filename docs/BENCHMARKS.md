@@ -559,8 +559,49 @@ fallbacks (the daemon's full link renews the record — the regression
 gate), and the relink's parse half rides the session. The
 bytes-written win ("patch ~1% of the image") lands where the patch path
 already proved it — the file-bound engine, P0-rig rows in the M9
-section above — and the wire cost of the patched bytes is exactly the
-deferred session-resident output-buffer rung's job.
+section above.
+
+### The §7.2 output-residency rung (`pgr-emit/wire-tiles` + re-recorded `pgr-driver/resident-fusion`)
+
+Wire v5 closes the deferral the fusion rung recorded: the session now
+*holds* every served image as resident output state (a content-addressed
+blob under the session's existing ceiling and LRU), so the warm cycle's
+previous output stops re-crossing the wire, and a patched relink's reply
+is the **changed-tile stream** (`pgr_emit::incremental::TilePatch`:
+`diff_tiles` on the daemon, `apply_tiles` + a content-hash gate on the
+client) instead of the whole image. What crosses per warm relink:
+
+| step | before (wire v3/v4) | after (wire v5) |
+|---|---|---|
+| previous output | uploaded once per changed output state | **0 bytes** (resident; re-uploaded only after a ceiling eviction) |
+| patched relink reply | the full patched image | **the changed tiles only** — e.g. 37.9 KiB of an 87 KiB corpus image (2 of 6 tiles, page 0 + the edit + the re-sign tail), ≈16.4 KiB of 8 MiB for a one-tile edit |
+| untouched relink reply | the full image, rewritten | **0 bytes**, nothing rewritten |
+
+The rung's CPU price is a memcmp-speed scan (which doubles as the wire's
+replay gate — the stream carries the patched image's SHA-256) plus a
+tile-splice replay. Recorded (2-core KVM sandbox, criterion median,
+20 samples, default sampling):
+
+| bench | time | throughput | what it runs |
+|---|---|---|---|
+| `wire-tiles/diff_one_tile_edit_8mib` | **5.64 ms** | 1.39 GiB/s | the daemon-side tile diff (scan + SHA-256) |
+| `wire-tiles/replay_one_tile_edit_8mib` | **0.75 ms** | 10.4 GiB/s | the client-side replay |
+| `wire-tiles/diff_untouched_8mib` | **5.25 ms** | 1.52 GiB/s | the pure scan, zero tiles |
+
+| (re-recorded on the rung) | time | what the step runs |
+|---|---|---|
+| `resident-fusion/fusion_relink_64_objects` | **529.6 ms** | the ladder + the tile stream (upload and download gone; the bench asserts the transport) |
+| `resident-fusion-audited/fusion_relink_audited_64_objects` | **610.6 ms** | the ladder + the tile stream + the audit |
+
+Honest verdict: on loopback unix sockets the wall clock is a **wash**
+(529.6 ms vs the 502.5–535.0 ms band the group recorded across runs —
+the relink is pipeline-bound, not socket-bound, and the 5.6 ms scan is
+~1% of it). The win is the wire and the memory bus: megabytes that used
+to cross per changed output state are now the changed tiles (~0.2–1% of
+the image), and the machine-hosted `pgrd` shape (a daemon on another
+host, a socketpair through a supervisor) is where the saved crossings
+become wall clock. The CPU price is paid on every relink; the byte
+saving is paid back on the first warm cycle.
 
 ### The audited fusion rung (`pgr-driver/resident-fusion-audited`, new bench)
 
