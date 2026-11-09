@@ -27,6 +27,7 @@ each flag has a fixture".
 | `LC_ID_DYLIB` (`-install_name`, `-current_version`, `-compatibility_version`) | ✅ | M3 | `e2e::m3_dylib_output_passes_verifier_strict` |
 | `LC_REEXPORT_DYLIB` (`-reexport_library`) + trie REEXPORT nodes | ✅ | M3 | `e2e::m3_reexport_library_lands_in_the_trie` |
 | `MH_DYLIB` / `MH_BUNDLE` outputs (`-dylib` / `-bundle`) | ✅ | M3 | `e2e::m3_dylib_output_passes_verifier_strict`, `e2e::m3_bundle_output_passes_verifier` |
+| `MH_OBJECT` output (`-r`; sections + preserved relocation entries, open undefineds) | ✅ | M10 | `m10_relocatable::r_output_relinks_into_an_executable` (two-step self-consumption), `object_emit::*`, `object_relocs::*` |
 | `LC_DYLD_INFO_ONLY` (classic rebase/bind opcode streams; `minos < 12.0.0` and `-no_fixup_chains`) | ✅ | M6 | `m6_legacy::*` (stream decode + verifier walk `dyld_info::check_dyld_info`) |
 | `__init_offsets` / `-init_offsets` | ❌ | later (newer deployment targets) | — |
 | `LC_ENCRYPTION_INFO` | ❌ | won't support (iOS App Store path) | — |

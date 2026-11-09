@@ -899,3 +899,40 @@ the parse walk it mirrors.
 ```sh
 cargo bench -p pgr-core --bench resolve
 ```
+
+## Recorded baseline (M10 rung 1 — the `-r` relocatable object emit)
+
+The relocatable rung ships `pgr_emit::build_object_image`: Passes 1–2
+stop short of the segment layout and the emit assembles the `MH_OBJECT`
+the pipeline itself consumes as an input — sections merged at their
+declared alignments, the symbol table grouped (locals, winner-backed
+globals, open undefineds) with its `LC_DYSYMTAB` subranges, and every
+relocation entry preserved and re-pointed at the output symbol table
+(`ADDEND`/`SUBTRACTOR` leaders re-emitted in decode order, site bytes
+verbatim). The corpus is the emit bench's own shape (16 objects × 512
+symbols × 32 KiB `__text`, branch + pointer relocs cross-referencing
+neighbors), so the two rungs' numbers read side by side:
+
+| (2-core KVM sandbox, criterion median, 20 samples) | time | throughput |
+|---|---|---|
+| `pgr-emit/object/build_object_image/16x512sym-32kib` | **6.57 ms** | ~1.6 GiB/s input |
+| `pgr-emit/emit/fused_tile_pass4` (same corpus) | 1.50 ms | 631 MiB/s |
+| `pgr-emit/emit/reference_pass4` (same corpus) | 2.14 ms | 442 MiB/s |
+
+Reading the ratio honestly: the object emit costs ~4× the fused image
+pass on the same bytes. It earns its shape, not a speed crown — the
+fused pass tiles `par_chunks_mut` across the pool and only *applies*
+pre-resolved patches, while the object emit rebuilds the symbol table
+(winner walk + strtab freeze), re-encodes every relocation entry against
+the output symtab and runs the section merge deterministically
+single-threaded (objects have no 16 KiB tile regime to parallelize
+across; the §4.3 determinism walk is the point). The rung's win is the
+output *class*: an input the next link consumes, skipping Pass 3, the
+fixup packer, the signature rebuild and the image write entirely. The
+two-step gate (link `-r`, then link the object) is byte-identical across
+double runs; per-file reloc-table costs scale with the entry count the
+input carries, not the image size.
+
+```sh
+cargo bench -p pgr-emit --bench object
+```
