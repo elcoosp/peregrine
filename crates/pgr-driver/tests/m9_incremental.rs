@@ -741,3 +741,98 @@ fn older_format_record_falls_back_and_re_records() {
     );
     assert_eq!(record.imports.len(), 1, "the table is re-recorded");
 }
+
+/// third.o (an added input): one unreferenced extern definition over a
+/// `__data` section — enough to move the file list the recorded snapshot
+/// vouches for, with no `__text` content (the segment-relayout tier's
+/// text-growth shape is a separate rung's territory; this gate is the
+/// resolve's file-list guard).
+fn third() -> ObjectBuilder {
+    let mut b = ObjectBuilder::new("third.o");
+    let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_third".into(),
+        section_index: data,
+        value: 0,
+        weak: false,
+    });
+    b
+}
+
+#[test]
+fn record_v5_carries_the_resolution_and_the_relink_renews_it() {
+    // M9 GA rung end to end: the full link records the Pass-2 snapshot in
+    // the v5 record, the edited relink renews it through the patch path,
+    // and every output keeps the standing verify gate.
+    let c = Corpus::new("recordv5");
+    run(&c.opts(true, false)).unwrap();
+    let first = pgr_emit::incremental::LinkRecord::decode(&std::fs::read(c.record()).unwrap())
+        .expect("the sidecar decodes");
+    assert_eq!(
+        first.format_version, 5,
+        "the resolve wiring bumps the record format to v5"
+    );
+    let snap = first
+        .resolution
+        .as_ref()
+        .expect("the full link records the Pass-2 snapshot");
+    assert_eq!(snap.file_names.len(), 2, "hello.o + greet.o");
+    assert!(
+        snap.file_names
+            .iter()
+            .any(|n| n.windows(b"hello.o".len()).any(|w| w == b"hello.o")),
+        "the snapshot vouches for the command-line file list (driver-resolved names)"
+    );
+    assert!(
+        snap.candidates.iter().any(|(name, _)| name == b"_main"),
+        "the candidate stream travels name-keyed"
+    );
+    assert!(strict_verify(&c.out));
+
+    c.edit(32 * 1024, true);
+    let second = run(&c.opts(true, true)).unwrap();
+    assert!(
+        second.patch.is_some(),
+        "the seeded relink still patches in place"
+    );
+    let refreshed = pgr_emit::incremental::LinkRecord::decode(&std::fs::read(c.record()).unwrap())
+        .expect("the refreshed sidecar decodes");
+    assert!(
+        refreshed.resolution.is_some(),
+        "the patched relink re-records the fresh snapshot"
+    );
+    assert!(strict_verify(&c.out));
+}
+
+#[test]
+fn moved_file_list_resolves_in_full_and_still_patches() {
+    // A third input moves every file identity the snapshot vouches for:
+    // the resolve reuse refuses INSIDE the pipeline (the ladder's bottom
+    // rung — the relink resolves in full) while the byte plan keeps
+    // patching, because the two gates are independent by design. The
+    // output verifies strict and the record renews the new shape so the
+    // next edit can reuse it.
+    let c = Corpus::new("movedlist");
+    run(&c.opts(true, false)).unwrap();
+    std::fs::write(c.dir.join("third.o"), third().build().unwrap()).unwrap();
+    let mut opts = c.opts(true, true);
+    opts.inputs
+        .push(c.dir.join("third.o").display().to_string());
+    let second = run(&opts).unwrap();
+    assert!(
+        second.patch.is_some(),
+        "the byte plan still patches (the resolve guard refuses inside the pipeline)"
+    );
+    assert!(strict_verify(&c.out), "the patched output verifies strict");
+    let fresh = pgr_emit::incremental::LinkRecord::decode(&std::fs::read(c.record()).unwrap())
+        .expect("the refreshed sidecar decodes");
+    assert_eq!(
+        fresh
+            .resolution
+            .expect("the relink re-records the snapshot")
+            .file_names
+            .len(),
+        3,
+        "the renewed record vouches for the new file list"
+    );
+}
