@@ -25,7 +25,10 @@
 //! [`layout::chained_fixups_min_minos`] names the per-platform
 //! deployment floor (macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0,
 //! visionOS 1.0) below which the classic `LC_DYLD_INFO_ONLY` opcodes
-//! encode the same fixups.
+//! encode the same fixups. Rung 3 opens the floor to consumers:
+//! [`platform::FixupEncoding`] names the fixup-encoding decision for a
+//! platform/target pair *before* the link runs — the same table
+//! [`layout::chained_fixups_min_minos`] encodes, one reader per side.
 
 pub mod cache;
 pub mod deadstrip;
@@ -37,6 +40,7 @@ pub mod interner;
 pub mod layout;
 pub mod link;
 pub mod object;
+pub mod platform;
 pub mod pool;
 pub mod propagate;
 pub mod resolve;
@@ -61,6 +65,7 @@ pub use link::{
     check_load_symbols, link, link_cached, link_from_objects, link_reloc, link_with,
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
+pub use platform::FixupEncoding;
 pub use propagate::{PropagationScope, SectionDigest};
 pub use resolve::{Def, Rank, Resolution};
 pub use resolve_reuse::{ResolveReuseSeed, ReuseFallback, ReusePlan, install_reused, plan_reuse};
