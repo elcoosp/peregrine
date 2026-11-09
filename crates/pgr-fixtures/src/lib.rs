@@ -1,5 +1,7 @@
-//! Deterministic Mach-O test-image builder shared by `pgr-verify` tests and
-//! the `pgr-format` parser benchmark.
+//! Deterministic Mach-O test-image builder shared across the workspace —
+//! the tests, benches and consumer examples of `pgr-verify`, `pgr-format`,
+//! `pgr-core`, `pgr-emit`, `pgr-driver` and `pgr-daemon`, plus the fuzz
+//! corpus seeding.
 //!
 //! The builder implements the TDD §8 layout contract directly:
 //!
