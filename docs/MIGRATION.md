@@ -47,6 +47,7 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | executable (default) | default; `-static` accepted |
 | `-dylib` + `-install_name` + `-current_version` / `-compatibility_version` | same; the install name defaults to the output path |
 | `-bundle` | same |
+| `-r` (relocatable) | same (`MH_OBJECT` output: sections merged, relocation entries preserved and re-pointed at the output symbol table, undefineds stay open — M10) |
 | `-reexport_library <path>` | same (`LC_REEXPORT_DYLIB` + trie REEXPORT nodes) |
 | `-exported_symbols_list` / `-unexported_symbols_list` | same (exact-name subset; globs are roadmap) |
 | `-mark_dead_strippable_dylib` | same |
@@ -125,6 +126,12 @@ construction (first-occurrence class ids, fixed-point layouts).
 | `PGR_CACHE_MAX` | default cache size bound (as `-cache_max`) |
 | `PGR_JOBS` | worker threads for the parallel passes (`1` = serial/deterministic debugging mode) |
 | `PGR_LLD64` | path to `ld64.lld` for the golden cross-check tests |
+| `PGR_DAEMON_SOCK` | default `pgrd` socket path (as `-resident_socket`) |
+| `PGR_RESIDENT_DEBUG` | set to install a tracing subscriber for the resident path |
+| `PGR_INCREMENTAL_RECORD` | pin the M9 link-record sidecar path (default `<output>.pgr-inc`) |
+| `PGR_INCREMENTAL_DEBUG` | set to install a tracing subscriber for the relink path |
+| `PGR_RANDOMIZED_STEPS` | size the M9 GA seeded randomized edit walk |
+| `PGR_TRACING` | set in consumer processes to install a tracing subscriber (the library spans stay inert otherwise) |
 
 ## Verifying outputs
 
