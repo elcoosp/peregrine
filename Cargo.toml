@@ -39,6 +39,12 @@ criterion = { version = "0.7", default-features = false, features = [
     "cargo_bench_support",
 ] }
 rayon = "1"
+# M9 GA rung 2 (the audit seams): spans on the audit/relink paths (inert
+# until a subscriber installs — the binaries do under their debug envs),
+# and miette help-text on the audit refusal (the fix, not just the verdict).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+miette = { version = "7", default-features = false, features = ["derive", "fancy-no-backtrace"] }
 
 # Workspace-wide lint policy (Peregrine hot-path rules, perf doc §5):
 #   * `unsafe` is forbidden everywhere at M0. When `pgr-emit`/`pgr-format` later

@@ -7,8 +7,8 @@
 | **Codename** | Peregrine (binary: `pgr`) |
 | **Target** | arm64-apple-darwin executables, dylibs, bundles (macOS 12+ default path) |
 | **Host** | Linux (primary development sandbox); macOS (deployment as an `ld` replacement) |
-| **Status** | Implemented through M9 tier 2 (the segment-relayout patch tier) plus the GA hardening pass (the relayout ladder's shrink rung, the seeded randomized edit gate) — this document is the design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
-| **Date** | 2026-11-05 |
+| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, and the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`) — this document is the design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
+| **Date** | 2026-11-09 |
 | **Companion diagrams** | `assets/pipeline.png`, `assets/output-map.png`, `assets/alignment.png`, `assets/fixup-chain.png` |
 
 ---

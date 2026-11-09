@@ -562,6 +562,31 @@ already proved it — the file-bound engine, P0-rig rows in the M9
 section above — and the wire cost of the patched bytes is exactly the
 deferred session-resident output-buffer rung's job.
 
+### The audited fusion rung (`pgr-driver/resident-fusion-audited`, new bench)
+
+Wire v4 serves `-incremental-verify` inside the session: the audited warm
+relink runs the ladder **plus** the audit (byte-identity against the
+reference emit — a second full fused emit of the same plan — and the
+strict verifier's page-hash recompute). The group pairs with the
+unaudited fusion group above on the same corpus and edit alternation:
+
+| (2-core KVM sandbox, criterion median, 20 samples) | time | what the step runs |
+|---|---|---|
+| `resident-fusion/fusion_relink_64_objects` | **502.5 ms** | the ladder: warm pipeline + plan + in-memory patch + re-sign |
+| `resident-fusion-audited/fusion_relink_audited_64_objects` | **597.4 ms** | the ladder **+ the audit**: the reference emit + the strict pass |
+
+Honest verdict: the audit costs **+19% per audited relink** on this
+corpus (94.8 ms — the reference emit over warm POIs plus the verifier's
+chain walk and page-hash recompute). That is the rung's price for
+never shipping an unaudited patch, paid only when `-incremental-verify`
+is on; the driver's `-resident -incremental` cycles without the flag are
+unchanged. The bench also caught the first real audit finding on the way
+in: the symbol-heavy bench corpus overflowed the verifier's
+function-starts delta accumulator — `build_func_starts` had emitted
+absolute offsets into a **delta** stream since M0 (small corpora masked
+it; 131 K function starts did not). Fixed with a regression gate in
+`m9_resident_fusion.rs`.
+
 ## Recorded baseline (M9 — in-place incremental relink, tier 1)
 
 The M9 milestone (architecture doc §10.4 row M9, §7.3 Stage C tier 1)

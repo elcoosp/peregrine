@@ -5,7 +5,96 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 
+> **Release-ladder reconciliation (2026-11-09).** The headings below used to
+> follow the design-doc milestone stream (0.7.0 → 1.2.0 for M6 → M9 v1), but
+> the published tags compressed that stream: everything through the M9 v1
+> engine shipped squashed in **v0.2.0**; the M9 GA tiers then shipped as
+> **v0.3.0** (the per-symbol propagation planner), **v0.4.0** (the
+> segment-relayout tier), **v0.5.0** (the GA hardening pass) and **v0.6.0**
+> (tier 2c, the resolve's record-side wiring, the resident fusion wire rung
+> and the audited fusion rung). The prose is unchanged; only the section
+> structure now matches the published tags (v0.2.0–v0.6.0; Cargo.toml
+> carries 0.6.0).
+
 ## [Unreleased]
+
+### Features
+
+- **daemon/driver:** M9 GA rung 2 — the daemon serves the
+  `-incremental-verify` audit (wire v4; the audited fusion rung, the last
+  cheap rung before the §7.2 buffer-residency work). The request's
+  `audit` flag asks the session to run the §7.3 gate's bytes-level twin
+  on the patched relink: byte-identity against the reference emit (the
+  full fused emit of the same plan) plus the strict verifier with the
+  deliberate-unsigned carve-out, verdict on the wire. The audit lives in
+  the engine (`pgr_emit::incremental::audit` — `audit_patch`,
+  `audit_image`, the miette-rendered `AuditRefusal`), shared by the
+  driver's in-process gate and the session's, so both paths gate with one
+  implementation; a divergence is healed in memory from the reference
+  emit (re-recorded, outcome adjusted) before the verdict crosses, and
+  the client refuses to write a failing verdict — §7.2 crash-safety
+  unchanged. The driver routes `-resident -incremental
+  -incremental-verify` through the daemon first (standing down to the
+  in-process audited relink without one), `LinkOutcome` carries the
+  audit's summary, and the refusal ships with help text instead of the
+  old `Tbd` shoehorn (a `.tbd`-parse error variant no longer carries
+  verifier verdicts)
+
+### Tests
+
+- `pgr-emit/tests/incremental.rs` (3 new): the audit twin's gates — the
+  audited tier-1 loop (identity holds, a flipped byte breaks it), the
+  strict pass with the unsigned carve-out (a tampered page is named, an
+  unsigned link audits clean besides its deliberate shape), and the
+  refusal's rendered help text
+- `pgr-daemon` session gates (2 new): the audited relink reports the
+  verdict (and its image IS the reference emit), a full link and an
+  untouched relink serve no audit; protocol v4 round-trips the audited
+  request
+- `pgr-driver/tests/m9_resident_fusion.rs` (2 new, 1 rewritten): the
+  audit is served by the daemon (verdict on the outcome, bytes still
+  match the audited one-shot cycle) and the audited relink stands down to
+  the in-process audit without a daemon; the old "stays in-process" gate
+  rewritten for the rung
+
+### Performance
+
+- `pgr-driver/resident-fusion-audited` bench (new):
+  `fusion_relink_audited_64_objects` — the audited warm relink against
+  the unaudited fusion group; the overhead is the rung's honest price
+  (the reference emit plus the strict pass per audited relink), recorded
+  in docs/BENCHMARKS.md
+
+### Fixed
+
+- **core:** `build_func_starts` emitted **absolute** offsets into
+  `LC_FUNCTION_STARTS`'s **delta**-encoded ULEB128 stream — semantically
+  wrong since M0 and invisible until the audited fusion rung's
+  symbol-heavy bench corpus (64 objects × 2 048 function symbols)
+  overflowed the decoder's accumulator past `__TEXT` (the strict gate's
+  `function start ... beyond __TEXT`). Small corpora masked it because
+  the accumulated sum stayed under vmsize. Now delta-encoded the way the
+  verifier and dyld decode it, with a regression gate in
+  `m9_resident_fusion.rs` (a symbol-heavy corpus full-links and relinks
+  strict-clean through the audit)
+
+### Build
+
+- workspace gains `tracing` (spans on the audit/relink seams — inert
+  until a subscriber installs; `pgr`/`pgrd` install one under
+  `PGR_INCREMENTAL_DEBUG`/`PGR_RESIDENT_DEBUG`) and `miette` (the
+  refusal's help text)
+
+### Docs
+
+- the release ladder reconciled with the published tags (the note below),
+  the README badge and status version refreshed, docs/TDD.md's status row
+  carried to the audited fusion rung, docs/COMPAT.md's deferred list
+  narrowed to the buffer-residency rung, and a consumer example for the
+  verifier's library surface (`pgr-verify/examples/verify_report.rs`) and
+  the audited session (`pgr-daemon/examples/fusion_audit_session.rs`)
+
+## [0.6.0] - 2026-11-09
 
 ### Features
 
@@ -28,6 +117,7 @@ release automation.
   so the incremental cycle survives daemon fallbacks instead of silently
   dead-looping on a stale sidecar. The daemon still holds no output state:
   the client writes the file (§7.2 crash-safety unchanged)
+
 - **core:** M9 tier 2c — the incremental resolve over the propagation
   index (architecture doc §7.3 step 3, the GA rung the roadmap names
   before the resident fusion). The tier-2b planner scopes *bytes*; the
@@ -42,6 +132,40 @@ release automation.
   full precedence rules over every name they can. The contract is
   equality with the full resolve — gated per relink shape and across a
   randomized edit walk in `tests/m9_resolve_reuse.rs`
+
+- **driver:** `-incremental-verify`'s strict-verifier audit no longer
+  counts the deliberate "arm64 images require an ad-hoc code signature"
+  error against a deliberately unsigned link (`-no_adhoc`): the audit
+  gates fixups, chains, segments and symtab at full strictness, and the
+  missing-signature shape is the config's own choice, not a patch defect.
+  Signed links keep the signature gate unchanged
+
+
+
+### Tests
+
+- `pgr-core/tests/m9_resolve_reuse.rs` (new): the tier-2c equality gates
+  — unchanged relinks reuse every winner, body edits re-decide only the
+  seeded sections' names, a weak/strong rank flip retargets the reused
+  winner, a duplicate strong definition lands the same `LinkError::Symbol`
+  both paths reach, moved file lists and dylib export sets refuse with
+  `ReuseFallback`, and a seeded xorshift64* walk (30 steps) keeps the
+  reused resolution indistinguishable from the full one
+
+### Performance
+
+- `pgr-core/benches/resolve.rs` (new): `resolve_pass2` pits the full
+  `Resolution::install` against `plan_reuse` + `install_reused` (the plan
+  hoisted out of the timed loop — the digest diff is plan-side, computed
+  once per relink beside the byte planner's). Recorded honestly on the
+  dev sandbox: break-even past ~32 inputs, −21% at 64 files × 49 externals
+  (352 µs → 278 µs median), +19% at 16 files where the plan-read machinery
+  still costs more than the full walk's get/decision work
+
+## [0.5.0] - 2026-11-08
+
+### Features
+
 - **emit:** M9 GA hardening — the relayout tier's **shrink rung** (the
   tier-2 trigger's mirror; architecture doc §7.3 "the fallback must
   always be available" cuts both ways). An unsigned relink (`-no_adhoc`)
@@ -56,22 +180,9 @@ release automation.
   unchanged. A signed relink never shrinks — the sig anchor pins the
   boundary — so this rung serves exactly the corpus the signed tiers
   could not
-- **driver:** `-incremental-verify`'s strict-verifier audit no longer
-  counts the deliberate "arm64 images require an ad-hoc code signature"
-  error against a deliberately unsigned link (`-no_adhoc`): the audit
-  gates fixups, chains, segments and symtab at full strictness, and the
-  missing-signature shape is the config's own choice, not a patch defect.
-  Signed links keep the signature gate unchanged
 
 ### Tests
 
-- `pgr-core/tests/m9_resolve_reuse.rs` (new): the tier-2c equality gates
-  — unchanged relinks reuse every winner, body edits re-decide only the
-  seeded sections' names, a weak/strong rank flip retargets the reused
-  winner, a duplicate strong definition lands the same `LinkError::Symbol`
-  both paths reach, moved file lists and dylib export sets refuse with
-  `ReuseFallback`, and a seeded xorshift64* walk (30 steps) keeps the
-  reused resolution indistinguishable from the full one
 - `pgr-emit/tests/incremental.rs` (1 new, 1 rewritten): the shrink-rung
   byte-identity gate (shrink patches through the relayout tier, the
   shrunk state is a relinkable baseline for a tier-1 body edit and a
@@ -79,6 +190,7 @@ release automation.
   churn dimension (grow past / shrink below the boundary reservation) and
   a `PGR_RANDOMIZED_STEPS` profile knob — 2000 sequences × 5 steps is the
   roadmap's 10⁴-step GA bar
+
 - `pgr-driver/tests/m9_randomized.rs` (new): the GA randomized
   edit-sequence gate end to end — a seeded xorshift64* walk over body
   flips, growth within slack, symtab churn (the shrink rung's side) and
@@ -86,24 +198,25 @@ release automation.
   files with the record sidecar in the mix; every step must land on a
   patch that reuses most tiles, an untouched no-op, or an honest
   fallback that re-records, and every output must verify clean
+
 - `pgr-driver/tests/m9_incremental.rs` (1 new): the shrink rung end to
   end — the unsigned shrinking relink patches through the relayout tier,
   the image shrinks, the output verifies, and the shrunk baseline still
   relinks
 
+
+
 ### Performance
 
-- `pgr-core/benches/resolve.rs` (new): `resolve_pass2` pits the full
-  `Resolution::install` against `plan_reuse` + `install_reused` (the plan
-  hoisted out of the timed loop — the digest diff is plan-side, computed
-  once per relink beside the byte planner's). Recorded honestly on the
-  dev sandbox: break-even past ~32 inputs, −21% at 64 files × 49 externals
-  (352 µs → 278 µs median), +19% at 16 files where the plan-read machinery
-  still costs more than the full walk's get/decision work
 - `pgr-driver/incremental_shrink` bench: new `linkedit_shrink_relink_8mib`
   group (an unsigned 8 MiB corpus alternating a 512-local-symbol object
   with the pristine one — shrink and regrow through the tail) with a
   per-direction bytes-written accounting pass
+
+
+## [0.4.0] - 2026-11-08
+
+### Performance
 
 - **emit:** M9 tier 2 — the **segment-relayout patch tier** executes (the
   §7.3 ladder's middle rung; architecture doc §10.4 row M9 GA). A skeleton
@@ -119,6 +232,7 @@ release automation.
   with the derived `LC_UUID`, and the `CodeDirectory` is re-signed from the
   merged hash table at the moved boundary — the byte-identity contract
   (patched == full fused emit of the same plan) is unchanged and gated
+
 - **emit:** the record's **v4 output-section content digest table**
   (`LinkRecord::content_digests`): SHA-256 over each output section's
   copy-run bytes (placement-invariant concatenation), computed in parallel
@@ -133,9 +247,12 @@ release automation.
   overwrites it; oversized growth (beyond the policy max) still escalates
   to the clean link, and the §7.3 economics gate still declines
   whole-image patches
+
 - **driver:** `-incremental` reports the patched state's file size (the
   relayout tier grows the image) and the relayout path is exercised
   end-to-end with `-incremental-verify`
+
+
 
 ### Tests
 
@@ -143,11 +260,14 @@ release automation.
   over an overflowing corpus (exec, unsigned, dylib), the `__LINKEDIT`
   overflow trigger, the ladder's honest top rung (growth beyond the policy
   max still falls back), and the relayout state as a fixpoint
+
 - `pgr-driver/tests/m9_incremental.rs` (3 new, 1 rewritten): the e2e
   relink patches through the relayout tier and recovers incrementally,
   oversized growth still falls back and re-records, and
   `-incremental-verify` audits the relayout patch; the old
   "skeleton move falls back" gate now pins the tier-2 patch
+
+
 
 ### Performance
 
@@ -166,17 +286,34 @@ release automation.
   content-digest hash adds no measurable full-link cost (parallel; full
   relink 17.4 ms vs 17.4 ms baseline)
 
-### Build
 
-- **build:** restore criterion's `cargo_bench_support` to the workspace
-  feature set — criterion 0.7 split the measuring harness out of the
-  default features, and with `default-features = false, features =
-  ["html_reports"]` every bench compiled, "passed" and measured nothing
-  (the CI `bench --no-run` gate could not see it); the harness runs again
 
-## [1.2.0] - 2026-11-08
+## [0.3.0] - 2026-11-08
 
 ### Features
+
+- **core:** M9 tier 2b — the per-symbol change-propagation planner
+  (architecture doc §7.3 step 3). The record's section-digest table (v3:
+  content + symbol records) is diffed against the relink's parse, and the
+  planner's **propagation gate** requires every changed content span to
+  sit inside `pgr_core::propagate::predict`'s scope — the seeds'
+  output-section extents plus the reverse-index closure of their
+  dependents — falling back to the full link when a span diff escapes the
+  scope (the stale-record shape, or literal-pool dedup churn the scope
+  does not model). The M8 reverse reference index and the
+  insertion-stable import table anchor the scope's input side
+
+## [0.2.0] - 2026-11-08
+
+The design-doc milestone stream (M0–M9 v1) shipped squashed in this
+release: the sections below keep their original prose, grouped under the
+design-ladder versions they were written against. Everything from the M0
+format layer through the M9 in-place incremental relink engine is in
+v0.2.0.
+
+#### Shipped inside v0.2.0 — design-ladder 1.2.0 (2026-11-08)
+
+#### Features
 
 - **emit:** M9 in-place incremental relink engine (architecture doc §10.4
   row M9, §7.3 Stage C tier 1) — the new `pgr-emit::incremental` module
@@ -216,7 +353,7 @@ release automation.
   (a version mismatch stays a hard proto error; clients fall back to the
   one-shot link)
 
-### Tests
+#### Tests
 
 - `pgr-core/tests/m9_foundations.rs` (4): anchored relink stability,
   overflow to the natural pad, anchor determinism, M8-c reproduction
@@ -231,7 +368,7 @@ release automation.
   patch, no-op, every fallback path, verifier-clean patched output,
   `-incremental-verify`, option surface, error propagation
 
-### Performance
+#### Performance
 
 - `pgr-driver/incremental` bench: full relink 16.4 ms vs incremental
   17.6 ms on the 8.53 MiB sandbox corpus (a wash — ext4 has no reflink, so
@@ -239,9 +376,10 @@ release automation.
   13.3 ms, and the §7.3 bytes-written gate met: **1.2% of the image bytes
   per one-function edit** (105 KB: two dirty tiles + the CodeDirectory)
 
-## [1.1.0] - 2026-11-08
 
-### Features
+#### Shipped inside v0.2.0 — design-ladder 1.1.0 (2026-11-08)
+
+#### Features
 
 - **daemon:** M8 resident link server — the new `pgr-daemon` crate ships
   `pgrd` (unix-domain socket, idle timeout, `--shutdown`) and the client
@@ -290,7 +428,7 @@ release automation.
   caller-owned buffer (cleared + resized, capacity retained), the reuse
   path the resident session's scratch buffer rides on
 
-### Performance
+#### Performance
 
 - **bench:** `pgr-driver/resident` — the warm-relink path recorded
   honestly: one-shot 224.3 ms vs resident-warm 260.3 ms on the
@@ -303,7 +441,7 @@ release automation.
 - **bench:** client manifest hashing runs on the shared compute pool (one
   SHA-256 per input, parallelized)
 
-### Tests
+#### Tests
 
 - **core:** `m8_foundations.rs` — reverse-index gates (site lists,
   dead-atom filtering under the live set, total order, schedule
@@ -326,9 +464,10 @@ release automation.
 - **emit:** the fused `_into` variant is byte-identical to the allocating
   path (reused by the M4 gates)
 
-## [1.0.0] - 2026-11-07
 
-### Features
+#### Shipped inside v0.2.0 — design-ladder 1.0.0 (2026-11-07)
+
+#### Features
 - **core:** M7 versioned cache format v2 — `CACHE_FORMAT_VERSION = 2` plus a
   parser revision recorded in every POI/frozen-`.tbd` frame *and* bound into
   the cache key (`sha256(bytes ‖ flags ‖ format ‖ parser)` — stale entries
@@ -369,7 +508,7 @@ release automation.
 - **docs:** `docs/MIGRATION.md` — the ld64 → pgr migration guide (flag
   mapping, no-ops, cache semantics, determinism contract, exit codes)
 
-### Bug Fixes
+#### Bug Fixes
 - **format:** `parse_imports` bounds `imports_count` by the payload before
   pre-allocation (a mutated/truncated image once drove `count × 16` to
   68 GiB and aborted; typed `Overrun` now; unknown formats rejected up
@@ -385,7 +524,7 @@ release automation.
 - **fuzz:** the `link_object` target links again (the M5 `link()`
   signature change had broken its compile)
 
-### Performance
+#### Performance
 - **bench:** `pgr-driver/cache_evict` — the LRU bound costs only on cold
   stores: 9.73 ms bounded vs 9.12 ms unbounded (+6.7%) on the 4-object
   parse-heavy corpus; warm (all-hit) links are unchanged — no stores, no
@@ -398,7 +537,7 @@ release automation.
   (docs/BENCHMARKS.md records the full table; the M5 row's "~118 µs" unit
   slip is corrected there)
 
-### Tests
+#### Tests
 - **core:** v2 frame/key/flag gates, marker self-heal (foreign + legacy
   dirs), LRU eviction + recency, hostile framed-length miss, parallel-store
   stress (30 bounded links)
@@ -411,9 +550,10 @@ release automation.
 - **verify:** saturated arithmetic on mutated headers (chain walks, branch
   ranges, segment contracts)
 
-## [0.7.0] - 2026-11-07
 
-### Features
+#### Shipped inside v0.2.0 — design-ladder 0.7.0 (2026-11-07)
+
+#### Features
 - **core:** M6 branch thunks/veneers — out-of-range `B`/`BL` sites (beyond
   the ±128 MiB arm64 reach) get a 3-instruction veneer (`adrp x16/add
   x16/br x16`) inserted into the same output section right after the
@@ -469,7 +609,7 @@ release automation.
   metadata sections (`__objc_classrefs`, `__objc_selrefs`,
   `__swift5_types`) and `-icf` fold corpora
 
-### Performance
+#### Performance
 - **bench:** `pgr-driver/link_icf` — the "ICF ≤ 25% added wall" gate:
   17.29 ms fold-off vs 19.37 ms `-icf=safe` on the fully-foldable 32×512
   corpus (**+12.0%**, 16,383 atoms folded, ~192 KiB of duplicate text
@@ -486,7 +626,7 @@ release automation.
   1.90×) — the veneer scan, fixup-command dispatch and fold-empty fast
   path cost nothing measurable
 
-### Tests
+#### Tests
 - **core:** veneer insertion on forward/backward overflow (one veneer per
   site, in-range final deltas, double-link determinism, no veneers when
   in range); ICF fold/keep/alias gates (identical fold, distinct targets
@@ -508,9 +648,10 @@ release automation.
   frozen-`.tbd` dylib links, `-no_cache`), `m6_ecosystem` (LTO detection,
   ObjC/Swift pass-through + determinism)
 
-## [0.6.0] - 2026-11-06
 
-### Features
+#### Shipped inside v0.2.0 — design-ladder 0.6.0 (2026-11-06)
+
+#### Features
 - **format:** M5 `!<arch>` archive parser — Apple `__.SYMDEF`/`__.SYMDEF_64`
   and GNU `/` ranlib tables (32/64-bit entries), BSD `#1/<len>` and GNU `//`
   long-name tables, ranlib member-offset resolution (header offset first,
@@ -547,7 +688,7 @@ release automation.
   name-sorted ranlib table from the member symtabs),
   `set_subsections_via_symbols`/`set_alt_entry`, section-relative reloc
   ctors (`unsigned_sect`, `page21_sect`, `pageoff12_sect`)
-### Performance
+#### Performance
 - **bench:** `pgr-format/parse_archive` — 11.9 GiB/s structural archive
   parse (64 members + ranlib index)
 - **bench:** `pgr-driver/link_archive` — S7 decision recorded: lazy pull
@@ -560,7 +701,7 @@ release automation.
 - **bench:** `pgr-driver/link_cstring` — 1.69 ms for the 16-object shared-
   pool corpus (deduped); M4 gates re-measured and holding (emit 1.39× the
   reference, full-pipeline parity within noise)
-### Tests
+#### Tests
 - **format:** archive round-trips (libtool/GNU/BSD shapes, `__.SYMDEF_64`),
   malformed-input battery, mutation/arbitrary-byte proptests
 - **core:** atom-boundary and `N_ALT_ENTRY` gates, dead-strip closure
@@ -573,9 +714,10 @@ release automation.
   closure), `m5_cstring` (dedup + symbol remap + dyld-simulated
   section-relative pointer remap + dead-strip cooperation), `m5_flags`
   (filelist/framework/sectcreate/search order)
-## [0.5.0] - 2026-11-06
 
-### Features
+#### Shipped inside v0.2.0 — design-ladder 0.5.0 (2026-11-06)
+
+#### Features
 - **emit:** M4 fused tile emit (`build_image_fused`) — parallel 16 KiB
   tiles copy coalesced runs, apply relocations, encode chained-fixup
   words, place the `__LINKEDIT` chunks and hash the 4 KiB signature pages
@@ -604,13 +746,13 @@ release automation.
 - **driver:** the fused pipeline becomes the default (`link_to_bytes`);
   `link_reference_bytes`/`link_reference_image` expose the pre-fusion
   reference for the M4 byte-identity gate and benches
-### Performance
+#### Performance
 - **bench:** `pgr-emit/emit` gate — fused tile emit 1.59 ms vs reference
   2.18 ms for ~0.94 MiB signed images (1.37×, 605 vs 441 MiB/s) on the
   2-core dev sandbox; full-pipeline benches record fused vs reference on
   all corpora (bind-path links 1.10–1.11×; resolution-heavy static corpus
   is Pass 2/3-bound as before); `PGR_JOBS=1` scaling recorded
-### Tests
+#### Tests
 - **emit:** ten fused-vs-reference byte-identity gates over every M3
   corpus shape (executables, dylibs, bundles, re-exports, export filters,
   flat namespace, `-no_fixup_chains`, `-no_adhoc`, wide multi-tile
@@ -622,9 +764,10 @@ release automation.
   strict verifier + bundle/dylib contracts on fused outputs, fused
   double-link determinism
 
-## [0.4.0] - 2026-11-06
 
-### Features
+#### Shipped inside v0.2.0 — design-ladder 0.4.0 (2026-11-06)
+
+#### Features
 - **driver:** M3 CLI — `-dylib`/`-bundle` outputs, `-install_name`,
   `-current_version`/`-compatibility_version`, `-reexport_library`,
   `-exported_symbols_list`/`-unexported_symbols_list`,
@@ -652,38 +795,40 @@ release automation.
   rejection) and `LC_REEXPORT_DYLIB` classification
 - **emit:** chain words at `vaddr − image_base`; ad-hoc signature carries
   `execSegFlags = CS_EXECSEG_MAIN_BINARY` only for executables
-### Performance
+#### Performance
 - **bench:** export-trie build gate — 31.5 ms for 10⁵ exports vs 363 ms
   for the legacy M2 builder on the dev sandbox (11.5×); legacy builder
   kept verbatim in the bench as the measured baseline
 - **core:** hash-set import dedup and hash-map indirect-symbol lookup
   replace two O(n²) scans
 - **bench:** `-dylib`/`-bundle` output-kind link benches
-### Tests
+#### Tests
 - **driver:** M3 e2e gates — strict-verified dylib/bundle outputs, the
   pair gate over a scanned dylib binary, re-export trie shape, export
   filters (`N_PEXT` symtab + trie exclusion), deterministic double-link
 
 <!-- generated by git-cliff -->
 
-## [0.3.0] - 2026-11-05
 
-### Continuous Integration
+#### Shipped inside v0.2.0 — design-ladder 0.3.0 (2026-11-05)
+
+#### Continuous Integration
 - Parse_tbd fuzz target + got/tbd corpus seeds (ab3d31f)
-### Documentation
+#### Documentation
 - M2 README gates + D13 compat checklist; version 0.3.0 (659f4bc)
-### Features
+#### Features
 - **driver:** M2 dynamic link CLI — tbd inputs, -l/-L, flat namespace (b3c275b)- **verify:** Export-trie walk for LC_DYLD_EXPORTS_TRIE (c8a50fa)- **emit:** Synthetic slot pieces + indirect symbol table chunk (1a1edd1)- **core:** M2 passes 1-3 — GOT/stub synthesis, binds, import table, trie (4732cf2)- **core:** Two-level resolution, dylib rank, GOT-load relocations (3d3fc9a)- **fixtures:** LLVM single-segment object convention, GOT relocations (d3f6e39)- **format:** .tbd v3/v4 stub parser, unsigned bind-word addend codec (585c30d)
-### Performance
+#### Performance
 - **bench:** Dylib-linked bind-path baseline (M2) (34fc15e)
-### Tests
+#### Tests
 - **driver:** M2 e2e gates — printf-from-tbd, flat namespace, lld golden (14fe25c)
 
 <!-- generated by git-cliff -->
 
-## [0.2.0] - 2026-11-05
 
-### Features
+#### Shipped inside v0.2.0 — design-ladder 0.2.0 (2026-11-05)
+
+#### Features
 - **driver:** M1 static hello-world link pipeline: ld64-compatible option
   surface (`-o -arch -platform_version -e -static -fixup_chains -adhoc
   -headerpad -segalign`), Pass 0 mapping and the Pass 1–5 driver loop
@@ -704,21 +849,33 @@ release automation.
 - **driver:** end-to-end link benchmark (small/large corpora) recorded as
   the M4 baseline
 
-### Continuous Integration
+#### Continuous Integration
 - Fuzz schedule extended with the `link_object` target (Pass 1 parser +
   Pass 2/3 pipeline) and object seeds in the fuzz corpus
 
-## [0.1.0] - 2026-11-05
 
-### Bug Fixes
+#### Shipped inside v0.2.0 — design-ladder 0.1.0 (2026-11-05)
+
+#### Bug Fixes
 - **format:** Panic-free casts on misaligned mutated input (a5e3a4f)
-### Continuous Integration
+#### Continuous Integration
 - Fmt/clippy/test/doc/bench gates, fuzz schedule, git-cliff release pipeline (c3234fa)
-### Features
+#### Features
 - **verify:** M0 verifier v1 with chain-walk simulation (408eb90)- **fixtures:** Deterministic Mach-O image builder (eb69c00)- **format:** Zero-copy Mach-O primitives, cursor and codecs (5ccacc8)
-### Performance
+#### Performance
 - **bench:** Parser-throughput baseline (GB/s) (d80515d)
-### Refactor
+#### Refactor
 - **fixtures:** Bundle fixup-payload inputs into FixupContext (f583287)
 
 <!-- generated by git-cliff -->
+
+#### Build
+
+- **build:** restore criterion's `cargo_bench_support` to the workspace
+  feature set — criterion 0.7 split the measuring harness out of the
+  default features, and with `default-features = false, features =
+  ["html_reports"]` every bench compiled, "passed" and measured nothing
+  (the CI `bench --no-run` gate could not see it); the harness runs again
+
+
+
