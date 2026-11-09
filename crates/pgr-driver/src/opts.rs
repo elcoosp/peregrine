@@ -1,16 +1,15 @@
-//! ld64-compatible option surface (TDD §5 Pass 0, M2 subset).
-//!
-//! M2 links direct `.o` inputs against `.tbd` dylib stubs: `-l`/`-L`
-//! library search, `-rpath`, `-flat_namespace`, `-undefined`,
-//! `-weak_library`, `-u` and `-source_version` join the surface. Flags real
-//! builds use that arrive at later milestones (`-dylib`, `-dead_strip`,
-//! `-framework`, `-filelist`, `-order_file`, TLV, bitcode) are rejected with
-//! actionable messages rather than silently ignored — a linker that pretends
-//! to understand a flag it drops is worse than one that says "not yet".
+//! ld64-compatible option surface (TDD §5 Pass 0; grown milestone by
+//! milestone: M2 library search, M3 dylibs/bundles, M5 archives and
+//! frameworks, M6 caches, M7 `-syslibroot`, M8 `-resident`, M9
+//! `-incremental`, M10 `-r` relocatable output). Flags real builds use
+//! that have not landed yet (`-order_file`, TLV, bitcode) are rejected
+//! with actionable messages rather than silently ignored — a linker that
+//! pretends to understand a flag it drops is worse than one that says
+//! "not yet".
 
 use pgr_core::layout::LinkConfig;
 
-/// Parsed driver options (M2 surface).
+/// Parsed driver options (the current milestone surface; M10 adds `-r`).
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Output path (`-o`).
@@ -525,22 +524,62 @@ fn apply_flag(
             opts.inputs.push(v);
             opts.weak_library_inputs.push(opts.inputs.len() - 1);
         }
-        "-dylib" => {
-            if opts.config.filetype != pgr_core::layout::OutputType::Execute {
+        "-dylib" => match opts.config.filetype {
+            // A repeated kind is idempotent; only a kind *switch* is a
+            // conflict (a duplicate used to be reported as the mutual-
+            // exclusion error — a diagnosis about a conflict that never
+            // happened).
+            pgr_core::layout::OutputType::Dylib => {}
+            pgr_core::layout::OutputType::Execute => {
+                opts.config.filetype = pgr_core::layout::OutputType::Dylib;
+            }
+            pgr_core::layout::OutputType::Relocatable => {
+                return Err(OptsError::Repeated {
+                    message: "-dylib and -r are mutually exclusive".into(),
+                });
+            }
+            pgr_core::layout::OutputType::Bundle => {
                 return Err(OptsError::Repeated {
                     message: "-dylib and -bundle are mutually exclusive".into(),
                 });
             }
-            opts.config.filetype = pgr_core::layout::OutputType::Dylib;
-        }
-        "-bundle" => {
-            if opts.config.filetype != pgr_core::layout::OutputType::Execute {
+        },
+        "-bundle" => match opts.config.filetype {
+            pgr_core::layout::OutputType::Bundle => {}
+            pgr_core::layout::OutputType::Execute => {
+                opts.config.filetype = pgr_core::layout::OutputType::Bundle;
+            }
+            pgr_core::layout::OutputType::Relocatable => {
+                return Err(OptsError::Repeated {
+                    message: "-bundle and -r are mutually exclusive".into(),
+                });
+            }
+            pgr_core::layout::OutputType::Dylib => {
                 return Err(OptsError::Repeated {
                     message: "-dylib and -bundle are mutually exclusive".into(),
                 });
             }
-            opts.config.filetype = pgr_core::layout::OutputType::Bundle;
-        }
+        },
+        // M10 rung 1: `-r` relocatable output — an MH_OBJECT the next
+        // link consumes as an input. The conflicting knobs (dead-strip,
+        // ICF, the incremental record, the resident daemon) are refused
+        // in `finish`, whatever order the flags arrived in.
+        "-r" => match opts.config.filetype {
+            pgr_core::layout::OutputType::Relocatable => {}
+            pgr_core::layout::OutputType::Execute => {
+                opts.config.filetype = pgr_core::layout::OutputType::Relocatable;
+            }
+            pgr_core::layout::OutputType::Dylib => {
+                return Err(OptsError::Repeated {
+                    message: "-r and -dylib are mutually exclusive".into(),
+                });
+            }
+            pgr_core::layout::OutputType::Bundle => {
+                return Err(OptsError::Repeated {
+                    message: "-r and -bundle are mutually exclusive".into(),
+                });
+            }
+        },
         "-install_name" => {
             let v = next_value(args, i, arg)?;
             opts.config.install_name = Some(v);
@@ -752,6 +791,35 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
         pgr_core::layout::OutputType::Dylib => {
             // ld64 defaults the install name to the output path; the driver
             // applies the default before linking.
+        }
+        pgr_core::layout::OutputType::Relocatable => {
+            // The object path keeps every section and relocation verbatim:
+            // the size/codegen knobs and the M8/M9 session machinery have
+            // nothing to attach to (no image, no record, no daemon shape).
+            if opts.config.dead_strip {
+                return Err(OptsError::InvalidValue {
+                    flag: "-dead_strip".into(),
+                    value: "-r keeps every section (the next link strips); drop -dead_strip".into(),
+                });
+            }
+            if opts.config.icf != pgr_core::icf::IcfMode::None {
+                return Err(OptsError::InvalidValue {
+                    flag: "-icf".into(),
+                    value: "-r preserves relocations verbatim; drop -icf".into(),
+                });
+            }
+            if opts.incremental {
+                return Err(OptsError::InvalidValue {
+                    flag: "-incremental".into(),
+                    value: "-r writes an input object, not an image: no link record exists; drop -incremental".into(),
+                });
+            }
+            if opts.resident {
+                return Err(OptsError::InvalidValue {
+                    flag: "-resident".into(),
+                    value: "-r has no resident shape; drop -resident".into(),
+                });
+            }
         }
     }
     Ok(opts.clone())
