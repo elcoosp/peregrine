@@ -485,3 +485,78 @@ fn symbol_heavy_corpus_verifies_strict_through_the_audit() {
     );
     assert!(strict_verify(&out));
 }
+
+/// The §7.2 output-residency rung (wire v5): the session holds every
+/// served image as resident output state, so the warm cycle's previous
+/// output never re-crosses the wire; a patched relink serves the
+/// changed-tile stream (a fraction of the image), an untouched one ships
+/// nothing — and the file the driver writes is still byte-identical to
+/// the one-shot cycle (the standing parity gate) and strict-verified.
+#[test]
+fn resident_output_tiles_close_the_wire_crossing() {
+    let c = Corpus::new("tiles");
+    let sock = start_daemon("tiles");
+    let opts = c.fusion_opts(&sock, false);
+
+    // Cold: a full link through the daemon (capture rides back). The
+    // image becomes the session's resident output state.
+    let cold = run(&opts).unwrap();
+    assert!(cold.patch.is_none(), "the first link is a full link");
+    assert!(
+        cold.transport.is_none(),
+        "a full link carries no tile transport"
+    );
+    assert!(strict_verify(&c.out));
+
+    // Edit: the daemon's ladder patches; the reply is the tile stream.
+    c.edit(32 * 1024 + 1024, true);
+    let warm = run(&opts).unwrap();
+    let patch = warm.patch.expect("the fusion relink patches");
+    assert!(!patch.untouched);
+    let tiles = match warm.transport.expect("the tiles rung serves a transport") {
+        pgr_daemon::Transport::Tiles { tiles, bytes } => (tiles, bytes),
+        pgr_daemon::Transport::Full => panic!("the patched relink serves tiles, got Full"),
+    };
+    assert!(tiles.0 > 0, "the edited tiles crossed");
+    assert!(
+        tiles.1 < warm.file_size,
+        "the stream is a fraction of the image ({} of {})",
+        tiles.1,
+        warm.file_size
+    );
+    assert!(strict_verify(&c.out));
+
+    // Parity: the same steps through the one-shot cycle write identical
+    // bytes (the resident client's tile replay is the file-path twin of
+    // the engine's patch).
+    let resident_bytes = c.output_bytes();
+    let oneshot = Corpus::new("tiles_oneshot");
+    oneshot.edit(32 * 1024, false);
+    run(&oneshot.plain_opts(false)).unwrap();
+    oneshot.edit(32 * 1024 + 1024, true);
+    run(&oneshot.plain_opts(false)).unwrap();
+    assert_eq!(
+        resident_bytes,
+        oneshot.output_bytes(),
+        "the tile-replayed file is the one-shot cycle's bytes"
+    );
+
+    // Untouched: a third run with no edit ships zero bytes and rewrites
+    // nothing — the output is already the answer.
+    let before = std::fs::metadata(&c.out).unwrap().len();
+    let untouched = run(&opts).unwrap();
+    let patch = untouched.patch.expect("the untouched relink reports");
+    assert!(patch.untouched);
+    assert_eq!(
+        untouched
+            .transport
+            .expect("the untouched relink still reports"),
+        pgr_daemon::Transport::Tiles { tiles: 0, bytes: 0 },
+        "nothing crossed the wire"
+    );
+    assert_eq!(
+        std::fs::metadata(&c.out).unwrap().len(),
+        before,
+        "the output was not rewritten"
+    );
+}

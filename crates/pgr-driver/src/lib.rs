@@ -39,6 +39,11 @@ pub struct LinkOutcome {
     /// in-process otherwise; `None` on a full link or an untouched
     /// relink, where the audit's subject never exists).
     pub audit: Option<pgr_emit::incremental::audit::AuditSummary>,
+    /// M9 output-residency rung (wire v5): how the resident reply's
+    /// image crossed the wire (`Some` only on the resident path — the
+    /// tile summary is the §7.2 rung's honest record; `None` on every
+    /// non-resident path).
+    pub transport: Option<pgr_daemon::Transport>,
 }
 
 /// A driver failure: options, I/O, or link errors.
@@ -957,6 +962,7 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
         fixup_slots: linked.fixup_slots,
         patch: None,
         audit: None,
+        transport: None,
     })
 }
 
@@ -1004,13 +1010,16 @@ impl From<DriverError> for ResidentAttempt {
 }
 
 /// The M9 GA fusion relink (§7.3 through the daemon, §7.2 transport): the
-/// previous record and the previous output's bytes cross the wire; the
-/// daemon runs the ladder — integrity gate, the anchored relink config
-/// derived from the record, the pipeline warm over its POIs, the patch
-/// plan, the in-memory patch — and returns the patched bytes plus the
-/// renewed record. The client writes the file and stores the record: the
-/// daemon still holds no output state (a daemon death mid-link leaves at
-/// most a dead socket, never a corrupt output).
+/// previous record and the previous output's content hash cross the wire
+/// (the bytes ride only when the session does not already hold them —
+/// every served image is resident output state, wire v5); the daemon runs
+/// the ladder — integrity gate, the anchored relink config derived from
+/// the record, the pipeline warm over its POIs, the patch plan, the
+/// in-memory patch — and returns the changed-tile stream plus the renewed
+/// record. The client replays the stream against its local previous
+/// output, verifies it against the stream's content hash, and writes the
+/// file: the daemon never writes the output (a daemon death mid-link
+/// leaves at most a dead socket, never a corrupt output).
 ///
 /// Any refusal stands down to the in-process relink: no daemon, no record,
 /// an undecodable record, or the daemon's own internal fallback (its full
@@ -1087,7 +1096,45 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
             );
         }
     }
-    write_image(&served.image, Path::new(&opts.output)).map_err(DriverError::from)?;
+    // The §7.2 output-residency rung (wire v5): a tiles reply is replayed
+    // against the local previous output BEFORE anything is written — the
+    // stream's content hash gates the replay, and a divergence never
+    // ships (the miette-rendered refusal rides the stand-down back to the
+    // in-process relink, which re-patches from the local record). An
+    // untouched relink ships nothing and rewrites nothing: the file the
+    // client holds already is the output.
+    let rebuilt = match (&served.tiles, served.patch.as_ref()) {
+        (Some(_), Some(patch)) if patch.untouched => None,
+        (Some(stream), _) => {
+            let span = tracing::info_span!(
+                "resident_tile_replay",
+                tiles = stream.tiles.len(),
+                bytes = stream.wire_bytes()
+            )
+            .entered();
+            let rebuilt = pgr_emit::incremental::apply_tiles(&prev, stream);
+            let got = pgr_daemon::protocol::hex(&pgr_daemon::content_hash(&rebuilt));
+            if got != pgr_daemon::protocol::hex(&stream.image_hash) {
+                let refusal = pgr_emit::incremental::TileReplayRefusal {
+                    want: pgr_daemon::protocol::hex(&stream.image_hash),
+                    got,
+                };
+                return Err(ResidentAttempt::StandDown(refusal.render()));
+            }
+            drop(span);
+            Some(rebuilt)
+        }
+        (None, _) => None,
+    };
+    match (&served.tiles, rebuilt) {
+        (Some(_), None) => {} // untouched: the output was left byte-for-byte alone
+        (Some(_), Some(bytes)) => {
+            write_image(&bytes, Path::new(&opts.output)).map_err(DriverError::from)?;
+        }
+        (None, _) => {
+            write_image(&served.image, Path::new(&opts.output)).map_err(DriverError::from)?;
+        }
+    }
     // The renewed record: store it so the next cycle starts from the
     // patched state (best-effort, like the in-process path).
     if let Some(record_bytes) = &served.record {
@@ -1097,11 +1144,17 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
     }
     Ok(LinkOutcome {
         output: opts.output.clone(),
-        file_size: served.image.len() as u64,
+        // A tiles reply carries no image bytes — the size is the stream's
+        // final size (the patched image's own).
+        file_size: match &served.tiles {
+            Some(stream) => stream.final_size,
+            None => served.image.len() as u64,
+        },
         entryoff: served.entryoff,
         fixup_slots: usize::try_from(served.fixup_slots).unwrap_or(usize::MAX),
         patch: served.patch,
         audit: served.audit.map(|a| a.summary()),
+        transport: Some(served.transport),
     })
 }
 
@@ -1208,6 +1261,7 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
                 untouched: true,
             }),
             audit: None,
+            transport: None,
         });
     }
     let (mut outcome, new_record) = pgr_emit::incremental::apply_patch(
@@ -1293,6 +1347,7 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
         fixup_slots: result.layout.fixups.slot_count,
         patch: Some(outcome),
         audit: audit_summary,
+        transport: None,
     })
 }
 

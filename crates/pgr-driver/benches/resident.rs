@@ -163,11 +163,11 @@ fn bench_resident(c: &mut Criterion) {
 ///
 /// Every timed iteration is a real edit: object 1 alternates between the
 /// pristine and a byte-distinct (data-payload) variant, so each relink
-/// dirties one tile plus the re-sign. What the rung still pays and a later
-/// one may remove: the previous output's bytes cross the wire once per
-/// changed output state (the session-cached blob misses after every
-/// patch) — the §7.2 buffer-residency rung. The byte-identity contract is
-/// asserted in `tests/m9_resident_fusion.rs`, not here.
+/// dirties one tile plus the re-sign. Since the §7.2 output-residency
+/// rung (wire v5) the warm cycle moves only the change: the previous
+/// output is the session's resident state (no re-upload) and the reply
+/// is the changed-tile stream (asserted here, byte-identity gated in
+/// `tests/m9_resident_fusion.rs`).
 fn bench_resident_fusion(
     c: &mut Criterion,
     dir: &std::path::Path,
@@ -221,6 +221,21 @@ fn bench_resident_fusion(
             let patch = outcome
                 .patch
                 .expect("the warm fusion relink patches in place");
+            // v5 (the §7.2 rung): the warm cycle's reply is the
+            // changed-tile stream — a fraction of the image.
+            match outcome.transport {
+                Some(pgr_daemon::Transport::Tiles { tiles, bytes }) => {
+                    assert!(
+                        tiles > 0 && bytes < outcome.file_size,
+                        "the stream is a fraction ({} tiles, {} of {} bytes)",
+                        tiles,
+                        bytes,
+                        outcome.file_size
+                    );
+                    std::hint::black_box((tiles, bytes));
+                }
+                other => panic!("the warm relink rides the tile stream, got {other:?}"),
+            }
             std::hint::black_box(patch);
         });
     });
