@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-core"
-version = "0.4.0"
+version = "0.9.0"
 dependencies = [
  "pgr-format",
  "rayon",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-emit"
-version = "0.4.0"
+version = "0.9.0"
 dependencies = [
  "pgr-core",
  "pgr-format",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-format"
-version = "0.4.0"
+version = "0.9.0"
 dependencies = [
  "bytemuck",
  "thiserror",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-verify"
-version = "0.4.0"
+version = "0.9.0"
 dependencies = [
  "pgr-format",
  "sha2",
