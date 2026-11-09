@@ -2992,9 +2992,18 @@ fn build_func_starts(sections: &[PlacedSection], symbols: &[OutputSymbol]) -> Ve
         .collect();
     starts.sort_unstable();
     starts.dedup();
+    // `LC_FUNCTION_STARTS` is a **delta** stream: each ULEB128 adds to the
+    // previous start (the verifier decodes it that way, and so does dyld).
+    // This used to emit absolute offsets — semantically wrong from M0 and
+    // invisible until the audited fusion rung's symbol-heavy bench corpus
+    // overflowed the decoder's accumulator past `__TEXT` (the strict
+    // gate's `function start ... beyond __TEXT`); small corpora masked it
+    // because the accumulated sum stayed under vmsize.
     let mut out = Vec::with_capacity(starts.len() * 2);
+    let mut prev = 0u64;
     for v in starts {
-        out.extend_from_slice(&uleb(v));
+        out.extend_from_slice(&uleb(v - prev));
+        prev = v;
     }
     out
 }
