@@ -13,10 +13,107 @@ release automation.
 > segment-relayout tier), **v0.5.0** (the GA hardening pass) and **v0.6.0**
 > (tier 2c, the resolve's record-side wiring, the resident fusion wire rung
 > and the audited fusion rung). The prose is unchanged; only the section
-> structure now matches the published tags (v0.2.0–v0.8.0; Cargo.toml
-> carries 0.8.0).
+> structure now matches the published tags (v0.2.0–v0.9.0; Cargo.toml
+> carries 0.9.0).
 
 ## [Unreleased]
+
+### Features
+
+- **emit/core/driver/verify:** M10 rung 1 — the `-r` relocatable output
+  (roadmap §10.4 row M10). `pgr_core::link_reloc` runs Passes 1–2 and
+  stops short of the segment layout (undefined externals stay open — the
+  object is itself a link input; duplicate strongs still refuse);
+  `pgr_emit::build_object_image` assembles the `MH_OBJECT`: sections
+  merged by `(segment, name)` in first-seen order, each contribution
+  re-aligned inside its section, symbol `n_value`s mapped through the
+  placement, the symtab grouped locals / winner-backed globals / open
+  undefineds with the `LC_DYSYMTAB` subranges following, commons kept
+  tentative, and every relocation entry **preserved, not applied** —
+  `r_extern` entries re-pointed at the output symbol table, section
+  targets re-ordinaled, `ADDEND`/`SUBTRACTOR` leaders re-emitted first,
+  site bytes verbatim. The driver parses `-r`, refuses the conflicting
+  knobs (`-dead_strip`, `-icf`, `-incremental`, `-resident`, the other
+  output kinds) with messages that name the conflict, and routes
+  `run()` through the new path; the verifier gains the object contract
+  (`check_object_contract`: no fixups/dyld-info/signature on
+  `MH_OBJECT`, every relocation entry bounds-checked against its
+  section, the symbol table and the pair shape) plus the image-shaped
+  carve-outs the convention needs. The two-step self-consumption link
+  (`pgr -r a.o b.o -o out.o`, then `pgr out.o -o exe`) is a test gate,
+  double `-r` is byte-identical, and the emitted object is
+  verifier-clean under `--strict`.
+- **emit:** the relocatable emit rides the workspace conventions —
+  tracing spans on `link_reloc`, `object_layout`, `reloc_encode` and
+  `object_emit` (inert until a subscriber installs), and the miette
+  help-text refusal `ObjectRelocRefusal` for a relocation the output
+  symbol table cannot represent (a malformed input's `r_extern` entry
+  naming a local), rendered with the fix, not just the verdict.
+- **emit:** the object emit gets its bench (`cargo bench -p pgr-emit --
+  bench object`: the same corpus shape the fused-emit bench uses) and
+  **driver** its consumer example (`cargo run -p pgr-driver --example
+  relocatable_link`: the two-step cycle at the API level, verifier
+  gated, spans watchable under `PGR_TRACING=1`).
+
+### Bug Fixes
+
+- **driver:** a repeated `-dylib`/`-bundle` is idempotent — it used to
+  be reported as "-dylib and -bundle are mutually exclusive", a
+  diagnosis about a conflict that never happened. The real kind switch
+  still refuses, naming both flags.
+
+### Refactor
+
+- **emit:** drop the dead public re-exports — `blob_size` and the
+  record-twin types (`SpanTable`, `RecordedSpan`, `RecordedSection`)
+  nothing in the workspace consumed are gone; the items stay reachable
+  through their own modules.
+
+### Documentation
+
+- reconcile the v0.9.0 release drift: the README badge and status line
+  ride 0.9.0, the release ladder note matches, and the missing 0.9.0
+  section is backfilled below.
+- **driver:** the `--help` text and the `opts` module docs carry their
+  current surface instead of the M2/M3 ones they stopped matching; the
+  emit/verify crate docs name their current rungs.
+- **migration:** the environment-variable table lists the full surface
+  (`PGR_DAEMON_SOCK`, `PGR_RESIDENT_DEBUG`, `PGR_INCREMENTAL_RECORD`,
+  `PGR_INCREMENTAL_DEBUG`, `PGR_RANDOMIZED_STEPS`, `PGR_TRACING`) and
+  the output-kind table carries `-r`.
+
+## [0.9.0] - 2026-11-09
+
+### Features
+
+- **core:** the incremental resolve gets its consumer example —
+  `cargo run -p pgr-core --example incremental_resolve` walks the reuse
+  shape (`plan_reuse` → `install_reused` vs the full resolve) on a
+  two-file corpus, printing the split counts (the tracing spans stay
+  inert until a subscriber installs).
+- **core:** the resolve-reuse seams ride tracing spans —
+  `resolve_reuse_plan`/`resolve_reuse_install` carry the refusal
+  reasons and the split counts as fields, inert until a subscriber
+  installs (the workspace convention).
+
+### Bug Fixes
+
+- **format:** the tbd utf-8 refusal names the offset — the error no
+  longer flattens the malformed byte position away.
+
+### Refactor
+
+- **emit:** drop the dead `apply_patch_reloc` re-export — nothing in
+  the workspace consumed it; the item stays reachable through its own
+  module.
+
+### Documentation
+
+- **fixtures:** the crate docs carry the workspace consumers.
+
+### Build
+
+- the lint-policy comment matches the CI gate.
 
 ## [0.8.0] - 2026-11-09
 
