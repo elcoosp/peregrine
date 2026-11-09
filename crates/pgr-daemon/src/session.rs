@@ -21,8 +21,7 @@
 //! patch ([`pgr_emit::incremental::apply_patch_bytes`]). Any refusal
 //! falls back to the session's clean full link — which captures a fresh
 //! record whenever the request asks, so the incremental cycle survives
-//! the daemon path. The daemon still holds no output state: the patched
-//! bytes cross the wire like any image and the client writes the file.
+//! the daemon path.
 //!
 //! M9 GA rung 2 (wire v4): the session also *serves the audit* — a
 //! request with `audit` set runs the §7.3 gate's bytes-level twin
@@ -30,6 +29,19 @@
 //! against the reference emit plus the strict verifier, and a divergence
 //! is healed in memory before the verdict crosses the wire (the client
 //! still refuses to ship a failing verdict by not writing the file).
+//!
+//! M9 output-residency rung (wire v5): the session closes §7.2's last
+//! deferred fusion item — the **session-resident output buffer**. Every
+//! served image is stored as resident output state (a content-addressed
+//! blob under the same memory ceiling and LRU as every other blob), so the
+//! next cycle's `prev_output` reference finds it and the previous output
+//! stops crossing the wire once per changed state. A tiles-asking client
+//! (v5 flag) further receives a patched relink as the changed 16 KiB-tile
+//! stream ([`pgr_emit::incremental::TilePatch`]) instead of the whole
+//! image — an untouched relink ships nothing. The file stays the client's:
+//! the stream is hash-gated (`TilePatch::image_hash`), the client verifies
+//! its replay before the atomic write, and a daemon crash loses only
+//! resident state, never an output (the §7.2 crash-safety contract).
 //!
 //! Safety properties (the §7.2 constraints):
 //!
@@ -69,15 +81,6 @@ pub enum SessionError {
     Patch(#[from] pgr_emit::incremental::PatchError),
 }
 
-/// One prepared object outcome (for stats/diagnostics).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PrepareStats {
-    /// POI frames decoded (no Mach-O walk).
-    pub hits: u64,
-    /// Fresh parses (also stored as frames for the next link).
-    pub misses: u64,
-}
-
 /// One cached POI frame: the encoded Pass 1 product plus its last-use
 /// stamp (the LRU clock for the memory ceiling).
 type PoiFrame = (std::sync::Arc<Vec<u8>>, u64);
@@ -101,6 +104,11 @@ pub struct ServedLink {
     /// audit and the ladder patched; the audit's subject is the patch —
     /// a full link or an untouched relink serves none).
     pub audit: Option<AuditOutcome>,
+    /// The changed-tile stream of a relink (v5, the §7.2 rung): `Some`
+    /// only when the request asked for tiles and the reply is a relink
+    /// (patched or untouched) — a full link has no previous state to
+    /// stream against, and the server then ships `image` as before.
+    pub tiles: Option<pgr_emit::incremental::TilePatch>,
 }
 
 /// Why the session's §7.3 ladder declined: the caller (the link entry)
@@ -161,9 +169,10 @@ impl ResidentSession {
         self.clock
     }
 
-    /// Bytes currently held as resident state (blobs + POI frames). The
-    /// scratch emit buffer is not session state — it is bounded by the
-    /// output size and always reclaimable.
+    /// Bytes currently held as resident state (blobs + POI frames — the
+    /// served images of past links ride as blobs, the §7.2 output
+    /// residency). The scratch emit buffer is not session state — it is
+    /// bounded by the output size and always reclaimable.
     #[must_use]
     pub fn bytes_held(&self) -> u64 {
         let blobs: u64 = self.blobs.values().map(|b| b.len() as u64).sum();
@@ -245,6 +254,22 @@ impl ResidentSession {
         Ok(obj)
     }
 
+    /// Stores the served image as resident output state (v5, the §7.2
+    /// rung): a content-addressed blob under the same ceiling and LRU as
+    /// every other blob, so the next cycle's `prev_output` reference
+    /// finds it and the previous output stops crossing the wire once per
+    /// changed state. Eviction is harmless — the client re-uploads.
+    fn hold_output(&mut self, image: &[u8]) {
+        let hash: [u8; 32] = Sha256::digest(image).into();
+        tracing::debug!(
+            bytes = image.len(),
+            "the served image became resident output"
+        );
+        // store_blob re-verifies the hash we just computed; failure is
+        // impossible, and even it were, the client re-uploads next cycle.
+        let _ = self.store_blob(&hash, image.to_vec());
+    }
+
     /// Runs one link through the session: prepares direct inputs, pulls
     /// archive members through the normal S7 fixpoint, links, gates `-u`,
     /// emits into the reused scratch buffer.
@@ -307,7 +332,10 @@ impl ResidentSession {
             if let Some(prev) = prev {
                 if let Some(record) = pgr_emit::incremental::LinkRecord::decode(record_bytes) {
                     match Self::serve_relink(&record, prev.as_ref(), req, &objects, &archives) {
-                        Ok(served) => return Ok(served),
+                        Ok(served) => {
+                            self.hold_output(&served.image);
+                            return Ok(served);
+                        }
                         Err(RelinkDecline::Error(e)) => return Err(e),
                         Err(RelinkDecline::Fallback) => {}
                     }
@@ -321,6 +349,10 @@ impl ResidentSession {
         let fixup_slots = result.layout.fixups.slot_count;
         pgr_emit::build_image_fused_into(&mut self.scratch, &result.layout, &result.objects)?;
         let image = self.scratch.clone();
+        // The §7.2 rung: the full link's image is the first cycle's
+        // resident output state — the next relink's previous output is
+        // already here.
+        self.hold_output(&image);
         let record = if req.record_resolution {
             Some(
                 pgr_emit::incremental::LinkRecord::record(
@@ -342,6 +374,7 @@ impl ResidentSession {
             record,
             patch: None,
             audit: None,
+            tiles: None,
         })
     }
 
@@ -416,6 +449,16 @@ impl ResidentSession {
         // No audit: its subject — the patch — never exists here (parity
         // with the in-process gate, which runs after a patch only).
         if plan.is_untouched() {
+            // The §7.2 rung: a tiles-asking client receives an empty
+            // stream (its file already IS the output) and the record is
+            // renewed verbatim (the driver's untouched shape). No audit:
+            // its subject — the patch — never exists here (parity with
+            // the in-process gate, which runs after a patch only).
+            let tiles = req.tiles.then(|| pgr_emit::incremental::TilePatch {
+                final_size: prev.len() as u64,
+                tiles: Vec::new(),
+                image_hash: Sha256::digest(prev).into(),
+            });
             return Ok(ServedLink {
                 image: prev.to_vec(),
                 entryoff: result.layout.entryoff,
@@ -428,6 +471,7 @@ impl ResidentSession {
                     untouched: true,
                 }),
                 audit: None,
+                tiles,
             });
         }
         let (mut outcome, mut new_record, mut image) = pgr_emit::incremental::apply_patch_bytes(
@@ -494,6 +538,15 @@ impl ResidentSession {
         } else {
             None
         };
+        // The §7.2 rung (v5): a tiles-asking client receives the changed
+        // 16 KiB tiles (plus the patched image's hash as its replay gate)
+        // instead of the whole image — the resident session held the
+        // previous output, so the warm cycle moves only the change.
+        // Computed after the audit: a healed image (the reference emit)
+        // is what ships, so the stream must diff against it.
+        let tiles = req
+            .tiles
+            .then(|| pgr_emit::incremental::diff_tiles(prev, &image));
         Ok(ServedLink {
             image,
             entryoff: result.layout.entryoff,
@@ -501,6 +554,7 @@ impl ResidentSession {
             record: Some(new_record.encode()),
             patch: Some(outcome),
             audit,
+            tiles,
         })
     }
 
@@ -631,6 +685,7 @@ mod tests {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -768,7 +823,14 @@ mod tests {
             session.bytes_held()
         );
         // The session still links correctly after eviction (a re-parse
-        // repopulates what it needs).
+        // repopulates what it needs). The §7.2 rung stores every served
+        // image as resident output, so a tight ceiling evicts input blobs
+        // too — the client's BLOB negotiation simply re-uploads them, the
+        // same store this test replays.
+        session.store_blob(&content_hash(&hello), hello).unwrap();
+        session
+            .store_blob(&content_hash(&greet_bytes), greet_bytes)
+            .unwrap();
         let image = session.link(&req).unwrap().image;
         assert!(!image.is_empty(), "image built");
     }
@@ -820,6 +882,7 @@ mod tests {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -984,6 +1047,7 @@ mod fusion_tests {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         let hashes = req.blob_hashes();
         (req, hashes)
@@ -1359,5 +1423,163 @@ mod fusion_tests {
             served.audit.is_none(),
             "an untouched relink serves no audit"
         );
+    }
+
+    // ---- the §7.2 output-residency rung (wire v5) ---------------------------
+
+    /// Every served image becomes resident output state keyed by its
+    /// content hash: the next cycle's `prev_output` reference finds it in
+    /// the session, so the BLOB negotiation skips the upload — the deferral
+    /// the rung closes (the previous output used to cross the wire once
+    /// per changed output state even for a warm session).
+    #[test]
+    fn served_images_become_resident_output() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+        assert!(
+            session.has_blob(&content_hash(&cold.image)),
+            "the served image is resident output state"
+        );
+
+        // The patched relink's image becomes the next cycle's state too —
+        // and the previous output needs no re-upload (already resident).
+        let edited = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited, &greet_bytes);
+        relink.record = Some(cold.record.clone().unwrap());
+        relink.prev_output = Some(content_hash(&cold.image));
+        relink.tiles = true;
+        session
+            .store_blob(&content_hash(&edited), edited.clone())
+            .unwrap();
+        let served = session.link(&relink).unwrap();
+        assert!(served.patch.is_some(), "the ladder patches");
+        assert!(
+            session.has_blob(&content_hash(&served.image)),
+            "the patched image is the next cycle's resident output"
+        );
+    }
+
+    /// A tiles-asking relink serves the changed-tile stream instead of the
+    /// image: a fraction of the bytes that replays to the exact patched
+    /// image, gated by its content hash (a divergence never ships).
+    #[test]
+    fn tiles_relink_serves_the_changed_tile_stream() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+        let prev_output = cold.image.clone();
+
+        let edited = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited, &greet_bytes);
+        relink.record = Some(cold.record.unwrap());
+        relink.prev_output = Some(content_hash(&prev_output));
+        relink.tiles = true;
+        session.store_blob(&content_hash(&edited), edited).unwrap();
+        let served = session.link(&relink).unwrap();
+        let patch = served.patch.expect("the ladder patches");
+        assert!(!patch.untouched);
+        let stream = served
+            .tiles
+            .as_ref()
+            .expect("the tiles rung serves a stream");
+        assert!(
+            stream.wire_bytes() > 0 && stream.wire_bytes() < served.image.len() as u64,
+            "the stream is a fraction of the image ({} of {})",
+            stream.wire_bytes(),
+            served.image.len()
+        );
+        assert_eq!(
+            pgr_emit::incremental::apply_tiles(&prev_output, stream),
+            served.image,
+            "the replay is lossless"
+        );
+        assert_eq!(
+            stream.image_hash,
+            content_hash(&served.image),
+            "the replay gate hashes the patched image"
+        );
+    }
+
+    /// The untouched relink ships nothing: an empty stream (the file the
+    /// client holds is already the output), with the record still renewed.
+    #[test]
+    fn untouched_relink_ships_an_empty_tile_stream() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+
+        let mut relink = req.clone();
+        relink.record = Some(cold.record.unwrap());
+        relink.prev_output = Some(content_hash(&cold.image));
+        relink.tiles = true;
+        let served = session.link(&relink).unwrap();
+        assert!(served.patch.as_ref().expect("the ladder runs").untouched);
+        let stream = served
+            .tiles
+            .expect("the untouched relink still shapes a stream");
+        assert!(
+            stream.tiles.is_empty() && stream.wire_bytes() == 0,
+            "nothing crossed the wire"
+        );
+        assert_eq!(stream.final_size, cold.image.len() as u64);
+    }
+
+    /// Without the request flag the reply carries no stream — the v4
+    /// client shape is unchanged (it receives the image and writes it).
+    #[test]
+    fn tiles_not_asked_serves_no_stream() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+
+        let edited = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited, &greet_bytes);
+        relink.record = Some(cold.record.unwrap());
+        relink.prev_output = Some(content_hash(&cold.image));
+        session.store_blob(&content_hash(&edited), edited).unwrap();
+        let served = session.link(&relink).unwrap();
+        assert!(served.patch.is_some());
+        assert!(served.tiles.is_none(), "no flag, no stream");
     }
 }

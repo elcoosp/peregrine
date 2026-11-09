@@ -106,6 +106,7 @@ fn request(hello_bytes: &[u8], greet_bytes: &[u8]) -> (LinkRequest, [u8; 32], [u
         record_resolution: false,
         prev_output: None,
         audit: false,
+        tiles: false,
     };
     (req, content_hash(hello_bytes), content_hash(greet_bytes))
 }

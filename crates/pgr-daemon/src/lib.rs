@@ -9,14 +9,20 @@
 //! * the input **bytes** themselves (Pass 4 copies section bytes);
 //! * the fused-emit **output buffer**, reused across links
 //!   ([`pgr_emit::build_image_fused_into`]) — the §10.4 M8 performance gate
-//!   "page-fault cost eliminated (buffer reuse)".
+//!   "page-fault cost eliminated (buffer reuse)";
+//! * since the M9 output-residency rung (wire v5), every **served image**
+//!   as resident output state (a content-addressed blob under the same
+//!   ceiling) — the next cycle's previous output never re-crosses the
+//!   wire, and a patched relink ships its changed 16 KiB tiles instead of
+//!   the whole image ([`pgr_emit::incremental::TilePatch`]).
 //!
 //! The link itself is the *same* pipeline as the one-shot path
 //! ([`pgr_core::link_from_objects`] + the fused emit), so resident output is
 //! byte-identical to one-shot in deterministic mode — the M8 correctness
 //! gate, asserted end-to-end in the driver tests. The daemon never touches
 //! the filesystem beyond its socket: the client writes the output through
-//! the normal Pass 5 atomic-rename path, so a daemon crash or restart can
+//! the normal Pass 5 atomic-rename path (verifying its tile replay against
+//! the stream's content hash first), so a daemon crash or restart can
 //! never corrupt an image (the second M8 correctness gate).
 //!
 //! This crate is unix-only (unix-domain sockets); the workspace CI matrix
@@ -28,14 +34,14 @@ pub mod server;
 pub mod session;
 
 pub use client::{
-    ClientError, DaemonClient, LinkJob, ResidentImage, connect_or_start, default_socket,
+    ClientError, DaemonClient, LinkJob, ResidentImage, Transport, connect_or_start, default_socket,
     link_via_daemon, shutdown_daemon,
 };
 pub use protocol::{
     ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, content_hash,
 };
 pub use server::{ServerError, serve};
-pub use session::{PrepareStats, ResidentSession, SessionError};
+pub use session::{ResidentSession, SessionError};
 
 /// The default daemon socket path (see [`client::default_socket`]).
 #[must_use]
@@ -54,9 +60,10 @@ mod tests {
     #[test]
     fn version_is_wired() {
         assert!(!crate::VERSION.is_empty(), "version line built");
-        // v4 (M9 GA rung 2): the fusion halves (v3) plus the audited
-        // relink — the request's audit flag, the reply's audit verdict.
-        assert_eq!(crate::PROTO_VERSION, 4);
+        // v5 (M9 output-residency rung): the fusion halves (v3) and the
+        // audited relink (v4) plus the request's tile-replay flag and the
+        // reply's changed-tile stream — the §7.2 resident output state.
+        assert_eq!(crate::PROTO_VERSION, 5);
     }
 
     #[test]
@@ -71,6 +78,7 @@ mod tests {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
