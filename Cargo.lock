@@ -426,6 +426,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
