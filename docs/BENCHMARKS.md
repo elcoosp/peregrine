@@ -764,3 +764,40 @@ verdict is decided on the P0 rig.
 cargo bench -p pgr-driver --bench incremental -- linkedit_shrink
 PGR_RANDOMIZED_STEPS=2000 cargo test -p pgr-emit --release --test incremental -- randomized
 ```
+
+## Recorded baseline (M9 GA — the resolve's record-side wiring, record v5)
+
+The record-side wiring rung (architecture doc §7.3 step 3) ships the
+tier-2c decision core's delivery path: the link record grows the
+**resolution snapshot section (v5)** — the candidate stream plus the
+winner matrix keyed by digest-vouched `(file, symbol)` positions — and
+the relink's Pass 2 plans through the recorded decisions
+(`pgr_core::resolve_reuse`) instead of re-deciding every external,
+refusing to the full resolve whenever the reuse shape (file list, dylib
+export surface) moves. The relink's refreshed record re-captures the
+fresh Pass-2 state, so the chain stays self-describing across cycles.
+
+Two bench groups land in `pgr-core/benches/resolve`:
+
+| (2-core KVM sandbox, criterion median, 10 samples) | time |
+|---|---|
+| `resolve_pass2/full_install` — 64 files × 49 externals | **347.7 µs** |
+| `resolve_pass2/reused_install` — same corpus, one edited file | **282.8 µs** (−19%) |
+| `resolve_pipeline/full_resolve` — full Passes 1b–3, 64 files | **2.94 ms** |
+| `resolve_pipeline/reused_resolve` — same relink through the v5 seed | **2.99 ms** (wash) |
+
+Reading the pair honestly: the resolver-level win matches the tier-2c
+gate (~19% of Pass 2 at 64 files; the decision core breaks even past
+~32 inputs and stays ~13% slower at 16), but Pass 2 is a small slice of
+Passes 1b–3 on this corpus, so the *pipeline-level* effect is a wash
+here — the same shape the M8 warm-relink bench recorded. The reuse win
+scales with symbol count (the copy is O(reused winners), the replay
+O(seeds)) while parse/layout stay put, so the payoff arrives where the
+roadmap aims it: input-heavy relinks on the P0 rig, stacked on the POI
+cache and the resident session. The record side's own cost (the v5
+capture + encode) rides the recording link's budget and is bounded by
+the parse walk it mirrors.
+
+```sh
+cargo bench -p pgr-core --bench resolve
+```
