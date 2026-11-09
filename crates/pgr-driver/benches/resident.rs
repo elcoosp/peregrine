@@ -21,10 +21,21 @@ use std::time::Duration;
 /// file, few relocation sites — Pass 1's symbol decode dominates the bytes,
 /// which is exactly the share the resident session removes).
 fn bench_object(seed: u64, symbols: usize, text_kib: usize) -> ObjectBuilder {
+    bench_object_data(seed, symbols, text_kib, 0)
+}
+
+/// The same object with a tunable `__data` payload byte: the byte-distinct,
+/// equally-valid variant the fusion bench alternates (a real edit each
+/// timed iteration).
+fn bench_object_data(seed: u64, symbols: usize, text_kib: usize, data_byte: u8) -> ObjectBuilder {
     let text = vec![0u8; text_kib * 1024];
     let mut b = ObjectBuilder::new(&format!("bench_{seed}.o"));
     let text_idx = b.add_section(ObjectSection::text("__text", text, Vec::new()));
-    let data_idx = b.add_section(ObjectSection::data("__data", vec![0u8; 8], Vec::new()));
+    let data_idx = b.add_section(ObjectSection::data(
+        "__data",
+        vec![data_byte; 8],
+        Vec::new(),
+    ));
     for i in 0..symbols {
         b.add_symbol(ObjectSymbol::Defined {
             name: format!("_bench_fn_{seed}_{i}"),
@@ -137,6 +148,79 @@ fn bench_resident(c: &mut Criterion) {
         b.iter(|| {
             let image = pgr_driver::link_to_bytes(&resident).unwrap();
             std::hint::black_box(image.len());
+        });
+    });
+    group.finish();
+
+    bench_resident_fusion(c, &dir, &base);
+}
+
+/// M9 GA fusion benchmark (architecture doc §7.3 + §10.4 M9): the
+/// edit→relink loop served by the resident session — `-resident
+/// -incremental` through `run()`, the daemon's §7.3 ladder patching in
+/// memory over warm POIs and the client writing the file.
+///
+/// Every timed iteration is a real edit: object 1 alternates between the
+/// pristine and a byte-distinct (data-payload) variant, so each relink
+/// dirties one tile plus the re-sign. What the rung still pays and a later
+/// one may remove: the previous output's bytes cross the wire once per
+/// changed output state (the session-cached blob misses after every
+/// patch) — the §7.2 buffer-residency rung. The byte-identity contract is
+/// asserted in `tests/m9_resident_fusion.rs`, not here.
+fn bench_resident_fusion(
+    c: &mut Criterion,
+    dir: &std::path::Path,
+    base: &pgr_driver::opts::Options,
+) {
+    // The edited variant of object seed 1 (the corpus's object files only,
+    // so `inputs[0]` is `resident_obj_0.o` = seed 1). Its own output name
+    // keeps the sidecar state apart from the plain resident groups above.
+    let edited = bench_object_data(1, 2_048, 2, 0xFF).build().unwrap();
+    let edited_path = dir.join("resident_obj_0_edited.o");
+    std::fs::write(&edited_path, &edited).unwrap();
+
+    let sock = dir.join("bench-fusion.sock");
+    start_daemon(&sock);
+
+    let mut fusion = base.clone();
+    fusion.resident = true;
+    fusion.resident_socket = Some(sock.display().to_string());
+    fusion.incremental = true;
+    fusion.output = dir.join("resident_fusion_out.bin").display().to_string();
+    // A stale sidecar from an earlier bench run describes a different
+    // output state — the warm-up link must be the recorded full link.
+    let stale = dir.join("resident_fusion_out.bin.pgr-inc");
+    let _ = std::fs::remove_file(&stale);
+
+    let mut group = c.benchmark_group("pgr-driver/resident-fusion");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(6));
+
+    // Warm the record once (the cold link is the recorded full link).
+    let warm = pgr_driver::run(&fusion).unwrap();
+    assert!(
+        warm.patch.is_none(),
+        "the warm-up link is the recorded full link"
+    );
+
+    let mut alternator = 0u32;
+    group.bench_function("fusion_relink_64_objects", |b| {
+        b.iter(|| {
+            alternator += 1;
+            let mut edited_opts = fusion.clone();
+            edited_opts.inputs[0] = dir
+                .join(if alternator % 2 == 0 {
+                    "resident_obj_0.o"
+                } else {
+                    "resident_obj_0_edited.o"
+                })
+                .display()
+                .to_string();
+            let outcome = pgr_driver::run(&edited_opts).unwrap();
+            let patch = outcome
+                .patch
+                .expect("the warm fusion relink patches in place");
+            std::hint::black_box(patch);
         });
     });
     group.finish();
