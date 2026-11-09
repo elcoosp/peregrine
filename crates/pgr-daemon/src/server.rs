@@ -20,7 +20,7 @@
 
 use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
-    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, put_str, put_u32, put_u64,
+    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, put_bytes, put_str, put_u8, put_u32, put_u64,
 };
 use crate::session::{ResidentSession, SessionError};
 use std::io::{Read, Write};
@@ -249,14 +249,35 @@ fn serve_link(
         }
     }
     match session.link(&req) {
-        Ok((image, entryoff, fixup_slots)) => {
-            let mut b = Vec::with_capacity(40 + image.len());
-            put_u64(&mut b, entryoff);
-            put_u64(&mut b, fixup_slots);
+        Ok(served) => {
+            // IMAGE v3: the M8 fields, then the M9 fusion tail — the patch
+            // outcome (absent on a full link) and the refreshed record
+            // (absent when the link neither captured nor renewed one) —
+            // then the image bytes.
+            let mut b = Vec::with_capacity(64 + served.image.len());
+            put_u64(&mut b, served.entryoff);
+            put_u64(&mut b, served.fixup_slots);
             put_u32(&mut b, session.hits as u32);
             put_u32(&mut b, session.misses as u32);
-            put_u64(&mut b, image.len() as u64);
-            b.extend_from_slice(&image);
+            match &served.patch {
+                Some(p) => {
+                    put_u8(&mut b, 1);
+                    put_u64(&mut b, p.bytes_patched);
+                    put_u32(&mut b, p.dirty_tiles);
+                    put_u32(&mut b, p.total_tiles);
+                    put_u8(&mut b, u8::from(p.untouched));
+                }
+                None => put_u8(&mut b, 0),
+            }
+            match &served.record {
+                Some(r) => {
+                    put_u8(&mut b, 1);
+                    put_bytes(&mut b, r);
+                }
+                None => put_u8(&mut b, 0),
+            }
+            put_u64(&mut b, served.image.len() as u64);
+            b.extend_from_slice(&served.image);
             write_frame(stream, TAG_IMAGE, &b)
         }
         Err(e @ (SessionError::Link(_) | SessionError::Emit(_))) => {

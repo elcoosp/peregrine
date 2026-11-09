@@ -54,8 +54,9 @@ mod tests {
     #[test]
     fn version_is_wired() {
         assert!(!crate::VERSION.is_empty(), "version line built");
-        // v2 (M9): the wire carries the M9 slack anchors with the config.
-        assert_eq!(crate::PROTO_VERSION, 2);
+        // v3 (M9 GA): the wire carries the fusion halves — record in,
+        // refreshed record + patch outcome out.
+        assert_eq!(crate::PROTO_VERSION, 3);
     }
 
     #[test]
@@ -66,6 +67,9 @@ mod tests {
             force_load: Vec::new(),
             inputs: Vec::new(),
             archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
