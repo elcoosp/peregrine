@@ -9,6 +9,20 @@ release automation.
 
 ### Features
 
+- **core:** M9 tier 2c — the incremental resolve over the propagation
+  index (architecture doc §7.3 step 3, the GA rung the roadmap names
+  before the resident fusion). The tier-2b planner scopes *bytes*; the
+  new `pgr_core::resolve::ResolutionSnapshot` records the Pass-2 decision
+  state — the complete candidate stream (name-grouped for the replay) and
+  the winners keyed by their digest-vouched `(file, symbol)` positions —
+  and `pgr_core::resolve_reuse` plans the reuse: shape-guarded on the
+  input file list and the dylib export surface (either moving refuses the
+  plan and the relink resolves in full), seeded by the same section-digest
+  diff the byte planner runs, copying every recorded winner the seeds
+  cannot touch (no name-keyed join on the hot path) and replaying the
+  full precedence rules over every name they can. The contract is
+  equality with the full resolve — gated per relink shape and across a
+  randomized edit walk in `tests/m9_resolve_reuse.rs`
 - **emit:** M9 GA hardening — the relayout tier's **shrink rung** (the
   tier-2 trigger's mirror; architecture doc §7.3 "the fallback must
   always be available" cuts both ways). An unsigned relink (`-no_adhoc`)
@@ -32,6 +46,13 @@ release automation.
 
 ### Tests
 
+- `pgr-core/tests/m9_resolve_reuse.rs` (new): the tier-2c equality gates
+  — unchanged relinks reuse every winner, body edits re-decide only the
+  seeded sections' names, a weak/strong rank flip retargets the reused
+  winner, a duplicate strong definition lands the same `LinkError::Symbol`
+  both paths reach, moved file lists and dylib export sets refuse with
+  `ReuseFallback`, and a seeded xorshift64* walk (30 steps) keeps the
+  reused resolution indistinguishable from the full one
 - `pgr-emit/tests/incremental.rs` (1 new, 1 rewritten): the shrink-rung
   byte-identity gate (shrink patches through the relayout tier, the
   shrunk state is a relinkable baseline for a tier-1 body edit and a
@@ -53,6 +74,13 @@ release automation.
 
 ### Performance
 
+- `pgr-core/benches/resolve.rs` (new): `resolve_pass2` pits the full
+  `Resolution::install` against `plan_reuse` + `install_reused` (the plan
+  hoisted out of the timed loop — the digest diff is plan-side, computed
+  once per relink beside the byte planner's). Recorded honestly on the
+  dev sandbox: break-even past ~32 inputs, −21% at 64 files × 49 externals
+  (352 µs → 278 µs median), +19% at 16 files where the plan-read machinery
+  still costs more than the full walk's get/decision work
 - `pgr-driver/incremental_shrink` bench: new `linkedit_shrink_relink_8mib`
   group (an unsigned 8 MiB corpus alternating a 512-local-symbol object
   with the pristine one — shrink and regrow through the tail) with a
@@ -118,6 +146,14 @@ release automation.
   bench recorded, with the bytes-written gate met; the record-time
   content-digest hash adds no measurable full-link cost (parallel; full
   relink 17.4 ms vs 17.4 ms baseline)
+
+### Build
+
+- **build:** restore criterion's `cargo_bench_support` to the workspace
+  feature set — criterion 0.7 split the measuring harness out of the
+  default features, and with `default-features = false, features =
+  ["html_reports"]` every bench compiled, "passed" and measured nothing
+  (the CI `bench --no-run` gate could not see it); the harness runs again
 
 ## [1.2.0] - 2026-11-08
 
@@ -271,7 +307,9 @@ release automation.
 - **emit:** the fused `_into` variant is byte-identical to the allocating
   path (reused by the M4 gates)
 
-## [1.0.0] - 2026-11-07### Features
+## [1.0.0] - 2026-11-07
+
+### Features
 - **core:** M7 versioned cache format v2 — `CACHE_FORMAT_VERSION = 2` plus a
   parser revision recorded in every POI/frozen-`.tbd` frame *and* bound into
   the cache key (`sha256(bytes ‖ flags ‖ format ‖ parser)` — stale entries
@@ -354,7 +392,9 @@ release automation.
 - **verify:** saturated arithmetic on mutated headers (chain walks, branch
   ranges, segment contracts)
 
-## [0.7.0] - 2026-11-07### Features
+## [0.7.0] - 2026-11-07
+
+### Features
 - **core:** M6 branch thunks/veneers — out-of-range `B`/`BL` sites (beyond
   the ±128 MiB arm64 reach) get a 3-instruction veneer (`adrp x16/add
   x16/br x16`) inserted into the same output section right after the
@@ -449,7 +489,9 @@ release automation.
   frozen-`.tbd` dylib links, `-no_cache`), `m6_ecosystem` (LTO detection,
   ObjC/Swift pass-through + determinism)
 
-## [0.6.0] - 2026-11-06### Features
+## [0.6.0] - 2026-11-06
+
+### Features
 - **format:** M5 `!<arch>` archive parser — Apple `__.SYMDEF`/`__.SYMDEF_64`
   and GNU `/` ranlib tables (32/64-bit entries), BSD `#1/<len>` and GNU `//`
   long-name tables, ranlib member-offset resolution (header offset first,
@@ -512,7 +554,9 @@ release automation.
   closure), `m5_cstring` (dedup + symbol remap + dyld-simulated
   section-relative pointer remap + dead-strip cooperation), `m5_flags`
   (filelist/framework/sectcreate/search order)
-## [0.5.0] - 2026-11-06### Features
+## [0.5.0] - 2026-11-06
+
+### Features
 - **emit:** M4 fused tile emit (`build_image_fused`) — parallel 16 KiB
   tiles copy coalesced runs, apply relocations, encode chained-fixup
   words, place the `__LINKEDIT` chunks and hash the 4 KiB signature pages
@@ -559,7 +603,9 @@ release automation.
   strict verifier + bundle/dylib contracts on fused outputs, fused
   double-link determinism
 
-## [0.4.0] - 2026-11-06### Features
+## [0.4.0] - 2026-11-06
+
+### Features
 - **driver:** M3 CLI — `-dylib`/`-bundle` outputs, `-install_name`,
   `-current_version`/`-compatibility_version`, `-reexport_library`,
   `-exported_symbols_list`/`-unexported_symbols_list`,
@@ -601,7 +647,9 @@ release automation.
 
 <!-- generated by git-cliff -->
 
-## [0.3.0] - 2026-11-05### Continuous Integration
+## [0.3.0] - 2026-11-05
+
+### Continuous Integration
 - Parse_tbd fuzz target + got/tbd corpus seeds (ab3d31f)
 ### Documentation
 - M2 README gates + D13 compat checklist; version 0.3.0 (659f4bc)
@@ -641,7 +689,9 @@ release automation.
 - Fuzz schedule extended with the `link_object` target (Pass 1 parser +
   Pass 2/3 pipeline) and object seeds in the fuzz corpus
 
-## [0.1.0] - 2026-11-05### Bug Fixes
+## [0.1.0] - 2026-11-05
+
+### Bug Fixes
 - **format:** Panic-free casts on misaligned mutated input (a5e3a4f)
 ### Continuous Integration
 - Fmt/clippy/test/doc/bench gates, fuzz schedule, git-cliff release pipeline (c3234fa)
