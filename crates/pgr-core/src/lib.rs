@@ -12,6 +12,12 @@
 //! (command-line file order, symbol order within a file, canonical output
 //! section order); nothing reads hash iteration order. Parallel schedules
 //! change who computes a result, never the result — gated in tests.
+//!
+//! The M8/M9 machinery rides the same passes: the reverse reference index,
+//! the insertion-stable import table and the slack policy (`revindex`,
+//! `stable_imports`, `slack`) anchor the §7.3 incremental relink's layout,
+//! and `propagate`/`resolve_reuse` scope a relink's Pass 2 work to what
+//! the recorded plan can vouch for — anything else re-runs in full.
 
 pub mod cache;
 pub mod deadstrip;
