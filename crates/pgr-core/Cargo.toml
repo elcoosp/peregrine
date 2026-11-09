@@ -21,6 +21,10 @@ tracing = { workspace = true }
 [dev-dependencies]
 pgr-fixtures = { workspace = true }
 criterion = { workspace = true }
+# The consumer example installs a subscriber under PGR_TRACING=1 so the
+# resolve-reuse seams (`resolve_reuse_plan`/`resolve_reuse_install`) are
+# watchable — the same inert-until-subscriber convention the binaries use.
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "trie"
