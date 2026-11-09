@@ -13,10 +13,49 @@ release automation.
 > segment-relayout tier), **v0.5.0** (the GA hardening pass) and **v0.6.0**
 > (tier 2c, the resolve's record-side wiring, the resident fusion wire rung
 > and the audited fusion rung). The prose is unchanged; only the section
-> structure now matches the published tags (v0.2.0–v0.7.0; Cargo.toml
-> carries 0.7.0).
+> structure now matches the published tags (v0.2.0–v0.8.0; Cargo.toml
+> carries 0.8.0).
 
 ## [Unreleased]
+
+## [0.8.0] - 2026-11-09
+
+### Features
+
+- **emit:** the engine gets its consumer example —
+  `cargo run -p pgr-emit --example record_patch_tiles` walks the whole
+  §7.3 tier-1 loop at the engine's own API level (record → plan → patch →
+  re-record) plus the bytes-level tile twin the §7.2 resident transport
+  ships, printing the report either way (the tracing spans stay inert
+  until a subscriber installs).
+- **driver:** the driver library gets its consumer example —
+  `cargo run -p pgr-driver --example library_link` drives the same
+  two-step cycle the CLI drives (`-o` then `-incremental`) at the
+  [`pgr_driver::run`] API level, checking the patched output two ways
+  (byte-identity against the full link, then a `pgr-verify` pass).
+
+### Bug Fixes
+
+- **driver:** the resident stand-down carries its io cause — the
+  fallback-to-one-shot path no longer flattens the underlying io error
+  into a bare message.
+- the lockfile carries the 0.7.0 members — `Cargo.lock` was left listing
+  the previous member set after the release bump.
+
+### Documentation
+
+- reconcile the v0.7.0 release drift (README status, the release ladder
+  in the docs).
+- **core:** the crate docs carry the m8/m9 machinery — the crate-level
+  rustdoc now names the reverse reference index, the insertion-stable
+  import table, the slack policy and the M9 `propagate`/`resolve_reuse`
+  scoping instead of stopping at M4.
+
+### Refactor
+
+- drop the dead public seams — public re-exports nothing in the workspace
+  consumed are gone; the underlying items stay reachable through their
+  own modules.
 
 ## [0.7.0] - 2026-11-09
 
