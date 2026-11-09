@@ -95,6 +95,11 @@ pub struct LinkResult {
     pub objects: Vec<InputObject>,
     /// The interner (name diagnostics for driver-side checks).
     pub interner: Interner,
+    /// The Pass-2 snapshot ([`crate::resolve::ResolutionSnapshot`])
+    /// captured when [`LinkConfig::record_resolution`] is set — the
+    /// record-side half of the M9 resolve wiring (the link record's v5
+    /// section). `None` on every clean link.
+    pub resolve_snapshot: Option<crate::resolve::ResolutionSnapshot>,
 }
 
 /// Runs Passes 1–3 over the inputs, producing the emit plan (M4 default:
@@ -205,10 +210,49 @@ pub fn link_from_objects(
     let _ = header_symbol_slot;
 
     // ---- Pass 2: resolution --------------------------------------------------
-    let mut res = Resolution::default();
-    res.install(&objects)?;
-    res.install_dylibs(&cfg.dylibs, &export_ids);
-    res.require_all_resolved(&interner, &objects, cfg.undefined_policy)?;
+    // M9 GA rung — the resolve's record-side wiring: a relink whose record
+    // vouches a snapshot plans Pass 2 through the recorded decisions
+    // (`resolve_reuse`; the replay enforces the undefined policy itself)
+    // and falls back to the full install whenever the shape guard or the
+    // replay refuses. The fallback is the ladder's bottom rung — always
+    // available, always correct, and invisible to the layout (the equality
+    // contract is gated in `tests/m9_resolve_reuse.rs`).
+    let reused = cfg.resolve_reuse.as_ref().and_then(|seed| {
+        crate::resolve_reuse::plan_reuse(
+            &seed.snapshot,
+            &seed.digests,
+            &interner,
+            &objects,
+            &cfg.dylibs,
+        )
+        .ok()
+        .and_then(|plan| {
+            crate::resolve_reuse::install_reused(
+                &plan,
+                &seed.snapshot,
+                &interner,
+                &objects,
+                &cfg.dylibs,
+                cfg.undefined_policy,
+            )
+            .ok()
+        })
+    });
+    let res = if let Some(reused) = reused {
+        reused
+    } else {
+        let mut full = Resolution::default();
+        full.install(&objects)?;
+        full.install_dylibs(&cfg.dylibs, &export_ids);
+        full.require_all_resolved(&interner, &objects, cfg.undefined_policy)?;
+        full
+    };
+    // The record side: capture the finished Pass-2 state when the caller
+    // asked for it (the `-incremental` record), so the v5 record section
+    // carries it to the next relink.
+    let resolve_snapshot = cfg.record_resolution.then(|| {
+        crate::resolve::ResolutionSnapshot::capture(&objects, &interner, &res, &cfg.dylibs)
+    });
 
     // ---- M5/D12 liveness, then M6 ICF over the live text atoms --------------
     let live = crate::deadstrip::compute(&objects, &res, &interner, cfg);
@@ -220,6 +264,7 @@ pub fn link_from_objects(
         layout,
         objects,
         interner,
+        resolve_snapshot,
     })
 }
 

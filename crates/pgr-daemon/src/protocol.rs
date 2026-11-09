@@ -511,9 +511,14 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         // cross-link state (the record sidecar lives next to the output,
         // §7.3) and the wire carries them deliberately not — the daemon
         // links clean, and resident + incremental fusion is GA scope
-        // (roadmap row M9).
+        // (roadmap row M9). The M9 GA resolve wiring rides the same
+        // sidecar: the v5 snapshot section and its Pass-2 reuse are the
+        // record's cross-link state, so a resident link neither captures
+        // nor consumes it.
         stable_imports: None,
         sig_anchor: None,
+        record_resolution: false,
+        resolve_reuse: None,
         unexported,
         dead_strippable,
         dead_strip,
@@ -570,9 +575,12 @@ mod tests {
             icf: pgr_core::icf::IcfMode::Safe,
             layout_slack: Some(pgr_core::SlackPolicy::default()),
             // Not on the wire (see decode): the daemon links clean; the
-            // cross-link anchors stay driver-side state.
+            // cross-link anchors stay driver-side state. The resolve's
+            // record-side wiring rides the same sidecar.
             stable_imports: None,
             sig_anchor: None,
+            record_resolution: false,
+            resolve_reuse: None,
             slack_anchor: vec![pgr_core::slack::SlackAnchor {
                 seg: "__TEXT".into(),
                 name: "__text".into(),

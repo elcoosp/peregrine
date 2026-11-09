@@ -169,6 +169,21 @@ pub struct LinkConfig {
     /// only when the chunks outgrow the reservation. `None` computes the
     /// boundary from the chunk stream alone (every clean link).
     pub sig_anchor: Option<u64>,
+    /// M9 GA rung — the resolve's record-side wiring, capture half: record
+    /// the Pass-2 snapshot into
+    /// [`LinkResult::resolve_snapshot`](crate::link::LinkResult::resolve_snapshot)
+    /// so the M9 link record can carry it (the v5 section). Off on every
+    /// clean link: the capture is a whole-parse walk only the record side
+    /// needs.
+    pub record_resolution: bool,
+    /// M9 GA rung — the resolve's record-side wiring, reuse half: the
+    /// previous link's recorded Pass-2 state (the record's v5 snapshot
+    /// section plus its v3 digest table). When set, Pass 2 plans through
+    /// the recorded decisions ([`crate::resolve_reuse`]) and falls back to
+    /// the full install whenever the reuse shape guard or the replay
+    /// refuses (§7.3's bottom rung — always available, always correct).
+    /// `None` (every clean link) resolves in full.
+    pub resolve_reuse: Option<crate::resolve_reuse::ResolveReuseSeed>,
 }
 
 impl Default for LinkConfig {
@@ -201,6 +216,8 @@ impl Default for LinkConfig {
             slack_anchor: Vec::new(),
             stable_imports: None,
             sig_anchor: None,
+            record_resolution: false,
+            resolve_reuse: None,
         }
     }
 }

@@ -1,6 +1,6 @@
 //! M9 tier-2c — the incremental resolve over the propagation index
 //! (architecture doc §7.3 step 3; roadmap row M9 GA: "the incremental
-//! resolve over the propagation index ... remain[s] GA scope").
+//! resolve over the propagation index ... remains GA scope").
 //!
 //! The tier-2b planner scopes *bytes* (the patch planner's propagation
 //! gate); this module reuses the Pass-2 *decisions*. A relink that re-ran
@@ -33,9 +33,11 @@
 //! The contract is equality: [`install_reused`]'s resolution must be
 //! [`crate::resolve::Resolution::equivalent`] to the full one (gated in
 //! `tests/m9_resolve_reuse.rs`, including a randomized edit walk), or the
-//! plan refuses. This rung ships the decision core — the record-side
-//! wiring (a v5 record section) lands with the resident-fusion rung, the
-//! same path tier 2b took into the patch planner.
+//! plan refuses. The M9 GA rung wires the record side: the link record's
+//! v5 section carries the snapshot ([`ResolveReuseSeed`]), the relink's
+//! `LinkConfig` hands it to the pipeline's Pass 2 through
+//! [`crate::link::link_cached`], and a refused plan falls back to the full
+//! resolve — the same path tier 2b took into the patch planner.
 
 use crate::LinkError;
 use crate::ids::StringId;
@@ -44,6 +46,23 @@ use crate::object::InputObject;
 use crate::propagate::seeds;
 use crate::resolve::{DefLite, Dylib, Resolution, ResolutionSnapshot, UndefinedPolicy};
 use std::collections::BTreeSet;
+
+/// The recorded Pass-2 state a relink reuses through
+/// `LinkConfig::resolve_reuse` (M9 GA rung — the resolve's record-side
+/// wiring): the resolution snapshot (the record's **v5** section) plus the
+/// parse's section-digest table (the record's **v3** section) the seeds
+/// diff against. Both sections ride the same `LinkRecord` payload, so the
+/// relink hands them over together; `None` (every clean link, and records
+/// from before the wiring) resolves in full.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveReuseSeed {
+    /// The previous link's resolution snapshot: the candidate stream and
+    /// the winning decisions the reuse path copies or replays.
+    pub snapshot: ResolutionSnapshot,
+    /// The previous parse's section-digest table: the diff baseline the
+    /// change-propagation seeds come from.
+    pub digests: Vec<crate::propagate::SectionDigest>,
+}
 
 /// Why the reuse plan refused: the snapshot's vouched shape moved, and the
 /// §7.3 ladder answers with the full resolve (always available, always
