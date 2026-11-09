@@ -10,7 +10,7 @@ each flag has a fixture".
 | Command | Status | Since | Fixture / test |
 |---|---|---|---|
 | `LC_SEGMENT_64` (canonical order) | ✅ | M0 | `pgr-verify` `check_segments` |
-| `LC_BUILD_VERSION` (1 tool entry, `TOOL_LD`) | ✅ | M0 | `pgr-verify` `misc::check_entry_and_version` |
+| `LC_BUILD_VERSION` (1 tool entry, `TOOL_LD`; platforms `macos`/`ios`/`tvos`/`watchos`/`visionos`) | ✅ | M0/M10 | `pgr-verify` `misc::check_entry_and_version`, `m10_platform::*` (verify) |
 | `LC_MAIN` | ✅ | M0 | `pgr-verify` entry checks |
 | `LC_SYMTAB` / `LC_DYSYMTAB` | ✅ | M0/M2 | `e2e::symtab_is_in_ld64_canonical_order`, `m2_links_printf_from_tbd` (indirect ranges) |
 | `LC_LOAD_DYLINKER` | ✅ | M0 | `misc::check_entry_and_version` warning when absent |
@@ -37,6 +37,7 @@ each flag has a fixture".
 | Flag | Status | Since | Fixture / test |
 |---|---|---|---|
 | `-o -arch -platform_version -e -static` | ✅ | M0/M1 | `opts` unit tests |
+| `-platform_version <macos\|ios\|tvos\|watchos\|visionos> <min> <sdk>` (five platforms; SDK ≥ deployment target; the per-platform chained-fixups floor picks the fixup encoding) | ✅ | M10 | `opts` unit tests + `m10_platform::*` (core/driver/verify), `platform_matrix` example |
 | `-fixup_chains` / `-no_fixup_chains` | ✅ | M1 | `opts` unit tests |
 | `-adhoc` / `-no_adhoc` | ✅ | M1 | `e2e::no_adhoc_omits_the_signature` |
 | `-headerpad` (advisory) / `-segalign` | ✅ | M1 | `opts` unit tests |

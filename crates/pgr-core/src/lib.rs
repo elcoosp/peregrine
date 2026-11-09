@@ -18,6 +18,14 @@
 //! `stable_imports`, `slack`) anchor the §7.3 incremental relink's layout,
 //! and `propagate`/`resolve_reuse` scope a relink's Pass 2 work to what
 //! the recorded plan can vouch for — anything else re-runs in full.
+//!
+//! M10 rides the same seams at both ends: [`link_reloc`] stops after
+//! Pass 2 for the `-r` relocatable output (the object is itself a link
+//! input), and the layout's fixup-encoding gate is platform-aware —
+//! [`layout::chained_fixups_min_minos`] names the per-platform
+//! deployment floor (macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0,
+//! visionOS 1.0) below which the classic `LC_DYLD_INFO_ONLY` opcodes
+//! encode the same fixups.
 
 pub mod cache;
 pub mod deadstrip;

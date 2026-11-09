@@ -71,7 +71,9 @@ behavior already matches what they request on arm64:
 - `-adhoc` / `-no_adhoc`, `-headerpad`, `-segalign` (0x1000 or 0x4000),
   `-fixup_chains` / `-no_fixup_chains`, `-flat_namespace` /
   `-twolevel_namespace`, `-undefined error|dynamic_lookup`, `-rpath`,
-  `-source_version`, `-arch arm64`, `-platform_version macos <min> <sdk>`.
+  `-source_version`, `-arch arm64`, `-platform_version <platform> <min> <sdk>`
+  with `<platform>` ∈ `macos`, `ios`, `tvos`, `watchos`, `visionos` (M10; the
+  SDK must be at least the deployment target).
 
 ## Rejected with an actionable message
 

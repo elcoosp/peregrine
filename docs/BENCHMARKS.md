@@ -936,3 +936,36 @@ input carries, not the image size.
 ```sh
 cargo bench -p pgr-emit --bench object
 ```
+
+## Recorded baseline (M10 rung 2 — the platform plumbing rung)
+
+The platform rung ships the five-platform `-platform_version` surface
+with a per-platform chained-fixups floor (`pgr_core::layout::
+chained_fixups_min_minos`: macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0,
+visionOS 1.0). The perf gate is a *wash by design*: the floor only
+selects the fixup **encoding** (chained payload at/above the floor, the
+classic `LC_DYLD_INFO_ONLY` opcode streams below it), so the same corpus
+linked for each platform at its floor must sit inside the noise. The
+`pgr-driver/platform_matrix/link/<platform>` bench links one
+rebase-slot corpus per platform (20 samples, 2-core KVM sandbox,
+criterion median):
+
+| platform | floor | median | throughput |
+|---|---|---|---|
+| `macos` 12.0.0 | chained | **84.6 µs** | 184.8 KiB/s |
+| `ios` 15.0.0 | chained | 84.1 µs | 185.8 KiB/s |
+| `tvos` 15.0.0 | chained | 83.0 µs | 188.3 KiB/s |
+| `watchos` 8.0.0 | chained | 82.5 µs | 189.4 KiB/s |
+| `visionos` 1.0.0 | chained | 84.4 µs | 185.1 KiB/s |
+
+The five medians span ~2.5% — the platform word is a config field the
+pipeline already carried (`LinkConfig::platform` existed since M1; the
+rung wires the driver flag, the floor table and the verifier gate around
+it), and the encoding decision is one integer comparison in Pass 3. No
+hardware gate changes: the arm64 targets keep their M4/M8/M9 profiles,
+and the floor table's fallback is byte-tested per platform
+(`m10_platform::*`).
+
+```sh
+cargo bench -p pgr-driver --bench platform
+```

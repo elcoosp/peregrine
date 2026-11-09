@@ -7,6 +7,12 @@
 //! panics on malformed input — every check returns issues, and the fuzz
 //! targets plus property tests keep that guarantee under mutation.
 //!
+//! The build-version gate is platform-aware (M10 rung 2): the five linked
+//! platforms (`macos`, `ios`, `tvos`, `watchos`, `visionos`) verify clean,
+//! an unknown platform constant is an error, and an SDK older than the
+//! deployment target is refused — the platform the linker declares is the
+//! platform the verifier checks, not "macOS or warn".
+//!
 //! Decomposition:
 //!
 //! * [`structural`] — header, load commands, segment contract, symbol tables

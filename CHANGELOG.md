@@ -13,10 +13,60 @@ release automation.
 > segment-relayout tier), **v0.5.0** (the GA hardening pass) and **v0.6.0**
 > (tier 2c, the resolve's record-side wiring, the resident fusion wire rung
 > and the audited fusion rung). The prose is unchanged; only the section
-> structure now matches the published tags (v0.2.0–v0.9.0; Cargo.toml
-> carries 0.9.0).
+> structure now matches the published tags (v0.2.0–v0.9.1; Cargo.toml
+> carries 0.9.1).
 
 ## [Unreleased]
+
+### Features
+
+- **format/core/driver/verify:** M10 rung 2 — the platform plumbing rung
+  (roadmap §10.4 row M10). `-platform_version` accepts the five linked
+  platforms — `macos`, `ios`, `tvos`, `watchos`, `visionos` — and the
+  refusal for anything else names the surface (miette help text, the
+  fix, not just the verdict); an SDK older than the deployment target
+  refuses at parse time (`OptsError::VersionOrder`). The layout's
+  chained-fixups gate is per-platform: `pgr_core::layout::
+  chained_fixups_min_minos` names the dyld availability floors
+  (macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, visionOS 1.0) — below
+  the floor the M6 classic `LC_DYLD_INFO_ONLY` opcode streams encode
+  the same fixups (the encoding flips, the pipeline does not), and the
+  fixup-shape span now carries the platform and its floor.
+  `pgr_format::PLATFORM_VISIONOS` (11) crosschecks against the vendored
+  headers' `PLATFORM_XROS`. The verifier's build-version gate checks
+  the *declared* platform — the five platforms verify strict-clean, an
+  unknown platform constant is an error, and `sdk < minos` is an error
+  (before the rung every non-macos image warned, so a legitimately
+  plumbed iOS image could not pass `--strict`). The `platform_matrix`
+  consumer example and the `platform` bench ride along.
+
+### Bug Fixes
+
+- **driver:** an unreadable input names itself — `DriverError::Io`
+  used to be routed through the option-error reporter, printing
+  "option handling failed" for what is a file-system refusal; the Io
+  arm now reports its own message ("reading {path}: {source}").
+
+### Refactor
+
+- **verify:** the export-trie walk loses its two logically-infallible
+  `unwrap()`s — the checked terminal bound is the value, so a hostile
+  payload can never turn "the verifier" into a panic (TDD §2: typed
+  errors, never panic); the re-export test uses the named
+  `EXPORT_SYMBOL_FLAGS_REEXPORT` constant instead of the magic `0x8`,
+  and the import-keeping `let _ =` suppression is gone.
+
+### Documentation
+
+- the `pgr-core`, `pgr-verify` crate docs carry their M10 rungs
+  (the relocatable stop-short and the platform-aware fixup floor; the
+  platform gate), and `LinkConfig::platform`'s rustdoc matches the
+  driver-selected surface instead of "macOS at M1".
+- **changelog:** cut the missing v0.9.1 section (the M10 rung 1 work
+  below shipped as 0.9.1 without its section) and fix the release
+  ladder note's carried version.
+
+## [0.9.1] - 2026-11-09
 
 ### Features
 
