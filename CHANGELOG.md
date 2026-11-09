@@ -4,6 +4,17 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.10.0] - 2026-11-09### Documentation
+- Reconcile the v0.10.0 drift and record the rung-3 seam (18fbe25)- Record the m10 rung 2 across the surface (a83f533)
+### Features
+- **driver:** The platform floor gets its consumer example (0c5c74f)- **core:** The platform floor becomes a nameable seam (07b2b19)- **driver:** The platform matrix gets its consumer example (1d0aada)- **verify:** The build-version gate checks the declared platform (a3fa8e8)- **driver:** The platform surface links five platforms (b1b775a)- **core:** The chained-fixups floor goes per-platform (5d767b0)- **format:** The visionOS platform constant lands crosschecked (6208855)
+### Miscellaneous Tasks
+- The delivery manifests stay out of the tree (02ff3bc)
+### Performance
+- **driver:** Bench the platform matrix (bb9a05a)
+### Refactor
+- **core:** The cstring walk inserts once, the stub arm refuses (a0a58d5)- **verify:** The trie walk names its flags, not its unwraps (a6a1198)
+
 
 > **Release-ladder reconciliation (2026-11-09).** The headings below used to
 > follow the design-doc milestone stream (0.7.0 → 1.2.0 for M6 → M9 v1), but
@@ -13,10 +24,26 @@ release automation.
 > segment-relayout tier), **v0.5.0** (the GA hardening pass) and **v0.6.0**
 > (tier 2c, the resolve's record-side wiring, the resident fusion wire rung
 > and the audited fusion rung). The prose is unchanged; only the section
-> structure now matches the published tags (v0.2.0–v0.9.1; Cargo.toml
-> carries 0.9.1).
+> structure now matches the published tags (v0.2.0–v0.10.0; Cargo.toml
+> carries 0.10.0).
 
 ## [Unreleased]
+
+### Features
+
+- **core/driver:** M10 rung 3, slice 1 — the platform floor becomes a
+  nameable consumer seam: `pgr_core::platform::FixupEncoding` answers
+  "chained fixups or the classic `LC_DYLD_INFO_ONLY` opcode streams?"
+  for a platform/target pair *before* the link runs, reading the same
+  per-platform floor table `chained_fixups_min_minos` encodes (one
+  table, two readers — no re-derivation drift). The decision rides a
+  tracing event, the below-floor advisory renders miette help text (the
+  fix, not just the verdict), and the `platform_floor` consumer example
+  plus the `platform` bench ride along. In the same pass the layout's
+  two logically-infallible `unreachable!`s became the house's typed
+  `LinkError::Internal` refusals (TDD §2: typed errors, never panic).
+
+## [0.10.0] - 2026-11-09
 
 ### Features
 
