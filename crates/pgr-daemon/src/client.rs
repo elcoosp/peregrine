@@ -4,7 +4,11 @@
 //! no daemon, stale socket, protocol mismatch, mid-link daemon death — is a
 //! [`ClientError`], and the driver answers it by falling back to the
 //! one-shot link. Nothing here can corrupt an output: the client writes the
-//! image bytes through the normal Pass 5 path after the daemon returns.
+//! image bytes through the normal Pass 5 path after the daemon returns —
+//! and since the §7.2 output-residency rung (wire v5), a patched relink's
+//! reply may be a hash-gated changed-tile stream the client replays against
+//! its own local bytes *before* that write: a replay that misses the gate
+//! is refused, never shipped.
 //!
 //! [`connect_or_start`] implements "started on demand by
 //! `pgr`": connect to the socket; when nothing answers, spawn `pgrd` (the
@@ -19,11 +23,31 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// How the reply's image crossed the wire (v5, the §7.2 rung).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// The full image crossed (a full link, or tiles not asked — the v4
+    /// shape).
+    Full,
+    /// Only the changed tiles crossed: `tiles` frames carrying `bytes`
+    /// bytes in total. An untouched relink ships `tiles = 0, bytes = 0`
+    /// (the client's file already is the output; nothing is rewritten).
+    Tiles {
+        /// Tile frames in the stream.
+        tiles: u32,
+        /// Payload bytes the stream carried (the wire's honest price).
+        bytes: u64,
+    },
+}
+
 /// One link's outcome from the daemon.
 #[derive(Debug, Clone)]
 pub struct ResidentImage {
     /// The complete output image bytes (the §7.3 ladder's patched image
-    /// when a record rode the request, else the full link's).
+    /// when a record rode the request, else the full link's). Populated
+    /// only for [`Transport::Full`] replies — a tiles reply carries the
+    /// stream in [`ResidentImage::tiles`] and the client replays it
+    /// against its own previous output.
     pub image: Vec<u8>,
     /// Entry offset within `__TEXT` (executables).
     pub entryoff: u64,
@@ -46,6 +70,16 @@ pub struct ResidentImage {
     /// byte-identity verdict plus its strict-verifier issues. The client
     /// refuses to ship a failing verdict (it writes nothing).
     pub audit: Option<pgr_emit::incremental::audit::AuditOutcome>,
+    /// The changed-tile stream (v5, the §7.2 rung): `Some` when the reply
+    /// shipped tiles instead of the image. The replay target is the
+    /// client's own previous output — the bytes the request's
+    /// `prev_output` hash vouches for — and
+    /// [`TilePatch::image_hash`](pgr_emit::incremental::TilePatch::image_hash)
+    /// gates the result before anything is written.
+    pub tiles: Option<pgr_emit::incremental::TilePatch>,
+    /// How the image tail crossed (v5): [`Transport::Full`] or the tile
+    /// summary (what the benches and the driver's outcome line record).
+    pub transport: Transport,
 }
 
 /// A client-side failure: the caller falls back to one-shot.
@@ -138,6 +172,7 @@ impl LinkJob {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         Self { request, blobs }
     }
@@ -178,6 +213,9 @@ impl LinkJob {
         job.request.record = Some(record);
         job.request.record_resolution = true;
         job.request.prev_output = Some(prev_hash);
+        // v5 (the §7.2 rung): the client holds the previous output bytes
+        // it just hashed — it can replay a changed-tile stream.
+        job.request.tiles = true;
         job.blobs.push((prev_hash, prev_output.to_vec()));
         job
     }
@@ -259,10 +297,12 @@ impl DaemonClient {
                     }
                 }
                 TAG_IMAGE => {
-                    // v4 body: the M8 fields, the M9 fusion tail — patch
+                    // v5 body: the M8 fields, the M9 fusion tail — patch
                     // outcome (absent on a full link) and the refreshed
-                    // record (absent when no capture was asked) — then the
-                    // audit verdict (absent unless asked and patched).
+                    // record (absent when no capture was asked) — the
+                    // audit verdict (absent unless asked and patched) —
+                    // then the §7.2 rung's image tail: a tile stream when
+                    // the session shaped one, else the full image bytes.
                     let mut r = crate::protocol::Reader::new(&body);
                     let entryoff = r.u64()?;
                     let fixup_slots = r.u64()?;
@@ -302,8 +342,38 @@ impl DaemonClient {
                             verify_blocking,
                         })
                     };
-                    let len = r.u64()? as usize;
-                    let image = r.take(len)?.to_vec();
+                    let (tiles, transport, image) = if r.u8()? == 0 {
+                        // Full image (the v4 tail, unchanged).
+                        let len = r.u64()? as usize;
+                        let image = r.take(len)?.to_vec();
+                        (None, Transport::Full, image)
+                    } else {
+                        // The changed-tile stream + the replay gate.
+                        let final_size = r.u64()?;
+                        let n = r.u32()?;
+                        let mut stream_tiles = Vec::with_capacity(n as usize);
+                        for _ in 0..n {
+                            let at = r.u64()?;
+                            let bytes = r.bytes().map(<[u8]>::to_vec)?;
+                            stream_tiles.push((at, bytes));
+                        }
+                        let image_hash = r.hash()?;
+                        let stream = pgr_emit::incremental::TilePatch {
+                            final_size,
+                            tiles: stream_tiles,
+                            image_hash,
+                        };
+                        let bytes = stream.wire_bytes();
+                        let count = stream.tiles.len() as u32;
+                        (
+                            Some(stream),
+                            Transport::Tiles {
+                                tiles: count,
+                                bytes,
+                            },
+                            Vec::new(),
+                        )
+                    };
                     r.done()?;
                     return Ok(ResidentImage {
                         image,
@@ -314,6 +384,8 @@ impl DaemonClient {
                         record,
                         patch,
                         audit,
+                        tiles,
+                        transport,
                     });
                 }
                 TAG_ERROR => {

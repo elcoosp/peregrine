@@ -5,9 +5,12 @@
 //!
 //! * **optional and transparent** — the daemon never changes output bytes;
 //!   a client that cannot reach it links one-shot (driver side).
-//! * **crash-safe** — the daemon holds no output state: the client writes
-//!   the file (fresh vnode + rename, the Pass 5 contract), so a daemon
-//!   death mid-link leaves at most a dead socket, never a corrupt output.
+//! * **crash-safe** — the daemon never writes the output: the client
+//!   writes the file (fresh vnode + rename, the Pass 5 contract), so a
+//!   daemon death mid-link leaves at most a dead socket, never a corrupt
+//!   output. (The §7.2 output-residency rung adds resident *state* — a
+//!   content-addressed copy of served images — never a write path: a
+//!   crash loses the cache, the client re-uploads.)
 //! * **concurrent-build safe** — links run serialized per daemon (they are
 //!   compute-bound anyway); every link is a pure function of its request,
 //!   so queued clients observe each other's bytes never.
@@ -20,7 +23,7 @@
 
 use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
-    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, put_bytes, put_str, put_u8, put_u32, put_u64,
+    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
 };
 use crate::session::{ResidentSession, SessionError};
 use std::io::{Read, Write};
@@ -250,11 +253,12 @@ fn serve_link(
     }
     match session.link(&req) {
         Ok(served) => {
-            // IMAGE v4: the M8 fields, the M9 fusion tail — the patch
+            // IMAGE v5: the M8 fields, the M9 fusion tail — the patch
             // outcome (absent on a full link) and the refreshed record
             // (absent when the link neither captured nor renewed one) —
-            // the audit verdict (absent unless asked and patched), then
-            // the image bytes.
+            // the audit verdict (absent unless asked and patched) — then
+            // the §7.2 rung's image tail: a tile stream when the session
+            // shaped one, else the full image bytes (the v4 shape).
             let mut b = Vec::with_capacity(64 + served.image.len());
             put_u64(&mut b, served.entryoff);
             put_u64(&mut b, served.fixup_slots);
@@ -289,8 +293,23 @@ fn serve_link(
                 }
                 None => put_u8(&mut b, 0),
             }
-            put_u64(&mut b, served.image.len() as u64);
-            b.extend_from_slice(&served.image);
+            // The §7.2 rung's image tail: the changed-tile stream when
+            // the session shaped one, else the full image (v4 shape).
+            if let Some(stream) = &served.tiles {
+                put_u8(&mut b, 1);
+                put_u64(&mut b, stream.final_size);
+                put_u32(&mut b, stream.tiles.len() as u32);
+                for (at, bytes) in &stream.tiles {
+                    put_u64(&mut b, *at);
+                    put_bytes(&mut b, bytes);
+                }
+                // The replay gate: the patched image's content hash.
+                put_hash(&mut b, &stream.image_hash);
+            } else {
+                put_u8(&mut b, 0);
+                put_u64(&mut b, served.image.len() as u64);
+                b.extend_from_slice(&served.image);
+            }
             write_frame(stream, TAG_IMAGE, &b)
         }
         Err(e @ (SessionError::Link(_) | SessionError::Emit(_))) => {

@@ -39,6 +39,14 @@
 //! verdict. The audit's subject is the patch: a full link or an untouched
 //! relink serves no audit (the client stands down or the verdict is
 //! trivially the full link's).
+//!
+//! M9 output-residency rung (wire v5): the request's `tiles` flag says the
+//! client holds the previous output bytes locally and can replay a
+//! changed-tile stream; the reply's image tail then ships the §7.2 rung's
+//! [`pgr_emit::incremental::TilePatch`] (the changed 16 KiB tiles plus the
+//! patched image's content hash) instead of the whole image — the session
+//! keeps every served image as resident output state, so a warm cycle
+//! moves only the changed tiles across the wire.
 
 use pgr_core::icf::IcfMode;
 use pgr_core::layout::{LinkConfig, OutputType};
@@ -48,9 +56,12 @@ use sha2::{Digest, Sha256};
 /// Wire-protocol revision. A mismatch is a hard [`DecodeError::Proto`]
 /// (the client falls back to one-shot rather than guessing). v3 carried
 /// the M9 fusion halves (record in, refreshed record + patch outcome out);
-/// **v4** adds the audited relink — the request's `audit` flag and the
-/// reply's audit verdict ([`pgr_emit::incremental::audit::AuditOutcome`]).
-pub const PROTO_VERSION: u32 = 4;
+/// v4 added the audited relink — the request's `audit` flag and the
+/// reply's audit verdict ([`pgr_emit::incremental::audit::AuditOutcome`]);
+/// **v5** adds the §7.2 output-residency rung — the request's `tiles` flag
+/// and the reply's tile-stream image tail
+/// ([`pgr_emit::incremental::TilePatch`]).
+pub const PROTO_VERSION: u32 = 5;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -262,6 +273,13 @@ pub struct LinkRequest {
     /// audit's subject is the patch — a full link or an untouched relink
     /// serves no audit.
     pub audit: bool,
+    /// Whether the client can replay a changed-tile stream (v5, the §7.2
+    /// output-residency rung): it holds the previous output bytes locally
+    /// and hashes its replay before writing, so a patched relink's reply
+    /// ships the changed 16 KiB tiles instead of the whole image. A daemon
+    /// serves tiles only to a flag-carrying request; a full link or a
+    /// v4-shaped client receives the image as before.
+    pub tiles: bool,
 }
 
 impl LinkRequest {
@@ -317,6 +335,8 @@ impl LinkRequest {
         }
         // M9 GA rung 2 (v4): the audited relink flag.
         put_u8(&mut b, u8::from(self.audit));
+        // M9 output-residency rung (v5): the tile-replay capability.
+        put_u8(&mut b, u8::from(self.tiles));
         b
     }
 
@@ -365,6 +385,7 @@ impl LinkRequest {
             _ => Some(r.hash()?),
         };
         let audit = r.u8()? != 0;
+        let tiles = r.u8()? != 0;
         r.done()?;
         Ok(Self {
             config,
@@ -375,6 +396,7 @@ impl LinkRequest {
             record_resolution,
             prev_output,
             audit,
+            tiles,
         })
     }
 }
@@ -685,6 +707,7 @@ mod tests {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -706,6 +729,7 @@ mod tests {
             record_resolution: true,
             prev_output: Some(content_hash(b"prev")),
             audit: true,
+            tiles: true,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -726,6 +750,7 @@ mod tests {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -750,6 +775,7 @@ mod tests {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -773,6 +799,7 @@ mod tests {
             record_resolution: true,
             prev_output: Some(content_hash(b"previous output")),
             audit: false,
+            tiles: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -795,6 +822,7 @@ mod tests {
             record_resolution: false,
             prev_output: None,
             audit: false,
+            tiles: false,
         };
         let back = LinkRequest::decode(&bare.encode()).unwrap();
         assert_eq!(back, bare);
@@ -811,5 +839,31 @@ mod tests {
         assert_eq!(TAG_LINK, 3);
         let mut r = Reader::new(&[1, 0, 0, 0]);
         assert_eq!(r.u32().unwrap(), 1);
+    }
+
+    #[test]
+    fn tiles_flag_round_trips_cleanly() {
+        // v5 (the §7.2 output-residency rung): the request's `tiles` flag
+        // says the client can replay a changed-tile stream (it holds the
+        // previous output bytes locally). It flips independently of the
+        // fusion halves.
+        let mut req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: Some(vec![1]),
+            record_resolution: true,
+            prev_output: Some(content_hash(b"prev")),
+            audit: false,
+            tiles: true,
+        };
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        assert!(back.tiles, "the flag rides the wire");
+        req.tiles = false;
+        assert_ne!(LinkRequest::decode(&req.encode()).unwrap(), back);
+        // Truncation inside the trailing flag byte is malformed.
+        let body = back.encode();
+        assert!(LinkRequest::decode(&body[..body.len() - 1]).is_err());
     }
 }
