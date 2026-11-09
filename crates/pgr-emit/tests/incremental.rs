@@ -1538,3 +1538,92 @@ fn apply_patch_bytes_matches_the_file_patch() {
     let err = apply_patch_bytes(&grown, &record, &plan, &layout2, &objects2, None);
     assert!(matches!(err, Err(PatchError::Fallback(_))), "{err:?}");
 }
+
+// ---- M9 GA rung 2: the audit twin (the daemon serves it; wire v4) ----
+//
+// The audit is the engine's bytes-level contract check, shared by the
+// driver's `-incremental-verify` and the daemon-served audit: byte-identity
+// against the full fused emit of the same plan, then the strict verifier
+// pass on the final bytes with the deliberate-unsigned carve-out.
+
+/// The audited tier-1 loop: the patched bytes pass the audit twin exactly
+/// because the engine contract (patched == full fused emit of the same
+/// plan) holds — and a flipped byte anywhere breaks identity.
+#[test]
+fn audit_patch_reports_identity_and_divergence() {
+    let old = inputs(&hello(16 * 1024, false));
+    let new = inputs(&hello(16 * 1024, true));
+    let cfg1 = cfg(OutputType::Execute, true, Vec::new());
+    let (layout1, objects1) = link(&old, &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+
+    let mut cfg2 = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    cfg2.sig_anchor = Some(layout1.linkedit.sig_off).filter(|&v| v > 0);
+    let (layout2, objects2) = link(&new, &cfg2);
+    let reference = build_image_fused(&layout2, &objects2).unwrap();
+    let decision = plan_patch(&record, &layout2, &objects2, cfg2.layout_slack.as_ref()).unwrap();
+    let plan = match &decision {
+        PatchDecision::InPlace(p) => p.clone(),
+        PatchDecision::Fallback(r) => panic!("expected in place, fell back: {r}"),
+    };
+    let (_, _, patched) =
+        apply_patch_bytes(&image1, &record, &plan, &layout2, &objects2, None).unwrap();
+
+    assert!(
+        pgr_emit::incremental::audit::audit_patch(&reference, &patched),
+        "the engine contract: patched == full fused emit of the same plan"
+    );
+    let mut diverged = patched.clone();
+    diverged[1024] ^= 0xFF; // page 0: any flipped byte breaks identity
+    assert!(
+        !pgr_emit::incremental::audit::audit_patch(&reference, &diverged),
+        "a diverged patch never passes the audit"
+    );
+}
+
+/// The strict-verifier half of the audit: a tampered code page is named
+/// (`signature_hash_mismatch`), and the deliberate-unsigned shape
+/// (`-no_adhoc`) is the config's own choice — never counted.
+#[test]
+fn audit_image_applies_the_deliberate_unsigned_carve_out() {
+    let objs = inputs(&hello(16 * 1024, false));
+
+    let cfg_signed = cfg(OutputType::Execute, true, Vec::new());
+    let (layout, objects) = link(&objs, &cfg_signed);
+    let image = build_image_fused(&layout, &objects).unwrap();
+    let mut tampered = image.clone();
+    tampered[4096] ^= 0xFF; // code page 1: the recomputed hash must differ
+    let blocking = pgr_emit::incremental::audit::audit_image(&tampered, false);
+    assert!(
+        blocking
+            .iter()
+            .any(|i| i.contains("signature_hash_mismatch")),
+        "the tampered page is named: {blocking:?}"
+    );
+
+    let cfg_unsigned = cfg_adhoc(OutputType::Execute, true, Vec::new(), false);
+    let (layout_u, objects_u) = link(&objs, &cfg_unsigned);
+    let unsigned = build_image_fused(&layout_u, &objects_u).unwrap();
+    let blocking_u = pgr_emit::incremental::audit::audit_image(&unsigned, true);
+    assert!(
+        blocking_u.is_empty(),
+        "an unsigned link audits clean besides its deliberate shape: {blocking_u:?}"
+    );
+}
+
+/// The refusal carries miette help-text that renders with the issue names
+/// and the fix (what the driver prints and what crosses nothing — the
+/// client refuses to ship).
+#[test]
+fn audit_refusal_renders_the_help_text() {
+    let refusal = pgr_emit::incremental::audit::AuditRefusal {
+        issues: vec!["Error [signature_hash_mismatch] page 1".into()],
+    };
+    let rendered = refusal.render();
+    assert!(rendered.contains("signature_hash_mismatch"), "{rendered}");
+    assert!(
+        rendered.contains("ships"),
+        "the help text renders: {rendered}"
+    );
+}

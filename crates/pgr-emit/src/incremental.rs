@@ -64,6 +64,8 @@
 //! `-incremental-verify` is the audit gate that hashes nothing less than
 //! everything.
 
+pub mod audit;
+
 use crate::EmitError;
 use crate::emit::{indirect_bytes, symtab_bytes};
 use crate::signature;
