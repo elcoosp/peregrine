@@ -66,6 +66,18 @@ fn main() -> ExitCode {
                     if audit.verify_ok { "clean" } else { "FAILED" }
                 );
             }
+            if let Some(transport) = &outcome.transport {
+                match transport {
+                    pgr_daemon::Transport::Full => {
+                        println!("{PROGRAM}: resident: the image crossed the wire in full");
+                    }
+                    pgr_daemon::Transport::Tiles { tiles, bytes } => {
+                        println!(
+                            "{PROGRAM}: resident: {tiles} tile(s), {bytes} bytes crossed the wire"
+                        );
+                    }
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(pgr_driver::DriverError::Opts(_) | pgr_driver::DriverError::Io { .. }) => {
