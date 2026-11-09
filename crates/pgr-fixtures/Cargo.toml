@@ -1,6 +1,6 @@
 [package]
 name = "pgr-fixtures"
-description = "Deterministic Mach-O test-image builder shared by pgr-verify tests and pgr-format benches (not published)"
+description = "Deterministic Mach-O test-image builder shared across the workspace's tests, benches, examples and the fuzz corpus (not published)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
