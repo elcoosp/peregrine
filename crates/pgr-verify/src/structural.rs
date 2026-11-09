@@ -865,9 +865,3 @@ pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &m
         }
     }
 }
-
-/// Re-exported for the CLI: file type classification helper.
-#[must_use]
-pub fn is_dylib_or_exec(filetype: u32) -> bool {
-    matches!(filetype, MH_EXECUTE | MH_DYLIB | MH_DYLINKER | MH_BUNDLE)
-}

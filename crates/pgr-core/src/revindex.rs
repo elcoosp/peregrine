@@ -103,11 +103,6 @@ impl ReverseIndex {
         self.sites.get(&id.0).map_or(&[], Vec::as_slice)
     }
 
-    /// The referenced symbols, ascending by name id.
-    pub fn referenced_symbols(&self) -> impl Iterator<Item = StringId> + '_ {
-        self.sites.keys().map(|k| StringId(*k))
-    }
-
     /// Number of distinct referenced symbols.
     #[must_use]
     pub fn len(&self) -> usize {
