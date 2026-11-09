@@ -38,6 +38,11 @@
 //! `LinkConfig` hands it to the pipeline's Pass 2 through
 //! [`crate::link::link_cached`], and a refused plan falls back to the full
 //! resolve — the same path tier 2b took into the patch planner.
+//!
+//! Tracing spans ride the two seams (`resolve_reuse_plan`,
+//! `resolve_reuse_install`) with the refusal reasons and the split counts
+//! as fields — inert until a subscriber installs, the workspace
+//! convention (the binaries do under their debug envs).
 
 use crate::LinkError;
 use crate::ids::StringId;
@@ -131,14 +136,22 @@ pub fn plan_reuse(
     objects: &[InputObject],
     dylibs: &[Dylib],
 ) -> Result<ReusePlan, ReuseFallback> {
+    let span = tracing::info_span!(
+        "resolve_reuse_plan",
+        recorded_files = recorded.file_names.len(),
+        relink_files = objects.len()
+    );
+    let _entered = span.enter();
     // 1. Shape guard: the snapshot's per-file identity must line up with
     //    the relink's parse exactly — a moved list renumbers FileIds and
     //    the winner slots' `(file, symbol)` keys with them.
     if recorded.file_names.len() != objects.len() {
+        tracing::debug!(fallback = "file_list_changed", "the shape guard refused");
         return Err(ReuseFallback::FileListChanged);
     }
     for (name, obj) in recorded.file_names.iter().zip(objects) {
         if name.as_slice() != obj.name.as_bytes() {
+            tracing::debug!(fallback = "file_list_changed", "the shape guard refused");
             return Err(ReuseFallback::FileListChanged);
         }
     }
@@ -149,6 +162,7 @@ pub fn plan_reuse(
         .flat_map(|d| d.exports.iter().cloned())
         .collect();
     if flat_exports != recorded.dylib_export_names {
+        tracing::debug!(fallback = "dylib_set_changed", "the shape guard refused");
         return Err(ReuseFallback::DylibSetChanged);
     }
 
@@ -207,6 +221,12 @@ pub fn plan_reuse(
         }
     }
 
+    tracing::debug!(
+        seeds = seed_sections.len(),
+        redecide = redecide.len(),
+        reused,
+        "the reuse plan split the name space"
+    );
     Ok(ReusePlan {
         seeds: seed_sections,
         redecide_ids,
@@ -237,6 +257,12 @@ pub fn install_reused(
     dylibs: &[Dylib],
     policy: UndefinedPolicy,
 ) -> Result<Resolution, LinkError> {
+    let span = tracing::info_span!(
+        "resolve_reuse_install",
+        reused = plan.reused,
+        redecide = plan.redecide.len()
+    );
+    let _entered = span.enter();
     let seed_files: BTreeSet<u32> = plan.seeds.iter().map(|(file, _)| *file).collect();
     // The hot-path membership check runs per external symbol of every
     // unchanged file — the plan's sorted id list keeps it on u32 compares,
@@ -319,6 +345,7 @@ pub fn install_reused(
         };
         res.replay_candidate(redecide_map[idx].1, cand)?;
     }
+    tracing::debug!(replayed = replay.len(), "the precedence replay finished");
     // 3. References: the recorded site set is digest-vouched to equal the
     //    relink parse's own, so re-walk the parse in file order — the
     //    walk order the full path pushes sites in.
