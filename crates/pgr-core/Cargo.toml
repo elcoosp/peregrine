@@ -22,5 +22,9 @@ criterion = { workspace = true }
 name = "trie"
 harness = false
 
+[[bench]]
+name = "resolve"
+harness = false
+
 [lints]
 workspace = true
