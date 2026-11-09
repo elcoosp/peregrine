@@ -13,8 +13,11 @@
 //!   the one-shot incremental cycle's, step for step;
 //! * **transparency** — with no daemon reachable the relink stands down
 //!   to the in-process path and the output is unchanged;
-//! * **the audit stays in-process** — `-incremental-verify` keeps the
-//!   relink on the audited path even with a daemon up.
+//! * **the audit is served by the daemon** — `-incremental-verify` rides
+//!   the wire rung (protocol v4): the daemon's ladder patches, audits its
+//!   bytes against the reference emit and hands the verdict across; the
+//!   client refuses to ship a failing verdict. Without a daemon the
+//!   audited relink stands down to the in-process audit (§7.3).
 //!
 //! The e2e suite's standing rule applies to every output here:
 //! `pgr-verify --strict` must pass before the test calls a link finished.
@@ -314,10 +317,13 @@ fn fusion_stands_down_to_the_in_process_relink_without_a_daemon() {
     assert!(strict_verify(&c.out));
 }
 
-/// `-incremental-verify` keeps the relink in-process (the audit lives
-/// there) even with a daemon up — the output is identical and strict.
+/// `-incremental-verify` is served by the daemon when one is up (M9 GA
+/// rung 2, wire v4): the relink patches through the ladder, the audit
+/// (byte-identity against the reference emit + the strict verifier) runs
+/// inside the session, and the verdict crosses the wire — the output is
+/// identical to the audited one-shot cycle and strict.
 #[test]
-fn incremental_verify_keeps_the_relink_in_process() {
+fn incremental_verify_is_served_by_the_daemon() {
     let c = Corpus::new("verify");
     let sock = start_daemon("verify");
     let opts = c.fusion_opts(&sock, true);
@@ -327,15 +333,155 @@ fn incremental_verify_keeps_the_relink_in_process() {
     let second = run(&opts).unwrap();
     let patch = second.patch.expect("the audited relink patches");
     assert!(!patch.untouched);
+    let audit = second
+        .audit
+        .expect("the daemon served the audit on the wire");
+    assert!(audit.identity_ok, "the engine contract holds: {audit:?}");
+    assert!(audit.verify_ok, "the strict pass is clean: {audit:?}");
+    assert!(!audit.healed, "nothing needed healing");
 
     let baseline = Corpus::new("verify_baseline");
     run(&baseline.plain_opts(true)).unwrap();
     baseline.edit(32 * 1024 + 1024, true);
-    run(&baseline.plain_opts(true)).unwrap();
+    let baseline_out = run(&baseline.plain_opts(true)).unwrap();
+    assert!(
+        baseline_out.audit.is_some(),
+        "the in-process audit reports on the same outcome shape"
+    );
     assert_eq!(
         c.output_bytes(),
         baseline.output_bytes(),
         "the audited fusion cycle matches the audited one-shot cycle"
     );
     assert!(strict_verify(&c.out));
+}
+
+/// Without a daemon the audited relink stands down to the in-process
+/// audit — every rung of the ladder stays available (§7.3).
+#[test]
+fn audited_relink_stands_down_to_the_in_process_audit() {
+    let c = Corpus::new("verify_absent");
+    let dead_sock = std::env::temp_dir().join(format!(
+        "pgr-m9-fusion-verify-absent-{}.sock",
+        std::process::id()
+    ));
+    let opts = c.fusion_opts(&dead_sock, true);
+
+    run(&opts).unwrap();
+    c.edit(32 * 1024 + 1024, true);
+    let second = run(&opts).unwrap();
+    assert!(second.patch.is_some(), "the in-process relink takes over");
+    let audit = second
+        .audit
+        .expect("the in-process audit reports on the outcome");
+    assert!(audit.identity_ok && audit.verify_ok, "clean: {audit:?}");
+    assert!(strict_verify(&c.out));
+}
+
+/// The audit's first catch (M9 GA rung 2): a symbol-heavy corpus (the
+/// benches' parse-heavy shape) overflowed the verifier's function-starts
+/// delta accumulator because `build_func_starts` emitted absolute offsets
+/// into a **delta** stream. The gate: such a corpus full-links AND
+/// relinks strict-clean.
+#[test]
+fn symbol_heavy_corpus_verifies_strict_through_the_audit() {
+    let dir = std::env::temp_dir().join("pgr_m9_fusion_symbol_heavy");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut inputs = Vec::new();
+    for seed in 1..=8u64 {
+        inputs.push(dir.join(format!("heavy_{seed}.o")).display().to_string());
+        let mut b = pgr_fixtures::ObjectBuilder::new(&format!("heavy_{seed}.o"));
+        let text_idx = b.add_section(ObjectSection::text(
+            "__text",
+            vec![0u8; 16 * 1024],
+            Vec::new(),
+        ));
+        let data_idx = b.add_section(ObjectSection::data("__data", vec![0u8; 8], Vec::new()));
+        b.section_mut(data_idx)
+            .relocs
+            .push(ObjectReloc::unsigned(0).at(0));
+        for i in 0..512 {
+            b.add_symbol(ObjectSymbol::Defined {
+                name: format!("_heavy_fn_{seed}_{i}"),
+                section_index: text_idx,
+                value: (i * 32) as u64,
+                weak: false,
+            });
+        }
+        let ref_seed = if seed == 1 { seed } else { seed - 1 };
+        for i in 0..512 {
+            b.add_symbol(ObjectSymbol::Undefined {
+                name: format!("_heavy_fn_{ref_seed}_{i}"),
+                weak_ref: false,
+            });
+        }
+        if seed == 1 {
+            b.add_symbol(ObjectSymbol::Defined {
+                name: "_main".into(),
+                section_index: text_idx,
+                value: 0,
+                weak: false,
+            });
+        }
+        std::fs::write(dir.join(format!("heavy_{seed}.o")), b.build().unwrap()).unwrap();
+    }
+    let out = dir.join("heavy_out");
+    let opts = pgr_driver::opts::Options {
+        output: out.display().to_string(),
+        inputs,
+        config: pgr_core::layout::LinkConfig {
+            ident: "pgr-m9-fusion-heavy".into(),
+            ..pgr_core::layout::LinkConfig::default()
+        },
+        incremental: true,
+        incremental_verify: true,
+        ..pgr_driver::opts::Options::default()
+    };
+    let cold = run(&opts).unwrap();
+    assert!(cold.patch.is_none(), "the cold link is a full link");
+    assert!(strict_verify(&out), "the full link is strict-clean");
+
+    // The audited warm relink over the edited corpus: the audit's
+    // identity + strict halves both hold.
+    let mut edited = pgr_fixtures::ObjectBuilder::new("heavy_1.o");
+    let t = edited.add_section(ObjectSection::text(
+        "__text",
+        vec![0u8; 16 * 1024],
+        Vec::new(),
+    ));
+    let d = edited.add_section(ObjectSection::data("__data", vec![0xFFu8; 8], Vec::new()));
+    edited
+        .section_mut(d)
+        .relocs
+        .push(ObjectReloc::unsigned(0).at(0));
+    for i in 0..512 {
+        edited.add_symbol(ObjectSymbol::Defined {
+            name: format!("_heavy_fn_1_{i}"),
+            section_index: t,
+            value: (i * 32) as u64,
+            weak: false,
+        });
+    }
+    for i in 0..512 {
+        edited.add_symbol(ObjectSymbol::Undefined {
+            name: format!("_heavy_fn_1_{i}"),
+            weak_ref: false,
+        });
+    }
+    edited.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: t,
+        value: 0,
+        weak: false,
+    });
+    std::fs::write(dir.join("heavy_1.o"), edited.build().unwrap()).unwrap();
+    let second = run(&opts).unwrap();
+    let audit = second.audit.expect("the audited relink serves the audit");
+    assert!(
+        audit.identity_ok && audit.verify_ok,
+        "the symbol-heavy relink audits clean: {audit:?}"
+    );
+    assert!(strict_verify(&out));
 }

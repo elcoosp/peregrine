@@ -153,6 +153,7 @@ fn bench_resident(c: &mut Criterion) {
     group.finish();
 
     bench_resident_fusion(c, &dir, &base);
+    bench_resident_fusion_audited(c, &dir, &base);
 }
 
 /// M9 GA fusion benchmark (architecture doc §7.3 + §10.4 M9): the
@@ -221,6 +222,75 @@ fn bench_resident_fusion(
                 .patch
                 .expect("the warm fusion relink patches in place");
             std::hint::black_box(patch);
+        });
+    });
+    group.finish();
+}
+
+/// M9 GA rung 2 benchmark (wire v4): the same edit→relink loop as
+/// [`bench_resident_fusion`], with `-incremental-verify` served by the
+/// daemon — the audit (byte-identity against the reference emit plus the
+/// strict verifier) runs inside the session over its warm POIs and the
+/// verdict crosses the wire. The overhead against the unaudited fusion
+/// group is the rung's honest price: the reference emit plus the verifier
+/// pass per audited relink. The verdict's correctness is gated in
+/// `tests/m9_resident_fusion.rs`, not here.
+fn bench_resident_fusion_audited(
+    c: &mut Criterion,
+    dir: &std::path::Path,
+    base: &pgr_driver::opts::Options,
+) {
+    let edited = bench_object_data(1, 2_048, 2, 0xFF).build().unwrap();
+    let edited_path = dir.join("resident_obj_0_edited.o");
+    if !edited_path.exists() {
+        std::fs::write(&edited_path, &edited).unwrap();
+    }
+
+    let sock = dir.join("bench-fusion-audited.sock");
+    start_daemon(&sock);
+
+    let mut audited = base.clone();
+    audited.resident = true;
+    audited.resident_socket = Some(sock.display().to_string());
+    audited.incremental = true;
+    audited.incremental_verify = true;
+    audited.output = dir
+        .join("resident_fusion_audited_out.bin")
+        .display()
+        .to_string();
+    let stale = dir.join("resident_fusion_audited_out.bin.pgr-inc");
+    let _ = std::fs::remove_file(&stale);
+
+    let mut group = c.benchmark_group("pgr-driver/resident-fusion-audited");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(6));
+
+    let warm = pgr_driver::run(&audited).unwrap();
+    assert!(
+        warm.patch.is_none(),
+        "the warm-up link is the recorded full link"
+    );
+
+    let mut alternator = 0u32;
+    group.bench_function("fusion_relink_audited_64_objects", |b| {
+        b.iter(|| {
+            alternator += 1;
+            let mut edited_opts = audited.clone();
+            edited_opts.inputs[0] = dir
+                .join(if alternator % 2 == 0 {
+                    "resident_obj_0.o"
+                } else {
+                    "resident_obj_0_edited.o"
+                })
+                .display()
+                .to_string();
+            let outcome = pgr_driver::run(&edited_opts).unwrap();
+            outcome
+                .patch
+                .expect("the warm audited relink patches in place");
+            let audit = outcome.audit.expect("the audited relink serves the audit");
+            assert!(audit.identity_ok && audit.verify_ok, "clean audit");
+            std::hint::black_box(audit);
         });
     });
     group.finish();

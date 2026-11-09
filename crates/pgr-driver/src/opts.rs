@@ -80,7 +80,9 @@ pub struct Options {
     /// full link (the fallback must always be available). Implies slack
     /// layout (`LinkConfig::layout_slack`) when the caller left it unset.
     pub incremental: bool,
-    /// M9 `-incremental-verify`: after a successful in-place patch, audit
+    /// M9 `-incremental-verify`: after a successful patch, audit (the
+    /// daemon serves it on the resident path — wire v4; in-process
+    /// otherwise)
     /// it — byte-identity against the full fused emit of the same plan,
     /// then a strict `pgr-verify` pass on the patched bytes (the §7.3
     /// "no stale-signature or stale-fixup failures" gate). A divergence

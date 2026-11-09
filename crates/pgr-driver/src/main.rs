@@ -10,6 +10,16 @@ use std::process::ExitCode;
 const PROGRAM: &str = "pgr";
 
 fn main() -> ExitCode {
+    // The relink/audit spans stay inert until a subscriber installs;
+    // PGR_INCREMENTAL_DEBUG=1 (or PGR_RESIDENT_DEBUG=1) turns them into
+    // stderr lines.
+    if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some()
+        || std::env::var_os("PGR_RESIDENT_DEBUG").is_some()
+    {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .init();
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     match args.first().and_then(|a| a.to_str()) {
         Some("--version" | "-version" | "-V") => {
@@ -41,6 +51,20 @@ fn main() -> ExitCode {
                         patch.dirty_tiles, patch.total_tiles, patch.bytes_patched
                     );
                 }
+            }
+            if let Some(audit) = &outcome.audit {
+                let served_by = if audit.healed {
+                    "healed from the reference emit"
+                } else if audit.identity_ok {
+                    "byte-identity held"
+                } else {
+                    "diverged"
+                };
+                println!(
+                    "{PROGRAM}: incremental-verify: {} (strict pass {})",
+                    served_by,
+                    if audit.verify_ok { "clean" } else { "FAILED" }
+                );
             }
             ExitCode::SUCCESS
         }

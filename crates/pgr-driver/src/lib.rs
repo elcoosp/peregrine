@@ -34,6 +34,11 @@ pub struct LinkOutcome {
     pub fixup_slots: usize,
     /// M9: the in-place patch report (`None` on a full link).
     pub patch: Option<pgr_emit::incremental::PatchOutcome>,
+    /// M9 GA rung 2: the served audit verdict (`Some` when
+    /// `-incremental-verify` ran — daemon-served on the resident path,
+    /// in-process otherwise; `None` on a full link or an untouched
+    /// relink, where the audit's subject never exists).
+    pub audit: Option<pgr_emit::incremental::audit::AuditSummary>,
 }
 
 /// A driver failure: options, I/O, or link errors.
@@ -77,6 +82,19 @@ pub enum DriverError {
     /// then surfaced this error too, or the patch itself was unrecoverable.
     #[error("incremental relink: {0}")]
     Incremental(#[from] pgr_emit::incremental::PatchError),
+    /// `-incremental-verify` refused to ship the patched image: the
+    /// strict verifier named blocking issues on the final bytes (the
+    /// miette-rendered refusal, help text included). The output file is
+    /// untouched when this comes from the resident path — the client
+    /// refuses to write — and healed from the full emit when it comes
+    /// from the in-process audit's identity half.
+    #[error("{path}: {detail}")]
+    Audit {
+        /// The output path the audit gates.
+        path: String,
+        /// The rendered refusal (issue list + miette help text).
+        detail: String,
+    },
     /// An input is an LLVM bitcode object (LTO): the M6 scope detects it
     /// and diagnoses clearly instead of failing deep in the Mach-O parser.
     #[error(
@@ -886,11 +904,14 @@ pub fn link_reference_bytes(opts: &opts::Options) -> Result<Vec<u8>, DriverError
 /// # Errors
 /// [`DriverError`] on option, link, emit or filesystem failures.
 pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
-    if opts.incremental && opts.resident && !opts.incremental_verify {
+    if opts.incremental && opts.resident {
         // M9 GA fusion rung: with a daemon reachable the relink runs
         // inside the resident session (warm POIs; the patched bytes cross
-        // the wire and the write below stays the client's). Any stand-down
-        // — no daemon, no record, a §7.3 refusal — hands over to the
+        // the wire and the write below stays the client's) — and since
+        // the audited rung (wire v4) the daemon also *serves* the
+        // `-incremental-verify` audit, so `-resident -incremental
+        // -incremental-verify` no longer stands down. Any stand-down — no
+        // daemon, no record, a §7.3 refusal — hands over to the
         // in-process relink, then to the full link: the ladder's rungs in
         // order, every one always available.
         match resident_relink(opts) {
@@ -935,6 +956,7 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
         entryoff: linked.entryoff,
         fixup_slots: linked.fixup_slots,
         patch: None,
+        audit: None,
     })
 }
 
@@ -1014,7 +1036,7 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
         slacked.config.layout_slack = Some(pgr_core::slack::SlackPolicy::default());
     }
     let (prepared, _cache) = prepare_link(&slacked)?;
-    let job = pgr_daemon::LinkJob::build_incremental(
+    let mut job = pgr_daemon::LinkJob::build_incremental(
         &prepared.config,
         &prepared.force_load,
         &prepared.inputs,
@@ -1022,6 +1044,10 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
         record_bytes,
         &prev,
     );
+    // M9 GA rung 2 (wire v4): the audit rides the request when
+    // `-incremental-verify` is on — the daemon's ladder serves the
+    // bytes-level audit and the verdict crosses the wire.
+    job.request.audit = opts.incremental_verify;
     let socket = opts
         .resident_socket
         .clone()
@@ -1039,6 +1065,28 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
             "the daemon's ladder fell back to its full link".into(),
         ));
     }
+    // The served audit's verdict gates the write (§7.3 "a divergence
+    // never ships"): the client refuses to ship a failing verdict by not
+    // writing the file at all. The daemon already healed a divergence
+    // from its reference emit in memory — `healed` says so.
+    if let Some(audit) = &served.audit {
+        if !audit.verify_blocking.is_empty() {
+            let detail = pgr_emit::incremental::audit::AuditRefusal {
+                issues: audit.verify_blocking.clone(),
+            }
+            .render();
+            return Err(ResidentAttempt::Error(DriverError::Audit {
+                path: opts.output.clone(),
+                detail,
+            }));
+        }
+        if audit.healed && std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
+            eprintln!(
+                "pgr: incremental-verify (daemon): the patched bytes diverged; \
+                 the daemon healed from its reference emit"
+            );
+        }
+    }
     write_image(&served.image, Path::new(&opts.output)).map_err(DriverError::from)?;
     // The renewed record: store it so the next cycle starts from the
     // patched state (best-effort, like the in-process path).
@@ -1053,6 +1101,7 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
         entryoff: served.entryoff,
         fixup_slots: usize::try_from(served.fixup_slots).unwrap_or(usize::MAX),
         patch: served.patch,
+        audit: served.audit.map(|a| a.summary()),
     })
 }
 
@@ -1158,6 +1207,7 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
                 total_tiles: plan.total_tiles,
                 untouched: true,
             }),
+            audit: None,
         });
     }
     let (mut outcome, new_record) = pgr_emit::incremental::apply_patch(
@@ -1174,11 +1224,13 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
         other => RelinkAttempt::Error(other.into()),
     })?;
 
-    // `-incremental-verify` (§7.3): the audit gate. Byte-identity against
-    // the full fused emit of the same plan first (the engine's contract);
+    // `-incremental-verify` (§7.3): the audit gate, through the engine's
+    // audit twin (the same implementation the daemon serves on the wire).
+    // Byte-identity against the full fused emit of the same plan first;
     // a divergence never ships — the output is rewritten from the full
-    // emit and re-recorded. Then the strict verifier pass (no stale
-    // signature, no stale fixup, no bad chain) on the final bytes.
+    // emit and re-recorded. Then the strict verifier pass on the final
+    // bytes (with the deliberate-unsigned carve-out for `-no_adhoc`).
+    let mut audit_summary = None;
     if opts.incremental_verify {
         let full = pgr_emit::build_image_fused(&result.layout, &result.objects)
             .map_err(|e| RelinkAttempt::Error(e.into()))?;
@@ -1188,19 +1240,21 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
                 source,
             })
             .map_err(RelinkAttempt::Error)?;
-        if patched != full {
+        let identity_ok = pgr_emit::incremental::audit::audit_patch(&full, &patched);
+        let healed = !identity_ok;
+        if healed {
             if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
                 eprintln!("pgr: incremental-verify: patched output diverged; healing");
             }
             write_image(&full, output).map_err(|e| RelinkAttempt::Error(e.into()))?;
-            let healed = pgr_emit::incremental::LinkRecord::record(
+            let healed_record = pgr_emit::incremental::LinkRecord::record(
                 &result.layout,
                 &result.objects,
                 &full,
                 result.resolve_snapshot.as_ref(),
             )
             .map_err(|e| RelinkAttempt::Error(e.into()))?;
-            store_record(opts, &healed);
+            store_record(opts, &healed_record);
             outcome.bytes_patched = full.len() as u64;
             outcome.dirty_tiles = plan.total_tiles;
         }
@@ -1210,42 +1264,23 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
                 source,
             })
             .map_err(RelinkAttempt::Error)?;
-        let vopts = pgr_verify::Options {
-            strict_warnings: true,
-            skip_hash_recompute: false,
-        };
-        let report = pgr_verify::verify(&final_bytes, &vopts);
         // A deliberately unsigned link (`-no_adhoc`) has no signature LC:
         // the verifier's "arm64 images require an ad-hoc code signature"
-        // error is the expected shape, not a patch defect — the audit
-        // gates everything else (fixups, chains, segments, symtab) at
-        // full strictness. Signed links keep the signature gate.
-        let signature_expected = !cfg.adhoc;
-        let blocking: Vec<_> = report
-            .issues
-            .iter()
-            .filter(|i| match i.severity {
-                pgr_verify::Severity::Error => {
-                    !(signature_expected && i.code == pgr_verify::Code::SignatureLayout)
-                }
-                pgr_verify::Severity::Warning => vopts.strict_warnings,
-            })
-            .collect();
+        // shape is the config's own choice — the carve-out lives in the
+        // twin; everything else gates at full strictness.
+        let blocking = pgr_emit::incremental::audit::audit_image(&final_bytes, !cfg.adhoc);
         if !blocking.is_empty() {
-            let detail = blocking
-                .iter()
-                .map(|i| format!("{:?} [{}] {}", i.severity, i.code.as_str(), i.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(RelinkAttempt::Error(DriverError::Tbd {
+            let detail = pgr_emit::incremental::audit::AuditRefusal { issues: blocking }.render();
+            return Err(RelinkAttempt::Error(DriverError::Audit {
                 path: opts.output.clone(),
-                source: pgr_format::FormatError::Malformed {
-                    what: format!(
-                        "-incremental-verify: the patched image failed the strict verifier: {detail}"
-                    ),
-                },
+                detail,
             }));
         }
+        audit_summary = Some(pgr_emit::incremental::audit::AuditSummary {
+            identity_ok,
+            healed,
+            verify_ok: true,
+        });
     }
 
     store_record(opts, &new_record);
@@ -1257,6 +1292,7 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
         entryoff: result.layout.entryoff,
         fixup_slots: result.layout.fixups.slot_count,
         patch: Some(outcome),
+        audit: audit_summary,
     })
 }
 
@@ -1337,6 +1373,8 @@ pub fn usage() -> String {
     s.push_str("                               full link silently)\n");
     s.push_str("  -no_incremental              disable the in-place relink\n");
     s.push_str("  -incremental-verify          after patching, audit byte-identity\n");
+    s.push_str("                               and strict-verify (daemon-served\n");
+    s.push_str("                               under -resident; in-process else)\n");
     s.push_str("                               against the full emit and run the\n");
     s.push_str("                               strict verifier on the result\n");
     s.push_str("  -resident                    route the link through the resident\n");
