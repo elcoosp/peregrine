@@ -13,6 +13,10 @@ sha2 = { workspace = true }
 pgr-format = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
+# Debug spans on the layout path (inert until a subscriber installs —
+# the binaries do under their debug envs; the old PGR_DEBUG_LAYOUT
+# eprintln block became spans when the workspace adopted tracing).
+tracing = { workspace = true }
 
 [dev-dependencies]
 pgr-fixtures = { workspace = true }

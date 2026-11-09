@@ -425,6 +425,7 @@ dependencies = [
  "rayon",
  "sha2",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

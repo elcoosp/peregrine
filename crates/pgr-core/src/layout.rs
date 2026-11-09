@@ -900,28 +900,25 @@ pub fn layout(
     let has_fixups = fixup_slot_count > 0 || !needs.got.is_empty();
     let use_chains = cfg.fixup_chains && has_fixups && cfg.minos >= CHAINED_FIXUPS_MIN_MINOS;
     let chains_enabled = use_chains;
-    if std::env::var("PGR_DEBUG_LAYOUT").is_ok() {
-        eprintln!(
-            "[layout] fixup_chains={} has_fixups={} slot_count={} got={} minos={:#x} use_chains={}",
-            cfg.fixup_chains,
-            has_fixups,
-            fixup_slot_count,
-            needs.got.len(),
-            cfg.minos,
-            use_chains
+    // The layout debug gate: spans, not stderr (inert until a subscriber
+    // installs — `pgr` does under PGR_INCREMENTAL_DEBUG/PGR_RESIDENT_DEBUG;
+    // formerly a PGR_DEBUG_LAYOUT eprintln block, two env reads per link).
+    tracing::debug!(
+        fixup_chains = cfg.fixup_chains,
+        has_fixups,
+        slot_count = fixup_slot_count,
+        got = needs.got.len(),
+        minos = format!("{:#x}", cfg.minos),
+        use_chains,
+        "the layout's fixup shape"
+    );
+    for (i, o) in objects.iter().enumerate() {
+        tracing::trace!(
+            object = i,
+            name = %o.name,
+            relocs = ?o.sections.iter().map(|s| s.relocs.len()).collect::<Vec<_>>(),
+            "the object's relocation spread"
         );
-        for (i, o) in objects.iter().enumerate() {
-            if std::env::var("PGR_DEBUG_LAYOUT").is_ok() {
-                eprintln!(
-                    "[layout] obj {i} {} relocs {:?}",
-                    o.name,
-                    o.sections
-                        .iter()
-                        .map(|s| s.relocs.len())
-                        .collect::<Vec<_>>()
-                );
-            }
-        }
     }
     let fixup_lc_kind = if use_chains {
         FixupLc::Chained
