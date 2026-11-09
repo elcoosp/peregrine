@@ -9,6 +9,16 @@
 //! twice in separate calls produces byte-identical images, and the fused
 //! emit is byte-identical to the preserved pre-fusion reference
 //! (`link_reference_bytes`) — both asserted in the integration tests.
+//!
+//! Since M8/M9 the loop also orchestrates the §7.2/§7.3 rungs: `-resident`
+//! routes a link through the `pgrd` daemon (any refusal stands down
+//! silently to the one-shot path), `-incremental` re-links in place from
+//! the recorded emit plan (the §7.3 ladder classifying every shape it
+//! cannot patch), and the fusion of both — the resident relink whose reply
+//! is the changed-tile stream, replayed and hash-gated client-side.
+//! [`run`] returns a [`LinkOutcome`] carrying the patch report, the audit
+//! verdict and the wire transport, so a consumer can see which path served
+//! the image.
 
 pub mod opts;
 pub mod synth;
@@ -1009,6 +1019,19 @@ impl From<DriverError> for ResidentAttempt {
     }
 }
 
+/// Why a record/previous-output read stood the resident attempt down: a
+/// missing file is the ordinary first-cycle shape ("no record yet"), and
+/// any other failure says so with its cause — the stand-down reason is the
+/// diagnostic the user gets, so a permission error must be diagnosable,
+/// not lied about.
+fn stand_down_reason(source: &std::io::Error) -> String {
+    if source.kind() == std::io::ErrorKind::NotFound {
+        "no record for this output yet".into()
+    } else {
+        format!("the record is unreadable: {source}")
+    }
+}
+
 /// The M9 GA fusion relink (§7.3 through the daemon, §7.2 transport): the
 /// previous record and the previous output's content hash cross the wire
 /// (the bytes ride only when the session does not already hold them —
@@ -1027,15 +1050,20 @@ impl From<DriverError> for ResidentAttempt {
 /// next cycle; standing down keeps the outcome identical to the one-shot
 /// cycle).
 fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt> {
+    let _span = tracing::debug_span!("resident_relink", output = opts.output.as_str()).entered();
     let record_bytes = std::fs::read(record_path(opts))
-        .map_err(|_| ResidentAttempt::StandDown("no record for this output yet".into()))?;
+        .map_err(|source| ResidentAttempt::StandDown(stand_down_reason(&source)))?;
     if pgr_emit::incremental::LinkRecord::decode(&record_bytes).is_none() {
         return Err(ResidentAttempt::StandDown(
             "the record did not decode; the in-process relink re-records".into(),
         ));
     }
     let prev = std::fs::read(Path::new(&opts.output)).map_err(|source| {
-        ResidentAttempt::StandDown(format!("the previous output is unreadable: {source}"))
+        ResidentAttempt::StandDown(if source.kind() == std::io::ErrorKind::NotFound {
+            "no previous output yet; the in-process relink re-links".into()
+        } else {
+            format!("the previous output is unreadable: {source}")
+        })
     })?;
     // §7.3 "layout stability": the in-place tier stands on slack anchors,
     // so the relink implies the M8-c policy exactly like the in-process
@@ -1451,6 +1479,27 @@ mod tests {
     use super::{link_to_bytes, usage, version_line};
     use crate::opts::Options;
     use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
+
+    /// The resident stand-down's record-read classification: a missing
+    /// record is the ordinary first-cycle reason, and every other read
+    /// failure carries its io cause instead of masquerading as a missing
+    /// record (the stand-down reason is diagnostic output — a permission
+    /// error must be diagnosable, not lied about).
+    #[test]
+    fn stand_down_reason_classifies_the_record_read() {
+        use super::stand_down_reason;
+        let missing = stand_down_reason(&std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(missing, "no record for this output yet");
+        let denied = stand_down_reason(&std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(
+            denied.starts_with("the record is unreadable: "),
+            "the cause rides the reason: {denied}"
+        );
+        assert!(
+            denied.contains("permission"),
+            "the os message rides the reason: {denied}"
+        );
+    }
 
     /// hello.o: _main ADRP+ADD loads _msg, BL _greet, returns 0.
     fn hello_main() -> Vec<u8> {
