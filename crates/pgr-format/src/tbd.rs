@@ -70,8 +70,20 @@ impl Tbd {
 /// `install-name`, unknown keys, no `arm64-macos` target, non-scalar values,
 /// truncated documents). The parser never panics on arbitrary input.
 pub fn parse_tbd(bytes: &[u8]) -> Result<Tbd, FormatError> {
-    let doc = std::str::from_utf8(bytes).map_err(|_| FormatError::Malformed {
-        what: ".tbd content is not UTF-8".into(),
+    // error.rs's design rule: every refusal carries the byte offset that
+    // explains *where* the file stopped making sense — the text codec's
+    // UTF-8 gate names the first invalid byte (`valid_up_to`) and how much
+    // of the tail is broken (`error_len`), instead of a bare "not UTF-8".
+    let doc = std::str::from_utf8(bytes).map_err(|e| {
+        let at = e.valid_up_to();
+        let tail = match e.error_len() {
+            Some(1) => "1 invalid byte follows".to_string(),
+            Some(n) => format!("{n} invalid bytes follow"),
+            None => "the error extends to the end of the input".to_string(),
+        };
+        FormatError::Malformed {
+            what: format!(".tbd content is not UTF-8 at byte {at} ({tail})"),
+        }
     })?;
     let mut lines = Lines::new(doc);
 
@@ -613,6 +625,25 @@ mod tests {
             "flags: [ installapi ]\ntargets: [ arm64-macos ]\ninstall-name: /v.dylib\ncurrent-version: 31.0.0\ncompatibility-version: 1.0.0\nexports:\n  - targets: [ arm64-macos ]\n    symbols: [ _v ]\n",
         );
         assert_eq!(tbd.current_version, (31 << 16));
+    }
+
+    #[test]
+    fn utf8_refusal_names_the_offset() {
+        // The marker block is ASCII, so the first invalid byte sits at a
+        // known offset; the refusal must name it (error.rs's design rule:
+        // every failure carries "the byte offset that explains where the
+        // file stopped making sense").
+        let mut doc =
+            b"--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: ".to_vec();
+        let bad_at = doc.len();
+        doc.extend_from_slice(b"\xff\xfe.dylib\n...\n");
+        let FormatError::Malformed { what } = parse_tbd(&doc).unwrap_err() else {
+            panic!("non-UTF-8 content is a Malformed refusal");
+        };
+        assert!(
+            what.contains(&format!("byte {bad_at}")),
+            "the refusal must name the first invalid byte: {what}"
+        );
     }
 
     #[test]
