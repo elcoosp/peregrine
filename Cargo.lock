@@ -450,6 +450,7 @@ name = "pgr-driver"
 version = "0.9.1"
 dependencies = [
  "criterion",
+ "miette",
  "pgr-core",
  "pgr-daemon",
  "pgr-emit",

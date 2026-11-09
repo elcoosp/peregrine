@@ -1449,7 +1449,10 @@ pub fn usage() -> String {
     s.push_str("Options:\n");
     s.push_str("  -o <path>                    output file (required)\n");
     s.push_str("  -arch arm64                  target architecture (arm64 only)\n");
-    s.push_str("  -platform_version <p> <min> <sdk>   build version (macos only)\n");
+    s.push_str("  -platform_version <p> <min> <sdk>   build version; the platform is\n");
+    s.push_str("                               macos, ios, tvos, watchos or visionos\n");
+    s.push_str("                               (M10), and the SDK must be at least the\n");
+    s.push_str("                               deployment target\n");
     s.push_str("  -e <symbol>                  entry symbol (default _main)\n");
     s.push_str("  -static                      static semantics (M1 default)\n");
     s.push_str("  -dylib                       link a dylib (MH_DYLIB)\n");

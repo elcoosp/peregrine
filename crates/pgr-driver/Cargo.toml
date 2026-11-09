@@ -17,6 +17,10 @@ pgr-daemon = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Option-refusal help text (the fix, not just the verdict) — the same
+# miette convention the audit/object refusals render with (M10 rung 2
+# wires the `-platform_version` surface through it).
+miette = { workspace = true }
 
 [dev-dependencies]
 pgr-fixtures = { workspace = true }
@@ -40,4 +44,8 @@ harness = false
 
 [[bench]]
 name = "incremental"
+harness = false
+
+[[bench]]
+name = "platform"
 harness = false

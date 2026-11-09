@@ -1,13 +1,30 @@
 //! ld64-compatible option surface (TDD §5 Pass 0; grown milestone by
 //! milestone: M2 library search, M3 dylibs/bundles, M5 archives and
 //! frameworks, M6 caches, M7 `-syslibroot`, M8 `-resident`, M9
-//! `-incremental`, M10 `-r` relocatable output). Flags real builds use
-//! that have not landed yet (`-order_file`, TLV, bitcode) are rejected
-//! with actionable messages rather than silently ignored — a linker that
-//! pretends to understand a flag it drops is worse than one that says
-//! "not yet".
+//! `-incremental`, M10 `-r` relocatable output and the platform surface).
+//! Flags real builds use that have not landed yet (`-order_file`, TLV,
+//! bitcode) are rejected with actionable messages rather than silently
+//! ignored — a linker that pretends to understand a flag it drops is
+//! worse than one that says "not yet".
 
 use pgr_core::layout::LinkConfig;
+use pgr_format::consts::{
+    PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_VISIONOS, PLATFORM_WATCHOS,
+};
+
+/// Maps a `-platform_version` platform name onto its `LC_BUILD_VERSION`
+/// constant (M10 rung 2). The five names are the platforms the pipeline
+/// links; anything else refuses with the surface in the hint.
+fn platform_const(name: &str) -> Option<u32> {
+    match name {
+        "macos" => Some(PLATFORM_MACOS),
+        "ios" => Some(PLATFORM_IOS),
+        "tvos" => Some(PLATFORM_TVOS),
+        "watchos" => Some(PLATFORM_WATCHOS),
+        "visionos" => Some(PLATFORM_VISIONOS),
+        _ => None,
+    }
+}
 
 /// Parsed driver options (the current milestone surface; M10 adds `-r`).
 #[derive(Debug, Clone)]
@@ -123,7 +140,11 @@ impl Default for Options {
 }
 
 /// A command-line problem (exit code 2).
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+///
+/// Refusals carry miette help text (the fix, not just the verdict) —
+/// rendered by the `pgr` binary the way the audit refusal is (M10 rung
+/// 2 wires the platform surface's help through the same derive).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum OptsError {
     /// A required flag or value is missing.
     #[error("missing value for {flag}")]
@@ -131,8 +152,9 @@ pub enum OptsError {
         /// The flag that wanted a value.
         flag: String,
     },
-    /// The flag is not part of the M1 surface.
-    #[error("unsupported flag {flag} (M1 links direct .o inputs only; {hint})")]
+    /// The flag is not part of the linked surface.
+    #[error("unsupported flag {flag} ({hint})")]
+    #[diagnostic(help("{hint}"))]
     Unsupported {
         /// The offending flag.
         flag: String,
@@ -141,11 +163,27 @@ pub enum OptsError {
     },
     /// A flag value is malformed.
     #[error("invalid value for {flag}: {value}")]
+    #[diagnostic(help(
+        "versions are `X[.Y[.Z]]` decimal triples packed into the Mach-O build-version word"
+    ))]
     InvalidValue {
         /// The flag.
         flag: String,
         /// The bad value.
         value: String,
+    },
+    /// `-platform_version`: the SDK is older than the deployment target
+    /// (M10 rung 2). The SDK ships the deployment target's interfaces;
+    /// building against an older one produces images dyld may refuse.
+    #[error("-platform_version: SDK version {sdk} is older than the deployment target {minos}")]
+    #[diagnostic(help(
+        "bump the SDK or lower the deployment target — the SDK must be at least the deployment target"
+    ))]
+    VersionOrder {
+        /// The deployment target as written.
+        minos: String,
+        /// The SDK as written.
+        sdk: String,
     },
     /// No output path or no inputs.
     #[error("{message}")]
@@ -434,20 +472,34 @@ fn apply_flag(
             let platform = next_value(args, i, arg)?;
             let minos = next_value(args, i, arg)?;
             let sdk = next_value(args, i, arg)?;
-            if platform != "macos" {
-                return Err(OptsError::Unsupported {
+            // M10 rung 2: the five linked platforms, not macOS only.
+            opts.config.platform =
+                platform_const(&platform).ok_or_else(|| OptsError::Unsupported {
                     flag: arg.into(),
-                    hint: format!("platform {platform:?} (M1 supports macos only)"),
-                });
-            }
+                    hint: format!(
+                        "platform {platform:?} is not a linked platform (the surface links \
+                     macos, ios, tvos, watchos and visionos)"
+                    ),
+                })?;
             opts.config.minos = parse_version(&minos).ok_or_else(|| OptsError::InvalidValue {
                 flag: arg.into(),
-                value: minos,
+                value: minos.clone(),
             })?;
             opts.config.sdk = parse_version(&sdk).ok_or_else(|| OptsError::InvalidValue {
                 flag: arg.into(),
-                value: sdk,
+                value: sdk.clone(),
             })?;
+            if opts.config.sdk < opts.config.minos {
+                return Err(OptsError::VersionOrder { minos, sdk });
+            }
+            // The flag→config seam, spanned like the pipeline seams (inert
+            // until a subscriber installs).
+            tracing::debug!(
+                platform = %platform,
+                minos = %minos,
+                sdk = %sdk,
+                "the -platform_version seam shaped the config"
+            );
         }
         "-e" | "-entry" => {
             opts.config.entry_symbol = next_value(args, i, arg)?;
@@ -890,6 +942,67 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn platform_flags_shape_the_config_m10() {
+        let cases = [
+            ("macos", pgr_format::consts::PLATFORM_MACOS),
+            ("ios", pgr_format::consts::PLATFORM_IOS),
+            ("tvos", pgr_format::consts::PLATFORM_TVOS),
+            ("watchos", pgr_format::consts::PLATFORM_WATCHOS),
+            ("visionos", pgr_format::consts::PLATFORM_VISIONOS),
+        ];
+        for (name, platform) in cases {
+            let o = parse(&args(&[
+                "-o",
+                "out",
+                "-platform_version",
+                name,
+                "1.0",
+                "1.0",
+                "a.o",
+            ]))
+            .unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+            assert_eq!(o.config.platform, platform, "{name} must shape the config");
+        }
+    }
+
+    #[test]
+    fn an_unknown_platform_refuses_with_the_surface_in_the_hint() {
+        let err = parse(&args(&[
+            "-o",
+            "out",
+            "-platform_version",
+            "linux",
+            "1.0",
+            "1.0",
+            "a.o",
+        ]))
+        .unwrap_err();
+        let msg = err.to_string();
+        for name in ["macos", "ios", "tvos", "watchos", "visionos"] {
+            assert!(msg.contains(name), "the refusal must name {name}: {msg}");
+        }
+    }
+
+    #[test]
+    fn an_sdk_older_than_the_deployment_target_refuses() {
+        let err = parse(&args(&[
+            "-o",
+            "out",
+            "-platform_version",
+            "macos",
+            "14.0",
+            "12.0",
+            "a.o",
+        ]))
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SDK") && msg.contains("14.0") && msg.contains("12.0"),
+            "the refusal must name both versions: {msg}"
+        );
     }
 
     #[test]

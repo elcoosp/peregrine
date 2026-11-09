@@ -80,7 +80,9 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(pgr_driver::DriverError::Opts(_) | pgr_driver::DriverError::Io { .. }) => {
+        Err(pgr_driver::DriverError::Opts(_)) => {
+            // The refusal renders with its miette help text (the fix, not
+            // just the verdict) — the same convention as the audit refusal.
             eprintln!("{PROGRAM}: error: {}", first_error(&args));
             ExitCode::from(2)
         }
@@ -97,10 +99,11 @@ fn run(args: &[std::ffi::OsString]) -> Result<pgr_driver::LinkOutcome, pgr_drive
     pgr_driver::run(&opts)
 }
 
-/// The error message for the failing option (parse errors carry the flag).
+/// The rendered error for the failing option (parse errors carry the
+/// flag and their miette help text — the fix, not just the verdict).
 fn first_error(args: &[std::ffi::OsString]) -> String {
     match pgr_driver::opts::parse(args) {
-        Err(e) => e.to_string(),
+        Err(e) => format!("{:?}", miette::Report::new(e)),
         Ok(_) => "option handling failed".into(),
     }
 }
