@@ -190,7 +190,7 @@ fn patch_and_assert_identity(
     let prev = dir.join("out");
     write_image(&image1, &prev).unwrap();
 
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     let mut cfg_new = cfg_adhoc(kind, slack, anchors_of(&layout1), adhoc);
     // The relink cycle anchors the signature boundary (the LINKEDIT tail
@@ -206,7 +206,7 @@ fn patch_and_assert_identity(
     };
 
     let (outcome, next_record) =
-        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
     assert!(!outcome.untouched);
     assert!(
         outcome.bytes_patched <= image1.len() as u64,
@@ -221,7 +221,7 @@ fn patch_and_assert_identity(
     // The returned record describes the new state exactly.
     assert_eq!(
         next_record,
-        LinkRecord::record(&layout2, &objects2, &image2_full).unwrap()
+        LinkRecord::record(&layout2, &objects2, &image2_full, None).unwrap()
     );
     // The next relink over the same inputs is a no-op.
     let decision3 = plan_patch(
@@ -314,7 +314,7 @@ fn unchanged_relink_is_untouched() {
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     // Same inputs, anchored config: identical plan.
     let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
@@ -332,6 +332,7 @@ fn unchanged_relink_is_untouched() {
                     &layout2,
                     &objects2,
                     &std::env::temp_dir().join("pgr_emit_inc_noop_missing_out"),
+                    None,
                 )
                 .is_err(),
                 "an untouched plan is not an apply request"
@@ -352,7 +353,7 @@ fn symbol_count_change_patches_in_place_inside_the_linkedit_reservation() {
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     // The edit adds a local symbol: the symtab grows into the reservation.
     let mut b = hello(64, true);
@@ -377,7 +378,7 @@ fn symbol_count_change_patches_in_place_inside_the_linkedit_reservation() {
     let prev = dir.join("out");
     write_image(&image1, &prev).unwrap();
     let (_outcome, next_record) =
-        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
     let full = build_image_fused(&layout2, &objects2).unwrap();
     assert_eq!(
         std::fs::read(&prev).unwrap(),
@@ -386,7 +387,7 @@ fn symbol_count_change_patches_in_place_inside_the_linkedit_reservation() {
     );
     assert_eq!(
         next_record,
-        LinkRecord::record(&layout2, &objects2, &full).unwrap()
+        LinkRecord::record(&layout2, &objects2, &full, None).unwrap()
     );
 }
 
@@ -405,7 +406,7 @@ fn linkedit_shrink_patches_through_segment_relayout() {
     let cfg_old = cfg_adhoc(OutputType::Execute, true, Vec::new(), false);
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
     assert_eq!(record.linkedit.sig_off, 0, "the corpus is unsigned");
 
     let new = inputs(&hello_with_locals(64, false, 0));
@@ -434,7 +435,7 @@ fn linkedit_shrink_patches_through_segment_relayout() {
     let prev = dir.join("out");
     write_image(&image1, &prev).unwrap();
     let (outcome, next_record) =
-        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
     assert!(!outcome.untouched);
     assert!(
         outcome.bytes_patched < image1.len() as u64,
@@ -450,7 +451,7 @@ fn linkedit_shrink_patches_through_segment_relayout() {
     );
     assert_eq!(
         next_record,
-        LinkRecord::record(&layout2, &objects2, &full).unwrap()
+        LinkRecord::record(&layout2, &objects2, &full, None).unwrap()
     );
     assert_eq!(next_record.file_size, layout2.file_size);
 
@@ -472,13 +473,21 @@ fn linkedit_shrink_patches_through_segment_relayout() {
             "a body edit on the shrunk baseline must patch in place, got Fallback({reason:?})"
         ),
     };
-    let (outcome3, record3) =
-        apply_patch(&prev, &next_record, &plan3, &layout3, &objects3, &prev).unwrap();
+    let (outcome3, record3) = apply_patch(
+        &prev,
+        &next_record,
+        &plan3,
+        &layout3,
+        &objects3,
+        &prev,
+        None,
+    )
+    .unwrap();
     let full3 = build_image_fused(&layout3, &objects3).unwrap();
     assert_eq!(std::fs::read(&prev).unwrap(), full3);
     assert_eq!(
         record3,
-        LinkRecord::record(&layout3, &objects3, &full3).unwrap()
+        LinkRecord::record(&layout3, &objects3, &full3, None).unwrap()
     );
     assert!(
         outcome3.bytes_patched < image1.len() as u64,
@@ -495,7 +504,7 @@ fn linkedit_shrink_patches_through_segment_relayout() {
             "the locals growing back is the LINKEDIT-overflow trigger, got Fallback({reason:?})"
         ),
     };
-    let (_, _) = apply_patch(&prev, &record3, &plan4, &layout4, &objects4, &prev).unwrap();
+    let (_, _) = apply_patch(&prev, &record3, &plan4, &layout4, &objects4, &prev, None).unwrap();
     let full4 = build_image_fused(&layout4, &objects4).unwrap();
     assert_eq!(
         std::fs::read(&prev).unwrap(),
@@ -513,7 +522,7 @@ fn ident_change_falls_back_to_the_clean_link() {
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
     cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
@@ -540,7 +549,7 @@ fn overflow_past_the_anchor_patches_through_segment_relayout() {
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     // 64 KiB of new text blows way past the min-pad anchor: the section
     // resizes (growth within the ladder's segment-relayout bound).
@@ -568,7 +577,7 @@ fn overflow_past_the_anchor_patches_through_segment_relayout() {
     let prev = dir.join("out");
     write_image(&image1, &prev).unwrap();
     let (outcome, next_record) =
-        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
     assert!(!outcome.untouched);
     let full = build_image_fused(&layout2, &objects2).unwrap();
     assert_eq!(
@@ -578,7 +587,7 @@ fn overflow_past_the_anchor_patches_through_segment_relayout() {
     );
     assert_eq!(
         next_record,
-        LinkRecord::record(&layout2, &objects2, &full).unwrap()
+        LinkRecord::record(&layout2, &objects2, &full, None).unwrap()
     );
 
     // The refreshed record is the next relink's baseline: a same-size body
@@ -606,7 +615,7 @@ fn oversized_growth_still_falls_back_to_the_clean_link() {
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     let new = inputs(&hello(4 * 1024 * 1024, false));
     let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
@@ -638,7 +647,7 @@ fn relayout_and_assert_identity(
     let cfg_old = cfg_adhoc(kind, true, Vec::new(), adhoc);
     let (layout1, objects1) = link(&inputs(&hello(old_text, false)), &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     let mut cfg_new = cfg_adhoc(kind, true, anchors_of(&layout1), adhoc);
     cfg_new.sig_anchor = Some(layout1.linkedit.sig_off);
@@ -656,7 +665,7 @@ fn relayout_and_assert_identity(
     let prev = dir.join("out");
     write_image(&image1, &prev).unwrap();
     let (outcome, next_record) =
-        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
     assert!(!outcome.untouched);
     let patched = std::fs::read(&prev).unwrap();
     assert_eq!(
@@ -665,7 +674,7 @@ fn relayout_and_assert_identity(
     );
     assert_eq!(
         next_record,
-        LinkRecord::record(&layout2, &objects2, &image2_full).unwrap()
+        LinkRecord::record(&layout2, &objects2, &image2_full, None).unwrap()
     );
     let decision3 = plan_patch(
         &next_record,
@@ -725,7 +734,7 @@ fn linkedit_overflow_patches_through_segment_relayout() {
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     let new = inputs(&b);
     let mut cfg_new = cfg(OutputType::Execute, true, anchors_of(&layout1));
@@ -748,7 +757,7 @@ fn linkedit_overflow_patches_through_segment_relayout() {
     let prev = dir.join("out");
     write_image(&image1, &prev).unwrap();
     let (_outcome, next_record) =
-        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
     let full = build_image_fused(&layout2, &objects2).unwrap();
     assert_eq!(
         std::fs::read(&prev).unwrap(),
@@ -757,7 +766,7 @@ fn linkedit_overflow_patches_through_segment_relayout() {
     );
     assert_eq!(
         next_record,
-        LinkRecord::record(&layout2, &objects2, &full).unwrap()
+        LinkRecord::record(&layout2, &objects2, &full, None).unwrap()
     );
 }
 
@@ -767,7 +776,7 @@ fn integrity_gate_checks_what_it_claims_and_no_more() {
     let cfg_old = cfg(OutputType::Execute, true, Vec::new());
     let (layout1, objects1) = link(&old, &cfg_old);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     let dir = workdir("integrity");
     let path = dir.join("out");
@@ -945,7 +954,7 @@ fn record_carries_the_import_table_and_roundtrips() {
     let cfg1 = stable_cfg(OutputType::Execute, Vec::new(), None, None);
     let (layout1, objects1) = link(&old, &cfg1);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     assert_eq!(
         record_import_names(&record),
@@ -962,7 +971,8 @@ fn record_carries_the_import_table_and_roundtrips() {
     let plain = inputs(&hello(64, false));
     let (plain_layout, plain_objects) = link(&plain, &cfg(OutputType::Execute, true, Vec::new()));
     let plain_image = build_image_fused(&plain_layout, &plain_objects).unwrap();
-    let plain_record = LinkRecord::record(&plain_layout, &plain_objects, &plain_image).unwrap();
+    let plain_record =
+        LinkRecord::record(&plain_layout, &plain_objects, &plain_image, None).unwrap();
     assert_eq!(plain_record.imports, [] as [pgr_core::StableImport; 0]);
     let plain_back = LinkRecord::decode(&plain_record.encode()).expect("empty-table roundtrip");
     assert_eq!(plain_back.imports, [] as [pgr_core::StableImport; 0]);
@@ -979,7 +989,7 @@ fn import_adding_edit_patches_byte_identically_with_stable_ordinals() {
     let dir = workdir("import_churn");
     let prev = dir.join("out");
     write_image(&image1, &prev).unwrap();
-    let record1 = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record1 = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
     assert_eq!(record_import_names(&record1), ["_log"]);
 
     // The edit re-points slot 0 at a NEW import and binds _log one slot
@@ -1001,7 +1011,7 @@ fn import_adding_edit_patches_byte_identically_with_stable_ordinals() {
         PatchDecision::Fallback(r) => panic!("expected in place, fell back: {r}"),
     };
     let (outcome, next_record) =
-        apply_patch(&prev, &record1, &plan, &layout2, &objects2, &prev).unwrap();
+        apply_patch(&prev, &record1, &plan, &layout2, &objects2, &prev, None).unwrap();
     let patched = std::fs::read(&prev).unwrap();
     assert_eq!(
         patched, image2_full,
@@ -1050,7 +1060,7 @@ fn randomized_edit_sequences_keep_the_patch_byte_identical() {
     let cfg1 = stable_cfg(kind, Vec::new(), None, None);
     let (mut layout, objects) = link(&inputs(&pointer_main(8 * 1024, &["_log"])), &cfg1);
     let mut image = build_image_fused(&layout, &objects).unwrap();
-    let mut record = LinkRecord::record(&layout, &objects, &image).unwrap();
+    let mut record = LinkRecord::record(&layout, &objects, &image, None).unwrap();
     let mut binds: usize = 1;
     let mut shift: usize = 0;
     let mut locals: usize = 0;
@@ -1154,13 +1164,16 @@ fn randomized_edit_sequences_keep_the_patch_byte_identical() {
                         continue;
                     }
                     let (outcome, next_record) =
-                        apply_patch(&prev, &record, &plan, &l2, &o2, &prev).unwrap();
+                        apply_patch(&prev, &record, &plan, &l2, &o2, &prev, None).unwrap();
                     let patched = std::fs::read(&prev).unwrap();
                     assert_eq!(
                         patched, full,
                         "sequence step diverged: patched != full emit (edit roll {roll})"
                     );
-                    assert_eq!(next_record, LinkRecord::record(&l2, &o2, &full).unwrap());
+                    assert_eq!(
+                        next_record,
+                        LinkRecord::record(&l2, &o2, &full, None).unwrap()
+                    );
                     record = next_record;
                     layout = l2;
                     image = full;
@@ -1171,7 +1184,7 @@ fn randomized_edit_sequences_keep_the_patch_byte_identical() {
                     // The ladder's honest exit: re-record from the full link.
                     fallback_steps += 1;
                     write_image(&full, &prev).unwrap();
-                    record = LinkRecord::record(&l2, &o2, &full).unwrap();
+                    record = LinkRecord::record(&l2, &o2, &full, None).unwrap();
                     layout = l2;
                     // The fallback ladder never produces an untouched plan
                     // for a changed corpus; record why for the report.
@@ -1241,7 +1254,7 @@ fn record_v3_roundtrips_the_section_digests_and_rejects_v2() {
         &cfg(OutputType::Execute, true, Vec::new()),
     );
     let image = build_image_fused(&layout, &objects).unwrap();
-    let record = LinkRecord::record(&layout, &objects, &image).unwrap();
+    let record = LinkRecord::record(&layout, &objects, &image, None).unwrap();
 
     assert_eq!(
         record.section_digests,
@@ -1279,7 +1292,7 @@ fn propagation_gate_accepts_a_predicted_dependent_retarget() {
     let dir = workdir("propagate_accept");
     let prev = dir.join("out");
     write_image(&image1, &prev).unwrap();
-    let record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     let mut cfg2 = cfg(kind, true, anchors_of(&layout1));
     cfg2.sig_anchor = Some(layout1.linkedit.sig_off);
@@ -1292,7 +1305,7 @@ fn propagation_gate_accepts_a_predicted_dependent_retarget() {
         PatchDecision::Fallback(r) => panic!("a predicted retarget fell back: {r}"),
     };
     let (outcome, next_record) =
-        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev).unwrap();
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
     assert_eq!(
         std::fs::read(&prev).unwrap(),
         image2_full,
@@ -1316,7 +1329,7 @@ fn propagation_gate_declines_an_unpredicted_content_change() {
     let cfg1 = cfg(kind, true, Vec::new());
     let (layout1, objects1) = link(&inputs(&hello(64, false)), &cfg1);
     let image1 = build_image_fused(&layout1, &objects1).unwrap();
-    let mut record = LinkRecord::record(&layout1, &objects1, &image1).unwrap();
+    let mut record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
 
     let mut cfg2 = cfg(kind, true, anchors_of(&layout1));
     cfg2.sig_anchor = Some(layout1.linkedit.sig_off);
@@ -1336,4 +1349,70 @@ fn propagation_gate_declines_an_unpredicted_content_change() {
         }
         other => panic!("expected a propagation fallback, got {other:?}"),
     }
+}
+
+#[test]
+fn record_v5_round_trips_the_resolution_snapshot() {
+    // M9 GA rung: the record's v5 section carries the Pass-2 snapshot, so
+    // the next relink's resolve plans through the recorded decisions. The
+    // codec must be lossless (the fuzz target's re-decode gate covers the
+    // same property on hostile bytes; here it is pinned on a real record).
+    let mut cfg1 = cfg(OutputType::Execute, false, Vec::new());
+    cfg1.record_resolution = true;
+    let result = link_cached(
+        &inputs(&hello(64, false)),
+        &[],
+        &cfg1,
+        Parallelism::Auto,
+        None,
+    )
+    .unwrap();
+    let image1 = build_image_fused(&result.layout, &result.objects).unwrap();
+    let record = LinkRecord::record(
+        &result.layout,
+        &result.objects,
+        &image1,
+        result.resolve_snapshot.as_ref(),
+    )
+    .unwrap();
+
+    assert_eq!(record.format_version, 5, "the resolve wiring is v5");
+    let snap = record
+        .resolution
+        .as_ref()
+        .expect("the recording link's snapshot rides the record");
+    assert_eq!(
+        snap.file_names,
+        vec![b"hello.o".to_vec(), b"greet.o".to_vec()],
+        "the shape guard's file identities travel in command order"
+    );
+    assert!(
+        snap.candidates.iter().any(|(name, _)| name == b"_main"),
+        "the candidate stream is self-describing (name-keyed)"
+    );
+    assert!(
+        snap.winner_slots.iter().flatten().any(Option::is_some),
+        "the winner matrix carries the decisions"
+    );
+
+    let bytes = record.encode();
+    let decoded = LinkRecord::decode(&bytes).expect("the v5 record decodes");
+    assert_eq!(decoded, record, "the codec is lossless over the snapshot");
+}
+
+#[test]
+fn record_without_a_snapshot_round_trips_as_none() {
+    // Links that did not capture (every clean link, v4-shaped callers)
+    // encode no v5 section; decode reports `None` and the relink resolves
+    // in full.
+    let cfg1 = cfg(OutputType::Execute, false, Vec::new());
+    let (layout1, objects1) = link(&inputs(&hello(64, false)), &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+    assert!(record.resolution.is_none(), "no capture, no section");
+
+    let bytes = record.encode();
+    let decoded = LinkRecord::decode(&bytes).expect("the record decodes");
+    assert_eq!(decoded, record);
+    assert!(decoded.resolution.is_none());
 }
