@@ -398,20 +398,34 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
 
 /// [`link_to_image`] plus the M9 record: when `-incremental` is active and
 /// the one-shot pipeline produced the image, the link's record is built in
-/// the same pass (no pipeline re-run). The resident daemon path returns no
-/// record (resident + incremental is GA scope — the daemon holds its own
-/// state, §7.2).
+/// the same pass (no pipeline re-run). The resident daemon path returns the
+/// daemon's refreshed record (M9 GA fusion rung: the wire carries both
+/// halves, so a resident full link re-records the state and the
+/// incremental cycle survives daemon fallbacks).
 fn link_to_image_recorded(
     opts: &opts::Options,
 ) -> Result<(ImageAndPlan, Option<pgr_emit::incremental::LinkRecord>), DriverError> {
     let (mut prepared, cache) = prepare_link(opts)?;
     if opts.resident {
-        let job = pgr_daemon::LinkJob::build(
-            &prepared.config,
-            &prepared.force_load,
-            &prepared.inputs,
-            &prepared.archives,
-        );
+        // M9 GA fusion rung: an `-incremental` cycle's full link asks the
+        // daemon to capture the fresh record (§7.3 — the sidecar must stay
+        // fresh across resident links, or the next relink falls back
+        // forever); a plain `-resident` link links clean as before.
+        let job = if opts.incremental {
+            pgr_daemon::LinkJob::build_capturing(
+                &prepared.config,
+                &prepared.force_load,
+                &prepared.inputs,
+                &prepared.archives,
+            )
+        } else {
+            pgr_daemon::LinkJob::build(
+                &prepared.config,
+                &prepared.force_load,
+                &prepared.inputs,
+                &prepared.archives,
+            )
+        };
         let socket = opts
             .resident_socket
             .clone()
@@ -419,13 +433,20 @@ fn link_to_image_recorded(
         let exe_hint = std::env::current_exe().ok();
         match pgr_daemon::link_via_daemon(&socket, exe_hint.as_deref(), &job) {
             Ok(img) => {
+                let record = img.record.and_then(|bytes| {
+                    let decoded = pgr_emit::incremental::LinkRecord::decode(&bytes);
+                    if decoded.is_none() && std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
+                        eprintln!("pgr: the daemon's record did not decode; dropping it");
+                    }
+                    decoded
+                });
                 return Ok((
                     ImageAndPlan {
                         image: img.image,
                         entryoff: img.entryoff,
                         fixup_slots: usize::try_from(img.fixup_slots).unwrap_or(usize::MAX),
                     },
-                    None,
+                    record,
                 ));
             }
             Err(e) => {
@@ -437,8 +458,8 @@ fn link_to_image_recorded(
     }
     // The M9 resolve wiring, capture half: the recording link carries its
     // Pass-2 snapshot out of the pipeline so the record's v5 section can
-    // hold it. The resident path above returns no record (resident +
-    // incremental is GA scope), so the capture rides the one-shot path.
+    // hold it. The resident path above captures through the wire; this
+    // half serves the one-shot path.
     prepared.config.record_resolution = opts.incremental;
     let result = pgr_core::link_cached(
         &prepared.inputs,
@@ -865,6 +886,23 @@ pub fn link_reference_bytes(opts: &opts::Options) -> Result<Vec<u8>, DriverError
 /// # Errors
 /// [`DriverError`] on option, link, emit or filesystem failures.
 pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
+    if opts.incremental && opts.resident && !opts.incremental_verify {
+        // M9 GA fusion rung: with a daemon reachable the relink runs
+        // inside the resident session (warm POIs; the patched bytes cross
+        // the wire and the write below stays the client's). Any stand-down
+        // — no daemon, no record, a §7.3 refusal — hands over to the
+        // in-process relink, then to the full link: the ladder's rungs in
+        // order, every one always available.
+        match resident_relink(opts) {
+            Ok(outcome) => return Ok(outcome),
+            Err(ResidentAttempt::Error(e)) => return Err(e),
+            Err(ResidentAttempt::StandDown(reason)) => {
+                if std::env::var_os("PGR_RESIDENT_DEBUG").is_some() {
+                    eprintln!("pgr: resident relink stand-down: {reason}");
+                }
+            }
+        }
+    }
     if opts.incremental {
         match incremental_relink(opts) {
             Ok(outcome) => return Ok(outcome),
@@ -927,6 +965,95 @@ fn record_path(opts: &opts::Options) -> std::path::PathBuf {
             },
             std::path::PathBuf::from,
         )
+}
+
+/// Why the daemon-side relink did not produce the outcome: a stand-down
+/// (the in-process relink runs next — never an error, the §7.2
+/// transparency contract) or a real driver error (propagated).
+enum ResidentAttempt {
+    StandDown(String),
+    Error(DriverError),
+}
+
+impl From<DriverError> for ResidentAttempt {
+    fn from(e: DriverError) -> Self {
+        Self::Error(e)
+    }
+}
+
+/// The M9 GA fusion relink (§7.3 through the daemon, §7.2 transport): the
+/// previous record and the previous output's bytes cross the wire; the
+/// daemon runs the ladder — integrity gate, the anchored relink config
+/// derived from the record, the pipeline warm over its POIs, the patch
+/// plan, the in-memory patch — and returns the patched bytes plus the
+/// renewed record. The client writes the file and stores the record: the
+/// daemon still holds no output state (a daemon death mid-link leaves at
+/// most a dead socket, never a corrupt output).
+///
+/// Any refusal stands down to the in-process relink: no daemon, no record,
+/// an undecodable record, or the daemon's own internal fallback (its full
+/// link answered — but with a fresh record this client then patches from
+/// next cycle; standing down keeps the outcome identical to the one-shot
+/// cycle).
+fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt> {
+    let record_bytes = std::fs::read(record_path(opts))
+        .map_err(|_| ResidentAttempt::StandDown("no record for this output yet".into()))?;
+    if pgr_emit::incremental::LinkRecord::decode(&record_bytes).is_none() {
+        return Err(ResidentAttempt::StandDown(
+            "the record did not decode; the in-process relink re-records".into(),
+        ));
+    }
+    let prev = std::fs::read(Path::new(&opts.output)).map_err(|source| {
+        ResidentAttempt::StandDown(format!("the previous output is unreadable: {source}"))
+    })?;
+    // §7.3 "layout stability": the in-place tier stands on slack anchors,
+    // so the relink implies the M8-c policy exactly like the in-process
+    // path (the daemon anchors the sections from the record itself).
+    let mut slacked = opts.clone();
+    if slacked.config.layout_slack.is_none() {
+        slacked.config.layout_slack = Some(pgr_core::slack::SlackPolicy::default());
+    }
+    let (prepared, _cache) = prepare_link(&slacked)?;
+    let job = pgr_daemon::LinkJob::build_incremental(
+        &prepared.config,
+        &prepared.force_load,
+        &prepared.inputs,
+        &prepared.archives,
+        record_bytes,
+        &prev,
+    );
+    let socket = opts
+        .resident_socket
+        .clone()
+        .map_or_else(pgr_daemon::default_socket, std::path::PathBuf::from);
+    let exe_hint = std::env::current_exe().ok();
+    let served = pgr_daemon::link_via_daemon(&socket, exe_hint.as_deref(), &job)
+        .map_err(|e| ResidentAttempt::StandDown(e.to_string()))?;
+    // The daemon's §7.3 ladder fell back internally: its reply is a full
+    // link. The client patches nothing; handing over to the in-process
+    // relink keeps the outcome identical to the one-shot cycle (and the
+    // fresh record the daemon returned still rides below on the next
+    // stand-down-free cycle... the in-process relink re-records anyway).
+    if served.patch.is_none() {
+        return Err(ResidentAttempt::StandDown(
+            "the daemon's ladder fell back to its full link".into(),
+        ));
+    }
+    write_image(&served.image, Path::new(&opts.output)).map_err(DriverError::from)?;
+    // The renewed record: store it so the next cycle starts from the
+    // patched state (best-effort, like the in-process path).
+    if let Some(record_bytes) = &served.record {
+        store_record_bytes(opts, record_bytes);
+    } else if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
+        eprintln!("pgr: the daemon's relink returned no record; keeping the old one");
+    }
+    Ok(LinkOutcome {
+        output: opts.output.clone(),
+        file_size: served.image.len() as u64,
+        entryoff: served.entryoff,
+        fixup_slots: usize::try_from(served.fixup_slots).unwrap_or(usize::MAX),
+        patch: served.patch,
+    })
 }
 
 /// The M9 in-place relink (architecture doc §7.3, tier 1): load the
@@ -1136,7 +1263,13 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
 /// Best-effort record store (a failed write only costs the next link a
 /// fallback, and is reported under `PGR_INCREMENTAL_DEBUG`).
 fn store_record(opts: &opts::Options, record: &pgr_emit::incremental::LinkRecord) {
-    if let Err(e) = std::fs::write(record_path(opts), record.encode()) {
+    store_record_bytes(opts, &record.encode());
+}
+
+/// [`store_record`] over already-encoded bytes (the daemon returns the
+/// renewed record encoded).
+fn store_record_bytes(opts: &opts::Options, bytes: &[u8]) {
+    if let Err(e) = std::fs::write(record_path(opts), bytes) {
         if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
             eprintln!("pgr: storing link record failed: {e}");
         }
