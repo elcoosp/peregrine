@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 /// One link's outcome from the daemon.
 #[derive(Debug, Clone)]
 pub struct ResidentImage {
-    /// The complete output image bytes.
+    /// The complete output image bytes (the §7.3 ladder's patched image
+    /// when a record rode the request, else the full link's).
     pub image: Vec<u8>,
     /// Entry offset within `__TEXT` (executables).
     pub entryoff: u64,
@@ -32,6 +33,14 @@ pub struct ResidentImage {
     pub poi_hits: u64,
     /// POI misses across the session so far.
     pub poi_misses: u64,
+    /// The refreshed link record (v3, M9 fusion): present when the request
+    /// asked for capture or carried a record the daemon renewed. The driver
+    /// stores it so the incremental cycle survives resident links.
+    pub record: Option<Vec<u8>>,
+    /// The in-place patch report (v3): `Some` when the daemon's §7.3
+    /// ladder patched, `None` on a full link (untouched relinks carry the
+    /// zeroed untouched outcome).
+    pub patch: Option<pgr_emit::incremental::PatchOutcome>,
 }
 
 /// A client-side failure: the caller falls back to one-shot.
@@ -120,8 +129,51 @@ impl LinkJob {
                     hash: hashes[inputs.len() + k],
                 })
                 .collect(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
         };
         Self { request, blobs }
+    }
+
+    /// Builds a job whose link **captures** a fresh record (v3, M9
+    /// fusion): the fallback full link of an `-incremental` cycle — no
+    /// record rides in (the relink just refused), but the reply must
+    /// carry the fresh state so the cycle survives the daemon path.
+    #[must_use]
+    pub fn build_capturing(
+        config: &pgr_core::layout::LinkConfig,
+        force_load: &[Vec<u8>],
+        inputs: &[pgr_core::LinkInput],
+        archives: &[pgr_core::LinkArchive],
+    ) -> Self {
+        let mut job = Self::build(config, force_load, inputs, archives);
+        job.request.record_resolution = true;
+        job
+    }
+
+    /// Builds a job for the daemon-side §7.3 relink (v3, M9 fusion): the
+    /// previous record rides in, the previous output's bytes join the
+    /// blob negotiation, and the reply carries the refreshed record plus
+    /// the patch outcome. The daemon runs the ladder (integrity gate,
+    /// anchored config, warm pipeline, plan, in-memory patch) and falls
+    /// back internally to its clean full link on any refusal.
+    #[must_use]
+    pub fn build_incremental(
+        config: &pgr_core::layout::LinkConfig,
+        force_load: &[Vec<u8>],
+        inputs: &[pgr_core::LinkInput],
+        archives: &[pgr_core::LinkArchive],
+        record: Vec<u8>,
+        prev_output: &[u8],
+    ) -> Self {
+        let mut job = Self::build(config, force_load, inputs, archives);
+        let prev_hash = content_hash(prev_output);
+        job.request.record = Some(record);
+        job.request.record_resolution = true;
+        job.request.prev_output = Some(prev_hash);
+        job.blobs.push((prev_hash, prev_output.to_vec()));
+        job
     }
 }
 
@@ -201,11 +253,32 @@ impl DaemonClient {
                     }
                 }
                 TAG_IMAGE => {
+                    // v3 body: the M8 fields, then the M9 fusion tail —
+                    // patch outcome (absent on a full link) and the
+                    // refreshed record (absent when no capture was asked).
                     let mut r = crate::protocol::Reader::new(&body);
                     let entryoff = r.u64()?;
                     let fixup_slots = r.u64()?;
                     let poi_hits = u64::from(r.u32()?);
                     let poi_misses = u64::from(r.u32()?);
+                    let patch = if r.u8()? == 0 {
+                        None
+                    } else {
+                        let bytes_patched = r.u64()?;
+                        let dirty_tiles = r.u32()?;
+                        let total_tiles = r.u32()?;
+                        let untouched = r.u8()? != 0;
+                        Some(pgr_emit::incremental::PatchOutcome {
+                            bytes_patched,
+                            dirty_tiles,
+                            total_tiles,
+                            untouched,
+                        })
+                    };
+                    let record = match r.u8()? {
+                        0 => None,
+                        _ => Some(r.bytes().map(<[u8]>::to_vec)?),
+                    };
                     let len = r.u64()? as usize;
                     let image = r.take(len)?.to_vec();
                     r.done()?;
@@ -215,6 +288,8 @@ impl DaemonClient {
                         fixup_slots,
                         poi_hits,
                         poi_misses,
+                        record,
+                        patch,
                     });
                 }
                 TAG_ERROR => {

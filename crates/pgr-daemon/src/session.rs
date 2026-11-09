@@ -13,6 +13,17 @@
 //!   ([`pgr_emit::build_image_fused_into`]): the page-fault cost of a fresh
 //!   output allocation disappears on every relink after the first.
 //!
+//! M9 GA (fusion rung): the session also serves the §7.3 ladder for a
+//! record-bearing request — integrity gate on the previous output (a
+//! blob like every input), the anchored relink config derived from the
+//! record (slack anchors, stable imports, signature boundary, resolve
+//! reuse seed), the warm pipeline, the patch plan, and the in-memory
+//! patch ([`pgr_emit::incremental::apply_patch_bytes`]). Any refusal
+//! falls back to the session's clean full link — which captures a fresh
+//! record whenever the request asks, so the incremental cycle survives
+//! the daemon path. The daemon still holds no output state: the patched
+//! bytes cross the wire like any image and the client writes the file.
+//!
 //! Safety properties (the §7.2 constraints):
 //!
 //! * The session is an **optimization only** — a corrupt/unmatched frame
@@ -45,6 +56,9 @@ pub enum SessionError {
     /// The emit failed.
     #[error(transparent)]
     Emit(#[from] pgr_emit::EmitError),
+    /// The M9 record/patch state failed (record capture, plan contract).
+    #[error(transparent)]
+    Patch(#[from] pgr_emit::incremental::PatchError),
 }
 
 /// One prepared object outcome (for stats/diagnostics).
@@ -59,6 +73,33 @@ pub struct PrepareStats {
 /// One cached POI frame: the encoded Pass 1 product plus its last-use
 /// stamp (the LRU clock for the memory ceiling).
 type PoiFrame = (std::sync::Arc<Vec<u8>>, u64);
+
+/// One served link: the image bytes plus the M9 fusion state — the
+/// refreshed record (when the request asked for capture or renewed one)
+/// and the in-place patch report (`None` on a full link).
+#[derive(Debug, Clone)]
+pub struct ServedLink {
+    /// The complete output image bytes (patched when the ladder ran).
+    pub image: Vec<u8>,
+    /// Entry offset within `__TEXT` (executables).
+    pub entryoff: u64,
+    /// Chained-fixup slots packed.
+    pub fixup_slots: u64,
+    /// The refreshed record bytes (`None` when no capture was asked).
+    pub record: Option<Vec<u8>>,
+    /// The in-place patch outcome (`None` on a full link).
+    pub patch: Option<pgr_emit::incremental::PatchOutcome>,
+}
+
+/// Why the session's §7.3 ladder declined: the caller (the link entry)
+/// falls back to the clean full link — the ladder's bottom rung — which
+/// is always available and always correct (§7.3).
+enum RelinkDecline {
+    /// A real session failure: surfaced as `ERROR`, not swallowed.
+    Error(SessionError),
+    /// A §7.3 refusal (integrity, shape, ladder): full link follows.
+    Fallback,
+}
 
 /// The resident state (M8 §7.2).
 #[derive(Debug)]
@@ -196,13 +237,16 @@ impl ResidentSession {
     /// archive members through the normal S7 fixpoint, links, gates `-u`,
     /// emits into the reused scratch buffer.
     ///
+    /// M9 GA (fusion rung): a record-bearing request runs the §7.3 ladder
+    /// first (the private `serve_relink`); any refusal falls back here to
+    /// the clean full link — which captures a fresh record whenever
+    /// `record_resolution` is set, so the sidecar stays fresh across
+    /// resident links (the rung that keeps the incremental cycle alive).
+    ///
     /// # Errors
     /// [`SessionError`] on missing blobs, link failures (undefined
     /// symbols, duplicates, layout contract) or emit failures.
-    pub fn link(
-        &mut self,
-        req: &crate::protocol::LinkRequest,
-    ) -> Result<(Vec<u8>, u64, u64), SessionError> {
+    pub fn link(&mut self, req: &crate::protocol::LinkRequest) -> Result<ServedLink, SessionError> {
         use pgr_core::Parallelism;
         let split = req.config.dead_strip;
         let mut objects: Vec<InputObject> = Vec::with_capacity(req.inputs.len());
@@ -242,6 +286,22 @@ impl ResidentSession {
                 all_load: a.all_load,
             });
         }
+        // The §7.3 ladder (v3 fusion): a record plus the previous output
+        // runs the relink inside the session. A record that will not
+        // decode, a missing previous output or any ladder refusal falls
+        // back to the clean full link below — never an error.
+        if let Some(record_bytes) = &req.record {
+            let prev = req.prev_output.and_then(|h| self.blob(&h).ok());
+            if let Some(prev) = prev {
+                if let Some(record) = pgr_emit::incremental::LinkRecord::decode(record_bytes) {
+                    match Self::serve_relink(&record, prev.as_ref(), req, &objects, &archives) {
+                        Ok(served) => return Ok(served),
+                        Err(RelinkDecline::Error(e)) => return Err(e),
+                        Err(RelinkDecline::Fallback) => {}
+                    }
+                }
+            }
+        }
         let result =
             pgr_core::link_from_objects(objects, &archives, &req.config, Parallelism::Auto, None)?;
         pgr_core::check_load_symbols(&result, &req.force_load)?;
@@ -249,11 +309,130 @@ impl ResidentSession {
         let fixup_slots = result.layout.fixups.slot_count;
         pgr_emit::build_image_fused_into(&mut self.scratch, &result.layout, &result.objects)?;
         let image = self.scratch.clone();
-        Ok((
+        let record = if req.record_resolution {
+            Some(
+                pgr_emit::incremental::LinkRecord::record(
+                    &result.layout,
+                    &result.objects,
+                    &image,
+                    result.resolve_snapshot.as_ref(),
+                )
+                .map_err(SessionError::from)?
+                .encode(),
+            )
+        } else {
+            None
+        };
+        Ok(ServedLink {
             image,
             entryoff,
-            u64::try_from(fixup_slots).unwrap_or(u64::MAX),
-        ))
+            fixup_slots: u64::try_from(fixup_slots).unwrap_or(u64::MAX),
+            record,
+            patch: None,
+        })
+    }
+
+    /// The §7.3 ladder inside the session (v3 fusion): gate the previous
+    /// output, derive the anchored relink config from the record (the
+    /// mirror of the driver's in-process assembly), run the pipeline warm
+    /// over the session's POIs, plan the patch and apply it in memory.
+    /// Every §7.3 refusal declines ([`RelinkDecline::Fallback`]) — the
+    /// caller's full link is the ladder's bottom rung.
+    fn serve_relink(
+        record: &pgr_emit::incremental::LinkRecord,
+        prev: &[u8],
+        req: &crate::protocol::LinkRequest,
+        objects: &[InputObject],
+        archives: &[pgr_core::LinkArchive],
+    ) -> Result<ServedLink, RelinkDecline> {
+        use pgr_core::Parallelism;
+        // The integrity gate: the transferred bytes must still be the
+        // recorded state (a stale previous output is the §7.3
+        // OutputChanged shape — the full link owns it).
+        match pgr_emit::incremental::output_integrity(prev, record) {
+            Ok(pgr_emit::incremental::Integrity::Match) => {}
+            Ok(pgr_emit::incremental::Integrity::Mismatch { .. }) => {
+                return Err(RelinkDecline::Fallback);
+            }
+            Err(_) => return Err(RelinkDecline::Fallback),
+        }
+        // The anchored relink config: exactly the assembly the driver's
+        // in-process relink runs (slack anchors, stable imports, signature
+        // boundary, resolve-reuse seed) — the layout the patch plan
+        // assumes. Capture is unconditional: the relink re-records the
+        // fresh state for the next cycle.
+        let mut cfg = req.config.clone();
+        cfg.slack_anchor = record
+            .sections
+            .iter()
+            .map(|s| pgr_core::slack::SlackAnchor {
+                seg: s.seg.clone(),
+                name: s.name.clone(),
+                padded: s.size,
+            })
+            .collect();
+        cfg.stable_imports = Some(record.imports.clone());
+        cfg.sig_anchor = (record.linkedit.sig_off > 0).then_some(record.linkedit.sig_off);
+        cfg.record_resolution = true;
+        if let Some(resolution) = &record.resolution {
+            cfg.resolve_reuse = Some(pgr_core::resolve_reuse::ResolveReuseSeed {
+                snapshot: resolution.clone(),
+                digests: record.section_digests.clone(),
+            });
+        }
+        let result =
+            pgr_core::link_from_objects(objects.to_vec(), archives, &cfg, Parallelism::Auto, None)
+                .map_err(|e| RelinkDecline::Error(e.into()))?;
+        pgr_core::check_load_symbols(&result, &req.force_load)
+            .map_err(|e| RelinkDecline::Error(e.into()))?;
+        let decision = pgr_emit::incremental::plan_patch(
+            record,
+            &result.layout,
+            &result.objects,
+            cfg.layout_slack.as_ref(),
+        )
+        .map_err(|e| RelinkDecline::Error(e.into()))?;
+        let plan = match decision {
+            pgr_emit::incremental::PatchDecision::InPlace(plan) => plan,
+            pgr_emit::incremental::PatchDecision::Fallback(_) => {
+                return Err(RelinkDecline::Fallback);
+            }
+        };
+        // Nothing changed: the previous output rides back untouched and
+        // the record is renewed verbatim (the driver's untouched shape).
+        if plan.is_untouched() {
+            return Ok(ServedLink {
+                image: prev.to_vec(),
+                entryoff: result.layout.entryoff,
+                fixup_slots: u64::try_from(result.layout.fixups.slot_count).unwrap_or(u64::MAX),
+                record: Some(record.encode()),
+                patch: Some(pgr_emit::incremental::PatchOutcome {
+                    bytes_patched: 0,
+                    dirty_tiles: 0,
+                    total_tiles: plan.total_tiles,
+                    untouched: true,
+                }),
+            });
+        }
+        let (outcome, new_record, image) = pgr_emit::incremental::apply_patch_bytes(
+            prev,
+            record,
+            &plan,
+            &result.layout,
+            &result.objects,
+            result.resolve_snapshot.clone(),
+        )
+        .map_err(|e| match e {
+            pgr_emit::incremental::PatchError::Fallback(_) => RelinkDecline::Fallback,
+            other => RelinkDecline::Error(other.into()),
+        })?;
+        Ok(ServedLink {
+            image,
+            entryoff: result.layout.entryoff,
+            fixup_slots: u64::try_from(result.layout.fixups.slot_count).unwrap_or(u64::MAX),
+            record: Some(new_record.encode()),
+            patch: Some(outcome),
+        })
     }
 
     /// Evicts least-recently-used entries until under the ceiling. `keep`
@@ -380,6 +559,9 @@ mod tests {
                 },
             ],
             archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -399,12 +581,16 @@ mod tests {
             session.store_blob(h, bytes).unwrap();
         }
 
-        let (cold, entryoff, slots) = session.link(&req).unwrap();
+        let cold = session.link(&req).unwrap();
+        let (entryoff, slots) = (cold.entryoff, cold.fixup_slots);
+        let cold = cold.image;
         assert_eq!((session.hits, session.misses), (0, 2));
         assert!(entryoff > 0, "executables carry an entry point");
         let _ = slots;
 
-        let (warm, entryoff2, slots2) = session.link(&req).unwrap();
+        let warm = session.link(&req).unwrap();
+        let (entryoff2, slots2) = (warm.entryoff, warm.fixup_slots);
+        let warm = warm.image;
         assert_eq!(
             (session.hits, session.misses),
             (2, 2),
@@ -514,7 +700,7 @@ mod tests {
         );
         // The session still links correctly after eviction (a re-parse
         // repopulates what it needs).
-        let (image, _, _) = session.link(&req).unwrap();
+        let image = session.link(&req).unwrap().image;
         assert!(!image.is_empty(), "image built");
     }
 
@@ -533,10 +719,8 @@ mod tests {
             session.store_blob(h, bytes).unwrap();
         }
         session.link(&req).unwrap();
-        assert_eq!(
-            session.scratch.capacity(),
-            session.link(&req).unwrap().0.len()
-        );
+        let second = session.link(&req).unwrap();
+        assert_eq!(session.scratch.capacity(), second.image.len());
         // Same capacity object across calls == reuse (the page-fault gate's
         // observable).
     }
@@ -563,14 +747,17 @@ mod tests {
                 all_load: false,
                 hash: content_hash(&archive_bytes),
             }],
+            record: None,
+            record_resolution: false,
+            prev_output: None,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
         session
             .store_blob(&content_hash(&archive_bytes), archive_bytes)
             .unwrap();
-        let (image1, _, _) = session.link(&req).unwrap();
-        let (image2, _, _) = session.link(&req).unwrap();
+        let image1 = session.link(&req).unwrap().image;
+        let image2 = session.link(&req).unwrap().image;
         assert_eq!(image1, image2);
         assert!(!image1.is_empty(), "image built");
     }
@@ -603,5 +790,401 @@ mod tests {
             weak_ref: false,
         });
         b.build().unwrap()
+    }
+}
+
+// ---- M9 GA: the fusion ladder inside the session ---------------------------
+//
+// A record-bearing request runs §7.3 inside the daemon: integrity gate on
+// the transferred previous output, the anchored relink config (the record
+// is the single cross-link carrier), the warm pipeline, the patch plan,
+// and the in-memory patch. Any refusal falls back to the clean full link,
+// which captures when asked — the rung that keeps the incremental cycle
+// alive through daemon fallbacks.
+
+#[cfg(test)]
+mod fusion_tests {
+    use super::ResidentSession;
+    use crate::protocol::{InputEntry, LinkRequest, content_hash};
+    use pgr_core::layout::{LinkConfig, OutputType};
+    use pgr_core::link::{LinkInput, Parallelism, link_cached};
+    use pgr_core::slack::SlackAnchor;
+    use pgr_emit::build_image_fused;
+    use pgr_emit::incremental::LinkRecord;
+    use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
+
+    /// hello.o: `_main` ADRP+ADD loads `_msg`, BL `_greet`, ret (the M8
+    /// session fixture's shape).
+    fn hello(body_flip: bool) -> Vec<u8> {
+        let mut words: Vec<u32> = vec![
+            0x9000_0000, // adrp x0, _msg@page
+            0x9100_0000, // add x0, x0, #_msg@pageoff
+            0x9400_0000, // bl _greet
+            0x5280_0000, // mov w0, #0 (flipped: #1)
+            0xD65F_03C0, // ret
+        ];
+        if body_flip {
+            words[3] = 0x5280_0020;
+        }
+        let text: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let mut b = ObjectBuilder::new("hello.o");
+        let sect = b.add_section(ObjectSection::text(
+            "__text",
+            text,
+            vec![
+                ObjectReloc::addend(0).at(0),
+                ObjectReloc::page21(1).at(0),
+                ObjectReloc::addend(0).at(4),
+                ObjectReloc::pageoff12(1).at(4),
+                ObjectReloc::branch26(2).at(8),
+            ],
+        ));
+        b.add_section(ObjectSection::cstring(if body_flip {
+            "merci, peregrine\n"
+        } else {
+            "hello, peregrine\n"
+        }));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_main".into(),
+            section_index: sect,
+            value: 0,
+            weak: false,
+        });
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_msg".into(),
+            section_index: 1,
+            value: 0,
+            weak: false,
+        });
+        b.add_symbol(ObjectSymbol::Undefined {
+            name: "_greet".into(),
+            weak_ref: false,
+        });
+        b.build().unwrap()
+    }
+
+    /// greet.o at a tunable text size (the structural edit grows it far
+    /// past every ladder bound).
+    fn greet(text_bytes: usize) -> Vec<u8> {
+        let mut b = ObjectBuilder::new("greet.o");
+        let mut words: Vec<u32> = vec![0xC0, 0x03, 0x5F, 0xD6]; // ret
+        words.resize(text_bytes / 4, 0xD503_201F); // nop padding
+        let text: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_greet".into(),
+            section_index: sect,
+            value: 0,
+            weak: false,
+        });
+        b.build().unwrap()
+    }
+
+    fn link_config() -> LinkConfig {
+        LinkConfig {
+            ident: "fusion-test".into(),
+            filetype: OutputType::Execute,
+            // The in-place tier stands on the slack anchors; `-incremental`
+            // implies slack for the whole cycle (the driver does the same).
+            layout_slack: Some(pgr_core::slack::SlackPolicy::default()),
+            ..LinkConfig::default()
+        }
+    }
+
+    fn request(
+        cfg: &LinkConfig,
+        hello_bytes: &[u8],
+        greet_bytes: &[u8],
+    ) -> (LinkRequest, Vec<[u8; 32]>) {
+        let req = LinkRequest {
+            config: cfg.clone(),
+            force_load: Vec::new(),
+            inputs: vec![
+                InputEntry {
+                    name: "hello.o".into(),
+                    hash: content_hash(hello_bytes),
+                },
+                InputEntry {
+                    name: "greet.o".into(),
+                    hash: content_hash(greet_bytes),
+                },
+            ],
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+        };
+        let hashes = req.blob_hashes();
+        (req, hashes)
+    }
+
+    fn store(session: &mut ResidentSession, hashes: &[([u8; 32], Vec<u8>)]) {
+        for (h, bytes) in hashes {
+            session.store_blob(h, bytes.clone()).unwrap();
+        }
+    }
+
+    /// The in-process reference for the daemon's ladder: the anchored
+    /// config assembled from the record (the driver's exact mirror), the
+    /// plain pipeline, and the full fused emit of the relink plan — the
+    /// patched bytes must equal it byte for byte.
+    fn fused_reference(record: &LinkRecord, hello_bytes: &[u8], greet_bytes: &[u8]) -> Vec<u8> {
+        let mut cfg = link_config();
+        cfg.slack_anchor = record
+            .sections
+            .iter()
+            .map(|s| SlackAnchor {
+                seg: s.seg.clone(),
+                name: s.name.clone(),
+                padded: s.size,
+            })
+            .collect();
+        cfg.stable_imports = Some(record.imports.clone());
+        cfg.sig_anchor = (record.linkedit.sig_off > 0).then_some(record.linkedit.sig_off);
+        cfg.record_resolution = true;
+        if let Some(resolution) = &record.resolution {
+            cfg.resolve_reuse = Some(pgr_core::resolve_reuse::ResolveReuseSeed {
+                snapshot: resolution.clone(),
+                digests: record.section_digests.clone(),
+            });
+        }
+        let inputs = vec![
+            LinkInput {
+                name: "hello.o".into(),
+                bytes: hello_bytes.to_vec(),
+            },
+            LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.to_vec(),
+            },
+        ];
+        let result = link_cached(&inputs, &[], &cfg, Parallelism::Auto, None).unwrap();
+        build_image_fused(&result.layout, &result.objects).unwrap()
+    }
+
+    #[test]
+    fn full_link_captures_the_record_only_when_asked() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        req.record_resolution = true;
+        let served = session.link(&req).unwrap();
+        assert!(served.patch.is_none(), "a full link never reports a patch");
+        let record_bytes = served.record.expect("capture was requested");
+        let record = LinkRecord::decode(&record_bytes).expect("the fresh record decodes");
+        assert_eq!(record.file_size, served.image.len() as u64);
+
+        // Without the flag (the plain M8 resident link) no record rides.
+        req.record_resolution = false;
+        let plain = session.link(&req).unwrap();
+        assert!(plain.record.is_none(), "no capture, no record");
+        assert_eq!(plain.image, served.image, "bytes unchanged by the flag");
+    }
+
+    #[test]
+    fn record_bearing_relink_patches_through_the_session() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+        let record_bytes = cold.record.clone().expect("cold capture");
+        let prev_output = cold.image.clone();
+
+        // The edit: hello.o's body flips (equal-size, a one-function edit).
+        let edited_hello = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited_hello, &greet_bytes);
+        relink.record = Some(record_bytes.clone());
+        relink.prev_output = Some(content_hash(&prev_output));
+        // The previous output's bytes ride the BLOB exchange (the server
+        // level negotiation; here the test stores them directly).
+        session
+            .store_blob(&content_hash(&prev_output), prev_output.clone())
+            .unwrap();
+        // hello.o's bytes ride again (its content hash changed).
+        session
+            .store_blob(&content_hash(&edited_hello), edited_hello.clone())
+            .unwrap();
+
+        let warm_hits = session.hits;
+        let served = session.link(&relink).unwrap();
+        let outcome = served.patch.expect("the ladder patches in place");
+        assert!(!outcome.untouched);
+        assert!(
+            outcome.bytes_patched < prev_output.len() as u64,
+            "a one-function edit patches a fraction of the image"
+        );
+        // The engine's contract at the wire: the patched image is
+        // byte-identical to the full fused emit of the same (anchored)
+        // plan — computed here through the plain in-process pipeline.
+        let record = LinkRecord::decode(&record_bytes).unwrap();
+        assert_eq!(
+            served.image,
+            fused_reference(&record, &edited_hello, &greet_bytes),
+            "the daemon's patch matches the in-process fused emit"
+        );
+        // The refreshed record describes the new state.
+        let renewed = LinkRecord::decode(served.record.as_ref().unwrap()).unwrap();
+        assert_eq!(renewed.file_size, served.image.len() as u64);
+        // The session's POIs served the pipeline (hello re-parsed as a
+        // miss on the edit; greet's frame hit — warm).
+        assert!(
+            session.hits > warm_hits,
+            "the warm session decoded POIs, hits {} -> {}",
+            warm_hits,
+            session.hits
+        );
+    }
+
+    #[test]
+    fn unchanged_relink_through_the_session_is_untouched() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+
+        let mut relink = req.clone();
+        relink.record = Some(cold.record.clone().unwrap());
+        relink.prev_output = Some(content_hash(&cold.image));
+        session
+            .store_blob(&content_hash(&cold.image), cold.image.clone())
+            .unwrap();
+        let served = session.link(&relink).unwrap();
+        let outcome = served.patch.expect("the ladder runs");
+        assert!(outcome.untouched, "nothing changed, nothing patched");
+        assert_eq!(served.image, cold.image, "the output rides back as-is");
+    }
+
+    #[test]
+    fn stale_previous_output_falls_back_to_the_full_link() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+
+        // The previous output changed under the record (a flipped page-0
+        // byte): the ladder declines, the full link answers — and it still
+        // captures, so the sidecar the driver stores stays fresh.
+        let mut stale = cold.image.clone();
+        stale[0] ^= 0xFF;
+        let mut relink = req.clone();
+        relink.record = Some(cold.record.clone().unwrap());
+        relink.prev_output = Some(content_hash(&stale));
+        session.store_blob(&content_hash(&stale), stale).unwrap();
+
+        let served = session.link(&relink).unwrap();
+        assert!(
+            served.patch.is_none(),
+            "a refusal is a full link, not a patch"
+        );
+        assert!(served.record.is_some(), "the full link still captures");
+        let record = LinkRecord::decode(served.record.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            served.image,
+            fused_reference(&record, &hello_bytes, &greet_bytes),
+            "the fallback full link matches the clean pipeline"
+        );
+    }
+
+    #[test]
+    fn structural_edit_falls_back_inside_the_daemon_and_still_captures() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+
+        // The edit: greet.o grows by 2 MiB — far past every slack anchor
+        // and the relayout tier's bound. The ladder declines; the full
+        // link answers and captures the fresh record (the regression
+        // gate: before the fusion rung the daemon returned no record and
+        // the driver's incremental cycle died here).
+        let grown = greet(2 * 1024 * 1024);
+        let (mut relink, _) = request(&link_config(), &hello_bytes, &grown);
+        relink.record = Some(cold.record.clone().unwrap());
+        relink.record_resolution = true;
+        relink.prev_output = Some(content_hash(&cold.image));
+        session
+            .store_blob(&content_hash(&grown), grown.clone())
+            .unwrap();
+        session
+            .store_blob(&content_hash(&cold.image), cold.image.clone())
+            .unwrap();
+
+        let served = session.link(&relink).unwrap();
+        assert!(served.patch.is_none(), "oversized growth is a full link");
+        let record = LinkRecord::decode(served.record.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            served.image,
+            fused_reference(&record, &hello_bytes, &grown),
+            "the fallback full link matches the clean pipeline"
+        );
+
+        // The cycle lives on: the next edit (body flip) patches again —
+        // off the record the fallback just renewed.
+        let edited = hello(true);
+        let (mut next, _) = request(&link_config(), &edited, &grown);
+        next.record = served.record.clone();
+        next.record_resolution = true;
+        next.prev_output = Some(content_hash(&served.image));
+        session
+            .store_blob(&content_hash(&edited), edited.clone())
+            .unwrap();
+        session
+            .store_blob(&content_hash(&served.image), served.image.clone())
+            .unwrap();
+        let served2 = session.link(&next).unwrap();
+        let outcome = served2.patch.expect("the renewed record patches again");
+        assert!(!outcome.untouched);
+        let renewed = LinkRecord::decode(served2.record.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            served2.image,
+            fused_reference(&renewed, &edited, &grown),
+            "byte-identity across the fallback boundary"
+        );
     }
 }

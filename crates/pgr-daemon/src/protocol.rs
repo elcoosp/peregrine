@@ -10,7 +10,7 @@
 //! | `LINK` 3 | C→S | [`LinkRequest`] |
 //! | `NEED` 4 | S→C | `u32 n, n × 32-byte content hashes` |
 //! | `BLOB` 5 | C→S | `32-byte hash, u64 len, bytes` |
-//! | `IMAGE` 6 | S→C | `u64 entryoff, u64 fixup_slots, u32 hits, u32 misses, u64 len, bytes` |
+//! | `IMAGE` 6 | S→C | v3 body: `u64 entryoff, u64 fixup_slots, u32 hits, u32 misses, [patch outcome], [record bytes], u64 len, image bytes` |
 //! | `ERROR` 7 | S→C | `str message` |
 //! | `SHUTDOWN` 8 | C→S | — |
 //! | `BYE` 9 | S→C | — |
@@ -21,6 +21,16 @@
 //! the archive manifests `(name, all_load, sha256)`. Bytes travel separately
 //! (`BLOB`, only for hashes the daemon does not already hold) so a warm
 //! relink transfers manifests only.
+//!
+//! M9 GA (fusion rung, wire v3): the request also carries the incremental
+//! halves — the previous link's encoded record (`record`), whether the
+//! daemon must capture a fresh record (`record_resolution`) and the
+//! previous output's content hash (`prev_output`, its bytes ride the `BLOB`
+//! exchange like every input). A record-bearing request runs the §7.3
+//! ladder inside the daemon; the reply carries the refreshed record and
+//! the patch outcome back. The wire never carries the *config* halves
+//! (`stable_imports`/`sig_anchor`/`resolve_reuse`): the record is their
+//! single carrier, decoded against the session's own pipeline.
 
 use pgr_core::icf::IcfMode;
 use pgr_core::layout::{LinkConfig, OutputType};
@@ -28,8 +38,9 @@ use pgr_core::resolve::{Dylib, UndefinedPolicy};
 use sha2::{Digest, Sha256};
 
 /// Wire-protocol revision. A mismatch is a hard [`DecodeError::Proto`]
-/// (the client falls back to one-shot rather than guessing).
-pub const PROTO_VERSION: u32 = 2;
+/// (the client falls back to one-shot rather than guessing). v3 carries the
+/// M9 fusion halves (record in, refreshed record + patch outcome out).
+pub const PROTO_VERSION: u32 = 3;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -218,6 +229,23 @@ pub struct LinkRequest {
     pub inputs: Vec<InputEntry>,
     /// Archives in command order.
     pub archives: Vec<ArchiveEntry>,
+    /// The previous link's encoded record (v3, M9 fusion): when present,
+    /// the daemon runs the §7.3 ladder — integrity gate on the previous
+    /// output, anchored relink config (slack anchors, stable imports,
+    /// signature boundary, resolve-reuse seed), warm pipeline, patch plan
+    /// — and falls back to its clean-slacked full link on any refusal.
+    pub record: Option<Vec<u8>>,
+    /// Whether the daemon must capture a fresh record for the reply (v3):
+    /// the driver sets it whenever `-incremental` is on, so the sidecar
+    /// stays fresh across resident links. Independent of `record` — a
+    /// fallback full link captures too (that is the rung that keeps the
+    /// incremental cycle alive through daemon fallbacks).
+    pub record_resolution: bool,
+    /// The previous output's content hash (v3): the bytes the §7.3 ladder
+    /// integrity-gates and patches. The hash joins the `BLOB` negotiation
+    /// ([`LinkRequest::blob_hashes`]), so a warm session transfers it once
+    /// per output state.
+    pub prev_output: Option<[u8; 32]>,
 }
 
 impl LinkRequest {
@@ -226,6 +254,9 @@ impl LinkRequest {
     pub fn blob_hashes(&self) -> Vec<[u8; 32]> {
         let mut out: Vec<[u8; 32]> = self.inputs.iter().map(|i| i.hash).collect();
         out.extend(self.archives.iter().map(|a| a.hash));
+        if let Some(prev) = self.prev_output {
+            out.push(prev);
+        }
         out.sort_unstable();
         out.dedup();
         out
@@ -251,6 +282,22 @@ impl LinkRequest {
             put_str(&mut b, &a.name);
             put_u8(&mut b, u8::from(a.all_load));
             put_hash(&mut b, &a.hash);
+        }
+        // M9 fusion halves (v3): record in, capture flag, previous output.
+        match &self.record {
+            Some(r) => {
+                put_u8(&mut b, 1);
+                put_bytes(&mut b, r);
+            }
+            None => put_u8(&mut b, 0),
+        }
+        put_u8(&mut b, u8::from(self.record_resolution));
+        match self.prev_output {
+            Some(h) => {
+                put_u8(&mut b, 1);
+                put_hash(&mut b, &h);
+            }
+            None => put_u8(&mut b, 0),
         }
         b
     }
@@ -289,12 +336,25 @@ impl LinkRequest {
                 })
             })
             .collect::<Result<Vec<ArchiveEntry>, DecodeError>>()?;
+        // M9 fusion halves (v3; see encode).
+        let record = match r.u8()? {
+            0 => None,
+            _ => Some(r.bytes().map(<[u8]>::to_vec)?),
+        };
+        let record_resolution = r.u8()? != 0;
+        let prev_output = match r.u8()? {
+            0 => None,
+            _ => Some(r.hash()?),
+        };
         r.done()?;
         Ok(Self {
             config,
             force_load,
             inputs,
             archives,
+            record,
+            record_resolution,
+            prev_output,
         })
     }
 }
@@ -507,14 +567,13 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         current_version,
         compatibility_version,
         exported_only,
-        // M9 tier-2a: the import and signature anchors are driver-side
-        // cross-link state (the record sidecar lives next to the output,
-        // §7.3) and the wire carries them deliberately not — the daemon
-        // links clean, and resident + incremental fusion is GA scope
-        // (roadmap row M9). The M9 GA resolve wiring rides the same
-        // sidecar: the v5 snapshot section and its Pass-2 reuse are the
-        // record's cross-link state, so a resident link neither captures
-        // nor consumes it.
+        // M9 tier-2a + GA: the import/signature anchors and the resolve
+        // reuse seed are the *record's* cross-link state (the sidecar
+        // lives next to the output, §7.3) — the wire carries them never;
+        // the v3 request's `record` field is their single carrier and the
+        // session derives the anchored relink config from it. A daemon
+        // link without a record links clean (every clean link); capture
+        // rides the request's `record_resolution` flag, not the config.
         stable_imports: None,
         sig_anchor: None,
         record_resolution: false,
@@ -574,9 +633,8 @@ mod tests {
             load_symbols: vec![b"_kept".to_vec()],
             icf: pgr_core::icf::IcfMode::Safe,
             layout_slack: Some(pgr_core::SlackPolicy::default()),
-            // Not on the wire (see decode): the daemon links clean; the
-            // cross-link anchors stay driver-side state. The resolve's
-            // record-side wiring rides the same sidecar.
+            // Not on the wire (see decode): the cross-link anchors ride
+            // the v3 request's `record` field, never the config.
             stable_imports: None,
             sig_anchor: None,
             record_resolution: false,
@@ -603,6 +661,9 @@ mod tests {
                 all_load: true,
                 hash: content_hash(b"archive"),
             }],
+            record: None,
+            record_resolution: false,
+            prev_output: None,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -620,6 +681,9 @@ mod tests {
             force_load: Vec::new(),
             inputs: Vec::new(),
             archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -640,6 +704,9 @@ mod tests {
             force_load: Vec::new(),
             inputs: Vec::new(),
             archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -647,6 +714,50 @@ mod tests {
         let mut extra = body.clone();
         extra.push(0);
         assert!(LinkRequest::decode(&extra).is_err());
+    }
+
+    #[test]
+    fn request_round_trips_the_record_halves() {
+        // v3 (M9 fusion): the record, the capture flag and the previous
+        // output hash ride the request; the previous output joins the
+        // BLOB negotiation so the daemon can gate and patch it.
+        let req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: Some(vec![7, 8, 9]),
+            record_resolution: true,
+            prev_output: Some(content_hash(b"previous output")),
+        };
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        assert_eq!(back, req);
+        assert!(
+            back.blob_hashes()
+                .contains(&content_hash(b"previous output"))
+        );
+
+        // A bare request (plain M8 resident link) round-trips with all
+        // halves absent and adds nothing to the negotiation.
+        let bare = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: vec![InputEntry {
+                name: "a.o".into(),
+                hash: content_hash(b"a"),
+            }],
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+        };
+        let back = LinkRequest::decode(&bare.encode()).unwrap();
+        assert_eq!(back, bare);
+        assert_eq!(back.blob_hashes(), vec![content_hash(b"a")]);
+
+        // Truncation inside the record tail is malformed, not a panic.
+        let body = req.encode();
+        assert!(LinkRequest::decode(&body[..body.len() - 1]).is_err());
     }
 
     #[test]
