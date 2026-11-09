@@ -98,7 +98,9 @@ pub struct LinkConfig {
     pub filetype: OutputType,
     /// Entry symbol name (`-e`, default `_main`; executables only).
     pub entry_symbol: String,
-    /// `LC_BUILD_VERSION` platform (macOS at M1).
+    /// `LC_BUILD_VERSION` platform (M10 rung 2: driver-selected —
+    /// `macos`, `ios`, `tvos`, `watchos` or `visionos` via
+    /// `-platform_version`; macOS was the only linked platform at M1).
     pub platform: u32,
     /// Packed minimum OS version (`X.Y.Z` → `(X<<16)|(Y<<8)|Z`).
     pub minos: u32,
@@ -870,8 +872,27 @@ struct FlatPiece {
 
 /// Chained fixups require macOS ≥ 12 (TDD §3.6 invariant 3); older
 /// deployment targets and `-no_fixup_chains` fall back to the classic
-/// `LC_DYLD_INFO_ONLY` streams (M6).
+/// `LC_DYLD_INFO_ONLY` streams (M6). This is the *macOS* floor — the
+/// per-platform table lives in [`chained_fixups_min_minos`] (M10 rung 2:
+/// the platform plumbing rung).
 pub const CHAINED_FIXUPS_MIN_MINOS: u32 = 0x000C_0000;
+
+/// The chained-fixups deployment floor per `LC_BUILD_VERSION` platform:
+/// dyld learned chained fixups on macOS 12.0, iOS 15.0, tvOS 15.0,
+/// watchOS 8.0 and visionOS 1.0. Below the floor the M6 legacy path
+/// encodes the *same* fixups as `LC_DYLD_INFO_ONLY` opcode streams — the
+/// fallback changes the encoding, never the fixups. An unknown platform
+/// keeps the macOS floor, the conservative default for a platform the
+/// pipeline does not model.
+#[must_use]
+pub fn chained_fixups_min_minos(platform: u32) -> u32 {
+    match platform {
+        pgr_format::consts::PLATFORM_IOS | pgr_format::consts::PLATFORM_TVOS => 0x000F_0000,
+        pgr_format::consts::PLATFORM_WATCHOS => 0x0008_0000,
+        pgr_format::consts::PLATFORM_VISIONOS => 0x0001_0000,
+        _ => CHAINED_FIXUPS_MIN_MINOS,
+    }
+}
 
 /// The `__LINKEDIT` tail reservation (M9 tier-2a, slack-mode links only):
 /// room between the last chunk and the code signature for the chunk stream
@@ -907,16 +928,21 @@ pub fn layout(
     // The fixups payload exists when *any* slot is planned: input pointer
     // slots (M1 rebases), synthesized GOT binds and POINTER_TO_GOT rebases.
     let has_fixups = fixup_slot_count > 0 || !needs.got.is_empty();
-    let use_chains = cfg.fixup_chains && has_fixups && cfg.minos >= CHAINED_FIXUPS_MIN_MINOS;
+    let chains_floor = chained_fixups_min_minos(cfg.platform);
+    let use_chains = cfg.fixup_chains && has_fixups && cfg.minos >= chains_floor;
     let chains_enabled = use_chains;
     // The layout debug gate: spans, not stderr (inert until a subscriber
     // installs — `pgr` does under PGR_INCREMENTAL_DEBUG/PGR_RESIDENT_DEBUG;
     // formerly a PGR_DEBUG_LAYOUT eprintln block, two env reads per link).
+    // M10 rung 2 rides the same span: the platform and its per-platform
+    // chained-fixups floor are on every fixup-shape event.
     tracing::debug!(
         fixup_chains = cfg.fixup_chains,
         has_fixups,
         slot_count = fixup_slot_count,
         got = needs.got.len(),
+        platform = cfg.platform,
+        chains_floor,
         minos = format!("{:#x}", cfg.minos),
         use_chains,
         "the layout's fixup shape"
