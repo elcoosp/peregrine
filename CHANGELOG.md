@@ -13,10 +13,12 @@ release automation.
 > segment-relayout tier), **v0.5.0** (the GA hardening pass) and **v0.6.0**
 > (tier 2c, the resolve's record-side wiring, the resident fusion wire rung
 > and the audited fusion rung). The prose is unchanged; only the section
-> structure now matches the published tags (v0.2.0–v0.6.0; Cargo.toml
-> carries 0.6.0).
+> structure now matches the published tags (v0.2.0–v0.7.0; Cargo.toml
+> carries 0.7.0).
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-11-09
 
 ### Features
 
@@ -41,7 +43,7 @@ release automation.
   spans ride the new seams (`diff_tiles`, `apply_tiles`,
   `resident_tile_replay`, the residency store).
 
-- **daemon/driver:** M9 GA rung 2 — the daemon serves the- **daemon/driver:** M9 GA rung 2 — the daemon serves the
+- **daemon/driver:** M9 GA rung 2 — the daemon serves the
   `-incremental-verify` audit (wire v4; the audited fusion rung, the last
   cheap rung before the §7.2 buffer-residency work). The request's
   `audit` flag asks the session to run the §7.3 gate's bytes-level twin
