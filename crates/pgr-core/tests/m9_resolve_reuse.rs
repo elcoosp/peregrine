@@ -10,10 +10,12 @@
 
 use pgr_core::ids::FileId;
 use pgr_core::interner::Interner;
+use pgr_core::layout::LinkConfig;
+use pgr_core::link::{LinkInput, Parallelism, link_cached};
 use pgr_core::object::InputObject;
 use pgr_core::propagate::{SectionDigest, section_digests};
 use pgr_core::resolve::{Dylib, Resolution, ResolutionSnapshot, UndefinedPolicy};
-use pgr_core::resolve_reuse::{ReuseFallback, install_reused, plan_reuse};
+use pgr_core::resolve_reuse::{ResolveReuseSeed, ReuseFallback, install_reused, plan_reuse};
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
 /// Parses the builders in command-line order and interns every symbol name
@@ -378,4 +380,122 @@ fn randomized_edit_walk_keeps_the_reused_resolution_equal_to_the_full_one() {
         snapshot = ResolutionSnapshot::capture(&objects, &interner, &full, &[]);
         prev = section_digests(&objects);
     }
+}
+
+/// The pipeline-level gate (M9 GA rung, the record-side wiring): the same
+/// reuse decision core, consumed through `link_cached`'s config exactly the
+/// way the driver's relink hands it over. `cfg_of` builds the link config
+/// with the record-side capture flag and the optional recorded seed.
+fn cfg_of(seed: Option<ResolveReuseSeed>) -> LinkConfig {
+    LinkConfig {
+        ident: "m9-resolve-reuse-pipeline".into(),
+        record_resolution: true,
+        resolve_reuse: seed,
+        ..LinkConfig::default()
+    }
+}
+
+/// Builds `LinkInput`s from the builders (the Pass-0 shape: raw bytes +
+/// command-line names).
+fn inputs_of(specs: &[ObjectBuilder]) -> Vec<LinkInput> {
+    specs
+        .iter()
+        .map(|b| LinkInput {
+            name: b.name().into(),
+            bytes: b.build().unwrap(),
+        })
+        .collect()
+}
+
+#[test]
+fn pipeline_resolve_reuse_lands_the_full_resolves_snapshot() {
+    // Link 1: the recording full link — its snapshot is what the v5 record
+    // section carries to the next relink.
+    let specs = vec![alpha(false, false), beta(0, false, false)];
+    let first = link_cached(
+        &inputs_of(&specs),
+        &[],
+        &cfg_of(None),
+        Parallelism::Serial,
+        None,
+    )
+    .unwrap();
+    let snapshot1 = first
+        .resolve_snapshot
+        .clone()
+        .expect("a recording link captures the Pass-2 snapshot");
+    let digests1 = section_digests(&first.objects);
+
+    // Link 2: the seeded relink — Pass 2 plans through the recorded
+    // decisions instead of re-deciding every external.
+    let relink_specs = vec![alpha(true, false), beta(0, false, false)];
+    let seeded = link_cached(
+        &inputs_of(&relink_specs),
+        &[],
+        &cfg_of(Some(ResolveReuseSeed {
+            snapshot: snapshot1,
+            digests: digests1,
+        })),
+        Parallelism::Serial,
+        None,
+    )
+    .unwrap();
+
+    // Link 3: the same relink resolved in full — the reference state.
+    let full = link_cached(
+        &inputs_of(&relink_specs),
+        &[],
+        &cfg_of(None),
+        Parallelism::Serial,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        seeded.resolve_snapshot, full.resolve_snapshot,
+        "the reused Pass 2 must capture exactly the full resolve's state"
+    );
+}
+
+#[test]
+fn pipeline_resolve_reuse_falls_back_transparently_when_the_shape_moves() {
+    // The baseline records two files; the relink adds a third — the shape
+    // guard refuses, and the link must land exactly where the full resolve
+    // lands (the ladder's bottom rung, through the same config seam).
+    let specs = vec![alpha(false, false), beta(0, false, false)];
+    let first = link_cached(
+        &inputs_of(&specs),
+        &[],
+        &cfg_of(None),
+        Parallelism::Serial,
+        None,
+    )
+    .unwrap();
+    let seed = ResolveReuseSeed {
+        snapshot: first.resolve_snapshot.expect("recording link captures"),
+        digests: section_digests(&first.objects),
+    };
+
+    let grown = vec![alpha(false, false), beta(0, false, false), gamma(true)];
+    let seeded = link_cached(
+        &inputs_of(&grown),
+        &[],
+        &cfg_of(Some(seed)),
+        Parallelism::Serial,
+        None,
+    )
+    .unwrap();
+    let full = link_cached(
+        &inputs_of(&grown),
+        &[],
+        &cfg_of(None),
+        Parallelism::Serial,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        seeded.resolve_snapshot, full.resolve_snapshot,
+        "the refused reuse must be indistinguishable from the full resolve"
+    );
 }
