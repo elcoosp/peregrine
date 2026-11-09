@@ -51,9 +51,12 @@ miette = { version = "7", default-features = false, features = ["derive", "fancy
 #     need audited `unsafe` blocks (perf doc rule 9), they must opt in per crate
 #     with a design note — never blanket-allowed.
 #   * No inline lint suppression anywhere: CI runs
-#     `cargo clippy --workspace --all-targets --all-features -- -D warnings
-#     -W clippy::pedantic`, pedantic rides in through the workspace lints
-#     below, and the tree carries no `#[allow]`/`#[expect]` attributes.
+#     `cargo clippy --workspace --all-targets -- -D warnings` and pedantic
+#     rides in through the workspace lints below (the curated `allow`s in
+#     that table are the suppression surface — a command-line
+#     `-W clippy::pedantic` would re-warn right over them, because cargo
+#     emits the lints table after the user's CLI flags), and the tree
+#     carries no `#[allow]`/`#[expect]` attributes.
 #     Every pedantic exception is recorded HERE, with its rationale, so the
 #     suppression surface is one auditable block.
 [workspace.lints.rust]
