@@ -530,6 +530,38 @@ the output is byte-identical to the one-shot link on every iteration
 cargo bench -p pgr-driver --bench resident
 ```
 
+### The M9 GA fusion rung (`pgr-driver/resident-fusion`, new bench)
+
+The fusion wire rung routes the `-resident -incremental` relink through
+the daemon's §7.3 ladder (protocol v3: record in, refreshed record +
+patch outcome out). Same 64-object parse-heavy corpus; every timed
+iteration is a real edit (object 1 alternates between the pristine and a
+byte-distinct variant, one dirty tile + re-sign each time), served by the
+daemon's warm session and patched in memory.
+
+| Bench | Median | Notes |
+|---|---|---|
+| `resident/one_shot_64_objects` | **235.3 ms** | the full pipeline (reference) |
+| `resident/resident_warm_64_objects` | **272.1 ms** | POI hits 64/64, no input re-transfer |
+| `resident-fusion/fusion_relink_64_objects` | **535.0 ms** | the §7.3 ladder in the session: relink pipeline (warm POIs) + plan + in-memory patch + re-sign + the renewed record |
+
+**Honest verdict: the ladder costs ~2× the warm resident link on this
+sandbox corpus, recorded as-is.** The delta pays for what the rung *is*:
+the relink re-runs Passes 2–3 (this corpus's dominant share, warm POIs
+only skip Pass 1 — the M8 verdict's physics again), plans the patch,
+applies it in memory and re-signs, and the previous output's bytes cross
+the wire once per changed output state (each patch changes the content
+hash, so the session's blob cache misses). What the rung buys and the
+bench proves functionally: the fusion cycle is correct end to end
+(byte-identical to the one-shot incremental cycle — gated in
+`m9_resident_fusion.rs`), the incremental state survives daemon
+fallbacks (the daemon's full link renews the record — the regression
+gate), and the relink's parse half rides the session. The
+bytes-written win ("patch ~1% of the image") lands where the patch path
+already proved it — the file-bound engine, P0-rig rows in the M9
+section above — and the wire cost of the patched bytes is exactly the
+deferred session-resident output-buffer rung's job.
+
 ## Recorded baseline (M9 — in-place incremental relink, tier 1)
 
 The M9 milestone (architecture doc §10.4 row M9, §7.3 Stage C tier 1)
