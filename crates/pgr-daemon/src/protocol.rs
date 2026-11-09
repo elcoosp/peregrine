@@ -10,7 +10,7 @@
 //! | `LINK` 3 | C→S | [`LinkRequest`] |
 //! | `NEED` 4 | S→C | `u32 n, n × 32-byte content hashes` |
 //! | `BLOB` 5 | C→S | `32-byte hash, u64 len, bytes` |
-//! | `IMAGE` 6 | S→C | v3 body: `u64 entryoff, u64 fixup_slots, u32 hits, u32 misses, [patch outcome], [record bytes], u64 len, image bytes` |
+//! | `IMAGE` 6 | S→C | v4 body: `u64 entryoff, u64 fixup_slots, u32 hits, u32 misses, [patch outcome], [record bytes], [audit outcome], u64 len, image bytes` |
 //! | `ERROR` 7 | S→C | `str message` |
 //! | `SHUTDOWN` 8 | C→S | — |
 //! | `BYE` 9 | S→C | — |
@@ -31,6 +31,14 @@
 //! the patch outcome back. The wire never carries the *config* halves
 //! (`stable_imports`/`sig_anchor`/`resolve_reuse`): the record is their
 //! single carrier, decoded against the session's own pipeline.
+//!
+//! M9 GA rung 2 (wire v4): the request's `audit` flag asks the daemon to
+//! serve the `-incremental-verify` audit for a patched relink —
+//! byte-identity against the reference emit plus the strict verifier —
+//! and the reply carries the [`pgr_emit::incremental::audit::AuditOutcome`]
+//! verdict. The audit's subject is the patch: a full link or an untouched
+//! relink serves no audit (the client stands down or the verdict is
+//! trivially the full link's).
 
 use pgr_core::icf::IcfMode;
 use pgr_core::layout::{LinkConfig, OutputType};
@@ -38,9 +46,11 @@ use pgr_core::resolve::{Dylib, UndefinedPolicy};
 use sha2::{Digest, Sha256};
 
 /// Wire-protocol revision. A mismatch is a hard [`DecodeError::Proto`]
-/// (the client falls back to one-shot rather than guessing). v3 carries the
-/// M9 fusion halves (record in, refreshed record + patch outcome out).
-pub const PROTO_VERSION: u32 = 3;
+/// (the client falls back to one-shot rather than guessing). v3 carried
+/// the M9 fusion halves (record in, refreshed record + patch outcome out);
+/// **v4** adds the audited relink — the request's `audit` flag and the
+/// reply's audit verdict ([`pgr_emit::incremental::audit::AuditOutcome`]).
+pub const PROTO_VERSION: u32 = 4;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -246,6 +256,12 @@ pub struct LinkRequest {
     /// ([`LinkRequest::blob_hashes`]), so a warm session transfers it once
     /// per output state.
     pub prev_output: Option<[u8; 32]>,
+    /// Whether the daemon must serve the `-incremental-verify` audit for
+    /// a patched relink (v4, M9 GA rung 2): byte-identity against the
+    /// reference emit plus the strict verifier, verdict on the wire. The
+    /// audit's subject is the patch — a full link or an untouched relink
+    /// serves no audit.
+    pub audit: bool,
 }
 
 impl LinkRequest {
@@ -299,6 +315,8 @@ impl LinkRequest {
             }
             None => put_u8(&mut b, 0),
         }
+        // M9 GA rung 2 (v4): the audited relink flag.
+        put_u8(&mut b, u8::from(self.audit));
         b
     }
 
@@ -346,6 +364,7 @@ impl LinkRequest {
             0 => None,
             _ => Some(r.hash()?),
         };
+        let audit = r.u8()? != 0;
         r.done()?;
         Ok(Self {
             config,
@@ -355,6 +374,7 @@ impl LinkRequest {
             record,
             record_resolution,
             prev_output,
+            audit,
         })
     }
 }
@@ -664,6 +684,7 @@ mod tests {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -672,6 +693,26 @@ mod tests {
             back.blob_hashes(),
             vec![content_hash(b"archive"), content_hash(b"hello")]
         );
+    }
+
+    #[test]
+    fn audited_request_round_trips_byte_shape() {
+        let mut req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: Some(vec![1, 2, 3]),
+            record_resolution: true,
+            prev_output: Some(content_hash(b"prev")),
+            audit: true,
+        };
+        let body = req.encode();
+        let back = LinkRequest::decode(&body).unwrap();
+        assert_eq!(back, req);
+        // The audit flag flips cleanly over the wire.
+        req.audit = false;
+        assert_ne!(LinkRequest::decode(&req.encode()).unwrap(), back);
     }
 
     #[test]
@@ -684,6 +725,7 @@ mod tests {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -707,6 +749,7 @@ mod tests {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -729,6 +772,7 @@ mod tests {
             record: Some(vec![7, 8, 9]),
             record_resolution: true,
             prev_output: Some(content_hash(b"previous output")),
+            audit: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -750,6 +794,7 @@ mod tests {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         let back = LinkRequest::decode(&bare.encode()).unwrap();
         assert_eq!(back, bare);

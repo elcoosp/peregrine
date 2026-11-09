@@ -24,6 +24,13 @@
 //! the daemon path. The daemon still holds no output state: the patched
 //! bytes cross the wire like any image and the client writes the file.
 //!
+//! M9 GA rung 2 (wire v4): the session also *serves the audit* — a
+//! request with `audit` set runs the §7.3 gate's bytes-level twin
+//! ([`pgr_emit::incremental::audit`]) on the in-memory patch: byte-identity
+//! against the reference emit plus the strict verifier, and a divergence
+//! is healed in memory before the verdict crosses the wire (the client
+//! still refuses to ship a failing verdict by not writing the file).
+//!
 //! Safety properties (the §7.2 constraints):
 //!
 //! * The session is an **optimization only** — a corrupt/unmatched frame
@@ -36,6 +43,7 @@
 
 use pgr_core::cache::{PoiCache, decode_poi, encode_poi};
 use pgr_core::object::InputObject;
+use pgr_emit::incremental::audit::{AuditOutcome, audit_image, audit_patch};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -89,6 +97,10 @@ pub struct ServedLink {
     pub record: Option<Vec<u8>>,
     /// The in-place patch outcome (`None` on a full link).
     pub patch: Option<pgr_emit::incremental::PatchOutcome>,
+    /// The served audit verdict (`Some` when the request asked for the
+    /// audit and the ladder patched; the audit's subject is the patch —
+    /// a full link or an untouched relink serves none).
+    pub audit: Option<AuditOutcome>,
 }
 
 /// Why the session's §7.3 ladder declined: the caller (the link entry)
@@ -172,7 +184,7 @@ impl ResidentSession {
         let use_at = self.tick();
         self.blob_uses.insert(*hash, use_at);
         self.blobs.insert(*hash, std::sync::Arc::new(bytes));
-        self.enforce_limit(None);
+        self.enforce_limit();
         Ok(())
     }
 
@@ -229,7 +241,7 @@ impl ResidentSession {
         let frame = std::sync::Arc::new(encode_poi(&obj, split_symbols));
         self.pois.insert((key, split_symbols), (frame, use_at));
         self.misses += 1;
-        self.enforce_limit(None);
+        self.enforce_limit();
         Ok(obj)
     }
 
@@ -329,6 +341,7 @@ impl ResidentSession {
             fixup_slots: u64::try_from(fixup_slots).unwrap_or(u64::MAX),
             record,
             patch: None,
+            audit: None,
         })
     }
 
@@ -400,6 +413,8 @@ impl ResidentSession {
         };
         // Nothing changed: the previous output rides back untouched and
         // the record is renewed verbatim (the driver's untouched shape).
+        // No audit: its subject — the patch — never exists here (parity
+        // with the in-process gate, which runs after a patch only).
         if plan.is_untouched() {
             return Ok(ServedLink {
                 image: prev.to_vec(),
@@ -412,9 +427,10 @@ impl ResidentSession {
                     total_tiles: plan.total_tiles,
                     untouched: true,
                 }),
+                audit: None,
             });
         }
-        let (outcome, new_record, image) = pgr_emit::incremental::apply_patch_bytes(
+        let (mut outcome, mut new_record, mut image) = pgr_emit::incremental::apply_patch_bytes(
             prev,
             record,
             &plan,
@@ -426,18 +442,70 @@ impl ResidentSession {
             pgr_emit::incremental::PatchError::Fallback(_) => RelinkDecline::Fallback,
             other => RelinkDecline::Error(other.into()),
         })?;
+        let _span = tracing::info_span!(
+            "daemon_relink",
+            bytes_patched = outcome.bytes_patched,
+            dirty_tiles = outcome.dirty_tiles,
+            total_tiles = outcome.total_tiles
+        )
+        .entered();
+        // The audited relink (v4, M9 GA rung 2): the §7.3 gate's
+        // bytes-level twin runs here, in memory — identity against the
+        // reference emit first, the strict verifier second, and a
+        // divergence is healed from the reference before the verdict
+        // crosses the wire. The client still owns the file: a failing
+        // verdict ships nothing (§7.2 crash-safety unchanged).
+        let audit = if req.audit {
+            let reference = pgr_emit::build_image_fused(&result.layout, &result.objects)
+                .map_err(SessionError::Emit)
+                .map_err(RelinkDecline::Error)?;
+            let identity_ok = audit_patch(&reference, &image);
+            let healed = !identity_ok;
+            if healed {
+                // A divergence never ships: serve the reference emit and
+                // re-record from it (the driver's file-path heal, in
+                // memory).
+                new_record = pgr_emit::incremental::LinkRecord::record(
+                    &result.layout,
+                    &result.objects,
+                    &reference,
+                    result.resolve_snapshot.as_ref(),
+                )
+                .map_err(|e| match e {
+                    pgr_emit::incremental::PatchError::Fallback(_) => RelinkDecline::Fallback,
+                    other => RelinkDecline::Error(other.into()),
+                })?;
+                image = reference;
+                outcome.bytes_patched = image.len() as u64;
+                outcome.dirty_tiles = plan.total_tiles;
+            }
+            let verify_blocking = audit_image(&image, !cfg.adhoc);
+            tracing::debug!(
+                identity_ok,
+                healed,
+                blocking = verify_blocking.len(),
+                "the daemon's audit finished"
+            );
+            Some(AuditOutcome {
+                identity_ok,
+                healed,
+                verify_blocking,
+            })
+        } else {
+            None
+        };
         Ok(ServedLink {
             image,
             entryoff: result.layout.entryoff,
             fixup_slots: u64::try_from(result.layout.fixups.slot_count).unwrap_or(u64::MAX),
             record: Some(new_record.encode()),
             patch: Some(outcome),
+            audit,
         })
     }
 
-    /// Evicts least-recently-used entries until under the ceiling. `keep`
-    /// is protected (currently-unused hook for callers mid-store).
-    fn enforce_limit(&mut self, _keep: Option<&[u8; 32]>) {
+    /// Evicts least-recently-used entries until under the ceiling.
+    fn enforce_limit(&mut self) {
         if self.max_bytes == 0 {
             return;
         }
@@ -562,6 +630,7 @@ mod tests {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -750,6 +819,7 @@ mod tests {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -913,6 +983,7 @@ mod fusion_tests {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         let hashes = req.blob_hashes();
         (req, hashes)
@@ -1185,6 +1256,108 @@ mod fusion_tests {
             served2.image,
             fused_reference(&renewed, &edited, &grown),
             "byte-identity across the fallback boundary"
+        );
+    }
+
+    /// M9 GA rung 2: the daemon serves the `-incremental-verify` audit —
+    /// the ladder patches, audits its bytes against the reference emit and
+    /// hands the verdict across the wire (`AuditOutcome`).
+    #[test]
+    fn audited_relink_reports_the_audit_outcome() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+        let record_bytes = cold.record.clone().expect("cold capture");
+        let prev_output = cold.image.clone();
+
+        let edited_hello = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited_hello, &greet_bytes);
+        relink.record = Some(record_bytes.clone());
+        relink.prev_output = Some(content_hash(&prev_output));
+        relink.audit = true;
+        session
+            .store_blob(&content_hash(&prev_output), prev_output.clone())
+            .unwrap();
+        session
+            .store_blob(&content_hash(&edited_hello), edited_hello.clone())
+            .unwrap();
+
+        let served = session.link(&relink).unwrap();
+        let patch = served.patch.expect("the audited relink patches");
+        assert!(!patch.untouched);
+        let audit = served.audit.expect("the audit rides the reply");
+        assert!(
+            audit.identity_ok,
+            "the engine contract holds on the wire path"
+        );
+        assert!(!audit.healed, "nothing to heal");
+        assert!(
+            audit.verify_blocking.is_empty(),
+            "a clean patch verifies strict: {:?}",
+            audit.verify_blocking
+        );
+        // The audited image IS the reference the contract demands: the
+        // full fused emit of the same plan.
+        let record = LinkRecord::decode(served.record.as_deref().unwrap()).unwrap();
+        let reference = fused_reference(&record, &edited_hello, &greet_bytes);
+        assert_eq!(
+            reference, served.image,
+            "the audited image is the reference"
+        );
+    }
+
+    /// The audit's subject is the patch: a full link (no record) and an
+    /// untouched relink serve no audit — parity with the in-process gate,
+    /// which runs after a patch only.
+    #[test]
+    fn audited_full_link_and_untouched_relink_serve_no_audit() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        // Full link, audit requested: no patch, no audit.
+        req.audit = true;
+        req.record_resolution = true;
+        let full = session.link(&req).unwrap();
+        assert!(full.patch.is_none());
+        assert!(full.audit.is_none(), "a full link serves no audit");
+
+        // The untouched relink: the ladder rides but patches nothing —
+        // the audit does not run (its subject never exists).
+        let record_bytes = full.record.expect("cold capture");
+        let prev_output = full.image.clone();
+        let (mut relink, _) = request(&link_config(), &hello_bytes, &greet_bytes);
+        relink.record = Some(record_bytes);
+        relink.prev_output = Some(content_hash(&prev_output));
+        relink.audit = true;
+        session
+            .store_blob(&content_hash(&prev_output), prev_output.clone())
+            .unwrap();
+        let served = session.link(&relink).unwrap();
+        let patch = served.patch.expect("the untouched relink reports");
+        assert!(patch.untouched);
+        assert!(
+            served.audit.is_none(),
+            "an untouched relink serves no audit"
         );
     }
 }

@@ -54,9 +54,9 @@ mod tests {
     #[test]
     fn version_is_wired() {
         assert!(!crate::VERSION.is_empty(), "version line built");
-        // v3 (M9 GA): the wire carries the fusion halves — record in,
-        // refreshed record + patch outcome out.
-        assert_eq!(crate::PROTO_VERSION, 3);
+        // v4 (M9 GA rung 2): the fusion halves (v3) plus the audited
+        // relink — the request's audit flag, the reply's audit verdict.
+        assert_eq!(crate::PROTO_VERSION, 4);
     }
 
     #[test]
@@ -70,6 +70,7 @@ mod tests {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);

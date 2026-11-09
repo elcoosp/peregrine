@@ -10,6 +10,13 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 fn main() -> ExitCode {
+    // The session's relink/audit spans stay inert until a subscriber
+    // installs; PGR_RESIDENT_DEBUG=1 turns them into stderr lines.
+    if std::env::var_os("PGR_RESIDENT_DEBUG").is_some() {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .init();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut socket = pgr_daemon::client_default_socket();
     let mut idle_secs: u64 = 900;

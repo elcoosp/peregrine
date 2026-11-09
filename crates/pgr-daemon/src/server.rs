@@ -250,10 +250,11 @@ fn serve_link(
     }
     match session.link(&req) {
         Ok(served) => {
-            // IMAGE v3: the M8 fields, then the M9 fusion tail — the patch
+            // IMAGE v4: the M8 fields, the M9 fusion tail — the patch
             // outcome (absent on a full link) and the refreshed record
             // (absent when the link neither captured nor renewed one) —
-            // then the image bytes.
+            // the audit verdict (absent unless asked and patched), then
+            // the image bytes.
             let mut b = Vec::with_capacity(64 + served.image.len());
             put_u64(&mut b, served.entryoff);
             put_u64(&mut b, served.fixup_slots);
@@ -273,6 +274,18 @@ fn serve_link(
                 Some(r) => {
                     put_u8(&mut b, 1);
                     put_bytes(&mut b, r);
+                }
+                None => put_u8(&mut b, 0),
+            }
+            match &served.audit {
+                Some(a) => {
+                    put_u8(&mut b, 1);
+                    put_u8(&mut b, u8::from(a.identity_ok));
+                    put_u8(&mut b, u8::from(a.healed));
+                    put_u32(&mut b, a.verify_blocking.len() as u32);
+                    for issue in &a.verify_blocking {
+                        put_str(&mut b, issue);
+                    }
                 }
                 None => put_u8(&mut b, 0),
             }

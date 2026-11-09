@@ -41,6 +41,11 @@ pub struct ResidentImage {
     /// ladder patched, `None` on a full link (untouched relinks carry the
     /// zeroed untouched outcome).
     pub patch: Option<pgr_emit::incremental::PatchOutcome>,
+    /// The served audit verdict (v4, M9 GA rung 2): `Some` when the
+    /// request asked for the audit and the ladder patched — the daemon's
+    /// byte-identity verdict plus its strict-verifier issues. The client
+    /// refuses to ship a failing verdict (it writes nothing).
+    pub audit: Option<pgr_emit::incremental::audit::AuditOutcome>,
 }
 
 /// A client-side failure: the caller falls back to one-shot.
@@ -132,6 +137,7 @@ impl LinkJob {
             record: None,
             record_resolution: false,
             prev_output: None,
+            audit: false,
         };
         Self { request, blobs }
     }
@@ -253,9 +259,10 @@ impl DaemonClient {
                     }
                 }
                 TAG_IMAGE => {
-                    // v3 body: the M8 fields, then the M9 fusion tail —
-                    // patch outcome (absent on a full link) and the
-                    // refreshed record (absent when no capture was asked).
+                    // v4 body: the M8 fields, the M9 fusion tail — patch
+                    // outcome (absent on a full link) and the refreshed
+                    // record (absent when no capture was asked) — then the
+                    // audit verdict (absent unless asked and patched).
                     let mut r = crate::protocol::Reader::new(&body);
                     let entryoff = r.u64()?;
                     let fixup_slots = r.u64()?;
@@ -279,6 +286,22 @@ impl DaemonClient {
                         0 => None,
                         _ => Some(r.bytes().map(<[u8]>::to_vec)?),
                     };
+                    let audit = if r.u8()? == 0 {
+                        None
+                    } else {
+                        let identity_ok = r.u8()? != 0;
+                        let healed = r.u8()? != 0;
+                        let n = r.u32()?;
+                        let mut verify_blocking = Vec::with_capacity(n as usize);
+                        for _ in 0..n {
+                            verify_blocking.push(r.str()?);
+                        }
+                        Some(pgr_emit::incremental::audit::AuditOutcome {
+                            identity_ok,
+                            healed,
+                            verify_blocking,
+                        })
+                    };
                     let len = r.u64()? as usize;
                     let image = r.take(len)?.to_vec();
                     r.done()?;
@@ -290,6 +313,7 @@ impl DaemonClient {
                         poi_misses,
                         record,
                         patch,
+                        audit,
                     });
                 }
                 TAG_ERROR => {
