@@ -212,6 +212,15 @@ fn platform_and_tool_constants_match_object() {
         TOOL_SWIFT,
         TOOL_LD,
     );
+    // visionOS shipped as xrOS in the vendored Apple header set the
+    // `object` crate mirrors; the platform word is the same numeric
+    // value (11) — M10 rung 2 pins the equality here so a header
+    // refresh that renames (or renumbers) it cannot pass silently.
+    assert_eq!(
+        u64::from(pc::PLATFORM_VISIONOS),
+        u64::from(om::PLATFORM_XROS),
+        "PLATFORM_VISIONOS must track the vendored PLATFORM_XROS"
+    );
 }
 
 #[test]

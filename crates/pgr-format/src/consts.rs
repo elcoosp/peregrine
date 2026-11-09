@@ -485,6 +485,10 @@ pub const PLATFORM_IOS: u32 = 2;
 pub const PLATFORM_TVOS: u32 = 3;
 /// `LC_BUILD_VERSION` platform: watchOS.
 pub const PLATFORM_WATCHOS: u32 = 4;
+/// `LC_BUILD_VERSION` platform: visionOS (M10 rung 2). The vendored
+/// Apple headers inside the `object` crate still carry the pre-rename
+/// name (`PLATFORM_XROS`); the constants crosscheck pins the equality.
+pub const PLATFORM_VISIONOS: u32 = 11;
 /// Build tool: clang.
 pub const TOOL_CLANG: u32 = 1;
 /// Build tool: swift.
