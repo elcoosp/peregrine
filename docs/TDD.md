@@ -7,7 +7,7 @@
 | **Codename** | Peregrine (binary: `pgr`) |
 | **Target** | arm64-apple-darwin executables, dylibs, bundles (macOS 12+ default path) |
 | **Host** | Linux (primary development sandbox); macOS (deployment as an `ld` replacement) |
-| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, and the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`) — this document is the design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
+| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay) — this document is the design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
 | **Date** | 2026-11-09 |
 | **Companion diagrams** | `assets/pipeline.png`, `assets/output-map.png`, `assets/alignment.png`, `assets/fixup-chain.png` |
 
