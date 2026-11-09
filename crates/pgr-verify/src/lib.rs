@@ -30,7 +30,7 @@ pub mod signature;
 pub mod structural;
 
 use pgr_format::FormatError;
-use pgr_format::consts::{MH_BUNDLE, MH_DYLIB, MH_EXECUTE};
+use pgr_format::consts::{MH_BUNDLE, MH_DYLIB, MH_EXECUTE, MH_OBJECT};
 
 /// Verification target knobs (M0: fixed to the arm64-apple-darwin contract).
 #[derive(Debug, Clone, Copy, Default)]
@@ -226,6 +226,9 @@ pub fn verify(bytes: &[u8], opts: &Options) -> Report {
     structural::check_dylib_contract(&parsed, &mut report);
     structural::check_segments(bytes, &parsed, &mut report);
     structural::check_symbol_table(bytes, &parsed, &mut report);
+    if parsed.header.filetype == MH_OBJECT {
+        structural::check_object_contract(bytes, &parsed, &mut report);
+    }
     misc::check_entry_and_version(bytes, &parsed, &mut report);
     misc::check_linkedit_payloads(bytes, &parsed, &mut report);
     if matches!(parsed.header.filetype, MH_EXECUTE | MH_DYLIB | MH_BUNDLE) {
