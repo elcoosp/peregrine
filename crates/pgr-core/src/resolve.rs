@@ -386,6 +386,278 @@ impl Resolution {
     pub fn is_referenced(&self, id: crate::ids::StringId) -> bool {
         self.references.contains_key(&id.0)
     }
+
+    /// Equality of the Pass-2 decision state, name by name: winners
+    /// (definition, rank, file, values), reference sites, two-level dylib
+    /// ordinals and the dynamic-lookup set. The M9 tier-2c reuse path must
+    /// reproduce exactly this state or fall back (the gate the resolve
+    /// tests lean on).
+    #[must_use]
+    pub fn equivalent(&self, other: &Self) -> bool {
+        self.defs == other.defs
+            && self.references == other.references
+            && self.dylib_exports == other.dylib_exports
+            && self.dynamic_lookups == other.dynamic_lookups
+    }
+
+    /// Copies one recorded winner verbatim (M9 tier-2c): the name sits
+    /// outside the propagation seeds, so its recorded decision is still
+    /// the decision the full walk would reach. No precedence check — the
+    /// digest table vouches for the defining section.
+    pub(crate) fn copy_winner(&mut self, key: u32, lite: &DefLite) {
+        self.defs.insert(key, Def::from(lite.clone()));
+    }
+
+    /// Records one reference site (M9 tier-2c merge): the reuse path
+    /// re-walks the parse in file order, so merged lists match the full
+    /// walk's ordering by construction.
+    pub(crate) fn merge_reference(&mut self, key: u32, site: (FileId, usize)) {
+        self.references.entry(key).or_default().push(site);
+    }
+
+    /// Replays one recorded or freshly parsed candidate through the
+    /// precedence rules (M9 tier-2c): the same decision `install` reaches,
+    /// fed from the snapshot instead of an object walk.
+    ///
+    /// # Errors
+    /// [`LinkError::Symbol`] on a duplicate strong definition — the same
+    /// error `install` lands on for the same candidate stream.
+    pub(crate) fn replay_candidate(&mut self, key: u32, cand: &DefLite) -> Result<(), LinkError> {
+        match cand.rank {
+            Rank::Common => {
+                self.replay_common(key, cand);
+                Ok(())
+            }
+            _ => self.install_sect_def(key, Def::from(cand.clone())),
+        }
+    }
+
+    /// The common-symbol coalescing `install_common` performs, from a
+    /// recorded candidate: first common wins the slot, later ones merge
+    /// (max size, max align, lowest file) and a real definition beats a
+    /// common.
+    fn replay_common(&mut self, key: u32, cand: &DefLite) {
+        let file = FileId(cand.file);
+        match self.defs.get(&key) {
+            None => {
+                self.defs.insert(
+                    key,
+                    Def {
+                        file,
+                        sym: cand.sym,
+                        rank: Rank::Common,
+                        weak: false,
+                        value: cand.value,
+                        section: None,
+                        common_align: cand.common_align,
+                        common_size: cand.common_size,
+                    },
+                );
+            }
+            Some(existing) if existing.rank == Rank::Common => {
+                let merged = Def {
+                    file: file.min(existing.file),
+                    sym: if file < existing.file {
+                        cand.sym
+                    } else {
+                        existing.sym
+                    },
+                    rank: Rank::Common,
+                    weak: false,
+                    value: 0,
+                    section: None,
+                    common_align: cand.common_align.max(existing.common_align),
+                    common_size: cand.common_size.max(existing.common_size),
+                };
+                self.defs.insert(key, merged);
+            }
+            Some(_) => {} // a real definition beats a common — nothing to do
+        }
+    }
+}
+
+/// A [`Def`] stripped to its serializable shape (M9 tier-2c): the
+/// resolution snapshot is a pointer-free, name-keyed record payload (the
+/// cache/record framing convention), so file and name identities travel as
+/// raw indices and bytes. Rank carries the precedence the replay applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefLite {
+    /// Defining file (command-line order).
+    pub file: u32,
+    /// Symbol table index within that file.
+    pub sym: usize,
+    /// Definition rank (precedence).
+    pub rank: Rank,
+    /// `N_WEAK_DEF` on the winner.
+    pub weak: bool,
+    /// The definition's value (section-relative address, or the common's
+    /// requested size before coalescing).
+    pub value: u64,
+    /// 0-based input section for `N_SECT` definitions.
+    pub section: Option<usize>,
+    /// Coalesced alignment exponent (commons only).
+    pub common_align: u32,
+    /// Coalesced size (commons only).
+    pub common_size: u64,
+}
+
+impl DefLite {
+    /// Captures one input symbol as a candidate: the same classification
+    /// `install` applies (archive rank by `from_archive`, common coalescing
+    /// fields, weak marker).
+    #[must_use]
+    pub fn of(obj: &InputObject, sym: usize) -> Self {
+        let s = &obj.symbols[sym];
+        let rank = if s.is_common() {
+            Rank::Common
+        } else if obj.from_archive {
+            if s.weak_def {
+                Rank::ArchiveWeak
+            } else {
+                Rank::ArchiveStrong
+            }
+        } else if s.weak_def {
+            Rank::WeakDef
+        } else {
+            Rank::Strong
+        };
+        Self {
+            file: obj.file.0,
+            sym,
+            rank,
+            weak: s.weak_def,
+            value: s.value,
+            section: s.section,
+            common_align: s.common_align.unwrap_or(0).min(15),
+            common_size: if s.is_common() { s.value } else { 0 },
+        }
+    }
+}
+
+impl From<&Def> for DefLite {
+    fn from(def: &Def) -> Self {
+        Self {
+            file: def.file.0,
+            sym: def.sym,
+            rank: def.rank,
+            weak: def.weak,
+            value: def.value,
+            section: def.section,
+            common_align: def.common_align,
+            common_size: def.common_size,
+        }
+    }
+}
+
+impl From<&DefLite> for Def {
+    fn from(lite: &DefLite) -> Self {
+        Self {
+            file: FileId(lite.file),
+            sym: lite.sym,
+            rank: lite.rank,
+            weak: lite.weak,
+            value: lite.value,
+            section: lite.section,
+            common_align: lite.common_align,
+            common_size: lite.common_size,
+        }
+    }
+}
+
+impl From<DefLite> for Def {
+    fn from(lite: DefLite) -> Self {
+        Self::from(&lite)
+    }
+}
+
+/// The Pass-2 state a relink reuses (M9 tier-2c): the complete candidate
+/// stream and the winning decisions of the linked parse, keyed so the
+/// reuse path never re-derives them through name lookups. All fields are
+/// pointer-free and name-keyed only where the record payload needs to be
+/// self-describing (the cache/record framing convention); the seed's
+/// section-digest table travels beside it and vouches for the per-file
+/// state it describes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolutionSnapshot {
+    /// Input file names in command-line order: the reuse shape guard (a
+    /// moved file list renumbers every `FileId`, so the plan refuses).
+    pub file_names: Vec<Vec<u8>>,
+    /// Every external definition and common of the linked parse, sorted
+    /// by `(name, file, symbol)` — the complete candidate stream, winners
+    /// and losers both (a re-decided name needs every candidate to replay
+    /// the precedence rules, not just the recorded winner). The name
+    /// grouping is the replay's index: one binary search per re-decided
+    /// name, never a scan of the whole list.
+    pub candidates: Vec<(Vec<u8>, DefLite)>,
+    /// Winning definitions as a per-file, per-symbol-index matrix: the
+    /// winner's defining `(file, sym)` position, digest-vouched for
+    /// unchanged files. The reuse copy walks the relink parse (whose
+    /// symbol ids are already in hand) and reads this O(1) — the name-keyed
+    /// join the record payload could otherwise force per winner.
+    pub winner_slots: Vec<Vec<Option<DefLite>>>,
+    /// Dylib export names flattened in `(dylib, export)` order: the
+    /// two-level ordinal map's shape guard (an export-set change renumbers
+    /// ordinals, so the plan refuses).
+    pub dylib_export_names: Vec<Vec<u8>>,
+}
+
+impl ResolutionSnapshot {
+    /// Captures the Pass-2 state of a finished resolve (the record-side
+    /// half of the reuse path): candidates from the parse walk, winners
+    /// placed by their defining symbol's position, export names from the
+    /// dylib list — all in deterministic total order (§4.3).
+    #[must_use]
+    pub fn capture(
+        objects: &[InputObject],
+        interner: &Interner,
+        res: &Resolution,
+        dylibs: &[Dylib],
+    ) -> Self {
+        let file_names = objects
+            .iter()
+            .map(|o| o.name.clone().into_bytes())
+            .collect();
+        let mut candidates: Vec<(Vec<u8>, DefLite)> = objects
+            .iter()
+            .flat_map(|obj| {
+                (0..obj.symbols.len()).filter_map(move |i| {
+                    let s = &obj.symbols[i];
+                    if s.stab || !s.external || !(s.is_defined() || s.is_common()) {
+                        return None;
+                    }
+                    Some((interner.bytes(s.name).to_vec(), DefLite::of(obj, i)))
+                })
+            })
+            .collect();
+        // Name-sorted (then file/symbol): the reuse path's replay reads
+        // each re-decided name's recorded stream as one binary-searched
+        // group instead of scanning the whole list.
+        candidates.sort_unstable_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| (a.1.file, a.1.sym).cmp(&(b.1.file, b.1.sym)))
+        });
+        let mut winner_slots: Vec<Vec<Option<DefLite>>> = objects
+            .iter()
+            .map(|o| vec![None; o.symbols.len()])
+            .collect();
+        for (_, def) in res.definitions() {
+            // A finished Resolution's winners name files and symbols of the
+            // very parse that produced it — the slots always fit.
+            let slots = &mut winner_slots[def.file.0 as usize];
+            if let Some(slot) = slots.get_mut(def.sym) {
+                *slot = Some(DefLite::from(def));
+            }
+        }
+        Self {
+            file_names,
+            candidates,
+            winner_slots,
+            dylib_export_names: dylibs
+                .iter()
+                .flat_map(|d| d.exports.iter().cloned())
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]

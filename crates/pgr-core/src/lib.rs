@@ -26,6 +26,7 @@ pub mod object;
 pub mod pool;
 pub mod propagate;
 pub mod resolve;
+pub mod resolve_reuse;
 pub mod revindex;
 pub mod slack;
 pub mod stable_imports;
@@ -48,6 +49,7 @@ pub use link::{
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use propagate::{PropagationScope, SectionDigest};
 pub use resolve::{Def, Rank, Resolution};
+pub use resolve_reuse::{ReuseFallback, ReusePlan, install_reused, plan_reuse};
 pub use revindex::{RefSite, ReverseIndex};
 pub use slack::{LayoutFallback, SlackPolicy};
 pub use stable_imports::{StableImport, StableImports};

@@ -113,6 +113,37 @@ pub fn section_digests(objects: &[InputObject]) -> Vec<SectionDigest> {
         .collect()
 }
 
+/// Diffs the recorded digest table against the new parse: every section
+/// whose digest moved (or appeared/vanished), ascending — the §7.3 step-1
+/// seeds. The byte planner and the M9 tier-2c resolve reuse share the
+/// same seed computation: one notion of "changed", two consumers.
+#[must_use]
+pub fn seeds(prev: &[SectionDigest], objects: &[InputObject]) -> Vec<(u32, usize)> {
+    // The recorded table keyed by placement; the new parse digested the
+    // same way so the diff is a plain map walk (deterministic, no hashes).
+    let recorded: BTreeMap<(u32, usize), &[u8; 32]> =
+        prev.iter().map(|d| ((d.file, d.in_sect), &d.sha)).collect();
+    let current = section_digests(objects);
+
+    let mut out: Vec<(u32, usize)> = Vec::new();
+    for d in &current {
+        match recorded.get(&(d.file, d.in_sect)) {
+            Some(prev_sha) if **prev_sha == d.sha => {}
+            _ => out.push((d.file, d.in_sect)),
+        }
+    }
+    // Sections that vanished from the parse (removed inputs/sections) are
+    // seeds too — the record vouches for bytes that no longer exist.
+    for &key in recorded.keys() {
+        let exists = current.iter().any(|d| (d.file, d.in_sect) == key);
+        if !exists {
+            out.push(key);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 /// Plans the change-propagation scope: seeds = the recorded digests' diff
 /// against the new parse, dependents = the reverse index's referencing
 /// sites, ranges = their placed output pieces. With no seeds the scope is
@@ -124,28 +155,7 @@ pub fn predict(
     objects: &[InputObject],
     layout: &Layout,
 ) -> PropagationScope {
-    // The recorded table keyed by placement; the new parse digested the
-    // same way so the diff is a plain map walk (deterministic, no hashes).
-    let recorded: BTreeMap<(u32, usize), &[u8; 32]> =
-        prev.iter().map(|d| ((d.file, d.in_sect), &d.sha)).collect();
-    let current = section_digests(objects);
-
-    let mut seeds: Vec<(u32, usize)> = Vec::new();
-    for d in &current {
-        match recorded.get(&(d.file, d.in_sect)) {
-            Some(prev_sha) if **prev_sha == d.sha => {}
-            _ => seeds.push((d.file, d.in_sect)),
-        }
-    }
-    // Sections that vanished from the parse (removed inputs/sections) are
-    // seeds too — the record vouches for bytes that no longer exist.
-    for &key in recorded.keys() {
-        let exists = current.iter().any(|d| (d.file, d.in_sect) == key);
-        if !exists {
-            seeds.push(key);
-        }
-    }
-    seeds.sort_unstable();
+    let seeds = seeds(prev, objects);
     if seeds.is_empty() {
         return PropagationScope::default();
     }
