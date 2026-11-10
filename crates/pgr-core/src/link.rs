@@ -183,25 +183,45 @@ pub fn link_from_objects(
     // available, always correct, and invisible to the layout (the equality
     // contract is gated in `tests/m9_resolve_reuse.rs`).
     let reused = cfg.resolve_reuse.as_ref().and_then(|seed| {
-        crate::resolve_reuse::plan_reuse(
+        match crate::resolve_reuse::plan_reuse(
             &seed.snapshot,
             &seed.digests,
             &interner,
             &objects,
             &cfg.dylibs,
-        )
-        .ok()
-        .and_then(|plan| {
-            crate::resolve_reuse::install_reused(
-                &plan,
-                &seed.snapshot,
-                &interner,
-                &objects,
-                &cfg.dylibs,
-                cfg.undefined_policy,
-            )
-            .ok()
-        })
+        ) {
+            Ok(plan) => {
+                match crate::resolve_reuse::install_reused(
+                    &plan,
+                    &seed.snapshot,
+                    &interner,
+                    &objects,
+                    &cfg.dylibs,
+                    cfg.undefined_policy,
+                ) {
+                    Ok(res) => Some(res),
+                    // The shape guard passed but the replay refused an
+                    // invariant — a distinct cause from a shape move, and
+                    // it used to vanish into the fallback. The ladder's
+                    // bottom rung stays silent-correct, not silent-blind:
+                    // the refusal names itself on the tracing seam.
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "the resolve-reuse install refused; falling back to the full resolve"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(fallback) => {
+                tracing::debug!(
+                    fallback = %fallback,
+                    "the resolve-reuse plan refused; falling back to the full resolve"
+                );
+                None
+            }
+        }
     });
     let res = if let Some(reused) = reused {
         reused
