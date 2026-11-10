@@ -220,6 +220,17 @@ pub struct LinkConfig {
     /// order — the rank-based subset orders content, not contracts.
     /// `None` (every clean link) packs exactly as before, bit-for-bit.
     pub symbol_order: Option<crate::order::SymbolOrder>,
+    /// M15 — the image base: the `__PAGEZERO` vmsize an executable link
+    /// plans with (the constant-delta base `vmaddr = fileoff + vmsize`;
+    /// see [`crate::pagezero`]). The default
+    /// ([`PageZero::default_image`](crate::pagezero::PageZero::default_image))
+    /// is the 4 GiB Mach-O arm64 constant every pre-M15 link planned
+    /// with — byte-identical — and a `-pagezero_size` override names a
+    /// different one. The fixup planner, the export trie and the
+    /// verifier's segment contract all read the same value; dylibs,
+    /// bundles and relocatable outputs carry no `__PAGEZERO`
+    /// ([`PageZero::base_for`](crate::pagezero::PageZero::base_for)).
+    pub pagezero: crate::pagezero::PageZero,
 }
 
 impl Default for LinkConfig {
@@ -256,6 +267,7 @@ impl Default for LinkConfig {
             resolve_reuse: None,
             chain_word_format: crate::fixups::FixupPointerFormat::Offset64,
             symbol_order: None,
+            pagezero: crate::pagezero::PageZero::default(),
         }
     }
 }
@@ -953,8 +965,10 @@ pub fn layout(
     fold: &crate::icf::FoldPlan,
 ) -> Result<Layout, LinkError> {
     // Constant-delta base: `__PAGEZERO` vmsize for executables, 0 for
-    // dylibs/bundles (M3). Every address math derives from this.
-    let image_base = cfg.filetype.image_base();
+    // dylibs/bundles (M3). Every address math derives from this — the
+    // M15 seam names the decision (`-pagezero_size`), the default is
+    // the pre-seam constant.
+    let image_base = cfg.pagezero.base_for(cfg.filetype);
     // ---- bucketing ---------------------------------------------------------
     let (mut buckets, mut bucket_of, fixup_slot_count) = bucket_inputs(objects, res)?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
@@ -1173,7 +1187,7 @@ pub fn layout(
         .segments
         .iter()
         .find(|s| s.name == "__TEXT")
-        .map_or(PAGEZERO_SIZE_64, |s| s.vmaddr);
+        .map_or(image_base, |s| s.vmaddr);
     let mh_header_sect = state
         .sections
         .iter()
@@ -2086,9 +2100,10 @@ fn place(
     }
 
     // ---- segment packing (§8) ----------------------------------------------
-    // Constant-delta base: 0x1_0000_0000 for executables (after __PAGEZERO),
-    // 0 for dylibs/bundles (M3: `__TEXT.vmaddr == fileoff`, no __PAGEZERO).
-    let base = cfg.filetype.image_base();
+    // Constant-delta base: the configured `__PAGEZERO` vmsize for
+    // executables (M15; the default is the 4 GiB constant), 0 for
+    // dylibs/bundles (M3: `__TEXT.vmaddr == fileoff`, no __PAGEZERO).
+    let base = cfg.pagezero.base_for(cfg.filetype);
     let mut segments: Vec<SegmentPlan> = Vec::new();
     if base > 0 {
         segments.push(SegmentPlan {
