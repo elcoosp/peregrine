@@ -10,7 +10,10 @@ publish = false
 
 [dependencies]
 pgr-format = { workspace = true }
-pgr-core = { path = "../pgr-core" }
+# The workspace dependency table is the single source for inter-crate
+# edges (every other member rides it); this crate's inline `path` was
+# the one escape, healed as chore(deps).
+pgr-core = { workspace = true }
 pgr-verify = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
