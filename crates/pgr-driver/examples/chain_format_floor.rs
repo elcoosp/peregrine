@@ -75,10 +75,7 @@ fn libsystem_tbd() -> &'static str {
 fn parse_args(dir: &std::path::Path, extra: &[&str]) -> Result<Options, opts::OptsError> {
     let obj = dir.join("printf_main.o");
     let tbd = dir.join("libSystem.tbd");
-    let mut argv: Vec<OsString> = vec![
-        "-o".into(),
-        dir.join("out").display().to_string().into(),
-    ];
+    let mut argv: Vec<OsString> = vec!["-o".into(), dir.join("out").display().to_string().into()];
     argv.extend(extra.iter().map(OsString::from));
     argv.push(obj.display().to_string().into());
     argv.push(tbd.display().to_string().into());
@@ -102,7 +99,10 @@ fn link_and_verify(opts: &Options, what: &str) {
         .filter(|i| i.severity == Severity::Error)
         .collect();
     assert!(errors.is_empty(), "{what} must verify strict: {errors:?}");
-    println!("  strict-verified {what} ({} issues, all clean)", report.issues.len());
+    println!(
+        "  strict-verified {what} ({} issues, all clean)",
+        report.issues.len()
+    );
 }
 
 fn main() {
@@ -177,7 +177,9 @@ fn main() {
     opts.config.ident = "peregrine-chain-format-floor".into();
     link_and_verify(&opts, "the arm64e link");
 
-    println!("\nThe floor flips the encoding, never the fixups — and an explicitly \
+    println!(
+        "\nThe floor flips the encoding, never the fixups — and an explicitly \
               named family that no image will carry is a refusal, not a silently \
-              dropped knob.");
+              dropped knob."
+    );
 }
