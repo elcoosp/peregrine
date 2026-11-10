@@ -64,9 +64,13 @@ fn bench_floor(c: &mut Criterion) {
     let mut group = c.benchmark_group("verify_platform_floor");
     let below = chained_exec(PLATFORM_IOS, 0x000E_0000, 0x0010_0000);
     let at = chained_exec(PLATFORM_MACOS, 0x000C_0000, 0x000E_0400);
-    group.bench_with_input(BenchmarkId::new("verify", "below_floor"), &below, |b, bytes| {
-        b.iter(|| verify(bytes, &strict()));
-    });
+    group.bench_with_input(
+        BenchmarkId::new("verify", "below_floor"),
+        &below,
+        |b, bytes| {
+            b.iter(|| verify(bytes, &strict()));
+        },
+    );
     group.bench_with_input(BenchmarkId::new("verify", "at_floor"), &at, |b, bytes| {
         b.iter(|| verify(bytes, &strict()));
     });
