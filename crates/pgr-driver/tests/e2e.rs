@@ -1537,7 +1537,7 @@ fn m3_export_filters_shape_trie_and_symtab() {
     // (N_PEXT) in the symtab.
     let dir = unique_dir("m3unexported");
     let (image, _) = link_foo_dylib_in(&dir, |o| {
-        o.config.unexported = vec![b"_foo_value".to_vec()];
+        o.config.unexported = vec![pgr_core::SymbolPattern::exact(b"_foo_value")];
     });
     let trie = find_trie(&image);
     let exports =
@@ -1561,7 +1561,10 @@ fn m3_export_filters_shape_trie_and_symtab() {
     // symbol) exports.
     let dir2 = unique_dir("m3exported");
     let (image2, _) = link_foo_dylib_in(&dir2, |o| {
-        o.config.exported_only = Some(vec![b"_foo_add".to_vec(), b"__mh_execute_header".to_vec()]);
+        o.config.exported_only = Some(vec![
+            pgr_core::SymbolPattern::exact(b"_foo_add"),
+            pgr_core::SymbolPattern::exact(b"__mh_execute_header"),
+        ]);
     });
     let trie2 = find_trie(&image2);
     let exports2 =
