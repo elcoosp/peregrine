@@ -49,7 +49,9 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | `-bundle` | same |
 | `-r` (relocatable) | same (`MH_OBJECT` output: sections merged, relocation entries preserved and re-pointed at the output symbol table, undefineds stay open — M10) |
 | `-reexport_library <path>` | same (`LC_REEXPORT_DYLIB` + trie REEXPORT nodes) |
-| `-exported_symbols_list` / `-unexported_symbols_list` | same (exact-name subset; globs are roadmap) |
+| `-weak_framework <name>` / `-lazy_framework <name>` | same (`LC_LOAD_WEAK_DYLIB` with weak binds / `LC_LAZY_LOAD_DYLIB`; M14) |
+| `-lazy_library <path>` | same (`LC_LAZY_LOAD_DYLIB`; the command rides the two-level ordinal space like a plain load — M14) |
+| `-exported_symbols_list` / `-unexported_symbols_list` | same (`*` globs supported — each star matches any, possibly empty, byte run; M14) |
 | `-mark_dead_strippable_dylib` | same |
 | `-dead_strip` / `-no_dead_strip` | same (mark-sweep over symbol-boundary atoms) |
 | `-icf=safe` / `-icf=all` / `-no_icf` | same (default `none`) |
@@ -89,9 +91,10 @@ tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 
 A linker that silently drops a flag it does not implement is worse than one
 that says so. These are rejected with the roadmap entry in the message:
-`-dylinker`, `-weak_framework`, `-lazy_framework`, `-lazy_library`, `-U`,
-`-pagezero_size`, `-sub_library`, `-sub_umbrella`. (`-order_file` left this
-list when its rank-based subset shipped at M11, alongside `-map`.)
+`-dylinker`, `-U`, `-pagezero_size`, `-sub_library`, `-sub_umbrella`.
+(`-order_file` left this list when its rank-based subset shipped at M11,
+alongside `-map`; the weak/lazy dylib family — `-weak_framework`,
+`-lazy_framework`, `-lazy_library` — left it at M14.)
 
 ## Peregrine-specific: the Stage A link cache
 
