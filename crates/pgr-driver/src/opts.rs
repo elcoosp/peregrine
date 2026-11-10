@@ -52,6 +52,9 @@ pub struct Options {
     pub force_load: Vec<String>,
     /// Indices into `inputs` loaded weakly (`-weak_library`).
     pub weak_library_inputs: Vec<usize>,
+    /// Indices into `inputs` loaded lazily (`-lazy_library`, M14:
+    /// `LC_LAZY_LOAD_DYLIB`).
+    pub lazy_library_inputs: Vec<usize>,
     /// Indices into `inputs` loaded as `LC_REEXPORT_DYLIB`
     /// (`-reexport_library`, M3).
     pub reexport_library_inputs: Vec<usize>,
@@ -68,6 +71,12 @@ pub struct Options {
     pub filelists: Vec<(String, Option<String>)>,
     /// M5 `-framework <name>` (searched via `-F` dirs).
     pub frameworks: Vec<String>,
+    /// M14 `-weak_framework <name>` (repeatable): the framework dylib
+    /// loads weakly (`LC_LOAD_WEAK_DYLIB`) and every bind to it is weak.
+    pub weak_frameworks: Vec<String>,
+    /// M14 `-lazy_framework <name>` (repeatable): the framework dylib
+    /// loads as `LC_LAZY_LOAD_DYLIB` (dyld's delay-load surface).
+    pub lazy_frameworks: Vec<String>,
     /// M5 `-F <dir>`: framework search directories.
     pub framework_dirs: Vec<String>,
     /// M5 `-sectcreate <seg> <sect> <file>`: section contents from a file.
@@ -139,6 +148,7 @@ impl Default for Options {
             libs: Vec::new(),
             force_load: Vec::new(),
             weak_library_inputs: Vec::new(),
+            lazy_library_inputs: Vec::new(),
             reexport_library_inputs: Vec::new(),
             exported_list_path: None,
             unexported_list_path: None,
@@ -146,6 +156,8 @@ impl Default for Options {
             force_load_archives: Vec::new(),
             filelists: Vec::new(),
             frameworks: Vec::new(),
+            weak_frameworks: Vec::new(),
+            lazy_frameworks: Vec::new(),
             framework_dirs: Vec::new(),
             sectcreate: Vec::new(),
             cache_dir: None,
@@ -283,17 +295,11 @@ const NOOP_FLAGS: [&str; 8] = [
 ];
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
-const LATER_FLAGS: [(&str, &str); 9] = [
+/// M14 released the weak/lazy dylib family (`-weak_framework`,
+/// `-lazy_framework`, `-lazy_library`) — the umbrella re-exports, `ObjC`
+/// semantics and the rest stay here with their roadmap entry.
+const LATER_FLAGS: [(&str, &str); 6] = [
     ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
-    (
-        "-weak_framework",
-        "weak/lazy framework loading is a later milestone",
-    ),
-    (
-        "-lazy_framework",
-        "weak/lazy framework loading is a later milestone",
-    ),
-    ("-lazy_library", "later milestone"),
     ("-U", "later milestone (make-undefined)"),
     ("-pagezero_size", "later milestone"),
     (
@@ -667,6 +673,26 @@ fn apply_flag(
             let v = next_value(args, i, arg)?;
             opts.inputs.push(v);
             opts.weak_library_inputs.push(opts.inputs.len() - 1);
+        }
+        "-lazy_library" => {
+            // M14: the whole dylib delays (LC_LAZY_LOAD_DYLIB) — dyld
+            // loads it when a bind from it first resolves; under chained
+            // fixups the command rides the two-level ordinal space like
+            // a plain load.
+            let v = next_value(args, i, arg)?;
+            opts.inputs.push(v);
+            opts.lazy_library_inputs.push(opts.inputs.len() - 1);
+        }
+        "-weak_framework" => {
+            // M14: the framework dylib loads weakly (the -framework
+            // search with the weak-load kind).
+            let v = next_value(args, i, arg)?;
+            opts.weak_frameworks.push(v);
+        }
+        "-lazy_framework" => {
+            // M14: the framework dylib delays (LC_LAZY_LOAD_DYLIB).
+            let v = next_value(args, i, arg)?;
+            opts.lazy_frameworks.push(v);
         }
         "-dylib" => match opts.config.filetype {
             // A repeated kind is idempotent; only a kind *switch* is a
@@ -1324,8 +1350,13 @@ mod tests {
         // tests/m11_order_file.rs); the surface stores its path.
         let o = parse(&args(&["-o", "out", "-order_file", "f.txt", "a.o"])).unwrap();
         assert_eq!(o.order_file.as_deref(), Some("f.txt"));
-        let err = parse(&args(&["-o", "out", "-weak_framework", "Foo", "a.o"])).unwrap_err();
-        assert!(err.to_string().contains("framework"), "{err}");
+        // M14: the weak/lazy dylib family left the list too (the
+        // acceptance is gated in tests/m14_lazy_dylibs.rs) — the
+        // umbrella/ObjC refusals remain the actionable surface.
+        let err = parse(&args(&["-o", "out", "-sub_umbrella", "Foo", "a.o"])).unwrap_err();
+        assert!(err.to_string().contains("umbrella"), "{err}");
+        let err = parse(&args(&["-o", "out", "-ObjC", "a.o"])).unwrap_err();
+        assert!(err.to_string().contains("ObjC"), "{err}");
         let err = parse(&args(&["-o", "out", "--wat", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"), "{err}");
     }
@@ -1414,6 +1445,39 @@ mod tests {
         assert_eq!(o.config.compatibility_version, 1 << 16);
         assert!(o.config.dead_strippable);
         assert_eq!(o.exported_list_path.as_deref(), Some("/tmp/exports.txt"));
+    }
+
+    #[test]
+    fn m14_lazy_weak_flags_shape_the_config() {
+        // M14: the released weak/lazy family parses repeatable; the
+        // path forms record their input indices for the driver's
+        // per-input kind marking.
+        let o = parse(&args(&[
+            "-o",
+            "hello",
+            "a.o",
+            "-lazy_library",
+            "libgreet.tbd",
+            "-weak_library",
+            "libweak.tbd",
+            "-weak_framework",
+            "Foundation",
+            "-weak_framework",
+            "CoreFoundation",
+            "-lazy_framework",
+            "SwiftUI",
+            "b.o",
+        ]))
+        .unwrap();
+        // lazy_library/weak_library push the path as an input and
+        // record its index.
+        assert_eq!(o.inputs[1], "libgreet.tbd");
+        assert_eq!(o.inputs[2], "libweak.tbd");
+        assert_eq!(o.lazy_library_inputs, [1]);
+        assert_eq!(o.weak_library_inputs, [2]);
+        assert_eq!(o.weak_frameworks, ["Foundation", "CoreFoundation"]);
+        assert_eq!(o.lazy_frameworks, ["SwiftUI"]);
+        assert_eq!(o.inputs.len(), 4, "a.o, the two libraries, b.o");
     }
 
     #[test]
