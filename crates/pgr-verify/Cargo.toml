@@ -43,5 +43,11 @@ harness = false
 name = "arm64e"
 harness = false
 
+# The M12 selective-surface bench: the whole-image pass beside each
+# single check family on one at-floor chained-fixup executable.
+[[bench]]
+name = "checks"
+harness = false
+
 [lints]
 workspace = true
