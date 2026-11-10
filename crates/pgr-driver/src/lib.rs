@@ -468,8 +468,12 @@ fn link_to_image_recorded(
             Ok(img) => {
                 let record = img.record.and_then(|bytes| {
                     let decoded = pgr_emit::incremental::LinkRecord::decode(&bytes);
-                    if decoded.is_none() && std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
-                        eprintln!("pgr: the daemon's record did not decode; dropping it");
+                    if decoded.is_none() {
+                        // The workspace's observability convention: a span,
+                        // not a bare eprintln — the debug envs install the
+                        // subscriber (main.rs); without one the event is
+                        // inert, and library consumers keep their own.
+                        tracing::warn!("the daemon's record did not decode; dropping it");
                     }
                     decoded
                 });
@@ -483,9 +487,10 @@ fn link_to_image_recorded(
                 ));
             }
             Err(e) => {
-                if std::env::var_os("PGR_RESIDENT_DEBUG").is_some() {
-                    eprintln!("pgr: resident fallback: {e}");
-                }
+                // The span, not the eprintln (the workspace convention):
+                // the debug envs install the subscriber, and library
+                // consumers keep their own.
+                tracing::warn!(error = %e, "the resident cycle fell back to the one-shot link");
             }
         }
     }
