@@ -47,6 +47,7 @@ pub mod link;
 pub mod map;
 pub mod object;
 pub mod order;
+pub mod pagezero;
 pub mod platform;
 pub mod pool;
 pub mod propagate;
@@ -75,6 +76,7 @@ pub use link::{
     check_load_symbols, link, link_cached, link_from_objects, link_reloc, link_with,
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
+pub use pagezero::PageZero;
 pub use platform::FixupEncoding;
 pub use propagate::{PropagationScope, SectionDigest};
 pub use resolve::{Def, Rank, Resolution};
