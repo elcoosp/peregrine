@@ -29,10 +29,10 @@ use pgr_format::consts::{
     DYLD_CHAINED_PTR_START_NONE, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE,
     LC_DYLD_CHAINED_FIXUPS, LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB,
     LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SYMTAB, LC_UUID, MH_DYLDLINK,
-    MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT, N_SECT, N_UNDF,
-    N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS,
-    SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ,
-    VM_PROT_WRITE,
+    MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL,
+    N_EXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS,
+    S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE,
+    VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::fixups::{
     Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
@@ -695,7 +695,9 @@ impl ImageBuilder {
         let flags = if exec {
             MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE
         } else {
-            MH_DYLDLINK | MH_TWOLEVEL
+            // The minimal builder never re-exports: set the marker dyld
+            // and the verifier expect on a re-export-free dylib.
+            MH_DYLDLINK | MH_TWOLEVEL | MH_NO_REEXPORTED_DYLIBS
         };
         buf[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
         buf[4..8].copy_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
@@ -1257,34 +1259,90 @@ fn global_section_base(segments: &[SegmentSpec], seg_index: usize) -> usize {
     segments[..seg_index].iter().map(|s| s.sections.len()).sum()
 }
 
-/// Minimal valid export trie: executables export `_mh_execute_header` at 0;
-/// dylibs export their first defined symbol at its address.
+/// Minimal valid export trie: executables export `_mh_execute_header` at
+/// 0; dylibs export every defined symbol at its section address. The node
+/// shape is the reader's order — a leaf is
+/// `[terminal_size uleb][flags uleb][address uleb][child_count = 0]` (the
+/// flags byte rides *in front of* the address), the root is a
+/// non-terminal `[0][child_count][edges]` whose edges carry the exported
+/// name and the leaf's absolute payload offset. A nameless terminal root
+/// exported an empty name and misread its own flags byte — every pair
+/// gate that walks the trie saw an empty surface.
 fn build_minimal_trie(
     exec: bool,
     symbols: &[SymbolSpec],
     sect_infos: &[SectionInfo],
 ) -> Result<Vec<u8>, BuildError> {
-    let addr = if exec {
-        0
+    let leaves: Vec<(&str, u64)> = if exec {
+        vec![("_mh_execute_header", 0)]
     } else {
-        let def = symbols.iter().find_map(|s| match s {
-            SymbolSpec::Defined { section_index, .. } => Some(*section_index),
-            SymbolSpec::Undefined { .. } => None,
-        });
-        let idx = def.ok_or_else(|| BuildError("dylib fixture needs a defined symbol".into()))?;
-        sect_infos
-            .get(idx)
-            .map(|s| s.addr)
-            .ok_or_else(|| BuildError("export section index out of range".into()))?
+        let mut out: Vec<(&str, u64)> = Vec::new();
+        for s in symbols {
+            if let SymbolSpec::Defined {
+                name,
+                section_index,
+                ..
+            } = s
+            {
+                let addr = sect_infos
+                    .get(*section_index)
+                    .map(|i| i.addr)
+                    .ok_or_else(|| BuildError("export section index out of range".into()))?;
+                out.push((name.as_str(), addr));
+            }
+        }
+        if out.is_empty() {
+            return Err(BuildError("dylib fixture needs a defined symbol".into()));
+        }
+        out.sort_unstable(); // deterministic edge order
+        out
     };
-    // Leaf node: [terminal_size uleb][addr uleb][flags uleb][children = 0]
-    let addr_uleb = uleb(addr);
-    let terminal = addr_uleb.len() + 1;
-    let mut out = Vec::new();
-    out.extend_from_slice(&uleb(terminal as u64));
-    out.extend_from_slice(&addr_uleb);
-    out.push(0); // flags
-    out.push(0); // children count
+    // Two-pass layout: the edge-table size depends on the leaf offsets,
+    // which depend on the edge-table size. Converges in two rounds.
+    let mut edge_widths: Vec<usize> = leaves.iter().map(|_| 1).collect();
+    let (leaf_offsets, root_len) = loop {
+        let mut offsets = Vec::with_capacity(leaves.len());
+        let mut at = 2usize; // root terminal-size byte + child-count byte
+        for ((name, _), w) in leaves.iter().zip(&edge_widths) {
+            at += name.len() + 1 + w;
+        }
+        let root_len = at;
+        let mut widths = Vec::with_capacity(leaves.len());
+        let mut stable = true;
+        for (i, (_, addr)) in leaves.iter().enumerate() {
+            let off = root_len
+                + leaves[..i]
+                    .iter()
+                    .map(|(n, _)| n.len() + 1 + uleb(*addr).len())
+                    .sum::<usize>();
+            offsets.push(off);
+            let w = uleb(off as u64).len();
+            widths.push(w);
+            stable &= w == edge_widths[i];
+        }
+        edge_widths = widths;
+        if stable {
+            break (offsets, root_len);
+        }
+    };
+    let mut out = Vec::with_capacity(root_len);
+    out.push(0); // root: non-terminal
+    let child_count = leaves.len();
+    out.push(child_count as u8);
+    for ((name, _), off) in leaves.iter().zip(&leaf_offsets) {
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        out.extend_from_slice(&uleb(*off as u64));
+    }
+    debug_assert_eq!(out.len(), root_len);
+    for (_, addr) in &leaves {
+        let addr_uleb = uleb(*addr);
+        let terminal = 1 + addr_uleb.len(); // flags byte + address
+        out.extend_from_slice(&uleb(terminal as u64));
+        out.push(0); // flags: regular
+        out.extend_from_slice(&addr_uleb);
+        out.push(0); // no children
+    }
     Ok(out)
 }
 
