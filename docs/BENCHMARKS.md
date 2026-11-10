@@ -1064,3 +1064,23 @@ branch per word — and any divergence is the finding.
 ```sh
 cargo bench -p pgr-core --bench arm64e
 ```
+
+## Recorded baseline (M10 rung 4, slice 4 — the pair gate walks the family)
+
+Slice 4 makes the verifier's M3 pair gate family-blind and the bench
+grows the matching group (`pgr-verify/verify_arm64e/pair_replay/
+<arm64e_auth|offset64_control>`) — the M3 two-level bind replay over an
+arm64e executable + dylib pair (one authenticated `__got` bind) and a
+64_OFFSET control pair born through the same builder knobs, so the
+family-blind walk keeps an honest same-shape baseline next to it.
+
+**No numbers are recorded yet** (the group lands with this slice; the
+next gate run fills this section like the slice-1 section above). The
+honest expectation: `pair_replay/arm64e_auth` sits inside the
+`offset64_control` noise band — the replay is the same chain walk with
+a different word reader and a doubled stride unit, a handful of slots
+per pair — and any divergence is the finding.
+
+```sh
+cargo bench -p pgr-verify --bench arm64e
+```
