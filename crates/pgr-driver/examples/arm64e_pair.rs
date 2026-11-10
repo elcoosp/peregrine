@@ -2,14 +2,14 @@
 //! arm64e executable and the dylib it binds against, built with the
 //! fixture builder and walked by `pgr_verify::pair::verify_dylib_pair` —
 //! the M3 two-level-ordinal replay that since slice 1 skipped every
-//! non-64_OFFSET segment, and since slice 4 walks both chain word
+//! non-`64_OFFSET` segment, and since slice 4 walks both chain word
 //! families. Two arm64e pairs: the honest one (the dylib exports
 //! `_greet`, the executable's **authenticated** bind names it) verifies
 //! clean, and the broken one (the dylib exports only `_other`) is
 //! refused — the two-level bind finding rendered as a miette diagnostic
 //! with help text, the fix and not just the verdict, the same convention
 //! the planner refusals and the below-floor advisory render with. The
-//! 64_OFFSET control pair rides beside them: same contracts, 4-byte
+//! `64_OFFSET` control pair rides beside them: same contracts, 4-byte
 //! strides.
 //!
 //! Set `PGR_TRACING=1` to install a subscriber and watch the pair
@@ -83,7 +83,7 @@ fn arm64e_exec() -> Vec<u8> {
     b.build().expect("the arm64e pair fixture builds").bytes
 }
 
-/// A 64_OFFSET control executable: the same bind, plain word shape.
+/// A `64_OFFSET` control executable: the same bind, plain word shape.
 fn offset64_exec() -> Vec<u8> {
     let mut b = ImageBuilder::executable("offset64-pair-demo");
     b.add_segment(text_segment(96, 0x5A));
@@ -183,8 +183,7 @@ fn main() {
 
     // The 64_OFFSET control: the plain bind is refused the same way (it
     // always was), the honest control pair stays clean.
-    let control_refused =
-        verify_dylib_pair(&control_exec, &greet_dylib(false), &opts);
+    let control_refused = verify_dylib_pair(&control_exec, &greet_dylib(false), &opts);
     let control_honest = verify_dylib_pair(&control_exec, &greet_dylib(true), &opts);
     println!("64_OFFSET control:");
     println!(
