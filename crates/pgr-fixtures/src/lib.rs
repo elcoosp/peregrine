@@ -8,8 +8,10 @@
 //! * segments 16 KiB aligned, `vmaddr = fileoff + delta` with
 //!   `delta = 0x1_0000_0000` for executables and `0` for dylibs,
 //! * `__PAGEZERO` = 4 GiB, `__TEXT` at `0x1_0000_0000` (executables),
-//! * chained fixups (`DYLD_CHAINED_PTR_64_OFFSET`) with the mold-style
-//!   payload: header | starts-in-image | imports | name blob,
+//! * chained fixups (`DYLD_CHAINED_PTR_64_OFFSET` by default, the
+//!   `DYLD_CHAINED_PTR_ARM64E` family under the pointer-format knob, M10
+//!   rung 4) with the mold-style payload: header | starts-in-image |
+//!   imports | name blob,
 //! * ad-hoc code signature: SHA-256 over 4 KiB pages, big-endian
 //!   `CodeDirectory` v0x20400, `SuperBlob` last in the file,
 //! * UUID derived from page hashes (two-pass: hashes with the UUID zeroed
@@ -23,15 +25,19 @@ use pgr_format::consts::{
     CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, CS_ADHOC, CS_CODEDIRECTORY_VERSION_EXECSEG,
     CS_EXECSEG_MAIN_BINARY, CS_HASHTYPE_SHA256, CS_PAGE_SIZE_LOG2, CS_SHA256_LEN,
     CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE, CSSLOT_CODEDIRECTORY, DYLD_CHAINED_IMPORT,
-    DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_START_NONE,
-    INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE, LC_DYLD_CHAINED_FIXUPS,
-    LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB,
-    LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SYMTAB, LC_UUID, MH_DYLDLINK, MH_DYLIB,
-    MH_EXECUTE, MH_MAGIC_64, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT, N_SECT, N_UNDF, N_WEAK_REF,
-    PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO,
-    SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
+    DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
+    DYLD_CHAINED_PTR_START_NONE, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE,
+    LC_DYLD_CHAINED_FIXUPS, LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB,
+    LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SYMTAB, LC_UUID, MH_DYLDLINK,
+    MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT, N_SECT, N_UNDF,
+    N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS,
+    SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ,
+    VM_PROT_WRITE,
 };
-use pgr_format::fixups::{Import, encode_bind_word, encode_rebase_word};
+use pgr_format::fixups::{
+    Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
+    encode_arm64e_rebase_word, encode_bind_word, encode_rebase_word,
+};
 use sha2::{Digest, Sha256};
 
 /// The image type to build.
@@ -126,6 +132,30 @@ pub enum SlotKind {
         /// Inline (unsigned 8-bit) addend carried in the bind word.
         addend: u8,
     },
+    /// Authenticated rebase (`DYLD_CHAINED_PTR_ARM64E` only): the 32-bit
+    /// runtime offset plus the pointer-authentication triple.
+    AuthRebase {
+        /// VM offset from the image base (the word's 32-bit field).
+        offset: u64,
+        /// Pointer-auth diversity value.
+        diversity: u16,
+        /// Address-diversity bit.
+        addr_div: bool,
+        /// PAC key (0 IA, 1 IB, 2 DA, 3 DB).
+        key: u8,
+    },
+    /// Authenticated bind (`DYLD_CHAINED_PTR_ARM64E` only): the import
+    /// ordinal plus the pointer-authentication triple.
+    AuthBind {
+        /// Index into the builder's symbol list (an `Undefined` symbol).
+        sym_index: usize,
+        /// Pointer-auth diversity value.
+        diversity: u16,
+        /// Address-diversity bit.
+        addr_div: bool,
+        /// PAC key (0 IA, 1 IB, 2 DA, 3 DB).
+        key: u8,
+    },
 }
 
 /// Chained-fixups import table format to emit.
@@ -135,6 +165,29 @@ pub enum ImportsFormat {
     Plain,
     /// `DYLD_CHAINED_IMPORT_ADDEND64` (64-bit table addends, inline 0).
     Addend64,
+}
+
+/// The chain-word pointer format a fixture's fixup payload carries (M10
+/// rung 4, slice 1: the arm64e read side).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerFormatKind {
+    /// `DYLD_CHAINED_PTR_64_OFFSET` — the historical default (4-byte
+    /// strides, image-offset rebase targets, no auth words).
+    Offset64,
+    /// `DYLD_CHAINED_PTR_ARM64E` — 8-byte strides, VM-address unauth
+    /// rebase targets, 32-bit auth runtime offsets, authenticated words.
+    Arm64e,
+}
+
+impl PointerFormatKind {
+    /// The `dyld_chained_starts_in_segment.pointer_format` value.
+    #[must_use]
+    pub const fn value(self) -> u16 {
+        match self {
+            Self::Offset64 => DYLD_CHAINED_PTR_64_OFFSET,
+            Self::Arm64e => DYLD_CHAINED_PTR_ARM64E,
+        }
+    }
 }
 
 /// Anything the builder refuses to do.
@@ -216,6 +269,7 @@ pub struct ImageBuilder {
     imports_format: ImportsFormat,
     keep_relocs: bool,
     build_version: Option<(u32, u32, u32)>,
+    pointer_format: PointerFormatKind,
 }
 
 impl ImageBuilder {
@@ -235,6 +289,7 @@ impl ImageBuilder {
             imports_format: ImportsFormat::Plain,
             keep_relocs: false,
             build_version: None,
+            pointer_format: PointerFormatKind::Offset64,
         }
     }
 
@@ -253,6 +308,7 @@ impl ImageBuilder {
             imports_format: ImportsFormat::Plain,
             keep_relocs: false,
             build_version: None,
+            pointer_format: PointerFormatKind::Offset64,
         }
     }
 
@@ -307,6 +363,15 @@ impl ImageBuilder {
         self.build_version = Some((platform, minos, sdk));
     }
 
+    /// Selects the chain-word pointer format (default: `Offset64`). The
+    /// M10 rung-4 knob: `Arm64e` encodes the `DYLD_CHAINED_PTR_ARM64E`
+    /// family — unauth rebase words carry VM-address targets
+    /// (`target + delta`), auth slots ride [`SlotKind::AuthRebase`] and
+    /// [`SlotKind::AuthBind`], and strides count 8-byte units.
+    pub fn set_pointer_format(&mut self, fmt: PointerFormatKind) {
+        self.pointer_format = fmt;
+    }
+
     fn prot(seg_name: &str) -> (u32, u32) {
         match seg_name {
             "__TEXT" => (
@@ -355,6 +420,23 @@ impl ImageBuilder {
                 }
             }
         }
+        // Auth slots are an arm64e-family shape: under the 64_OFFSET
+        // default there is no encoding for them, and the builder refuses
+        // instead of emitting a word dyld cannot read.
+        if !self.got.is_empty() {
+            let has_auth_slots = self.got.iter().any(|slot| {
+                matches!(
+                    slot,
+                    SlotKind::AuthRebase { .. } | SlotKind::AuthBind { .. }
+                )
+            });
+            if has_auth_slots && self.pointer_format == PointerFormatKind::Offset64 {
+                return Err(BuildError(
+                    "auth slots require the arm64e pointer format".into(),
+                ));
+            }
+        }
+
         let data_const_index = self.segments.iter().position(|s| s.name == "__DATA_CONST");
         if !self.got.is_empty() && data_const_index.is_none() {
             return Err(BuildError("set_got requires a __DATA_CONST segment".into()));
@@ -552,6 +634,8 @@ impl ImageBuilder {
                 imports: &mut imports,
                 names: &import_names,
                 fmt: self.imports_format,
+                pf: self.pointer_format,
+                delta,
             })?
         };
 
@@ -907,6 +991,12 @@ struct FixupContext<'a> {
     names: &'a [String],
     /// Import entry format.
     fmt: ImportsFormat,
+    /// Chain-word pointer format.
+    pf: PointerFormatKind,
+    /// The image-base delta (`vmaddr = fileoff + delta`): the unauth
+    /// arm64e rebase target is a VM address, so the builder synthesizes
+    /// `target + delta` into the word (dyld subtracts it walking back).
+    delta: u64,
 }
 
 /// Builds the `LC_DYLD_CHAINED_FIXUPS` payload (mold layout) and the encoded
@@ -923,6 +1013,8 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
         imports,
         names,
         fmt,
+        pf,
+        delta,
     } = ctx;
     // Import name offsets inside the payload's name blob (leading NUL).
     let mut name_off = 1u32; // after the leading NUL
@@ -954,14 +1046,24 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
         sorted.sort_by_key(|&i| slot_fileoffs[i]);
         for (j, &si) in sorted.iter().enumerate() {
             let word = match &got[si] {
-                SlotKind::Rebase { target } => {
-                    let high8 = (target >> 56) as u8;
-                    encode_rebase_word(
-                        target & 0x00ff_ffff_ffff_ffff,
-                        high8,
-                        next_for(&sorted, j, slot_fileoffs),
-                    )?
-                }
+                SlotKind::Rebase { target } => match pf {
+                    PointerFormatKind::Offset64 => {
+                        let high8 = (target >> 56) as u8;
+                        encode_rebase_word(
+                            target & 0x00ff_ffff_ffff_ffff,
+                            high8,
+                            next_strides(&sorted, j, slot_fileoffs, 4),
+                        )?
+                    }
+                    // Unauth arm64e rebase targets are VM addresses: the
+                    // word carries `target + delta` (dyld subtracts the
+                    // preferred load address walking back).
+                    PointerFormatKind::Arm64e => encode_arm64e_rebase_word(
+                        target + delta,
+                        0,
+                        next_strides(&sorted, j, slot_fileoffs, 8),
+                    )?,
+                },
                 SlotKind::Bind { sym_index, addend } => {
                     let name = match symbols.get(*sym_index) {
                         Some(SymbolSpec::Undefined { name, .. }) => name.as_str(),
@@ -975,7 +1077,59 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
                         ImportsFormat::Plain => *addend,
                         ImportsFormat::Addend64 => 0,
                     };
-                    encode_bind_word(ordinal as u32, inline, next_for(&sorted, j, slot_fileoffs))?
+                    match pf {
+                        PointerFormatKind::Offset64 => encode_bind_word(
+                            ordinal as u32,
+                            inline,
+                            next_strides(&sorted, j, slot_fileoffs, 4),
+                        )?,
+                        PointerFormatKind::Arm64e => encode_arm64e_bind_word(
+                            ordinal as u32,
+                            i64::from(inline),
+                            next_strides(&sorted, j, slot_fileoffs, 8),
+                        )?,
+                    }
+                }
+                SlotKind::AuthRebase {
+                    offset,
+                    diversity,
+                    addr_div,
+                    key,
+                } => {
+                    if offset >> 32 != 0 {
+                        return Err(BuildError(format!(
+                            "auth rebase offset {offset:#x} exceeds the 32-bit runtime-offset field"
+                        )));
+                    }
+                    encode_arm64e_auth_rebase_word(
+                        *offset,
+                        *diversity,
+                        *addr_div,
+                        *key,
+                        next_strides(&sorted, j, slot_fileoffs, 8),
+                    )?
+                }
+                SlotKind::AuthBind {
+                    sym_index,
+                    diversity,
+                    addr_div,
+                    key,
+                } => {
+                    let name = match symbols.get(*sym_index) {
+                        Some(SymbolSpec::Undefined { name, .. }) => name.as_str(),
+                        _ => return Err(BuildError("bind without a name".into())),
+                    };
+                    let ordinal = names
+                        .iter()
+                        .position(|n| n == name)
+                        .ok_or_else(|| BuildError("bind name missing from import table".into()))?;
+                    encode_arm64e_auth_bind_word(
+                        ordinal as u32,
+                        *diversity,
+                        *addr_div,
+                        *key,
+                        next_strides(&sorted, j, slot_fileoffs, 8),
+                    )?
                 }
             };
             words[si] = word;
@@ -1024,7 +1178,7 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
     // starts_in_segment for the got segment
     push32(&mut b, 22 + u32::from(npages) * 2);
     push16(&mut b, page_size as u16);
-    push16(&mut b, DYLD_CHAINED_PTR_64_OFFSET);
+    push16(&mut b, pf.value());
     b.extend_from_slice(&got_seg_fileoff.to_le_bytes()); // segment_offset == fileoff
     push32(&mut b, 0); // max_valid_pointer
     push16(&mut b, npages);
@@ -1070,10 +1224,12 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
     Ok((b, words))
 }
 
-/// Strides to the next fixup in the same chain (0 terminates).
-fn next_for(sorted: &[usize], j: usize, slot_fileoffs: &[u64]) -> u32 {
+/// Strides to the next fixup in the same chain (0 terminates), counted in
+/// the pointer format's stride units (4-byte for the 64 family, 8-byte for
+/// arm64e).
+fn next_strides(sorted: &[usize], j: usize, slot_fileoffs: &[u64], stride: u64) -> u32 {
     match sorted.get(j + 1) {
-        Some(&next_i) => ((slot_fileoffs[next_i] - slot_fileoffs[sorted[j]]) / 4) as u32,
+        Some(&next_i) => ((slot_fileoffs[next_i] - slot_fileoffs[sorted[j]]) / stride) as u32,
         None => 0,
     }
 }
