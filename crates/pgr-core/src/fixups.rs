@@ -45,8 +45,8 @@ use pgr_format::consts::{
     DYLD_CHAINED_PTR_START_MULTI, DYLD_CHAINED_PTR_START_MULTI_MASK, DYLD_CHAINED_PTR_START_NONE,
 };
 use pgr_format::fixups::{
-    Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word,
-    encode_arm64e_bind_word, encode_arm64e_rebase_word, encode_bind_word, encode_rebase_word,
+    Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
+    encode_arm64e_rebase_word, encode_bind_word, encode_rebase_word,
 };
 
 /// `next` counts 4-byte units with 12 bits; only 0 ends a chain (TDD §7.4).
@@ -197,7 +197,7 @@ pub fn pack_page_strided(fx: &mut [PackingSlot], stride: u64, max_next: u32) -> 
             j += 1;
         }
         for k in i..j {
-            fx[k].next = (fx[k + 1].page_off - fx[k].page_off) as u32 / stride as u32;
+            fx[k].next = (fx[k + 1].page_off - fx[k].page_off) / stride as u32;
         }
         fx[j].next = 0; // terminate
         i = j + 1;
@@ -245,10 +245,11 @@ fn rebase_word_arm64e(target_vaddr: u64) -> Result<u64, LinkError> {
         });
     }
     let high8 = (target_vaddr >> 56) as u8;
-    encode_arm64e_rebase_word(target_vaddr & 0x7_FFFF_FFFF_FFFF, high8, 0)
-        .map_err(|e| LinkError::Internal {
+    encode_arm64e_rebase_word(target_vaddr & 0x7_FFFF_FFFF_FFFF, high8, 0).map_err(|e| {
+        LinkError::Internal {
             message: format!("arm64e rebase word encode: {e}"),
-        })
+        }
+    })
 }
 
 /// Encodes a bind chain word (bit 63 set): `ordinal | addend8 << 24 |
@@ -269,12 +270,14 @@ fn rebase_word_arm64e_auth(
     slot_vaddr: u64,
     policy: &FixupAuth,
 ) -> Result<u64, LinkError> {
-    let runtime_offset = target_vaddr.checked_sub(image_base).ok_or(LinkError::Layout {
-        message: format!(
-            "auth rebase target {target_vaddr:#x} sits below the image base \
+    let runtime_offset = target_vaddr
+        .checked_sub(image_base)
+        .ok_or(LinkError::Layout {
+            message: format!(
+                "auth rebase target {target_vaddr:#x} sits below the image base \
              {image_base:#x} (slot {slot_vaddr:#x})"
-        ),
-    })?;
+            ),
+        })?;
     let off32 = u32::try_from(runtime_offset).map_err(|_| LinkError::Layout {
         message: format!(
             "auth rebase target {runtime_offset:#x} exceeds the 32-bit runtime \
@@ -588,13 +591,13 @@ pub fn plan_fixups_with_format(
 /// the PAC triple, auth binds carry the ordinal with the PAC triple and
 /// move their whole addend into the import entry (the word has no
 /// addend field). An empty policy plans byte-identically to the slice-2
-/// planner; the 64_OFFSET family refuses a policy outright, as does an
+/// planner; the `64_OFFSET` family refuses a policy outright, as does an
 /// entry that names no slot or names one twice.
 ///
 /// # Errors
 /// [`LinkError::Layout`] on slots outside any segment, misaligned slots,
 /// targets the word fields cannot represent, an arm64e import table
-/// beyond the 16-bit ordinal, an auth policy under the 64_OFFSET family,
+/// beyond the 16-bit ordinal, an auth policy under the `64_OFFSET` family,
 /// an auth entry naming no slot or named twice, and auth rebase targets
 /// beyond the 32-bit runtime offset.
 pub fn plan_fixups_with_auth(
@@ -779,24 +782,22 @@ pub fn plan_fixups_with_auth(
                         match format {
                             FixupPointerFormat::Offset64 => bind_word(ordinal, inline)?,
                             FixupPointerFormat::Arm64e => match policy {
-                                Some(p) => {
-                                    encode_arm64e_auth_bind_word(
-                                        ordinal,
-                                        p.diversity,
-                                        p.addr_div,
-                                        p.key,
-                                        0,
-                                    )
-                                    .map_err(|e| LinkError::Internal {
+                                Some(p) => encode_arm64e_auth_bind_word(
+                                    ordinal,
+                                    p.diversity,
+                                    p.addr_div,
+                                    p.key,
+                                    0,
+                                )
+                                .map_err(|e| {
+                                    LinkError::Internal {
                                         message: format!("arm64e auth bind word encode: {e}"),
-                                    })?
-                                }
-                                None => {
-                                    encode_arm64e_bind_word(u64::from(ordinal), i64::from(inline), 0)
-                                        .map_err(|e| LinkError::Internal {
-                                            message: format!("arm64e bind word encode: {e}"),
-                                        })?
-                                }
+                                    }
+                                })?,
+                                None => encode_arm64e_bind_word(ordinal, i64::from(inline), 0)
+                                    .map_err(|e| LinkError::Internal {
+                                        message: format!("arm64e bind word encode: {e}"),
+                                    })?,
                             },
                         }
                     }
@@ -819,11 +820,8 @@ pub fn plan_fixups_with_auth(
                     continue;
                 }
                 let mut packed_words = page.clone();
-                let heads = pack_page_strided(
-                    &mut packed_words,
-                    format.stride_bytes(),
-                    format.max_next(),
-                );
+                let heads =
+                    pack_page_strided(&mut packed_words, format.stride_bytes(), format.max_next());
                 for slot in &packed_words {
                     let slot_vaddr = vmaddr + page_i as u64 * page_size + u64::from(slot.page_off);
                     seg.slot_words
