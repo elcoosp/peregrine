@@ -7,24 +7,44 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use pgr_verify::{Options, Severity};
+use pgr_verify::{CheckSet, Options, Severity, verify_with_checks};
 
 /// Program name.
 const PROGRAM: &str = "pgr-verify";
 
 fn main() -> ExitCode {
-    let args = std::env::args().skip(1);
+    let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut json = false;
     let mut strict = false;
     let mut quiet = false;
     let mut skip_hashes = false;
-    for arg in args {
-        match arg.as_str() {
+    let mut checks: Option<CheckSet> = None;
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i].as_str() {
             "--json" => json = true,
             "--strict" => strict = true,
             "--quiet" | "-q" => quiet = true,
             "--skip-hash-recompute" => skip_hashes = true,
+            "--list-checks" => {
+                print_checks();
+                return ExitCode::SUCCESS;
+            }
+            "--checks" => {
+                i += 1;
+                let Some(value) = argv.get(i) else {
+                    eprintln!("{PROGRAM}: --checks needs a comma-separated list (try --help)");
+                    return ExitCode::from(2);
+                };
+                match CheckSet::parse(value) {
+                    Ok(set) => checks = Some(set),
+                    Err(e) => {
+                        eprintln!("{PROGRAM}: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             "--help" | "-h" => {
                 print_help();
                 return ExitCode::SUCCESS;
@@ -35,6 +55,7 @@ fn main() -> ExitCode {
             }
             other => files.push(PathBuf::from(other)),
         }
+        i += 1;
     }
     if files.is_empty() {
         eprintln!("{PROGRAM}: no input files (try --help)");
@@ -45,6 +66,7 @@ fn main() -> ExitCode {
         strict_warnings: strict,
         skip_hash_recompute: skip_hashes,
     };
+    let checks = checks.unwrap_or_else(CheckSet::all);
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut any_bad = false;
@@ -59,7 +81,7 @@ fn main() -> ExitCode {
                 continue;
             }
         };
-        let report = pgr_verify::verify(&bytes, &opts);
+        let report = verify_with_checks(&bytes, &opts, &checks);
         if json {
             if let Err(e) = write_json(&mut out, file, &report) {
                 eprintln!("{PROGRAM}: {e}");
@@ -99,6 +121,13 @@ fn main() -> ExitCode {
 
 fn report_label(report: &pgr_verify::Report, opts: Options) -> &'static str {
     if report.is_ok(&opts) { "OK" } else { "FAILED" }
+}
+
+/// The selector surface, one line per family (the `--list-checks` view).
+fn print_checks() {
+    for unit in pgr_verify::image_checks() {
+        println!("{:<14} {}", unit.name(), unit.summary());
+    }
 }
 
 /// Minimal dependency-free JSON writer with proper string escaping.
@@ -167,7 +196,7 @@ fn print_help() {
     println!(
         "{PROGRAM} {} — Peregrine read-side Mach-O verifier (M0)\n\n\
          USAGE:\n    pgr-verify [OPTIONS] <mach-o-file>...\n\n\
-         OPTIONS:\n    --json                  Machine-readable report\n    --strict                Treat warnings as failures\n    --quiet, -q             Only set the exit code\n    --skip-hash-recompute   Skip SHA-256 page-hash verification\n    --help, -h              This help\n    --version, -V           Version\n\n\
+         OPTIONS:\n    --json                  Machine-readable report\n    --strict                Treat warnings as failures\n    --quiet, -q             Only set the exit code\n    --skip-hash-recompute   Skip SHA-256 page-hash verification\n    --checks <a,b,...>      Run only the named families (e.g. segments,fixups)\n    --list-checks           Print the families and exit\n    --help, -h              This help\n    --version, -V           Version\n\n\
          EXIT:\n    0 clean · 1 issues · 2 usage/IO error",
         env!("CARGO_PKG_VERSION")
     );
