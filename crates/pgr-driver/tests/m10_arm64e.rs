@@ -16,15 +16,13 @@
 //! well-formed — with byte-determinism and an unchanged Offset64 default.
 
 use pgr_core::fixups::FixupPointerFormat;
-use pgr_driver::opts::{parse, Options};
+use pgr_driver::opts::{Options, parse};
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use pgr_format::consts::{
-    DYLD_CHAINED_PTR_ARM64E, DYLD_CHAINED_PTR_64_OFFSET, LC_DYLD_CHAINED_FIXUPS,
+    DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E, LC_DYLD_CHAINED_FIXUPS,
 };
-use pgr_format::fixups::{parse_header, parse_starts_in_image, ChainWordArm64e, ChainWord64};
-use pgr_format::{
-    LoadCommandIter, LoadCommandKind, MachHeader64, SegmentCommand64,
-};
+use pgr_format::fixups::{ChainWord64, ChainWordArm64e, parse_header, parse_starts_in_image};
+use pgr_format::{LoadCommandIter, LoadCommandKind, MachHeader64, SegmentCommand64};
 use std::ffi::OsString;
 
 fn args(list: &[&str]) -> Vec<OsString> {
@@ -100,7 +98,7 @@ fn parsed_opts(dir: &std::path::Path, extra: &[&str]) -> Options {
         "-fixup_chains_format".to_string(),
         "arm64e".to_string(),
     ];
-    argv.extend(extra.iter().map(|s| s.to_string()));
+    argv.extend(extra.iter().copied().map(str::to_string));
     argv.push(obj.display().to_string());
     argv.push(tbd.display().to_string());
     let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
@@ -205,7 +203,10 @@ fn the_flag_accepts_both_word_families_in_both_spellings() {
             obj.to_str().unwrap(),
         ]))
         .unwrap_or_else(|e| panic!("attached form must parse: {e}"));
-        assert_eq!(attached.config.chain_word_format, expected, "attached {value}");
+        assert_eq!(
+            attached.config.chain_word_format, expected,
+            "attached {value}"
+        );
         let separated = parse(&args(&[
             "-o",
             "out",
@@ -214,7 +215,10 @@ fn the_flag_accepts_both_word_families_in_both_spellings() {
             obj.to_str().unwrap(),
         ]))
         .unwrap_or_else(|e| panic!("separated form must parse: {e}"));
-        assert_eq!(separated.config.chain_word_format, expected, "separated {value}");
+        assert_eq!(
+            separated.config.chain_word_format, expected,
+            "separated {value}"
+        );
     }
     let default = parse(&args(&["-o", "out", obj.to_str().unwrap()])).unwrap();
     assert_eq!(
@@ -238,8 +242,14 @@ fn an_unknown_word_family_refuses_with_the_vocabulary() {
     ]))
     .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("offset64"), "the refusal names the default: {msg}");
-    assert!(msg.contains("arm64e"), "the refusal names the arm64e family: {msg}");
+    assert!(
+        msg.contains("offset64"),
+        "the refusal names the default: {msg}"
+    );
+    assert!(
+        msg.contains("arm64e"),
+        "the refusal names the arm64e family: {msg}"
+    );
 }
 
 #[test]
@@ -471,7 +481,10 @@ fn the_floor_leaves_the_documented_fallbacks_alone() {
     .expect("the above-floor arm64e set parses");
     opts.config.ident = "peregrine-floor-chained".into();
     let image = link(&opts);
-    assert!(has_chained_fixups(&image), "the floor passes chains through");
+    assert!(
+        has_chained_fixups(&image),
+        "the floor passes chains through"
+    );
     assert_strict_clean(&image, "the above-floor arm64e image");
 
     // (c) `-r` keeps its own refusal wording below the floor (the
@@ -523,7 +536,11 @@ fn an_arm64e_link_verifies_strict_and_names_format_one() {
         find_section(&image, "__TEXT", "__text").expect("__text present");
     let (_data_addr, data_off, _size) =
         find_section(&image, "__DATA", "__data").expect("__data present");
-    let raw = u64::from_le_bytes(image[data_off as usize..data_off as usize + 8].try_into().unwrap());
+    let raw = u64::from_le_bytes(
+        image[data_off as usize..data_off as usize + 8]
+            .try_into()
+            .unwrap(),
+    );
     let word = ChainWordArm64e::new(raw);
     assert!(
         !word.is_bind() && !word.is_auth(),
@@ -538,7 +555,11 @@ fn an_arm64e_link_verifies_strict_and_names_format_one() {
     // The __got bind slot carries the import ordinal.
     let (got_addr, got_off, _size) =
         find_section(&image, "__DATA_CONST", "__got").expect("__got present");
-    let raw = u64::from_le_bytes(image[got_off as usize..got_off as usize + 8].try_into().unwrap());
+    let raw = u64::from_le_bytes(
+        image[got_off as usize..got_off as usize + 8]
+            .try_into()
+            .unwrap(),
+    );
     let word = ChainWordArm64e::new(raw);
     assert!(word.is_bind(), "the __got slot is a bind");
     assert!(!word.is_auth(), "plain binds stay unauth");
@@ -548,13 +569,9 @@ fn an_arm64e_link_verifies_strict_and_names_format_one() {
     // And the payload's segment record agrees with the mirror.
     let payload = {
         let header = MachHeader64::parse(&image).unwrap();
-        let mut it = LoadCommandIter::new(
-            &image,
-            MachHeader64::SIZE,
-            header.ncmds,
-            header.sizeofcmds,
-        )
-        .unwrap();
+        let mut it =
+            LoadCommandIter::new(&image, MachHeader64::SIZE, header.ncmds, header.sizeofcmds)
+                .unwrap();
         let mut found = None;
         while let Some(cmd) = it.next_command().unwrap() {
             if cmd.kind == LoadCommandKind::LinkeditData(LC_DYLD_CHAINED_FIXUPS) {
@@ -573,7 +590,9 @@ fn an_arm64e_link_verifies_strict_and_names_format_one() {
             continue;
         }
         let rec_at = hdr.starts_offset as usize + off as usize;
-        formats.push(u16::from_le_bytes(payload[rec_at + 6..rec_at + 8].try_into().unwrap()));
+        formats.push(u16::from_le_bytes(
+            payload[rec_at + 6..rec_at + 8].try_into().unwrap(),
+        ));
     }
     assert!(
         formats.contains(&DYLD_CHAINED_PTR_ARM64E),
@@ -614,7 +633,9 @@ fn the_offset64_control_stays_the_default_bytes() {
     );
     let (_, data_off, _size) = find_section(&a, "__DATA", "__data").expect("__data present");
     let word = ChainWord64::new(u64::from_le_bytes(
-        a[data_off as usize..data_off as usize + 8].try_into().unwrap(),
+        a[data_off as usize..data_off as usize + 8]
+            .try_into()
+            .unwrap(),
     ));
     assert!(
         !word.is_bind(),
