@@ -4,17 +4,6 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
-## [0.10.0] - 2026-11-09### Documentation
-- Reconcile the v0.10.0 drift and record the rung-3 seam (18fbe25)- Record the m10 rung 2 across the surface (a83f533)
-### Features
-- **driver:** The platform floor gets its consumer example (0c5c74f)- **core:** The platform floor becomes a nameable seam (07b2b19)- **driver:** The platform matrix gets its consumer example (1d0aada)- **verify:** The build-version gate checks the declared platform (a3fa8e8)- **driver:** The platform surface links five platforms (b1b775a)- **core:** The chained-fixups floor goes per-platform (5d767b0)- **format:** The visionOS platform constant lands crosschecked (6208855)
-### Miscellaneous Tasks
-- The delivery manifests stay out of the tree (02ff3bc)
-### Performance
-- **driver:** Bench the platform matrix (bb9a05a)
-### Refactor
-- **core:** The cstring walk inserts once, the stub arm refuses (a0a58d5)- **verify:** The trie walk names its flags, not its unwraps (a6a1198)
-
 
 > **Release-ladder reconciliation (2026-11-09).** The headings below used to
 > follow the design-doc milestone stream (0.7.0 → 1.2.0 for M6 → M9 v1), but
@@ -42,6 +31,79 @@ release automation.
   plus the `platform` bench ride along. In the same pass the layout's
   two logically-infallible `unreachable!`s became the house's typed
   `LinkError::Internal` refusals (TDD §2: typed errors, never panic).
+- **driver:** M10 rung 3, slice 2 — the encoding decision crosses the
+  surface: `pgr --print-fixup-encoding <platform> <min> <sdk>` (and the
+  same-named library seam `pgr_driver::fixup_encoding_report`) answers
+  the query a build system asks before it links — the encoding Pass 3
+  plans with, its floor, and (below the floor) a miette advisory that
+  names the fix. The refusals are exactly the `-platform_version`
+  surface's (unknown platform names the five, `sdk < minos` refuses,
+  malformed versions refuse), the query rides the `encoding_query`
+  tracing span, and the `encoding_query` consumer example walks the
+  full loop — query, link the at-floor row, strict-verify.
+- **verify:** the build-version gate reads the encoding floor (the
+  rung-3 verifier half): an image that carries `LC_DYLD_CHAINED_FIXUPS`
+  while its declared deployment target sits below the platform's
+  chained-fixups floor cannot load on that target's dyld, so the gate
+  names it — the new `fixups_floor` issue code, error severity, the fix
+  riding the message (raise the target or relink with
+  `-no_fixup_chains`). At-floor images and fixup-free below-floor
+  images stay silent, and the gate reads the same canonical table as
+  the layout and the query — one table, three readers, no
+  re-derivation drift.
+- **fixtures:** `ImageBuilder::set_build_version` pins the
+  `LC_BUILD_VERSION` payload (platform, minos, sdk) — the platform knob
+  the rung-2 matrix had to fake with post-build repatching (which broke
+  the signature hashes and forced `skip_hash_recompute`). An override
+  is written during assembly, so strict verification runs with the
+  hash recompute on; the default row is unchanged.
+
+### Bug Fixes
+
+- **core:** the resolve-reuse fallback names its refusal cause — the
+  Pass-2 reuse path used to flatten both refusal shapes through
+  `.ok()`, so a `ReuseFallback` shape move and an `install_reused`
+  invariant refusal were indistinguishable at the call site. Both now
+  ride a tracing event (`plan` refusals name the fallback reason, the
+  install refusal names the error); the fallback behavior itself is
+  unchanged (the equality contract in `tests/m9_resolve_reuse.rs`
+  holds as before).
+
+### Refactor
+
+- the chained-fixups floor table moves beside the `PLATFORM_*`
+  constants it reads (`pgr_format::consts::chained_fixups_floor`, the
+  canonical copy; `pgr_core::layout::chained_fixups_min_minos`
+  delegates and keeps its documented path) — the verifier's floor gate
+  joins the layout and `FixupEncoding` as the table's third reader with
+  no new dependency edge.
+- the dead public seams go: `Resolution::reference_sites` (zero callers
+  anywhere in the workspace) and `pgr_emit::VERSION` (a "tooling smoke
+  test" re-export nothing smoked).
+
+### Performance
+
+- **verify:** the crate's first bench — `verify_platform_floor/verify`
+  over below-floor and at-floor chained-fixup executables born through
+  the builder's platform knob, pinning the strict verify pass on both
+  shapes (the gate itself is a floor compare; the bench exists so
+  rotation catches a regression in either shape).
+
+### Documentation
+
+- the surface records rung 3: the README status paragraph and the env
+  list (`PGR_TRACING`), the TDD design addendum for the M10 rungs
+  (`-r`, the platform plumbing, the encoding seam and its three
+  readers), the benchmarks page's rung-3 bench section, the COMPAT
+  `-ObjC` row (now refused with the roadmap hint, matching the README's
+  "rejected with a clear message" claim), and the rustdoc drift (the
+  stale "D7 stays open" note, the false `payload_off` claim, the
+  macOS-only trigger line, the per-process socket-path fiction in the
+  `-resident_socket` docs). The git-cliff template's glued-heading bug
+  is fixed in `cliff.toml` (the version heading and each bullet now end
+  their lines), and this file's malformed regenerated block — five
+  pre-rewrite hashes and a glued `0.10.0###Documentation` heading — is
+  gone.
 
 ## [0.10.0] - 2026-11-09
 
@@ -1066,9 +1128,6 @@ v0.2.0.
   pair gate over a scanned dylib binary, re-export trie shape, export
   filters (`N_PEXT` symtab + trie exclusion), deterministic double-link
 
-<!-- generated by git-cliff -->
-
-
 #### Shipped inside v0.2.0 — design-ladder 0.3.0 (2026-11-05)
 
 #### Continuous Integration
@@ -1081,9 +1140,6 @@ v0.2.0.
 - **bench:** Dylib-linked bind-path baseline (M2) (34fc15e)
 #### Tests
 - **driver:** M2 e2e gates — printf-from-tbd, flat namespace, lld golden (14fe25c)
-
-<!-- generated by git-cliff -->
-
 
 #### Shipped inside v0.2.0 — design-ladder 0.2.0 (2026-11-05)
 
@@ -1125,8 +1181,6 @@ v0.2.0.
 - **bench:** Parser-throughput baseline (GB/s) (d80515d)
 #### Refactor
 - **fixtures:** Bundle fixup-payload inputs into FixupContext (f583287)
-
-<!-- generated by git-cliff -->
 
 #### Build
 

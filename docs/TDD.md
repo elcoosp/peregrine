@@ -7,7 +7,7 @@
 | **Codename** | Peregrine (binary: `pgr`) |
 | **Target** | arm64-apple-darwin executables, dylibs, bundles (macOS 12+ default path) |
 | **Host** | Linux (primary development sandbox); macOS (deployment as an `ld` replacement) |
-| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay); M10 rides the same seams at both ends — rung 1 stops Passes 1–2 short for the `-r` relocatable output (`pgr_core::link_reloc`, `pgr_emit::build_object_image`, the object contract in the verifier), rung 2 makes the fixup-encoding gate per-platform (`chained_fixups_min_minos`, the `-platform_version` surface, the verifier's declared-platform gate) — and rung 3 opens the floor to consumers (`pgr_core::platform::FixupEncoding` names the encoding decision before the link runs) — this document is the design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
+| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay); M10 rides the same seams at both ends — rung 1 stops Passes 1–2 short for the `-r` relocatable output (`pgr_core::link_reloc`, `pgr_emit::build_object_image`, the object contract in the verifier), rung 2 makes the fixup-encoding gate per-platform (`chained_fixups_min_minos`, the `-platform_version` surface, the verifier's declared-platform gate) — and rung 3 lands the consumer seam: `pgr_core::platform::FixupEncoding` names the encoding decision before the link runs (slice 1), `pgr --print-fixup-encoding` / `pgr_driver::fixup_encoding_report` put it on the driver surface and the verifier's `fixups_floor` gate reads the same canonical table (`pgr_format::consts::chained_fixups_floor` — one table, three readers; slice 2) — §15 is the M10 design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
 | **Date** | 2026-11-09 |
 | **Companion diagrams** | `assets/pipeline.png`, `assets/output-map.png`, `assets/alignment.png`, `assets/fixup-chain.png` |
 
@@ -927,6 +927,95 @@ Deliberately *not* milestones: arm64e, `-order_file` full semantics (rank-based 
 16. Apple — *OS X ABI Mach-O File Format Reference* (segment/symbol/stub structures; `LC_SEGMENT_64`, `LC_SYMTAB`, `LC_DYSYMTAB` field semantics)
 
 **Normative-adjacent tools used in validation design:** `llvm-otool`, `llvm-nm`, `llvm-objdump` (Linux cross-inspection), `ld64.lld` (LLVM Mach-O port as the Linux-runnable reference linker), `cargo-fuzz`, `hyperfine`.
+
+---
+
+## 15. Addendum — M10 design record (the platform breadth rungs and the encoding seam)
+
+*Recorded 2026-11-10 with rung 3 slice 2; the body above is the M0–M9
+design record and stays as written.*
+
+### 15.1 Rung 1 — the `-r` relocatable output
+
+Passes 1–2 stop short of the segment layout: `pgr_core::link_reloc`
+runs the archive-pull fixpoint, interning and resolution, then refuses
+the Pass-3 contract the way an assembler would — undefined externals
+stay open (the object is itself a link input), duplicates still
+refuse. `pgr_emit::build_object_image` assembles the `MH_OBJECT`:
+sections merged at their declared alignments, relocation entries
+preserved and re-pointed at the output symbol table (`ADDEND`/
+`SUBTRACTOR` pairs re-emitted in decode order), the symtab grouped
+locals / winner-backed globals / open undefineds with its
+`LC_DYSYMTAB` subranges. The verifier carries the object contract
+(`check_object_contract`: no fixups, no signature, every relocation
+entry bounds-checked), the two-step self-consumption link (`pgr -r`,
+then link the output again) is a test gate, and the design invariant
+holds: the linker can eat its own output because the output is exactly
+the input shape Pass 0 parses.
+
+### 15.2 Rung 2 — the platform plumbing
+
+`-platform_version` accepts the five linked platforms (`macos`, `ios`,
+`tvos`, `watchos`, `visionos`); unknown names refuse with the surface
+in the hint (miette help text), and `sdk < minos` refuses at parse
+time (`OptsError::VersionOrder`). The chained-fixups gate goes
+per-platform: dyld learned chained fixups at macOS 12.0, iOS 15.0,
+tvOS 15.0, watchOS 8.0 and visionOS 1.0 — below the floor the M6
+classic `LC_DYLD_INFO_ONLY` opcode streams encode the *same* fixups
+(TDD §3.6 invariant 3: the encoding flips, never the fixups). The
+verifier's build-version gate checks the *declared* platform, and
+`pgr_format::PLATFORM_VISIONOS` (11) crosschecks against the vendored
+headers' `PLATFORM_XROS`.
+
+### 15.3 Rung 3 — the encoding decision as a consumer seam
+
+The design problem: the encoding decision was only observable by
+running Pass 3, and any tool that wanted it before the link had to
+re-derive the floor table — exactly the duplication drift the house
+forbids. The design answer is one table with named readers:
+
+1. **The canonical table** lives beside the `PLATFORM_*` constants it
+   reads (`pgr_format::consts::chained_fixups_floor`) — the platform
+   constants module is the one home both dependents already share, so
+   the verifier gets its reader with *no new dependency edge*.
+2. **The layout reader** (`pgr_core::layout::chained_fixups_min_minos`)
+   delegates to it and keeps its documented path (the README names the
+   function; consumers do not break).
+3. **The library consumer seam** (slice 1):
+   `pgr_core::platform::FixupEncoding::for_target(platform, minos)`
+   names the decision as a typed value, with a `tracing::debug!` event
+   on every decision (platform, minos, floor, encoding — inert until a
+   subscriber installs, the house convention).
+4. **The driver surface** (slice 2):
+   `pgr --print-fixup-encoding <platform> <min> <sdk>` and the
+   same-named library seam `pgr_driver::fixup_encoding_report` answer
+   the build system's before-the-link question. The refusals are
+   exactly the `-platform_version` surface's (the platform name table
+   is shared, `pub(crate) platform_const`), the SDK-order rule
+   applies, the below-floor answer carries a miette advisory
+   (`BelowFloorAdvisory` — the fix, not just the verdict), and the
+   query rides an `encoding_query` span. Exit status is honest: an
+   advisory is a plan (exit 0, stderr advisory); a refusal is an
+   option error (exit 2, rendered diagnostic).
+5. **The verifier reader** (slice 2): the build-version gate grows the
+   `fixups_floor` issue code — an image carrying
+   `LC_DYLD_CHAINED_FIXUPS` while its declared `minos` sits below the
+   platform's floor cannot load on that target's dyld, so the gate
+   refuses with the fix in the message (raise the target or relink
+   with `-no_fixup_chains`). Above the floor the classic streams are a
+   producer choice (`-no_fixup_chains`) and stay silent; below-floor
+   images without chained words are the classic path working as
+   designed and stay silent; unknown platforms stay with the
+   unknown-platform error.
+
+Supporting pieces: `ImageBuilder::set_build_version` pins the fixture
+builder's `LC_BUILD_VERSION` payload (the rung-2 matrix had to
+repatch bytes post-build, which invalidated the signature hashes and
+forced `skip_hash_recompute` — born-at-version images verify with the
+hash recompute on), the `encoding_query` example walks the full
+loop (query → link the at-floor row → strict-verify), and the
+verifier's first bench (`verify_platform_floor`) pins the strict pass
+on below-floor and at-floor shapes.
 
 ---
 

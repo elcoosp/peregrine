@@ -92,7 +92,8 @@ Usage: pgrd [options]
 
 Options:
   --socket <path>    listen path (default: $PGR_DAEMON_SOCK, else
-                     {tmpdir}/pgr-<uid>.sock)
+                     {tmpdir}/pgr-<uid|pid>.sock — SUDO_UID when
+                     present, else the process id)
   --idle-secs <n>    exit after this many seconds with no client work
                      (default 900)
   --shutdown         ask the daemon at the socket path to exit

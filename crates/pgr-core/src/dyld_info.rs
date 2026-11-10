@@ -9,7 +9,9 @@
 //! (dyld writes them at load); no `__chain_starts` mirror exists.
 //!
 //! Trigger (`pgr-core::layout`): `has_fixups && (!cfg.fixup_chains ||
-//! cfg.minos < 12.0.0)`.
+//! cfg.minos < chains_floor)` — the floor is per-platform since M10
+//! rung 2 (`pgr_format::consts::chained_fixups_floor`: macOS 12.0,
+//! iOS 15.0, tvOS 15.0, watchOS 8.0, visionOS 1.0).
 
 use crate::LinkError;
 use crate::fixups::{FixupKind, FixupSlot};

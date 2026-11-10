@@ -15,8 +15,10 @@
 //! first-use for golden compatibility. *M4 update:* the tile scheduler
 //! shipped without needing D7 — the import table is built here, in Pass 3,
 //! and Pass 4's tiles only **read** the encoded slot words, so no
-//! cross-tile mutation exists; D7 (insertion-stable ordinals) stays open
-//! for the M6 incremental work.
+//! cross-tile mutation exists. *M9 update:* D7 closed — the
+//! insertion-stable import table (`crate::stable_imports`) is load-bearing
+//! for the §7.3 relink ladder (anchored ordinals across relink cycles,
+//! gated in `tests/m9_stable_imports.rs`).
 //!
 //! Addend split (mirrors ld64/lld): an addend in `0..=255` travels inline in
 //! the bind word's 8-bit field with a zero import addend; any other addend
@@ -172,8 +174,11 @@ pub struct FixupPlan {
     /// `LC_DYLD_CHAINED_FIXUPS` payload bytes (header | starts | segment
     /// records | import table | name pool).
     pub payload: Vec<u8>,
-    /// File offset where the payload lands in `__LINKEDIT` (patched by the
-    /// layout pass).
+    /// The payload's `__LINKEDIT` file offset as recorded at plan time —
+    /// always `0`: the authoritative offset is assigned during LINKEDIT
+    /// chunk placement (`LinkeditPlan::fixup_payload_off`) and consumed
+    /// by emit from there; this field predates that plan and stays for
+    /// constructor compatibility.
     pub payload_off: u64,
     /// Final slot words: `(slot vaddr, encoded word)` sorted by vaddr.
     pub slot_words: Vec<(u64, u64)>,

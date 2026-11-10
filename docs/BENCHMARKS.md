@@ -969,3 +969,35 @@ and the floor table's fallback is byte-tested per platform
 ```sh
 cargo bench -p pgr-driver --bench platform
 ```
+
+## Recorded baseline (M10 rung 3 — the encoding seam)
+
+Rung 3 makes the fixup-encoding decision a *consumer seam* — slice 1
+named it in the library (`pgr_core::platform::FixupEncoding::for_target`),
+slice 2 crosses the surface (`pgr --print-fixup-encoding` /
+`pgr_driver::fixup_encoding_report`, the verifier's `fixups_floor`
+gate, the canonical table beside the `PLATFORM_*` constants). Two
+bench pins ride along:
+
+- `pgr-core/platform_floor/for_target/<platform>` (slice 1): the
+  consumer seam's own decision cost — a floor compare plus its tracing
+  event, benched across the five linked platforms at a fixed deployment
+  word. Cheap by construction; the bench exists so rotation catches a
+  shape regression on a seam every before-the-link consumer pays.
+- `pgr-verify/verify_platform_floor/verify/<below_floor|at_floor>`
+  (slice 2, the crate's first bench): the strict verify pass over two
+  chained-fixup executables *born* at their build versions through the
+  builder's platform knob — one below its platform's floor (the gate
+  fires), one at the floor (clean).
+
+**No numbers are recorded for either bench yet** (the rung-3 benches
+landed with this milestone; the next gate run fills this section the
+way the rung-2 table above was filled — criterion medians on the
+2-core KVM dev sandbox). The honest expectation mirrors rung 2: the
+gate itself is one integer comparison, so the two verify shapes should
+sit inside each other's noise, and any divergence is the finding.
+
+```sh
+cargo bench -p pgr-core --bench platform
+cargo bench -p pgr-verify --bench platform
+```
