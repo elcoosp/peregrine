@@ -33,8 +33,16 @@
 //!   (thunk) placement gate,
 //! * [`checks`] — the M12 selective surface: named check families, the
 //!   [`CheckSet`] selector and the [`ImageCheck`] registry seam
-//!   (`verify_with_checks` drives a subset; `verify` is the full set).
+//!   (`verify_with_checks` drives a subset; `verify` is the full set),
+//! * [`report_json`] — the M13 report interchange shape (one writer,
+//!   one reader, a round-trip gate; the CLI's `--json` output is the
+//!   same form the library renders),
+//! * [`baseline`] — the M13 baseline gate: [`BaselineDelta::between`]
+//!   classifies a fresh report against the last accepted image's
+//!   (introduced / resolved / surviving) under an [`IssueIdentity`]
+//!   matching policy — the relink loop's "no *new* findings" gate.
 
+pub mod baseline;
 pub mod branch_range;
 pub mod chain_starts;
 pub mod checks;
@@ -43,10 +51,15 @@ pub mod dynamic;
 pub mod export_trie;
 pub mod misc;
 pub mod pair;
+pub mod report_json;
 pub mod signature;
 pub mod structural;
 
+pub use baseline::{BaselineDelta, CodeIdentity, IssueIdentity, IssueKey, OffsetIdentity};
 pub use checks::{Check, CheckContext, CheckSet, CheckSetError, ImageCheck, image_checks};
+pub use report_json::{
+    ReportJsonError, parse_report_json, to_json, to_json_with_baseline, to_json_with_file,
+};
 
 use pgr_format::FormatError;
 
@@ -69,7 +82,7 @@ pub enum Severity {
 }
 
 /// Machine-checkable issue identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Code {
     /// Header magic, cpu type, size or reserved field is wrong.
     HeaderInvalid,
@@ -116,6 +129,31 @@ pub enum Code {
 }
 
 impl Code {
+    /// Every issue code, in declaration order (the `report_json` reader
+    /// matches canonical names against this table; tooling can enumerate
+    /// the surface the way `Check::ALL` enumerates the families).
+    pub const ALL: [Code; 19] = [
+        Code::HeaderInvalid,
+        Code::LoadCommandMalformed,
+        Code::SegmentContract,
+        Code::SegmentLayout,
+        Code::ImageBase,
+        Code::SectionBounds,
+        Code::SymbolTable,
+        Code::FixupsPayload,
+        Code::FixupsChain,
+        Code::FixupsImport,
+        Code::FixupsSegmentOffset,
+        Code::SignatureLayout,
+        Code::SignatureHashMismatch,
+        Code::LinkeditPayload,
+        Code::ExportTrie,
+        Code::BranchRange,
+        Code::DyldInfoStreams,
+        Code::FixupsFloor,
+        Code::Suspicious,
+    ];
+
     /// Stable string identifier (also used by the JSON report).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
