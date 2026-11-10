@@ -30,7 +30,6 @@
 //! * dead atoms are invisible to ICF (it runs after the D12 mark-sweep).
 
 use crate::LinkError;
-use crate::interner::Interner;
 use crate::layout::LinkConfig;
 use crate::object::{InputObject, RelocKind, RelocTarget};
 use crate::resolve::Resolution;
@@ -120,14 +119,13 @@ struct Cand {
 pub fn fold(
     objects: &[InputObject],
     res: &Resolution,
-    interner: &Interner,
     cfg: &LinkConfig,
     live: &crate::deadstrip::LiveSet,
 ) -> Result<FoldPlan, LinkError> {
     if !cfg.icf.is_active() {
         return Ok(FoldPlan::default());
     }
-    Ok(refine(objects, res, interner, cfg, live))
+    Ok(refine(objects, res, cfg, live))
 }
 
 /// FNV-1a 64: a deterministic hasher (the std hasher is randomly seeded,
@@ -287,7 +285,6 @@ fn kind_fp(kind: &RelocKind) -> u8 {
 fn refine(
     objects: &[InputObject],
     res: &Resolution,
-    interner: &Interner,
     cfg: &LinkConfig,
     live: &crate::deadstrip::LiveSet,
 ) -> FoldPlan {
@@ -456,7 +453,6 @@ fn refine(
         plan.folded_count += 1;
         plan.folded_bytes += c.end - c.start;
     }
-    let _ = interner;
     plan
 }
 
