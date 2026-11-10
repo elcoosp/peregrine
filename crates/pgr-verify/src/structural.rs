@@ -20,7 +20,12 @@ use pgr_format::segment::SegmentCommand64;
 use pgr_format::symtab::{DysymtabCommand, Nlist64, SymtabCommand};
 
 /// Everything the checks need, collected once in load-command order.
-pub(crate) struct ParsedImage<'a> {
+///
+/// The parse pre-pass product shared by every family: the raw header, the
+/// classified load commands, the segment/symbol/fixup payload anchors and
+/// the aggregate counters. Public since M12 so the [`crate::ImageCheck`]
+/// seam can carry it in its public context type.
+pub struct ParsedImage<'a> {
     /// Parsed header.
     pub header: MachHeader64,
     /// Load commands in header order.
@@ -58,7 +63,16 @@ pub(crate) struct ParsedImage<'a> {
 
 /// Loads and pre-validates the image: any failure here is fatal for all
 /// downstream checks.
-pub(crate) fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
+///
+/// Public since M12: the [`crate::ImageCheck`] seam's context carries the
+/// parsed image, so external tooling can parse once and drive selected
+/// families through `crate::verify_with_checks`.
+///
+/// # Errors
+/// A single error-severity [`Issue`] (header or load-command malformed)
+/// anchored at the first bad offset — the same issue the whole-image
+/// report carries when the parse cannot proceed.
+pub fn parse_image(bytes: &[u8]) -> Result<ParsedImage<'_>, Issue> {
     let header = MachHeader64::parse(bytes).map_err(|e| issue_from(&e, Code::HeaderInvalid))?;
     let mut commands = Vec::new();
     let mut segments = Vec::new();
