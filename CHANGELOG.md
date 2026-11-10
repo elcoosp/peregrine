@@ -4,6 +4,26 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.12.0] - 2026-11-10
+### Bug Fixes
+- **emit:** The writer thread names its panic payload (2b4006c)
+
+### Documentation
+- The surface records rung 4 slice 1 and heals the changelog (2b0a2d9)
+
+### Features
+- **verify:** The arm64e walk gets its consumer example (b1a12f8)
+- **verify:** The chain walk strides the arm64e family (c1d527a)
+- **fixtures:** The builder speaks the arm64e pointer format (f0a8ed9)
+- **format:** The arm64e chain words decode and encode (d7aa5d2)
+
+### Performance
+- **verify:** Bench the arm64e strict pass (c660a3f)
+
+### Tests
+- **verify:** The arm64e read side gates its shapes (f8ed42d)
+
+
 ## [0.11.0] - 2026-11-10
 ### Bug Fixes
 - **core:** The resolve-reuse fallback names its refusal cause (364ef9e)
