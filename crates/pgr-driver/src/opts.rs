@@ -2,10 +2,11 @@
 //! milestone: M2 library search, M3 dylibs/bundles, M5 archives and
 //! frameworks, M6 caches, M7 `-syslibroot`, M8 `-resident`, M9
 //! `-incremental`, M10 `-r` relocatable output and the platform surface).
-//! Flags real builds use that have not landed yet (`-order_file`, TLV,
-//! bitcode) are rejected with actionable messages rather than silently
-//! ignored — a linker that pretends to understand a flag it drops is
-//! worse than one that says "not yet".
+//! Flags real builds use that have not landed yet (TLV, bitcode) are
+//! rejected with actionable messages rather than silently ignored — a
+//! linker that pretends to understand a flag it drops is worse than one
+//! that says "not yet". `-order_file` landed at M11 (the rank-based
+//! subset TDD §12 scoped from the start).
 
 use pgr_core::fixups::FixupPointerFormat;
 use pgr_core::layout::LinkConfig;
@@ -116,6 +117,14 @@ pub struct Options {
     /// named family the floor cannot carry is a refused knob, never a
     /// silently dropped one (the surface's own contract).
     pub chain_word_format_explicit: bool,
+    /// M11 `-order_file <path>`: the order file's path (read and ranked
+    /// by the driver before Pass 3 — see [`pgr_core::order`]). `None`
+    /// (the default) packs the layout exactly as before.
+    pub order_file: Option<String>,
+    /// M11 `-map <path>`: write the link map (the placed image's
+    /// segments/sections/symbols, rendered by [`pgr_core::map`]) next to
+    /// the link. `None` (the default) writes no map.
+    pub map_path: Option<String>,
 }
 
 impl Default for Options {
@@ -148,6 +157,8 @@ impl Default for Options {
             incremental: false,
             incremental_verify: false,
             chain_word_format_explicit: false,
+            order_file: None,
+            map_path: None,
         }
     }
 }
@@ -209,6 +220,17 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// An `-order_file` surface conflict (M11): the rank table cannot be
+    /// applied (or carried) where it was requested. The verdict names the
+    /// shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    OrderFileConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// `-platform_version`: the SDK is older than the deployment target
     /// (M10 rung 2). The SDK ships the deployment target's interfaces;
     /// building against an older one produces images dyld may refuse.
@@ -261,7 +283,7 @@ const NOOP_FLAGS: [&str; 8] = [
 ];
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
-const LATER_FLAGS: [(&str, &str); 10] = [
+const LATER_FLAGS: [(&str, &str); 9] = [
     ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
     (
         "-weak_framework",
@@ -272,10 +294,6 @@ const LATER_FLAGS: [(&str, &str); 10] = [
         "weak/lazy framework loading is a later milestone",
     ),
     ("-lazy_library", "later milestone"),
-    (
-        "-order_file",
-        "roadmap-gated (symbol-boundary ordering needs the atomizer's ordering pass)",
-    ),
     ("-U", "later milestone (make-undefined)"),
     ("-pagezero_size", "later milestone"),
     (
@@ -582,11 +600,10 @@ fn apply_flag(
             // flag and value; the attached form is matched below (the
             // `-icf=` convention).
             let v = next_value(args, i, arg)?;
-            opts.config.chain_word_format = parse_chain_format(&v).ok_or_else(|| {
-                OptsError::ChainFormatValue {
+            opts.config.chain_word_format =
+                parse_chain_format(&v).ok_or_else(|| OptsError::ChainFormatValue {
                     value: format!("{v} (offset64 | arm64e)"),
-                }
-            })?;
+                })?;
             // The flag was named explicitly: the floor gate (slice 5)
             // reads this, the default stays the silent fallback.
             opts.chain_word_format_explicit = true;
@@ -599,11 +616,10 @@ fn apply_flag(
         }
         a if a.starts_with("-fixup_chains_format=") => {
             let v = &a[21..];
-            opts.config.chain_word_format = parse_chain_format(v).ok_or_else(|| {
-                OptsError::ChainFormatValue {
+            opts.config.chain_word_format =
+                parse_chain_format(v).ok_or_else(|| OptsError::ChainFormatValue {
                     value: format!("{v} (offset64 | arm64e)"),
-                }
-            })?;
+                })?;
             opts.chain_word_format_explicit = true;
         }
         "-adhoc" => opts.config.adhoc = true,
@@ -827,6 +843,18 @@ fn apply_flag(
             let file = next_value(args, i, arg)?;
             opts.sectcreate.push((seg, sect, file));
         }
+        // M11: the order file is read (and its parse refusals named) by
+        // the driver before Pass 3; the surface stores the path.
+        "-order_file" => {
+            let v = next_value(args, i, arg)?;
+            opts.order_file = Some(v);
+        }
+        // M11: the link map is rendered from the finished plan (the same
+        // layout the fused emit writes) and written after the link.
+        "-map" => {
+            let v = next_value(args, i, arg)?;
+            opts.map_path = Some(v);
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -1012,6 +1040,55 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
                     "raise the deployment target above {floor_text} or drop \
                      -fixup_chains_format — the encoding flips, the fixups do not"
                 ),
+            });
+        }
+    }
+    // M11: the map reports the placed image — the surfaces that do not
+    // produce one (an input object, the patch tiers' in-place plan, the
+    // daemon's wire) refuse the knob instead of dropping it.
+    if opts.map_path.is_some() {
+        if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+            return Err(OptsError::OrderFileConflict {
+                verdict: "-r writes an input object: no segment layout exists for the map to \
+                         report"
+                    .into(),
+                fix: "drop -map".into(),
+            });
+        }
+        if opts.incremental {
+            return Err(OptsError::OrderFileConflict {
+                verdict: "-incremental's patch tiers plan inside the relink engine; the map \
+                          reports the full emit's layout"
+                    .into(),
+                fix: "drop -map or -incremental".into(),
+            });
+        }
+        if opts.resident {
+            return Err(OptsError::OrderFileConflict {
+                verdict: "the resident session links across the v6 wire and never returns the \
+                          layout the map reports"
+                    .into(),
+                fix: "drop -map or -resident".into(),
+            });
+        }
+    }
+    // M11: the order file must be appliable where it was requested — a
+    // refusal, never a silently dropped knob (the surface's contract).
+    if opts.order_file.is_some() {
+        if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+            return Err(OptsError::OrderFileConflict {
+                verdict: "-r writes an input object: sections merge at their declared \
+                         alignments and no segment layout exists to rank"
+                    .into(),
+                fix: "drop -order_file".into(),
+            });
+        }
+        if opts.resident {
+            return Err(OptsError::OrderFileConflict {
+                verdict: "the resident session's reuse gates replay the v6 wire config, \
+                          which does not carry the order-file rank table"
+                    .into(),
+                fix: "drop -resident or -order_file".into(),
             });
         }
     }
@@ -1242,8 +1319,11 @@ mod tests {
 
     #[test]
     fn later_milestone_flags_are_rejected_actionably() {
-        let err = parse(&args(&["-o", "out", "-order_file", "f.txt", "a.o"])).unwrap_err();
-        assert!(err.to_string().contains("M5"), "{err}");
+        // M11: `-order_file` left the later-milestone list — the rank
+        // table rides the link (the acceptance is gated in
+        // tests/m11_order_file.rs); the surface stores its path.
+        let o = parse(&args(&["-o", "out", "-order_file", "f.txt", "a.o"])).unwrap();
+        assert_eq!(o.order_file.as_deref(), Some("f.txt"));
         let err = parse(&args(&["-o", "out", "-weak_framework", "Foo", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("framework"), "{err}");
         let err = parse(&args(&["-o", "out", "--wat", "a.o"])).unwrap_err();
