@@ -855,8 +855,9 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
         if opts.resident {
             return Err(OptsError::InvalidValue {
                 flag: "-fixup_chains_format".into(),
-                value: "the resident session plans Offset64 shapes this \
-                        slice (wire v5 carries no word family); drop -resident \
+                value: "the resident session's reuse gates plan Offset64 \
+                        shapes this slice (the v6 wire mirrors the family, \
+                        the gates do not consume it yet); drop -resident \
                         or -fixup_chains_format"
                     .into(),
             });
