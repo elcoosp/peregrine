@@ -71,10 +71,11 @@ each flag has a fixture".
 | `-framework <name>` / `-F <dir>` (`.tbd`/dylib payloads) | ✅ | M5 | `m5_flags::m5_framework_search_finds_stub_dylibs` |
 | `-sectcreate <seg> <sect> <file>` | ✅ | M5 | `m5_flags::m5_sectcreate_places_file_contents` |
 | `-weak_framework` / `-lazy_framework` / `-lazy_library` | ❌ (rejected, actionable) | later | `opts::LATER_FLAGS` |
-| `-order_file` | ❌ (rejected) | M5 deferral (needs D1 ordering pass; flagged with the atomizer) | `opts::LATER_FLAGS` |
+| `-order_file` (rank-based subset: `symbol` / `object.o:symbol`) | ✅ | M11 | `m11_order_file::*` (core + driver), `pgr_core::order` |
 | `-dylinker` (MH_DYLINKER outputs) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-sub_umbrella` / `-sub_library` (umbrella re-exports) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-ObjC` (archive member class pull) | ❌ (rejected, actionable) | M6 (ObjC class/selector handling) | `opts::LATER_FLAGS` |
+| `-map <path>` (the link map: segments, sections, symbols) | ✅ | M11 | `pgr_core::map`, `m11_map::*` (core + driver), the `map` bench + the `link_map` example |
 
 ## Linking semantics
 
@@ -97,7 +98,7 @@ each flag has a fixture".
 | `-dead_strip` | ✅ | M5 | D12 |
 | ICF (`-icf=safe`/`-icf=all`) | ✅ | M6 | `m6_icf::*`, `pgr-core::icf` tests |
 | Branch veneers/thunks for `BR26` overflow (> 128 MiB text) | ✅ | M6 | `pgr-core::thunks` tests, `pgr-verify::branch_range` |
-| `-order_file` | ❌ | later (needs the D1 ordering pass) | — |
+| `-order_file` (rank-based subset; a stable sort by the order file's rank — TDD §8.4) | ✅ | M11 | `m11_order_file::*`, the `order` bench + the `order_file_link` example |
 | TLV (`__thread_vars`, `tlv_bootstrap`) | ❌ | M5 | reloc types parsed and rejected today |
 | `-icf=safe` / `-icf=all` / `-no_icf` (identical code folding) | ✅ | M6 | `pgr-core::icf` tests, `m6_icf::*` |
 | `-syslibroot <dir>` (repeatable; ld64 pairing rule: 1 root = prefixed-only, ≥2 roots = union + original) | ✅ | M7 | `opts::effective_lib_dirs` tests, `m7_driver::m7_syslibroot_*` |
