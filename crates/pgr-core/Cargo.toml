@@ -56,5 +56,18 @@ harness = false
 name = "map"
 harness = false
 
+# The M14 export-filter bench: the visibility closure's match cost per
+# family (exact vs one-star vs two-star) over the same name universe.
+[[bench]]
+name = "filter"
+harness = false
+
+# The M14 rung-2 dylib-surface bench: the link across the load-command
+# kinds (load vs weak vs lazy) over the same 256-bind corpus — a
+# shape-parity gate, the kind is one header opcode per dylib.
+[[bench]]
+name = "dylibs"
+harness = false
+
 [lints]
 workspace = true
