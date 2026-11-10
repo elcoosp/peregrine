@@ -1023,3 +1023,22 @@ divergence is the finding.
 ```sh
 cargo bench -p pgr-verify --bench arm64e
 ```
+
+## Recorded baseline (M10 rung 4, slice 2 — the arm64e producer)
+
+Slice 2 ships the write side: Pass 3 plans either word family
+(`pgr_core::fixups::plan_fixups_with_format`), and the planner bench
+(`pgr-core/plan_fixups_word_family/<offset64|arm64e>/<1k|10k|100k>`) holds
+the same mixed rebase/bind slot corpus through both encoders — the shape
+parity the producer's contract wants visible (the family changes the
+encoding, never the fixups, so the two curves should track).
+
+**No numbers are recorded yet** (the bench lands with this slice; the
+next gate run fills this section like the slice-1 section above). The
+honest expectation: arm64e sits inside the 64_OFFSET noise band — the
+per-slot work is the same packer with a wider stride and one extra
+encoder branch — and any divergence is the finding.
+
+```sh
+cargo bench -p pgr-core --bench arm64e
+```

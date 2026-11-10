@@ -1071,6 +1071,52 @@ Supporting pieces: the `arm64e` strict-pass bench (auth shapes plus a
 watches the spans), and the read-side gate matrix in
 `tests/m10_arm64e.rs`.
 
+### 15.5 Rung 4, slice 2 — the Pass-3 producer
+
+Slice 1's named next step: the producer half. Pass 3 now plans either
+word family — [`FixupPointerFormat`] (`pgr_core::fixups`) chooses the
+encoding, and the seam is invisible on the default: planning with
+`Offset64` explicitly is byte-identical to the M2 planner (the §7.2
+lock stays the lock; the family is a named consumer choice, not a
+behavior change).
+
+1. **The planner seam** (`plan_fixups_with_format`): the M2/M9 planner
+   entries (`plan_fixups`, `plan_fixups_with_imports`) delegate with the
+   default family. `Arm64e` swaps three things and nothing else: the
+   unauth rebase word carries the **VM address** (format-1 semantics —
+   dyld subtracts the preferred load address walking back; the verifier's
+   `(vmaddr − base)` walk from slice 1 is the contract), `next` counts
+   **8-byte strides** with 11 bits (`pack_page_strided` parameterizes the
+   packer's stride window), and the payload's per-segment records plus
+   the `__chain_starts` mirror declare **pointer format 1**. The import
+   table stays `DYLD_CHAINED_IMPORT_ADDEND` in both families — its
+   format is a separate payload field a loader reads independently of
+   the word family — and the M2 addend split rule (0..=255 inline) holds
+   in both, so the M9 import anchor cannot diverge per format.
+2. **The refusals name their field**: a rebase target whose bits 43..56
+   have no home in the arm64e word (43-bit target + high8 covering
+   56..64) refuses instead of silently truncating; a bind surface that
+   outgrows the arm64e word's 16-bit ordinal refuses at plan time. The
+   planner names its family on the tracing span (inert until a
+   subscriber installs, the house convention).
+3. **The driver surface**: `-fixup_chains_format <offset64|arm64e>` (both
+   ld64 spellings) shapes `LinkConfig::chain_word_format`; the
+   combinations that cannot carry the requested family refuse with the
+   fix in the message (the classic opcode path has no chain words, the
+   resident session's reuse gates and wire ride Offset64 shapes this
+   slice — the wire's v6 tail byte mirrors the family faithfully so it
+   can never silently drop one, and `-r` objects carry no fixups at
+   all). The miette help-text debt slice 1 deferred lands here: the
+   flag refusals render through the `OptsError` derive like the
+   `-platform_version` surface.
+
+Supporting pieces: the producer word-shape gates
+(`crates/pgr-core/tests/m10_arm64e_producer.rs`), the driver flag + e2e
+verify-strict gates (`crates/pgr-driver/tests/m10_arm64e.rs`), the
+`arm64e` planner bench (both families over the same slot corpus), and
+the `arm64e_producer` consumer example (the same slots planned twice,
+decoded side by side).
+
 ---
 
 *End of design document. Next step: M0 — build the verifier before the linker.*
