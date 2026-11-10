@@ -60,11 +60,12 @@ mod tests {
     #[test]
     fn version_is_wired() {
         assert!(!crate::VERSION.is_empty(), "version line built");
-        // v6 (M10 rung 4, slice 2): the fusion halves (v3), the audited
-        // relink (v4) and the §7.2 tile replay (v5) plus the request
-        // config's chain-word-family byte — the wire can never silently
-        // drop the family a client asked for.
-        assert_eq!(crate::PROTO_VERSION, 6);
+        // v7 (M14): the fusion halves (v3), the audited relink (v4), the
+        // §7.2 tile replay (v5), the request config's chain-word-family
+        // byte (v6) — and now the export-filter lists re-encoded as
+        // patterns (kind byte + source), so a resident relink's export
+        // surface is the surface the client named.
+        assert_eq!(crate::PROTO_VERSION, 7);
     }
 
     #[test]
