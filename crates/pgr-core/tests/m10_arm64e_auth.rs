@@ -22,22 +22,20 @@
 //! * the payload's per-segment records and the `__chain_starts` mirror
 //!   still name pointer format 1 — authentication changes words, not
 //!   the declared family;
-//! * refusals name their cause: auth slots under the 64_OFFSET family,
+//! * refusals name their cause: auth slots under the `64_OFFSET` family,
 //!   an auth entry that names no fixup slot, an auth entry named twice,
 //!   and an auth rebase target beyond the 32-bit runtime offset;
 //! * the M9 import anchor holds: an auth bind's table key appends
 //!   without renumbering the anchored ordinals (§7.3 step 5).
 
+use pgr_core::LinkError;
 use pgr_core::fixups::{
     FixupAuth, FixupKind, FixupPointerFormat, FixupSlot, plan_fixups_with_auth,
     plan_fixups_with_format,
 };
 use pgr_core::ids::StringId;
 use pgr_core::interner::Interner;
-use pgr_core::LinkError;
-use pgr_format::consts::{
-    DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_ARM64E, PAGE_SIZE_16K,
-};
+use pgr_format::consts::{DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_ARM64E, PAGE_SIZE_16K};
 use pgr_format::fixups::ChainWordArm64e;
 
 const PAGE: u64 = PAGE_SIZE_16K;
@@ -106,7 +104,9 @@ fn an_auth_rebase_word_carries_the_runtime_offset_and_the_pac_triple() {
     let plan = plan_fixups_with_auth(
         vec![FixupSlot {
             vaddr: slot_vaddr,
-            kind: FixupKind::Rebase { target_vaddr: target },
+            kind: FixupKind::Rebase {
+                target_vaddr: target,
+            },
         }],
         &segments(),
         IMAGE_BASE,
@@ -122,12 +122,16 @@ fn an_auth_rebase_word_carries_the_runtime_offset_and_the_pac_triple() {
     assert!(!word.is_bind(), "rebase words leave the bind bit clear");
     assert!(word.is_auth(), "the policy signs the word (bit 63)");
     assert_eq!(
-        word.auth_rebase_offset(),
+        u64::from(word.auth_rebase_offset()),
         target - IMAGE_BASE,
         "an auth rebase carries the 32-bit runtime offset (target − image base), \
          what dyld adds to the preferred load address"
     );
-    assert_eq!(word.auth_diversity(), 0xBEEF, "the diversity value reads back");
+    assert_eq!(
+        word.auth_diversity(),
+        0xBEEF,
+        "the diversity value reads back"
+    );
     assert!(word.auth_addr_div(), "address diversity reads back");
     assert_eq!(word.auth_key(), 2, "the 2-bit key reads back");
     assert_eq!(word.next(), 0, "a single-slot chain terminates");
@@ -137,7 +141,9 @@ fn an_auth_rebase_word_carries_the_runtime_offset_and_the_pac_triple() {
     let unauth = plan_fixups_with_format(
         vec![FixupSlot {
             vaddr: slot_vaddr,
-            kind: FixupKind::Rebase { target_vaddr: target },
+            kind: FixupKind::Rebase {
+                target_vaddr: target,
+            },
         }],
         &segments(),
         IMAGE_BASE,
@@ -180,7 +186,11 @@ fn an_auth_bind_word_carries_the_ordinal_and_the_table_addend() {
         0,
         "first-use order: the bind is import 0"
     );
-    assert_eq!(word.auth_diversity(), 0x1234, "the PAC triple rides the word");
+    assert_eq!(
+        word.auth_diversity(),
+        0x1234,
+        "the PAC triple rides the word"
+    );
     assert!(!word.auth_addr_div());
     assert_eq!(word.auth_key(), 3);
     // The auth bind word has no addend field: the full addend travels in
@@ -223,7 +233,11 @@ fn the_auth_bind_split_does_not_disturb_the_unauth_beside_it() {
     );
     let signed = ChainWordArm64e::new(word_at(&plan, auth_at));
     assert!(signed.is_auth());
-    assert_eq!(signed.bind_ordinal(), 1, "a distinct table key, second import");
+    assert_eq!(
+        signed.bind_ordinal(),
+        1,
+        "a distinct table key, second import"
+    );
     assert_eq!(plan.imports.len(), 2, "the two splits are two imports");
     assert_eq!(
         plan.imports[0].addend, 0,
@@ -302,7 +316,9 @@ fn the_payload_and_mirror_still_name_pointer_format_1() {
     let starts_offset = u32::from_le_bytes(plan.payload[4..8].try_into().unwrap()) as usize;
     let rec0 = starts_offset
         + u32::from_le_bytes(
-            plan.payload[starts_offset + 4..starts_offset + 8].try_into().unwrap(),
+            plan.payload[starts_offset + 4..starts_offset + 8]
+                .try_into()
+                .unwrap(),
         ) as usize;
     let pointer_format = u16::from_le_bytes(plan.payload[rec0 + 6..rec0 + 8].try_into().unwrap());
     assert_eq!(
@@ -407,7 +423,9 @@ fn an_auth_rebase_runtime_offset_beyond_32_bits_refuses() {
     let err = plan_fixups_with_auth(
         vec![FixupSlot {
             vaddr: TEXT_VM,
-            kind: FixupKind::Rebase { target_vaddr: target },
+            kind: FixupKind::Rebase {
+                target_vaddr: target,
+            },
         }],
         &segments(),
         0,
@@ -469,6 +487,10 @@ fn the_auth_bind_key_appends_to_the_anchor_table() {
         "the anchored ordinal holds across the auth seam"
     );
     let appended = ChainWordArm64e::new(word_at(&relink, TEXT_VM + 0x200));
-    assert_eq!(appended.bind_ordinal(), 1, "the auth bind is the new import");
+    assert_eq!(
+        appended.bind_ordinal(),
+        1,
+        "the auth bind is the new import"
+    );
     assert_eq!(relink.imports[1].addend, 0x40, "its addend rides the table");
 }
