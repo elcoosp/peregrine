@@ -6,11 +6,19 @@
 //! executable's chained-fixup binds are replayed the same way dyld walks
 //! them, and every import whose two-level ordinal names the dylib must be
 //! exported by the dylib's trie — as a regular export or a re-export.
+//!
+//! The replay is family-blind (M10 rung 4, slice 4): each segment's words
+//! decode through its own `pointer_format` — [`ChainWord64`] under the
+//! 4-byte-stride `DYLD_CHAINED_PTR_64(_OFFSET)` families,
+//! [`ChainWordArm64e`] under `DYLD_CHAINED_PTR_ARM64E` — and `next`
+//! advances by the family's [`chain_stride`] (4 or 8 bytes), the same
+//! dispatch the dynamic walk uses.
 
 use crate::{Code, Issue, Options, Report, Severity, verify};
-use pgr_format::consts::{DYLD_CHAINED_PTR_64_OFFSET, MH_DYLIB, MH_EXECUTE};
+use pgr_format::consts::{DYLD_CHAINED_PTR_ARM64E, MH_DYLIB, MH_EXECUTE};
 use pgr_format::fixups::{
-    ChainWord64, parse_header, parse_imports, parse_starts_in_image, parse_starts_in_segment,
+    ChainWord64, ChainWordArm64e, chain_stride, parse_header, parse_imports,
+    parse_starts_in_image, parse_starts_in_segment,
 };
 
 /// The pair verification result: both images' own reports plus the
@@ -53,7 +61,9 @@ impl PairReport {
 /// 2. the executable must name the dylib among its `LC_LOAD_DYLIB`
 ///    commands (otherwise the pair does not link),
 /// 3. every bind whose two-level ordinal selects that dylib must resolve
-///    to a name the dylib's export trie exports (regular or re-export),
+///    to a name the dylib's export trie exports (regular or re-export) —
+///    replayed family-blind, both chain word families (M10 rung 4,
+///    slice 4),
 /// 4. trie re-export ordinals must stay within the dylib's own dylib list.
 ///
 /// # Panics
@@ -222,9 +232,25 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
         else {
             continue;
         };
-        if seg.pointer_format != DYLD_CHAINED_PTR_64_OFFSET {
+        // Family-blind replay (M10 rung 4, slice 4): the segment's own
+        // `pointer_format` picks the word reader and the stride its `next`
+        // field counts — 8 bytes under arm64e, 4 under the 64 families.
+        // A format the read side does not walk stays skipped (the dynamic
+        // walk refuses it outright; the pair gate simply has no binds to
+        // replay there).
+        let Some(stride) = chain_stride(seg.pointer_format) else {
             continue;
-        }
+        };
+        // The replay names its contract on the tracing seam (inert until a
+        // subscriber installs — the house convention): the family it walks
+        // and the stride that family's `next` counts.
+        tracing::debug!(
+            pointer_format = seg.pointer_format,
+            stride,
+            pages = seg.page_count,
+            segment = seg_index,
+            "pair bind replay contract"
+        );
         for page in 0..seg.page_count {
             let Ok(heads) = pgr_format::fixups::page_chain_starts(
                 payload,
@@ -253,11 +279,12 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
                     else {
                         break;
                     };
-                    let word = ChainWord64::new(u64::from_le_bytes(
-                        word_bytes.try_into().unwrap_or([0; 8]),
-                    ));
-                    if word.is_bind() {
-                        let bind_ord = word.bind_ordinal() as usize;
+                    // Decode through the segment's own family (the helper
+                    // names why: the families' bind bits sit at different
+                    // bit positions).
+                    let (is_bind, bind_ord, strides) =
+                        decode_bind_replay(seg.pointer_format, word_bytes);
+                    if is_bind {
                         if let Some(name) = import_name(bind_ord) {
                             if bind_ord == ordinal && !exports.contains(&name) {
                                 out.pair_issues.push(Issue::error(
@@ -271,16 +298,32 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
                             }
                         }
                     }
-                    let strides = u64::from(word.next());
                     if strides == 0 {
                         break;
                     }
-                    slot_off += strides * 4;
+                    slot_off += strides * stride;
                 }
             }
         }
     }
     out
+}
+
+/// Decodes one chain word through its segment's family: the bind bit and
+/// the ordinal live at different bit positions per family (arm64e's bind
+/// bit is 62, not the 64 family's 63), so a single reader would
+/// misclassify every word. Returns `(is_bind, bind_ordinal, next)` with
+/// `next` counted in raw strides — the caller multiplies by the family's
+/// [`chain_stride`].
+fn decode_bind_replay(pointer_format: u16, word_bytes: &[u8]) -> (bool, usize, u64) {
+    let raw = u64::from_le_bytes(word_bytes.try_into().unwrap_or([0; 8]));
+    if pointer_format == DYLD_CHAINED_PTR_ARM64E {
+        let word = ChainWordArm64e::new(raw);
+        (word.is_bind(), word.bind_ordinal() as usize, u64::from(word.next()))
+    } else {
+        let word = ChainWord64::new(raw);
+        (word.is_bind(), word.bind_ordinal() as usize, u64::from(word.next()))
+    }
 }
 
 /// Parses the chained-fixups payload header (error-mapped for brevity).

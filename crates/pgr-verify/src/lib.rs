@@ -27,7 +27,8 @@
 //! * [`dynamic`] — the chained-fixups payload and chain-walk simulation,
 //! * [`signature`] — SuperBlob/CodeDirectory layout and page-hash recompute,
 //! * [`pair`] — the M3 dylib + executable pair gate (two-level ordinals vs
-//!   the dylib's export trie),
+//!   the dylib's export trie, replayed family-blind across both chain word
+//!   families),
 //! * [`branch_range`] — the M6 `B`/`BL` decode pass backing the veneer
 //!   (thunk) placement gate.
 
