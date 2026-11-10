@@ -49,7 +49,9 @@ pub struct ParsedImage<'a> {
     /// `LC_BUILD_VERSION` payload command.
     pub build_version: Option<pgr_format::BuildVersionCommand>,
     /// Dependent dylib install names (`LC_LOAD_DYLIB`,
-    /// `LC_LOAD_WEAK_DYLIB` and `LC_REEXPORT_DYLIB`, in ordinal order).
+    /// `LC_LOAD_WEAK_DYLIB`, `LC_LAZY_LOAD_DYLIB` and
+    /// `LC_REEXPORT_DYLIB`, in ordinal order — the lazy command rides
+    /// the two-level ordinal space like a plain load, M14).
     pub dylibs: Vec<String>,
     /// The `LC_ID_DYLIB` payload (dylibs only), when present.
     pub id_dylib: Option<pgr_format::DylibCommand>,
