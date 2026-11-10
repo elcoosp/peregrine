@@ -140,6 +140,12 @@ pub enum DriverError {
         /// The parse refusal (line-tagged).
         message: String,
     },
+    /// A `.pgr-inc` sidecar could not be read as a link record (M13
+    /// rung 2, the `--print-record` query): the frame layer that
+    /// refused — size, magic, length, checksum, version or body — and
+    /// the fix in the message.
+    #[error("link record: {0}")]
+    Record(#[from] pgr_emit::incremental::RecordReadError),
 }
 
 /// Reads a symbol-list file (one symbol per line, `#` comments and blank
@@ -1579,12 +1585,18 @@ pub fn usage() -> String {
     s.push_str("                               opcode streams) before any link\n");
     s.push_str("                               runs (M10); a below-floor answer\n");
     s.push_str("                               renders its advisory on stderr\n");
+    s.push_str("  --print-record <path>        summarize a link record sidecar\n");
+    s.push_str("                               (<output>.pgr-inc, M13): the\n");
+    s.push_str("                               identity, skeleton and table\n");
+    s.push_str("                               counts the last -incremental\n");
+    s.push_str("                               link recorded — the what-will-\n");
+    s.push_str("                               the-relink-patch query\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
     s.push_str("member pull (S7), -dead_strip, -all_load/-force_load, -filelist,\n");
-    s.push_str("-framework/-F, -sectcreate, __cstring merging. -order_file stays\n");
-    s.push_str("roadmap-gated.\n");
+    s.push_str("-framework/-F, -sectcreate, __cstring merging; -order_file and\n");
+    s.push_str("-map shipped at M11, --print-record at M13 (the queries above).\n");
     s
 }
 
@@ -1722,6 +1734,28 @@ pub fn fixup_encoding_report(
         minos: minos_word,
         advisory,
     })
+}
+
+/// The `--print-record <path>` answer (M13 rung 2): reads the `.pgr-inc`
+/// sidecar a previous `-incremental` link recorded and summarizes it —
+/// the identity, the skeleton, the span/digest/hash counts and the
+/// resolve-capture flag — the "what did the last incremental link
+/// record, and will the next relink patch?" seam a build system asks
+/// without relinking. The record's trust model is unchanged: the read
+/// is a diagnosis, never a link failure.
+///
+/// # Errors
+/// [`DriverError::Record`] with the frame layer that refused (missing
+/// file, foreign bytes, truncation, corruption, foreign revision).
+pub fn record_report(path: &str) -> Result<pgr_emit::incremental::RecordSummary, DriverError> {
+    let _query_span = tracing::info_span!(
+        "record_query",
+        path = %path,
+    )
+    .entered();
+    Ok(pgr_emit::incremental::read_summary(std::path::Path::new(
+        path,
+    ))?)
 }
 
 #[cfg(test)]
