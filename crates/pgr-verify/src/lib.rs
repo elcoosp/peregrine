@@ -30,10 +30,14 @@
 //!   the dylib's export trie, replayed family-blind across both chain word
 //!   families),
 //! * [`branch_range`] — the M6 `B`/`BL` decode pass backing the veneer
-//!   (thunk) placement gate.
+//!   (thunk) placement gate,
+//! * [`checks`] — the M12 selective surface: named check families, the
+//!   [`CheckSet`] selector and the [`ImageCheck`] registry seam
+//!   (`verify_with_checks` drives a subset; `verify` is the full set).
 
 pub mod branch_range;
 pub mod chain_starts;
+pub mod checks;
 pub mod dyld_info;
 pub mod dynamic;
 pub mod export_trie;
@@ -42,8 +46,9 @@ pub mod pair;
 pub mod signature;
 pub mod structural;
 
+pub use checks::{Check, CheckContext, CheckSet, CheckSetError, ImageCheck, image_checks};
+
 use pgr_format::FormatError;
-use pgr_format::consts::{MH_BUNDLE, MH_DYLIB, MH_EXECUTE, MH_OBJECT};
 
 /// Verification target knobs (M0: fixed to the arm64-apple-darwin contract).
 #[derive(Debug, Clone, Copy, Default)]
@@ -189,7 +194,7 @@ pub struct Stats {
 }
 
 /// Result of verifying one image.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     /// All findings, sorted by anchor offset.
     pub issues: Vec<Issue>,
@@ -208,7 +213,8 @@ impl Report {
         })
     }
 
-    /// Pushes an issue, keeping the report sorted on access.
+    /// Pushes an issue (the report is ordered by [`Report::sort`] before
+    /// it is returned).
     fn push(&mut self, issue: Issue) {
         self.issues.push(issue);
     }
@@ -221,11 +227,31 @@ impl Report {
 
 /// Verifies a complete Mach-O image against the Peregrine arm64 contract.
 ///
-/// The image type shapes the checks: executables and dylibs get the full
-/// segment/base/signature contract; bundles and other types get structural
-/// checks only.
+/// The whole-image pass: every check family, in canonical order — the
+/// same as [`verify_with_checks`] over [`CheckSet::all`]. The image type
+/// shapes the checks: executables and dylibs get the full
+/// segment/base/signature contract; bundles and other types get
+/// structural checks only.
 #[must_use]
 pub fn verify(bytes: &[u8], opts: &Options) -> Report {
+    verify_with_checks(bytes, opts, &CheckSet::all())
+}
+
+/// Verifies a selected subset of the check families ([`checks`], M12).
+///
+/// The parse pre-pass always runs (every family reads its product, and
+/// a fatal parse short-circuits into the same single-issue report as
+/// `verify`); selection then runs only the chosen [`ImageCheck`] units
+/// from [`image_checks`], in canonical order. The stats contract is the
+/// whole-image one: parse-derived counters always land, and the
+/// fixup-slot count zeroes whenever any error-severity issue was
+/// reported by the selected families.
+///
+/// The selection also rides the tracing seam (inert until a subscriber
+/// installs — the workspace convention): one `debug` event names the
+/// selected set.
+#[must_use]
+pub fn verify_with_checks(bytes: &[u8], opts: &Options, checks: &CheckSet) -> Report {
     let mut report = Report::default();
     let parsed = match structural::parse_image(bytes) {
         Ok(p) => p,
@@ -239,30 +265,22 @@ pub fn verify(bytes: &[u8], opts: &Options) -> Report {
     report.stats.sections = parsed.nsections;
     report.stats.symbols = img_nsyms(&parsed);
 
-    structural::check_header(&parsed, &mut report);
-    structural::check_load_commands(&parsed, &mut report);
-    structural::check_dylib_contract(&parsed, &mut report);
-    structural::check_segments(bytes, &parsed, &mut report);
-    structural::check_symbol_table(bytes, &parsed, &mut report);
-    if parsed.header.filetype == MH_OBJECT {
-        structural::check_object_contract(bytes, &parsed, &mut report);
-    }
-    misc::check_entry_and_version(bytes, &parsed, &mut report);
-    misc::check_linkedit_payloads(bytes, &parsed, &mut report);
-    if matches!(parsed.header.filetype, MH_EXECUTE | MH_DYLIB | MH_BUNDLE) {
-        if let Some(payload) = &parsed.fixups {
-            dynamic::check_fixups(bytes, &parsed, payload, &mut report);
+    // The selection names itself on the tracing seam (inert until a
+    // subscriber installs — the house convention).
+    tracing::debug!(selected = %checks, "verify-check selection");
+
+    for unit in image_checks() {
+        if checks.contains(unit.check()) {
+            let mut ctx = CheckContext {
+                bytes,
+                parsed: &parsed,
+                opts,
+                report: &mut report,
+            };
+            unit.run(&mut ctx);
         }
-        if parsed.header.filetype == MH_EXECUTE {
-            // M1: the static mirror must agree with the payload (TDD §7.5).
-            chain_starts::check_chain_starts(bytes, &parsed, &mut report);
-        }
-        // M6: the branch-range gate (veneers included).
-        branch_range::check_branch_range(bytes, &parsed, &mut report);
-        // M6: the classic `LC_DYLD_INFO(_ONLY)` opcode-stream walk.
-        dyld_info::check_dyld_info(bytes, &parsed, &mut report);
-        signature::check_signature(bytes, &parsed, !opts.skip_hash_recompute, &mut report);
     }
+
     if report.issues.iter().any(|i| i.severity == Severity::Error) {
         report.stats.fixup_slots = 0;
     } else {
