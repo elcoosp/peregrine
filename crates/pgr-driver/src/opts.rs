@@ -134,6 +134,12 @@ pub struct Options {
     /// segments/sections/symbols, rendered by [`pgr_core::map`]) next to
     /// the link. `None` (the default) writes no map.
     pub map_path: Option<String>,
+    /// M15: `-pagezero_size` was passed explicitly. The default (`false`)
+    /// keeps the seam's own default on every non-executable output — the
+    /// flag only applies to executables, and an explicitly named knob
+    /// that cannot apply is a refused conflict, never a silently
+    /// dropped one (the `-fixup_chains_format` surface convention).
+    pub pagezero_explicit: bool,
 }
 
 impl Default for Options {
@@ -171,6 +177,7 @@ impl Default for Options {
             chain_word_format_explicit: false,
             order_file: None,
             map_path: None,
+            pagezero_explicit: false,
         }
     }
 }
@@ -218,6 +225,45 @@ pub enum OptsError {
     ))]
     ChainFormatValue {
         /// The unknown family as written.
+        value: String,
+    },
+    /// A `-pagezero_size` value the grammar refuses (M15): the size is
+    /// a non-zero multiple of the 16 KiB arm64 page — the same
+    /// validation the core seam pays — and the help names the grammar
+    /// (the fix, not just the verdict).
+    #[error("invalid value for -pagezero_size: {value}")]
+    #[diagnostic(help(
+        "the size is a non-zero multiple of the 16 KiB arm64 page (0x4000), decimal or 0x-hex — \
+         e.g. 0x40000000; the default is 0x100000000"
+    ))]
+    PageZeroValue {
+        /// The refused value as written.
+        value: String,
+    },
+    /// A `-pagezero_size` surface conflict (M15): `__PAGEZERO` exists
+    /// on executables only (the M3 contract: `__TEXT.vmaddr ==
+    /// fileoff` for dylibs/bundles, no segments for `-r`). The verdict
+    /// names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    PageZeroConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// An argv element is not valid UTF-8 (the surface stores paths and
+    /// values as `String`s — the Mach-O string tables are UTF-8 too).
+    /// The message names what happened and which bytes; the old shape
+    /// misreported it as an "invalid value for <arg>".
+    #[error("argument is not valid UTF-8: {value}")]
+    #[diagnostic(help(
+        "paths and values are carried as UTF-8 (the Mach-O string tables are UTF-8); \
+         rename the file or pass an escaped form"
+    ))]
+    NonUtf8Arg {
+        /// The offending bytes, lossily rendered.
         value: String,
     },
     /// A `-fixup_chains_format` surface conflict (M10 rung 4): the
@@ -296,12 +342,12 @@ const NOOP_FLAGS: [&str; 8] = [
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
 /// M14 released the weak/lazy dylib family (`-weak_framework`,
-/// `-lazy_framework`, `-lazy_library`) — the umbrella re-exports, `ObjC`
-/// semantics and the rest stay here with their roadmap entry.
-const LATER_FLAGS: [(&str, &str); 6] = [
+/// `-lazy_framework`, `-lazy_library`) and M15 released `-pagezero_size`
+/// (the image-base seam) — the umbrella re-exports, `ObjC` semantics and
+/// the rest stay here with their roadmap entry.
+const LATER_FLAGS: [(&str, &str); 5] = [
     ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
     ("-U", "later milestone (make-undefined)"),
-    ("-pagezero_size", "later milestone"),
     (
         "-sub_library",
         "umbrella re-exports beyond -reexport_library are a later milestone",
@@ -328,8 +374,7 @@ pub fn parse(args: &[std::ffi::OsString]) -> Result<Options, OptsError> {
     let mut output_seen = false;
     let mut i = 0usize;
     while i < args.len() {
-        let arg = args[i].to_str().ok_or_else(|| OptsError::InvalidValue {
-            flag: "<arg>".into(),
+        let arg = args[i].to_str().ok_or_else(|| OptsError::NonUtf8Arg {
             value: args[i].to_string_lossy().into_owned(),
         })?;
         if arg == "-o" {
@@ -380,8 +425,7 @@ fn expand_response_files(
 ) -> Result<Vec<std::ffi::OsString>, OptsError> {
     let mut out = Vec::with_capacity(args.len());
     for arg in args {
-        let s = arg.to_str().ok_or_else(|| OptsError::InvalidValue {
-            flag: "<arg>".into(),
+        let s = arg.to_str().ok_or_else(|| OptsError::NonUtf8Arg {
             value: arg.to_string_lossy().into_owned(),
         })?;
         if let Some(path) = s.strip_prefix('@') {
@@ -881,6 +925,18 @@ fn apply_flag(
             let v = next_value(args, i, arg)?;
             opts.map_path = Some(v);
         }
+        // M15: the image base (the `__PAGEZERO` vmsize an executable
+        // plans with). The same validation the core seam pays runs here,
+        // so the refusal names the grammar; the output-kind conflict is
+        // `finish`'s (it sees the whole surface).
+        "-pagezero_size" => {
+            let v = next_value(args, i, arg)?;
+            let n =
+                parse_number(&v).ok_or_else(|| OptsError::PageZeroValue { value: v.clone() })?;
+            opts.config.pagezero = pgr_core::PageZero::from_override(n)
+                .map_err(|_| OptsError::PageZeroValue { value: v.clone() })?;
+            opts.pagezero_explicit = true;
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -952,6 +1008,25 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
                 fix: "drop -resident or -fixup_chains_format".into(),
             });
         }
+    }
+    // M15: the image base is an executable decision — `__PAGEZERO`
+    // exists on executables only (the M3 contract: `__TEXT.vmaddr ==
+    // fileoff` for dylibs/bundles, no segments for `-r`). An explicitly
+    // named knob that cannot apply is a refusal, never a silently
+    // dropped one.
+    if opts.pagezero_explicit && opts.config.filetype != pgr_core::layout::OutputType::Execute {
+        return Err(OptsError::PageZeroConflict {
+            verdict: format!(
+                "-pagezero_size names an image base, but the {} output carries no __PAGEZERO",
+                match opts.config.filetype {
+                    pgr_core::layout::OutputType::Dylib => "-dylib",
+                    pgr_core::layout::OutputType::Bundle => "-bundle",
+                    pgr_core::layout::OutputType::Relocatable => "-r",
+                    pgr_core::layout::OutputType::Execute => unreachable!("guarded above"),
+                }
+            ),
+            fix: "drop -pagezero_size or link an executable (the default output)".into(),
+        });
     }
     match opts.config.filetype {
         pgr_core::layout::OutputType::Execute => {
@@ -1478,6 +1553,88 @@ mod tests {
         assert_eq!(o.weak_frameworks, ["Foundation", "CoreFoundation"]);
         assert_eq!(o.lazy_frameworks, ["SwiftUI"]);
         assert_eq!(o.inputs.len(), 4, "a.o, the two libraries, b.o");
+    }
+
+    #[test]
+    fn m15_pagezero_flag_shapes_the_config() {
+        // M15: the image base parses (decimal and 0x-hex) into the
+        // validated seam value; the executable default is untouched.
+        let o = parse(&args(&[
+            "-o",
+            "hello",
+            "-pagezero_size",
+            "0x40000000",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(o.config.pagezero.vmsize(), 0x4000_0000);
+        assert!(o.pagezero_explicit);
+        let o = parse(&args(&[
+            "-o",
+            "hello",
+            "-pagezero_size",
+            "1073741824",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(o.config.pagezero.vmsize(), 0x4000_0000);
+        // The default spelling (the 4 GiB constant) parses too.
+        let o = parse(&args(&[
+            "-o",
+            "hello",
+            "-pagezero_size",
+            "0x100000000",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(o.config.pagezero.vmsize(), 0x1_0000_0000);
+        // No flag: the seam default rides, nothing is explicit.
+        let o = parse(&args(&["-o", "hello", "a.o"])).unwrap();
+        assert_eq!(o.config.pagezero.vmsize(), 0x1_0000_0000);
+        assert!(!o.pagezero_explicit);
+    }
+
+    #[test]
+    fn m15_pagezero_refusals_name_the_grammar() {
+        // Zero, misaligned and non-numeric values refuse with the
+        // grammar in the help; the core seam's validation is the same
+        // one the wire pays.
+        for raw in ["0", "0x3000", "0x4001", "abc"] {
+            let err = parse(&args(&["-o", "hello", "-pagezero_size", raw, "a.o"])).unwrap_err();
+            assert!(
+                matches!(err, OptsError::PageZeroValue { .. }),
+                "{raw}: {err:?}"
+            );
+        }
+        // The knob is executable-only: dylib and -r outputs refuse with
+        // the conflict shape (a refusal, never a silently dropped flag).
+        for kind_flag in [["-dylib"], ["-r"]] {
+            let mut argv = vec!["-o", "x"];
+            argv.extend_from_slice(&kind_flag);
+            argv.extend_from_slice(&["-pagezero_size", "0x40000000", "a.o"]);
+            let err = parse(&args(&argv)).unwrap_err();
+            assert!(
+                matches!(err, OptsError::PageZeroConflict { .. }),
+                "{kind_flag:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_utf8_arguments_are_a_named_error() {
+        // The weak "invalid value for <arg>" shape became a named
+        // refusal: the message says what happened (not valid UTF-8) and
+        // the help names the constraint.
+        let raw =
+            <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![0xFF, 0xFE]);
+        let err = parse(&[
+            std::ffi::OsString::from("-o"),
+            std::ffi::OsString::from("out"),
+            raw,
+        ])
+        .unwrap_err();
+        assert!(matches!(err, OptsError::NonUtf8Arg { .. }), "{err:?}");
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
     }
 
     #[test]
