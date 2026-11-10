@@ -17,8 +17,8 @@
 use crate::{Code, Issue, Options, Report, Severity, verify};
 use pgr_format::consts::{DYLD_CHAINED_PTR_ARM64E, MH_DYLIB, MH_EXECUTE};
 use pgr_format::fixups::{
-    ChainWord64, ChainWordArm64e, chain_stride, parse_header, parse_imports,
-    parse_starts_in_image, parse_starts_in_segment,
+    ChainWord64, ChainWordArm64e, chain_stride, parse_header, parse_imports, parse_starts_in_image,
+    parse_starts_in_segment,
 };
 
 /// The pair verification result: both images' own reports plus the
@@ -286,7 +286,16 @@ pub fn verify_dylib_pair(exec_bytes: &[u8], dylib_bytes: &[u8], opts: &Options) 
                         decode_bind_replay(seg.pointer_format, word_bytes);
                     if is_bind {
                         if let Some(name) = import_name(bind_ord) {
-                            if bind_ord == ordinal && !exports.contains(&name) {
+                            // The two-level ordinal rides the import table
+                            // entry's `lib_ordinal` (the 1-based
+                            // LC_LOAD_DYLIB index) — the table *index* is
+                            // its position, not its library (comparing
+                            // the two skipped every first import whose
+                            // index differs from its library ordinal).
+                            let lib_ordinal = imports
+                                .get(bind_ord)
+                                .map_or(usize::MAX, |imp| usize::from(imp.lib_ordinal));
+                            if lib_ordinal == ordinal && !exports.contains(&name) {
                                 out.pair_issues.push(Issue::error(
                                     Code::FixupsImport,
                                     format!(
@@ -319,10 +328,18 @@ fn decode_bind_replay(pointer_format: u16, word_bytes: &[u8]) -> (bool, usize, u
     let raw = u64::from_le_bytes(word_bytes.try_into().unwrap_or([0; 8]));
     if pointer_format == DYLD_CHAINED_PTR_ARM64E {
         let word = ChainWordArm64e::new(raw);
-        (word.is_bind(), word.bind_ordinal() as usize, u64::from(word.next()))
+        (
+            word.is_bind(),
+            word.bind_ordinal() as usize,
+            u64::from(word.next()),
+        )
     } else {
         let word = ChainWord64::new(raw);
-        (word.is_bind(), word.bind_ordinal() as usize, u64::from(word.next()))
+        (
+            word.is_bind(),
+            word.bind_ordinal() as usize,
+            u64::from(word.next()),
+        )
     }
 }
 
