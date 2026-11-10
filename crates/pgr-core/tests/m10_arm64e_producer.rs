@@ -7,7 +7,7 @@
 //!
 //! * unauth rebase words carry the **VM address** (format-1 semantics —
 //!   dyld subtracts the preferred load address walking back), not the
-//!   image-base-relative offset the 64_OFFSET family carries;
+//!   image-base-relative offset the `64_OFFSET` family carries;
 //! * `next` counts **8-byte strides** and 0 terminates;
 //! * bind words carry the 16-bit ordinal and the signed inline addend
 //!   (bit 62 set, 63 clear);
@@ -21,13 +21,12 @@
 //! * refusals name their cause: a rebase target the arm64e fields cannot
 //!   represent, and an import table beyond the 16-bit arm64e ordinal.
 
+use pgr_core::LinkError;
 use pgr_core::fixups::{FixupKind, FixupPointerFormat, FixupSlot, plan_fixups_with_format};
 use pgr_core::ids::StringId;
 use pgr_core::interner::Interner;
-use pgr_core::LinkError;
 use pgr_format::consts::{
-    DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_ARM64E, DYLD_CHAINED_PTR_64_OFFSET,
-    PAGE_SIZE_16K,
+    DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E, PAGE_SIZE_16K,
 };
 use pgr_format::fixups::{ChainWord64, ChainWordArm64e};
 
@@ -204,8 +203,7 @@ fn arm64e_bind_words_carry_the_ordinal_and_inline_addend() {
     );
     assert_eq!(plan.imports.len(), 1, "one import entry");
     assert_eq!(
-        plan.imports[0].addend,
-        0,
+        plan.imports[0].addend, 0,
         "0..=255 travels inline, not in the table"
     );
 }
@@ -228,7 +226,9 @@ fn the_payload_and_mirror_name_the_arm64e_format() {
     let starts_offset = u32::from_le_bytes(plan.payload[4..8].try_into().unwrap()) as usize;
     let rec0 = starts_offset
         + u32::from_le_bytes(
-            plan.payload[starts_offset + 4..starts_offset + 8].try_into().unwrap(),
+            plan.payload[starts_offset + 4..starts_offset + 8]
+                .try_into()
+                .unwrap(),
         ) as usize;
     let pointer_format = u16::from_le_bytes(plan.payload[rec0 + 6..rec0 + 8].try_into().unwrap());
     assert_eq!(
@@ -292,7 +292,10 @@ fn the_default_path_stays_byte_identical() {
         "the seam is invisible on the default: same payload bytes"
     );
     assert_eq!(explicit.slot_words, legacy.slot_words, "same encoded words");
-    assert_eq!(explicit.chain_starts, legacy.chain_starts, "same mirror bytes");
+    assert_eq!(
+        explicit.chain_starts, legacy.chain_starts,
+        "same mirror bytes"
+    );
     assert_eq!(explicit.imports, legacy.imports, "same import table");
     // And the pointer format is the one the M2 planner locked (§7.2).
     assert_eq!(
@@ -306,10 +309,16 @@ fn an_arm64e_target_beyond_the_rebase_field_refuses() {
     let (interner, _) = interner_with(&[]);
     // Bits 43..56 of a VM address have no home in the arm64e word (the
     // target field is 43 bits, the high8 covers 56..64): refuse instead
-    // of silently truncating them.
+    // of silently truncating them. The slot itself sits inside the
+    // segment — it is the *target* that is unrepresentable.
     let impossible = TEXT_VM + (1 << 44);
     let err = plan_fixups_with_format(
-        vec![rebase(impossible)],
+        vec![FixupSlot {
+            vaddr: TEXT_VM,
+            kind: FixupKind::Rebase {
+                target_vaddr: impossible,
+            },
+        }],
         &segments(),
         IMAGE_BASE,
         PAGE,
