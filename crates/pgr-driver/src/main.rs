@@ -30,6 +30,9 @@ fn main() -> ExitCode {
             print!("{}", pgr_driver::usage());
             return ExitCode::SUCCESS;
         }
+        Some("--print-fixup-encoding") => {
+            return print_fixup_encoding(&args[1..]);
+        }
         _ => {}
     }
 
@@ -97,6 +100,48 @@ fn main() -> ExitCode {
 fn run(args: &[std::ffi::OsString]) -> Result<pgr_driver::LinkOutcome, pgr_driver::DriverError> {
     let opts = pgr_driver::opts::parse(args)?;
     pgr_driver::run(&opts)
+}
+
+/// The `--print-fixup-encoding` intercept (M10 rung 3, slice 2): names
+/// the fixup encoding a `-platform_version` triple plans with before
+/// any link runs — the build-system seam. The verdict prints on
+/// stdout; a below-floor answer renders its miette advisory (help text
+/// included) on stderr and still exits 0 (an advisory is a plan, not a
+/// failure); option refusals render like the parse path and exit 2.
+fn print_fixup_encoding(rest: &[std::ffi::OsString]) -> ExitCode {
+    if rest.len() != 3 {
+        eprintln!("{PROGRAM}: error: --print-fixup-encoding <platform> <minos> <sdk>");
+        return ExitCode::from(2);
+    }
+    let (Some(platform), Some(minos), Some(sdk)) =
+        (rest[0].to_str(), rest[1].to_str(), rest[2].to_str())
+    else {
+        eprintln!(
+            "{PROGRAM}: error: --print-fixup-encoding <platform> <minos> <sdk> \
+             (arguments must be UTF-8)"
+        );
+        return ExitCode::from(2);
+    };
+    match pgr_driver::fixup_encoding_report(platform, minos, sdk) {
+        Ok(report) => {
+            let encoding = match report.encoding {
+                pgr_core::platform::FixupEncoding::ChainedFixups => "chained-fixups",
+                pgr_core::platform::FixupEncoding::ClassicOpcodes => "classic-opcodes",
+            };
+            println!(
+                "{PROGRAM}: {platform} {minos} links {encoding} (chained-fixups floor {})",
+                report.floor_text()
+            );
+            if let Some(advisory) = report.advisory {
+                eprintln!("{:?}", miette::Report::new(advisory));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{PROGRAM}: error: {:?}", miette::Report::new(e));
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// The rendered error for the failing option (parse errors carry the
