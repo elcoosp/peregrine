@@ -55,7 +55,15 @@
 //! byte exists so the wire can never silently drop the family a client
 //! asked for, and a fusion rung can widen the surface without the
 //! config's shape moving again.
+//!
+//! M14 (wire v7): the config body's export-filter lists carry
+//! [`SymbolPattern`]s, not bare names — one kind byte per entry (`0`
+//! exact, `1` glob) ahead of the pattern's own bytes, so the wire can
+//! never silently flatten a glob into an exact name (the resident
+//! relink's export surface would move). A malformed pattern refuses at
+//! decode time, like every other shape the wire carries.
 
+use pgr_core::export_filter::SymbolPattern;
 use pgr_core::fixups::FixupPointerFormat;
 use pgr_core::icf::IcfMode;
 use pgr_core::layout::{LinkConfig, OutputType};
@@ -69,10 +77,12 @@ use sha2::{Digest, Sha256};
 /// reply's audit verdict ([`pgr_emit::incremental::audit::AuditOutcome`]);
 /// v5 added the §7.2 output-residency rung — the request's `tiles` flag
 /// and the reply's tile-stream image tail
-/// ([`pgr_emit::incremental::TilePatch`]); **v6** appends the chain word
+/// ([`pgr_emit::incremental::TilePatch`]); **v6** appended the chain word
 /// family to the config body (M10 rung 4 slice 2 — the family a client
-/// asked for crosses the wire verbatim, never silently dropped).
-pub const PROTO_VERSION: u32 = 6;
+/// asked for crosses the wire verbatim, never silently dropped); **v7**
+/// re-encodes the export-filter lists as patterns (M14 — kind byte +
+/// source bytes; globs stay globs across the wire).
+pub const PROTO_VERSION: u32 = 7;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -412,6 +422,30 @@ impl LinkRequest {
     }
 }
 
+/// Encodes one export-filter pattern (M14, wire v7): a kind byte (the
+/// `SymbolPattern` variant) ahead of the line as written, so the daemon
+/// relinks with the surface the client named — globs stay globs.
+fn put_pattern(out: &mut Vec<u8>, p: &SymbolPattern) {
+    put_u8(
+        out,
+        match p {
+            SymbolPattern::Exact(_) => 0,
+            SymbolPattern::Glob(_) => 1,
+        },
+    );
+    put_bytes(out, p.source());
+}
+
+/// Decodes one export-filter pattern: the kind byte is advisory (the
+/// source decides the variant at parse), a malformed pattern refuses —
+/// the wire never carries a filter the pipeline would silently misread.
+fn read_pattern(r: &mut Reader<'_>) -> Result<SymbolPattern, DecodeError> {
+    let _kind = r.u8()?;
+    let source = r.bytes()?;
+    SymbolPattern::parse(source)
+        .map_err(|_| DecodeError::Malformed(std::io::ErrorKind::InvalidData.into()))
+}
+
 fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     put_str(out, &cfg.ident);
     put_u8(
@@ -459,15 +493,15 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         Some(list) => {
             put_u8(out, 1);
             put_u32(out, list.len() as u32);
-            for n in list {
-                put_bytes(out, n);
+            for p in list {
+                put_pattern(out, p);
             }
         }
         None => put_u8(out, 0),
     }
     put_u32(out, cfg.unexported.len() as u32);
-    for n in &cfg.unexported {
-        put_bytes(out, n);
+    for p in &cfg.unexported {
+        put_pattern(out, p);
     }
     put_u8(out, u8::from(cfg.dead_strippable));
     put_u8(out, u8::from(cfg.dead_strip));
@@ -513,6 +547,10 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         }
         put_u8(out, u8::from(d.weak));
         put_u8(out, u8::from(d.reexport));
+        // M14 (v7): the lazy-load kind rides beside weak/re-export — the
+        // wire never silently flattens an `LC_LAZY_LOAD_DYLIB` request
+        // into a plain load.
+        put_u8(out, u8::from(d.lazy));
     }
     // M10 rung 4 slice 2 (v6 wire): the chain word family rides the tail
     // of the config body (the append-in-place upgrade convention).
@@ -559,17 +597,19 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     let install_name = r.opt_str()?;
     let current_version = r.u32()?;
     let compatibility_version = r.u32()?;
-    let exported_only = match r.u8()? {
-        0 => None,
-        _ => Some(
-            (0..r.u32()?)
-                .map(|_| r.bytes().map(<[u8]>::to_vec))
-                .collect::<Result<Vec<Vec<u8>>, DecodeError>>()?,
-        ),
+    let exported_only = if r.u8()? == 0 {
+        None
+    } else {
+        let mut list = Vec::new();
+        for _ in 0..r.u32()? {
+            list.push(read_pattern(&mut *r)?);
+        }
+        Some(list)
     };
-    let unexported = (0..r.u32()?)
-        .map(|_| r.bytes().map(<[u8]>::to_vec))
-        .collect::<Result<Vec<Vec<u8>>, DecodeError>>()?;
+    let mut unexported = Vec::new();
+    for _ in 0..r.u32()? {
+        unexported.push(read_pattern(&mut *r)?);
+    }
     let dead_strippable = r.u8()? != 0;
     let dead_strip = r.u8()? != 0;
     let load_symbols = (0..r.u32()?)
@@ -611,6 +651,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
                     .collect::<Result<Vec<Vec<u8>>, DecodeError>>()?,
                 weak: r.u8()? != 0,
                 reexport: r.u8()? != 0,
+                lazy: r.u8()? != 0,
             })
         })
         .collect::<Result<Vec<Dylib>, DecodeError>>()?;
@@ -676,6 +717,7 @@ mod tests {
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, TAG_LINK,
         content_hash, put_u32,
     };
+    use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
     use pgr_core::layout::LinkConfig;
     use pgr_core::resolve::Dylib;
@@ -699,6 +741,7 @@ mod tests {
                 exports: vec![b"_greet".to_vec(), b"_greet_loud".to_vec()],
                 weak: true,
                 reexport: true,
+                lazy: true,
             }],
             flat_namespace: true,
             undefined_policy: pgr_core::resolve::UndefinedPolicy::DynamicLookup,
@@ -707,8 +750,17 @@ mod tests {
             install_name: Some("@rpath/libapp.dylib".into()),
             current_version: 0x1_0_0,
             compatibility_version: 0x0_1_0,
-            exported_only: Some(vec![b"_public".to_vec()]),
-            unexported: vec![b"_secret".to_vec()],
+            // The v7 filter lists: both forms ride (a glob must not
+            // flatten into an exact name across the wire — the export
+            // surface is the surface the client named).
+            exported_only: Some(vec![
+                SymbolPattern::exact(b"_public"),
+                SymbolPattern::parse(b"_pub_*").unwrap(),
+            ]),
+            unexported: vec![
+                SymbolPattern::exact(b"_secret"),
+                SymbolPattern::parse(b"_priv_*").unwrap(),
+            ],
             dead_strippable: true,
             dead_strip: true,
             load_symbols: vec![b"_kept".to_vec()],
