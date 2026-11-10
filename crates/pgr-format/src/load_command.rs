@@ -37,7 +37,9 @@ impl ParsedCommand<'_> {
     }
 }
 
-/// The load commands Peregrine's M0 pipeline reasons about.
+/// The load commands the pipeline and the verifier reason about (the M0
+/// seed, grown with the milestones: re-exports M3, the linkedit payloads
+/// M2–M10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadCommandKind {
     /// `LC_SEGMENT_64`.

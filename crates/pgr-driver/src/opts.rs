@@ -101,14 +101,21 @@ pub struct Options {
     /// full link (the fallback must always be available). Implies slack
     /// layout (`LinkConfig::layout_slack`) when the caller left it unset.
     pub incremental: bool,
-    /// M9 `-incremental-verify`: after a successful patch, audit (the
-    /// daemon serves it on the resident path — wire v4; in-process
-    /// otherwise)
-    /// it — byte-identity against the full fused emit of the same plan,
-    /// then a strict `pgr-verify` pass on the patched bytes (the §7.3
-    /// "no stale-signature or stale-fixup failures" gate). A divergence
-    /// never ships: the output is rewritten from the full emit.
+    /// M9 `-incremental-verify`: after a successful patch, audit
+    /// byte-identity against the full fused emit of the same plan (the
+    /// daemon serves the audit on the resident path — wire v4;
+    /// in-process otherwise), then a strict `pgr-verify` pass on the
+    /// patched bytes (the §7.3 "no stale-signature or stale-fixup
+    /// failures" gate). A divergence never ships: the output is
+    /// rewritten from the full emit.
     pub incremental_verify: bool,
+    /// M10 rung 4, slice 5: `-fixup_chains_format` was passed explicitly
+    /// (either spelling). The default (`false`) keeps the documented
+    /// below-floor fallback — the layout silently plans the classic
+    /// opcode streams when no family was named — while an explicitly
+    /// named family the floor cannot carry is a refused knob, never a
+    /// silently dropped one (the surface's own contract).
+    pub chain_word_format_explicit: bool,
 }
 
 impl Default for Options {
@@ -140,6 +147,7 @@ impl Default for Options {
             resident_socket: None,
             incremental: false,
             incremental_verify: false,
+            chain_word_format_explicit: false,
         }
     }
 }
@@ -176,6 +184,30 @@ pub enum OptsError {
         flag: String,
         /// The bad value.
         value: String,
+    },
+    /// An unknown `-fixup_chains_format` word family (M10 rung 4,
+    /// slice 5): the flag's vocabulary is two names, and the help names
+    /// them — the shared `InvalidValue` help text (the version-triple
+    /// grammar) never fit this flag.
+    #[error("invalid value for -fixup_chains_format: {value}")]
+    #[diagnostic(help(
+        "the chain word families are `offset64` (the M2 default) and `arm64e` (the rung-4 producer family)"
+    ))]
+    ChainFormatValue {
+        /// The unknown family as written.
+        value: String,
+    },
+    /// A `-fixup_chains_format` surface conflict (M10 rung 4): the
+    /// requested chain word family cannot be encoded where it was
+    /// requested. The verdict names the shape conflict; the help is the
+    /// fix — the house convention (the fix, not just the verdict).
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ChainFormatConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
     },
     /// `-platform_version`: the SDK is older than the deployment target
     /// (M10 rung 2). The SDK ships the deployment target's interfaces;
@@ -231,12 +263,18 @@ const NOOP_FLAGS: [&str; 8] = [
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
 const LATER_FLAGS: [(&str, &str); 10] = [
     ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
-    ("-weak_framework", "framework bundles are a later milestone"),
-    ("-lazy_framework", "framework bundles are a later milestone"),
+    (
+        "-weak_framework",
+        "weak/lazy framework loading is a later milestone",
+    ),
+    (
+        "-lazy_framework",
+        "weak/lazy framework loading is a later milestone",
+    ),
     ("-lazy_library", "later milestone"),
     (
         "-order_file",
-        "M5 scope (symbol-boundary ordering lands with the atomizer)",
+        "roadmap-gated (symbol-boundary ordering needs the atomizer's ordering pass)",
     ),
     ("-U", "later milestone (make-undefined)"),
     ("-pagezero_size", "later milestone"),
@@ -545,11 +583,13 @@ fn apply_flag(
             // `-icf=` convention).
             let v = next_value(args, i, arg)?;
             opts.config.chain_word_format = parse_chain_format(&v).ok_or_else(|| {
-                OptsError::InvalidValue {
-                    flag: "-fixup_chains_format".into(),
+                OptsError::ChainFormatValue {
                     value: format!("{v} (offset64 | arm64e)"),
                 }
             })?;
+            // The flag was named explicitly: the floor gate (slice 5)
+            // reads this, the default stays the silent fallback.
+            opts.chain_word_format_explicit = true;
             // The flag→config seam, spanned like the pipeline seams (inert
             // until a subscriber installs).
             tracing::debug!(
@@ -560,11 +600,11 @@ fn apply_flag(
         a if a.starts_with("-fixup_chains_format=") => {
             let v = &a[21..];
             opts.config.chain_word_format = parse_chain_format(v).ok_or_else(|| {
-                OptsError::InvalidValue {
-                    flag: "-fixup_chains_format".into(),
+                OptsError::ChainFormatValue {
                     value: format!("{v} (offset64 | arm64e)"),
                 }
             })?;
+            opts.chain_word_format_explicit = true;
         }
         "-adhoc" => opts.config.adhoc = true,
         "-no_adhoc" => opts.config.adhoc = false,
@@ -845,21 +885,17 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
     // where it is requested — a refusal, never a silently dropped knob.
     if opts.config.chain_word_format == FixupPointerFormat::Arm64e {
         if !opts.config.fixup_chains {
-            return Err(OptsError::InvalidValue {
-                flag: "-fixup_chains_format".into(),
-                value: "the classic opcode streams have no chain words to \
-                        shape; drop -fixup_chains_format or re-enable chained fixups"
-                    .into(),
+            return Err(OptsError::ChainFormatConflict {
+                verdict: "the classic opcode streams have no chain words to shape".into(),
+                fix: "drop -fixup_chains_format or re-enable chained fixups".into(),
             });
         }
         if opts.resident {
-            return Err(OptsError::InvalidValue {
-                flag: "-fixup_chains_format".into(),
-                value: "the resident session's reuse gates plan Offset64 \
-                        shapes this slice (the v6 wire mirrors the family, \
-                        the gates do not consume it yet); drop -resident \
-                        or -fixup_chains_format"
+            return Err(OptsError::ChainFormatConflict {
+                verdict: "the resident session's reuse gates plan Offset64 shapes this slice \
+                          (the v6 wire mirrors the family, the gates do not consume it yet)"
                     .into(),
+                fix: "drop -resident or -fixup_chains_format".into(),
             });
         }
     }
@@ -919,11 +955,9 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
                 });
             }
             if opts.config.chain_word_format == FixupPointerFormat::Arm64e {
-                return Err(OptsError::InvalidValue {
-                    flag: "-fixup_chains_format".into(),
-                    value: "-r writes an input object: no fixups exist to \
-                            shape; drop -fixup_chains_format"
-                        .into(),
+                return Err(OptsError::ChainFormatConflict {
+                    verdict: "-r writes an input object: no fixups exist to shape".into(),
+                    fix: "drop -fixup_chains_format".into(),
                 });
             }
             if opts.incremental {
@@ -938,6 +972,47 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
                     value: "-r has no resident shape; drop -resident".into(),
                 });
             }
+        }
+    }
+    // M10 rung 4, slice 5: an *explicitly named* chain word family must
+    // survive the deployment floor. Below it the layout plans the classic
+    // opcode streams (TDD §3.6 invariant 3 — the encoding flips, the
+    // fixups do not; the floor is the documented fallback) — and a named
+    // family no image will ever carry is a silently dropped knob, which
+    // this surface refuses to do. The unnamed default keeps the silent
+    // fallback. The decision reads the same consumer seam the encoding
+    // query answers from (one table, three readers — never a
+    // re-derivation); after the output-kind match so `-r` keeps its
+    // tighter refusal wording.
+    if opts.chain_word_format_explicit && opts.config.fixup_chains {
+        let encoding =
+            pgr_core::platform::FixupEncoding::for_target(opts.config.platform, opts.config.minos);
+        if encoding == pgr_core::platform::FixupEncoding::ClassicOpcodes {
+            let floor = pgr_core::platform::FixupEncoding::floor_for(opts.config.platform);
+            let floor_text = crate::fmt_version_word(floor);
+            let minos_text = crate::fmt_version_word(opts.config.minos);
+            tracing::debug!(
+                format = chain_format_text(opts.config.chain_word_format),
+                platform = platform_display(opts.config.platform),
+                minos = %minos_text,
+                floor = %floor_text,
+                "the -fixup_chains_format floor gate refused the explicit family"
+            );
+            return Err(OptsError::ChainFormatConflict {
+                verdict: format!(
+                    "explicit -fixup_chains_format {} rides chained fixups, and {} {} sits \
+                     below the {} chained-fixups floor: the link plans the classic opcode \
+                     streams and the named family never reaches the image",
+                    chain_format_text(opts.config.chain_word_format),
+                    platform_display(opts.config.platform),
+                    minos_text,
+                    floor_text,
+                ),
+                fix: format!(
+                    "raise the deployment target above {floor_text} or drop \
+                     -fixup_chains_format — the encoding flips, the fixups do not"
+                ),
+            });
         }
     }
     Ok(opts.clone())
@@ -965,6 +1040,33 @@ pub fn parse_chain_format(v: &str) -> Option<FixupPointerFormat> {
         "offset64" => Some(FixupPointerFormat::Offset64),
         "arm64e" => Some(FixupPointerFormat::Arm64e),
         _ => None,
+    }
+}
+
+/// The `-fixup_chains_format` vocabulary a config rides (the flag's own
+/// names, for refusal messages — M10 rung 4, slice 5).
+#[must_use]
+pub fn chain_format_text(format: FixupPointerFormat) -> &'static str {
+    match format {
+        FixupPointerFormat::Offset64 => "offset64",
+        FixupPointerFormat::Arm64e => "arm64e",
+    }
+}
+
+/// The `-platform_version` name a platform constant rides (the inverse
+/// of `platform_const`, for refusal messages). A constant outside the
+/// five linked platforms displays numerically — only a caller-built
+/// `pgr_core::layout::LinkConfig` can produce one (the CLI refuses it at
+/// parse time).
+#[must_use]
+pub fn platform_display(platform: u32) -> String {
+    match platform {
+        PLATFORM_MACOS => "macos".into(),
+        PLATFORM_IOS => "ios".into(),
+        PLATFORM_TVOS => "tvos".into(),
+        PLATFORM_WATCHOS => "watchos".into(),
+        PLATFORM_VISIONOS => "visionos".into(),
+        other => format!("platform {other}"),
     }
 }
 

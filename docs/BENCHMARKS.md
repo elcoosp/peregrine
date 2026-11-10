@@ -1,6 +1,6 @@
-# Peregrine Benchmarks — M0/M1/M2/M3/M4/M5 Baselines
+# Peregrine Benchmarks — Recorded Baselines
 
-Status: **M0–M5 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
+Status: **M0 through M10 rung 4 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
 end-to-end link baseline + architecture doc §10.3 M2 dynamic-link baseline +
 M3 export-trie gate "trie build < 10 ms for 10⁵ exports" + M4 fused-emit
 byte-identity gate and its sandbox perf half + M5 archive/dead-strip/

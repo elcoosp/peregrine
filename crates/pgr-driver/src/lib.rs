@@ -1505,18 +1505,19 @@ pub fn usage() -> String {
     s.push_str("                               any structure move falls back to the\n");
     s.push_str("                               full link silently)\n");
     s.push_str("  -no_incremental              disable the in-place relink\n");
-    s.push_str("  -incremental-verify          after patching, audit byte-identity\n");
-    s.push_str("                               and strict-verify (daemon-served\n");
-    s.push_str("                               under -resident; in-process else)\n");
-    s.push_str("                               against the full emit and run the\n");
-    s.push_str("                               strict verifier on the result\n");
+    s.push_str("  -incremental-verify          after a successful patch, audit\n");
+    s.push_str("                               byte-identity against the full\n");
+    s.push_str("                               fused emit (daemon-served under\n");
+    s.push_str("                               -resident; in-process else) and\n");
+    s.push_str("                               run the strict verifier on the\n");
+    s.push_str("                               patched bytes\n");
     s.push_str("  -resident                    route the link through the resident\n");
     s.push_str("                               daemon (pgrd); falls back to the\n");
     s.push_str("                               one-shot link when unreachable\n");
     s.push_str("  -resident_socket <path>      daemon socket (default $PGR_DAEMON_SOCK,\n");
     s.push_str("                               else {tmpdir}/pgr-<uid|pid>.sock — SUDO_UID\n");
     s.push_str("                               when present, else the process id)\n");
-    s.push_str("  -print-fixup-encoding <p> <min> <sdk>\n");
+    s.push_str("  --print-fixup-encoding <p> <min> <sdk>\n");
     s.push_str("                               name the fixup encoding a\n");
     s.push_str("                               -platform_version target plans\n");
     s.push_str("                               (chained fixups or the classic\n");
@@ -1584,7 +1585,7 @@ pub struct BelowFloorAdvisory {
 
 /// The packed `X.Y.Z` word as the `-platform_version` grammar displays
 /// it (the same rendering the verifier's build-version messages use).
-fn fmt_version_word(v: u32) -> String {
+pub(crate) fn fmt_version_word(v: u32) -> String {
     format!("{}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff)
 }
 

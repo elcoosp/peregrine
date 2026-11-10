@@ -94,8 +94,6 @@ each flag has a fixture".
 | Export filters (`N_PEXT` symtab marking, trie exclusion) | ✅ | M3 | `e2e::m3_export_filters_shape_trie_and_symtab` |
 | Indirect symbol table (`__got`/`__stubs` slots) | ✅ | M2 | `INDIRECT_SYMBOL_LOCAL` for unnamed rebases |
 | Direct page reloc to an external symbol | ❌ **rejected** (ld64/lld both reject or mis-link) | M2 | error message points at GOT-load relocs |
-| Archive members (`-all_load`, `-ObjC`, ranlib liveness) | ❌ | M3 | rank 3/4 in resolve |
-| Full export tries for dylibs, re-exports | ❌ | M3 | trie walker already handles re-export nodes (warns) |
 | `-dead_strip` | ✅ | M5 | D12 |
 | ICF (`-icf=safe`/`-icf=all`) | ✅ | M6 | `m6_icf::*`, `pgr-core::icf` tests |
 | Branch veneers/thunks for `BR26` overflow (> 128 MiB text) | ✅ | M6 | `pgr-core::thunks` tests, `pgr-verify::branch_range` |

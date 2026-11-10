@@ -4,11 +4,10 @@
 //! builder's pointer-format knob, *decode* every chain word through the
 //! format layer's typed arm64e codec (the two-bit bind/auth discriminator,
 //! the PAC triple, the 8-byte strides), then *strict-verify* the image —
-//! the same verifier gate dyld's chain-walk simulation rides. The word
-//! family is read-side this slice: Pass 3's producer encoding and the
-//! driver surface are the rung's next slice — shipped since: slice 2
-//! (`plan_fixups_with_format` + `-fixup_chains_format`) and slice 3
-//! (`plan_fixups_with_auth`, the authenticated words this walk reads).
+//! the same verifier gate dyld's chain-walk simulation rides. The rung has
+//! since closed: slice 2 shipped the producer (`plan_fixups_with_format` +
+//! `-fixup_chains_format`), slice 3 the authenticated words
+//! (`plan_fixups_with_auth`) and slice 4 the family-blind pair gate.
 //!
 //! Run: `cargo run -p pgr-verify --example arm64e_walk`
 //! (`PGR_TRACING=1` installs a subscriber so the walk's contract spans

@@ -312,7 +312,8 @@ impl ChainWord64 {
         (self.raw & 0x00ff_ffff) as u32
     }
 
-    /// Bind inline addend (bits 24..32, read as signed i8 by dyld).
+    /// Bind inline addend (bits 24..32 — the 8-bit unsigned inline
+    /// addend; larger addends travel in the import entry, the M2 split).
     #[must_use]
     pub const fn bind_addend(&self) -> u8 {
         ((self.raw >> 24) & 0xff) as u8
@@ -323,7 +324,8 @@ impl ChainWord64 {
 /// clear). `target` must fit in 36 bits — the emit path errors on overflow.
 ///
 /// # Errors
-/// [`FormatError`] when the input structure is malformed or truncated.
+/// [`FormatError`] when a field exceeds its width (the 36-bit target, the
+/// 12-bit stride count).
 pub fn encode_rebase_word(target: u64, high8: u8, next: u32) -> Result<u64, FormatError> {
     if target >> 36 != 0 {
         return Err(FormatError::Invalid {
@@ -345,7 +347,8 @@ pub fn encode_rebase_word(target: u64, high8: u8, next: u32) -> Result<u64, Form
 /// Encodes a bind chain word: `ordinal | addend << 24 | next << 51 | 1 << 63`.
 ///
 /// # Errors
-/// [`FormatError`] when the input structure is malformed or truncated.
+/// [`FormatError`] when a field exceeds its width (the 24-bit ordinal, the
+/// 12-bit stride count).
 ///
 /// `addend` is the 8-bit *unsigned* inline addend (`dyld_chained_ptr_64_bind.addend`);
 /// larger addends travel in the import entry (`DYLD_CHAINED_IMPORT_ADDEND`).

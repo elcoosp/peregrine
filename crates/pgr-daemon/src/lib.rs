@@ -60,10 +60,11 @@ mod tests {
     #[test]
     fn version_is_wired() {
         assert!(!crate::VERSION.is_empty(), "version line built");
-        // v5 (M9 output-residency rung): the fusion halves (v3) and the
-        // audited relink (v4) plus the request's tile-replay flag and the
-        // reply's changed-tile stream — the §7.2 resident output state.
-        assert_eq!(crate::PROTO_VERSION, 5);
+        // v6 (M10 rung 4, slice 2): the fusion halves (v3), the audited
+        // relink (v4) and the §7.2 tile replay (v5) plus the request
+        // config's chain-word-family byte — the wire can never silently
+        // drop the family a client asked for.
+        assert_eq!(crate::PROTO_VERSION, 6);
     }
 
     #[test]

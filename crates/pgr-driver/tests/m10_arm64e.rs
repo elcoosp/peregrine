@@ -1,4 +1,4 @@
-//! M10 rung 4, slice 2 — the arm64e producer rides the driver surface:
+//! M10 rung 4, slices 2–5 — the arm64e producer rides the driver surface:
 //! `-fixup_chains_format` names the chain word family the Pass-3 planner
 //! encodes (the read side has accepted both families since slice 1).
 //!
@@ -7,8 +7,12 @@
 //! refuses the combinations that cannot carry the requested family (the
 //! classic opcode path has no chain words, the resident session's reuse
 //! gates and wire plan Offset64 shapes this slice, and `-r` objects carry
-//! no fixups at all), and the end-to-end arm64e link verifies strict —
-//! the verifier's dyld walk re-reads the produced words and finds them
+//! no fixups at all), and — slice 5 — an explicitly named family refuses
+//! a deployment target below the platform's chained-fixups floor (the
+//! link would plan the classic opcode streams and the named family would
+//! never reach the image; the flag-less default keeps the silent
+//! fallback). The end-to-end arm64e link verifies strict — the
+//! verifier's dyld walk re-reads the produced words and finds them
 //! well-formed — with byte-determinism and an unchanged Offset64 default.
 
 use pgr_core::fixups::FixupPointerFormat;
@@ -299,6 +303,200 @@ fn arm64e_refuses_the_relocatable_output() {
         msg.contains("-r"),
         "the refusal names the output kind: {msg}"
     );
+}
+
+// ---- the deployment-floor gate (slice 5) ------------------------------------
+
+/// The packed macOS 11.0.0 word (one release below the chained-fixups
+/// floor).
+const MACOS_BELOW_FLOOR: u32 = 0x000B_0000;
+
+#[test]
+fn an_explicit_family_refuses_below_the_floor() {
+    let dir = scratch("floor_arm64e");
+    let obj = dir.join("printf_main.o");
+    std::fs::write(&obj, printf_main()).unwrap();
+    let err = parse(&args(&[
+        "-o",
+        "out",
+        "-fixup_chains_format",
+        "arm64e",
+        "-platform_version",
+        "macos",
+        "11.0",
+        "12.0",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("floor"),
+        "the refusal names the deployment floor: {msg}"
+    );
+    assert!(
+        msg.contains("11.0.0") && msg.contains("12.0.0"),
+        "the refusal displays the target and the floor: {msg}"
+    );
+    assert!(
+        msg.contains("classic opcode"),
+        "the refusal names what the link plans instead: {msg}"
+    );
+    // The fix rides the miette help text, not just the verdict.
+    let rendered = format!("{:?}", miette::Report::new(err));
+    assert!(
+        rendered.contains("drop -fixup_chains_format"),
+        "the help names the flag: {rendered}"
+    );
+}
+
+#[test]
+fn the_default_family_refuses_below_the_floor_too() {
+    let dir = scratch("floor_offset64");
+    let obj = dir.join("printf_main.o");
+    std::fs::write(&obj, printf_main()).unwrap();
+    let err = parse(&args(&[
+        "-o",
+        "out",
+        "-fixup_chains_format",
+        "offset64",
+        "-platform_version",
+        "macos",
+        "11.0",
+        "12.0",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("floor") && msg.contains("offset64"),
+        "the refusal names the family and the floor: {msg}"
+    );
+    // The attached spelling hits the same gate.
+    let err = parse(&args(&[
+        "-o",
+        "out",
+        "-fixup_chains_format=offset64",
+        "-platform_version",
+        "macos",
+        "11.0",
+        "12.0",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("floor"),
+        "the attached form refuses too: {err}"
+    );
+}
+
+#[test]
+fn the_floor_gate_matches_every_linked_platform() {
+    let dir = scratch("floor_matrix");
+    let obj = dir.join("printf_main.o");
+    std::fs::write(&obj, printf_main()).unwrap();
+    // One row below each platform's floor (the canonical table's floors:
+    // macOS 12.0, iOS/tvOS 15.0, watchOS 8.0, visionOS 1.0) — all refuse.
+    for (platform, below) in [
+        ("macos", "11.0"),
+        ("ios", "14.0"),
+        ("tvos", "14.0"),
+        ("watchos", "7.0"),
+        ("visionos", "0.5"),
+    ] {
+        let err = parse(&args(&[
+            "-o",
+            "out",
+            "-fixup_chains_format",
+            "arm64e",
+            "-platform_version",
+            platform,
+            below,
+            "15.0",
+            obj.to_str().unwrap(),
+        ]))
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("floor") && msg.contains(platform),
+            "{platform} {below} refuses with the floor named: {msg}"
+        );
+    }
+}
+
+#[test]
+fn the_floor_leaves_the_documented_fallbacks_alone() {
+    let dir = scratch("floor_fallbacks");
+    let obj = dir.join("printf_main.o");
+    std::fs::write(&obj, printf_main()).unwrap();
+    let tbd = dir.join("libSystem.tbd");
+    std::fs::write(&tbd, libsystem_tbd()).unwrap();
+
+    // (a) No explicit family: the below-floor target keeps the silent
+    // classic-opcode fallback (TDD §3.6 invariant 3 — the encoding
+    // flips, the fixups do not; the knob was never named).
+    let out_classic = dir.join("classic").display().to_string();
+    let mut opts = parse(&args(&[
+        "-o",
+        &out_classic,
+        "-platform_version",
+        "macos",
+        "11.0",
+        "12.0",
+        obj.to_str().unwrap(),
+        tbd.to_str().unwrap(),
+    ]))
+    .expect("the flag-less below-floor set parses");
+    opts.config.ident = "peregrine-floor-fallback".into();
+    let image = link(&opts);
+    assert!(
+        !has_chained_fixups(&image),
+        "the below-floor default plans the classic streams"
+    );
+    assert_strict_clean(&image, "the classic-stream image");
+
+    // (b) Above the floor the explicit family links as before.
+    let out_chained = dir.join("chained").display().to_string();
+    let mut opts = parse(&args(&[
+        "-o",
+        &out_chained,
+        "-fixup_chains_format",
+        "arm64e",
+        "-platform_version",
+        "macos",
+        "12.0",
+        "14.0",
+        obj.to_str().unwrap(),
+        tbd.to_str().unwrap(),
+    ]))
+    .expect("the above-floor arm64e set parses");
+    opts.config.ident = "peregrine-floor-chained".into();
+    let image = link(&opts);
+    assert!(has_chained_fixups(&image), "the floor passes chains through");
+    assert_strict_clean(&image, "the above-floor arm64e image");
+
+    // (c) `-r` keeps its own refusal wording below the floor (the
+    // output-kind conflict names the tighter gate).
+    let err = parse(&args(&[
+        "-o",
+        "out.o",
+        "-r",
+        "-fixup_chains_format",
+        "arm64e",
+        "-platform_version",
+        "macos",
+        "11.0",
+        "12.0",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("-r"),
+        "the -r refusal wins for relocatable output: {err}"
+    );
+
+    // (d) The `MACOS_BELOW_FLOOR` constant agrees with the refusal text
+    // (11.0.0 — the word the packing grammar displays).
+    assert_eq!(MACOS_BELOW_FLOOR, 0x000B_0000, "11.0.0 packed");
 }
 
 // ---- the end-to-end producer gates -----------------------------------------

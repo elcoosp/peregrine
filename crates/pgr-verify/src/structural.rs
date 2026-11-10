@@ -1,5 +1,7 @@
-//! Structural checks: header, load commands, the 16 KiB segment contract and
-//! the symbol tables.
+//! Structural checks: header, load commands, the 16 KiB segment contract,
+//! the symbol tables (with the object relocation contract) and the output
+//! contracts — the dylib/bundle shape (M3) and the `MH_OBJECT` one (M10
+//! rung 1).
 
 use crate::{Code, Issue, Report, issue_from};
 use pgr_format::LinkeditDataCommand;

@@ -54,11 +54,20 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | `-dead_strip` / `-no_dead_strip` | same (mark-sweep over symbol-boundary atoms) |
 | `-icf=safe` / `-icf=all` / `-no_icf` | same (default `none`) |
 | `-all_load` / `-force_load <archive>` / `-u <symbol>` | same (archives pull members lazily via ranlib) |
+| `-fixup_chains` / `-no_fixup_chains` | same (chained `LC_DYLD_CHAINED_FIXUPS` by default; below the deployment floor — or with `-no_fixup_chains` — the classic `LC_DYLD_INFO_ONLY` streams encode the same fixups) |
+| `-fixup_chains_format offset64\|arm64e` | same family vocabulary (M10 rung 4; an explicitly named family refuses a target below the platform's chained-fixups floor — raise the target or drop the flag) |
+| `-platform_version <platform> <min> <sdk>` | same (`<platform>` ∈ `macos`, `ios`, `tvos`, `watchos`, `visionos`; the SDK must be at least the deployment target) |
+| `-flat_namespace` / `-twolevel_namespace`, `-undefined error\|dynamic_lookup` | same |
+| `-rpath <path>` | same (`LC_RPATH`) |
+| `-source_version <n>` | same (`LC_SOURCE_VERSION`) |
+| `-adhoc` / `-no_adhoc` | same (the ad-hoc signature is on by default) |
+| `-segalign 0x1000\|0x4000` | same |
+| `-arch arm64` | same (arm64-apple-darwin exclusively) |
 
-## Accepted no-ops (feature parity by default)
+## Accepted no-ops
 
-These ld64 flags are accepted with no effect because Peregrine's default
-behavior already matches what they request on arm64:
+These ld64 flags are accepted and ignored (recorded as no-ops rather than
+silently dropped):
 
 - `-demangle` / `-no_demangle` — symbol names are stored verbatim in the
   symtab (demangling is a consumer-side concern);
@@ -68,12 +77,13 @@ behavior already matches what they request on arm64:
   diagnosed clearly (rebuild with `-fno-lto`);
 - `-no_uuid`, `-no_function_starts`, `-no_data_in_code`,
   `-keep_private_externs`, `-no_adhoc_extensions`;
-- `-adhoc` / `-no_adhoc`, `-headerpad`, `-segalign` (0x1000 or 0x4000),
-  `-fixup_chains` / `-no_fixup_chains`, `-flat_namespace` /
-  `-twolevel_namespace`, `-undefined error|dynamic_lookup`, `-rpath`,
-  `-source_version`, `-arch arm64`, `-platform_version <platform> <min> <sdk>`
-  with `<platform>` ∈ `macos`, `ios`, `tvos`, `watchos`, `visionos` (M10; the
-  SDK must be at least the deployment target).
+- `-headerpad <n>` — advisory: load commands never grow after the link.
+
+The flags that look like no-ops but actually shape the link (the default
+behavior already matches what they request on arm64) are mapped in the
+tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
+`-no_fixup_chains`, `-fixup_chains_format`, `-flat_namespace`, `-undefined`,
+`-rpath`, `-source_version`, `-arch arm64`, `-platform_version`.
 
 ## Rejected with an actionable message
 

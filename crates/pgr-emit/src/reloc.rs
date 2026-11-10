@@ -159,9 +159,6 @@ mod tests {
         let w = word_of(&buf, 0);
         assert_eq!((w >> 29) & 0x3, 3, "immlo of -1");
         assert_eq!((w >> 5) & 0x7FFFF, 0x7FFFF, "immhi of -1");
-        let _ = EmitError::Internal {
-            message: String::new(),
-        };
     }
 
     #[test]

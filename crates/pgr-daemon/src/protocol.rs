@@ -10,7 +10,7 @@
 //! | `LINK` 3 | C→S | [`LinkRequest`] |
 //! | `NEED` 4 | S→C | `u32 n, n × 32-byte content hashes` |
 //! | `BLOB` 5 | C→S | `32-byte hash, u64 len, bytes` |
-//! | `IMAGE` 6 | S→C | v4 body: `u64 entryoff, u64 fixup_slots, u32 hits, u32 misses, [patch outcome], [record bytes], [audit outcome], u64 len, image bytes` |
+//! | `IMAGE` 6 | S→C | `u64 entryoff, u64 fixup_slots, u32 hits, u32 misses, [patch outcome], [record bytes], [audit outcome]`, then — v5 — the `tiles` flag picks the changed-tile stream (`u64 final_size, u32 tile count, per tile: u64 offset + bytes`, then the 32-byte image hash) or `u64 len, image bytes` |
 //! | `ERROR` 7 | S→C | `str message` |
 //! | `SHUTDOWN` 8 | C→S | — |
 //! | `BYE` 9 | S→C | — |

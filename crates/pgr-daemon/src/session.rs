@@ -70,7 +70,7 @@ pub enum SessionError {
     /// client): refused rather than linked.
     #[error("session: blob {} does not match its hash", crate::protocol::hex(&.0))]
     HashMismatch([u8; 32]),
-    /// The link failed ( surfaced to the client as `ERROR`).
+    /// The link failed (surfaced to the client as `ERROR`).
     #[error(transparent)]
     Link(#[from] pgr_core::LinkError),
     /// The emit failed.
@@ -450,10 +450,7 @@ impl ResidentSession {
         // with the in-process gate, which runs after a patch only).
         if plan.is_untouched() {
             // The §7.2 rung: a tiles-asking client receives an empty
-            // stream (its file already IS the output) and the record is
-            // renewed verbatim (the driver's untouched shape). No audit:
-            // its subject — the patch — never exists here (parity with
-            // the in-process gate, which runs after a patch only).
+            // stream (its file already IS the output).
             let tiles = req.tiles.then(|| pgr_emit::incremental::TilePatch {
                 final_size: prev.len() as u64,
                 tiles: Vec::new(),

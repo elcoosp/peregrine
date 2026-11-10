@@ -25,7 +25,7 @@ use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
     TAG_LINK, TAG_NEED, TAG_SHUTDOWN, put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
 };
-use crate::session::{ResidentSession, SessionError};
+use crate::session::ResidentSession;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -312,12 +312,12 @@ fn serve_link(
             }
             write_frame(stream, TAG_IMAGE, &b)
         }
-        Err(e @ (SessionError::Link(_) | SessionError::Emit(_))) => {
-            // A real link failure: deterministic, so the client's one-shot
-            // fallback reproduces the same error. Report it, keep serving.
+        Err(e) => {
+            // A real failure (link, emit, session): deterministic, so the
+            // client's one-shot fallback reproduces the same error. Report
+            // it, keep serving.
             write_frame(stream, TAG_ERROR, &error_body(&e.to_string()))
         }
-        Err(e) => write_frame(stream, TAG_ERROR, &error_body(&e.to_string())),
     }
 }
 

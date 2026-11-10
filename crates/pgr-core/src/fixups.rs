@@ -30,8 +30,6 @@
 //! travels in the import entry (`i32`) with a zero word addend. dyld adds
 //! both (only one is ever nonzero). Auth binds (M10 rung 4, slice 3) are
 //! the named exception: their word has no addend field, so the full addend
-//! rides the import entry. Auth binds (M10 rung 4, slice 3) are
-//! the named exception: their word has no addend field, so the full addend
 //! rides the import entry.
 //!
 //! Determinism: slots are sorted by output address, pages packed in ascending

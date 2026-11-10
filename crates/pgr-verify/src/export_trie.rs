@@ -10,8 +10,10 @@
 //! * edges are sorted by their first byte (ld64's canonical order),
 //! * edge substrings are non-empty,
 //! * terminal addresses stay within the mapped image,
-//! * the flag set is one M2 understands (regular / weak definition);
-//!   re-export and stub-and-resolver nodes warn as unimplemented.
+//! * the flag set is one the verifier understands (regular / weak
+//!   definition); M3 re-export nodes are validated in full (ordinal
+//!   bounds and the imported name), while stub-and-resolver and unknown
+//!   flag bits warn as unimplemented.
 
 use pgr_format::trie::EXPORT_SYMBOL_FLAGS_REEXPORT;
 

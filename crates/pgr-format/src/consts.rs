@@ -363,7 +363,8 @@ pub const ARM64_RELOC_TLVP_LOAD_PAGE21: u32 = 8;
 pub const ARM64_RELOC_TLVP_LOAD_PAGEOFF12: u32 = 9;
 /// Paired relocation carrying the addend (arm64 page relocs).
 pub const ARM64_RELOC_ADDEND: u32 = 10;
-/// arm64e authenticated pointer (schema only at M0).
+/// arm64e authenticated pointer relocation (defined and cross-checked;
+/// the pipeline accepts the type but never emits one — schema only).
 pub const ARM64_RELOC_AUTHENTICATED_POINTER: u32 = 11;
 
 /// Generic 32-bit absolute.
@@ -390,7 +391,8 @@ pub const R_SCATTERED: u32 = 0x8000_0000;
 pub const DYLD_CHAINED_PTR_64_OFFSET: u16 = 6;
 /// Pointer format: rebase targets are VM addresses (`DYLD_CHAINED_PTR_64`).
 pub const DYLD_CHAINED_PTR_64: u16 = 2;
-/// Pointer format: arm64e authenticated pointers (schema only at M0).
+/// Pointer format: arm64e authenticated pointers (`DYLD_CHAINED_PTR_ARM64E`,
+/// decoded and encoded since M10 rung 4 — no longer schema-only).
 pub const DYLD_CHAINED_PTR_ARM64E: u16 = 1;
 
 /// Import table format: `dyld_chained_import` (no addend).

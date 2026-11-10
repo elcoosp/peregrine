@@ -1,10 +1,12 @@
 //! Peregrine format layer: zero-copy Mach-O primitives for arm64-apple-darwin.
 //!
-//! Scope (M0, TDD §12 "M0 Verifier first"): raw `#[repr(C)]` structures, the
-//! constant set, a bounds-checked cursor, and codecs for the structures the
-//! verifier must reason about — load commands, symbol tables, relocations,
-//! chained fixups and code-signature blobs. Everything parses with typed
-//! errors and never panics on malformed input.
+//! Scope (TDD §12's M0 seed, grown with the milestones): raw `#[repr(C)]`
+//! structures, the constant set, a bounds-checked cursor, and codecs for
+//! everything the pipeline and the verifier reason about — load commands,
+//! symbol tables, relocations, chained fixups (both the 64 and arm64e
+//! word families), classic dyld-info opcode streams, export tries, `.tbd`
+//! v3/v4 stubs, `!<arch>` archives and code-signature blobs. Everything
+//! parses with typed errors and never panics on malformed input.
 //!
 //! Design invariants carried from the TDD / perf doc:
 //!
@@ -85,8 +87,15 @@ struct SegmentSpan {
     fileoff: u64,
 }
 
-/// Walks one chain page, counting slots and validating the stride invariants
-/// (8-byte slots, no page crossing, termination). Returns slots visited.
+/// Walks one chain page of the 64 family, counting slots and validating
+/// the stride invariants (8-byte slot alignment, no page crossing,
+/// termination). Returns slots visited.
+///
+/// The M0-era summary walk hard-codes the 64 family (the `ChainWord64`
+/// decode and the 4-byte stride units); the arm64e walk lives in
+/// `pgr-verify`'s dyld chain-walk simulation, which reads each segment's
+/// declared `pointer_format` — a named seam for a future slice, not a
+/// silent mis-decode.
 fn walk_chain_page(
     bytes: &[u8],
     page_base: u64,

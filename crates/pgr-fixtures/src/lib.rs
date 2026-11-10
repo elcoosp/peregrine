@@ -576,31 +576,37 @@ impl ImageBuilder {
         let nsyms = symtab_entries.len();
 
         // ---- import table (dedup by bind name, in first-use order) -------
+        // Auth binds register their import too (M10 rung 4, slice 5):
+        // their word carries no addend field, so the table entry rides
+        // addend 0 under every import format.
         let mut imports: Vec<Import> = Vec::new();
         let mut import_names: Vec<String> = Vec::new();
         for slot in &self.got {
-            if let SlotKind::Bind { sym_index, addend } = *slot {
-                let Some(SymbolSpec::Undefined {
-                    name, lib_ordinal, ..
-                }) = self.symbols.get(sym_index)
-                else {
-                    continue;
-                };
-                if import_names.iter().any(|n| n == name) {
-                    continue;
-                }
-                let table_addend = match self.imports_format {
-                    ImportsFormat::Plain => 0,
-                    ImportsFormat::Addend64 => i64::from(addend),
-                };
-                import_names.push(name.clone());
-                imports.push(Import {
-                    lib_ordinal: *lib_ordinal,
-                    weak_import: false,
-                    name_offset: 0, // patched once the name blob is laid out
-                    addend: table_addend,
-                });
+            let (sym_index, addend) = match *slot {
+                SlotKind::Bind { sym_index, addend } => (sym_index, addend),
+                SlotKind::AuthBind { sym_index, .. } => (sym_index, 0),
+                SlotKind::Rebase { .. } | SlotKind::AuthRebase { .. } => continue,
+            };
+            let Some(SymbolSpec::Undefined {
+                name, lib_ordinal, ..
+            }) = self.symbols.get(sym_index)
+            else {
+                continue;
+            };
+            if import_names.iter().any(|n| n == name) {
+                continue;
             }
+            let table_addend = match self.imports_format {
+                ImportsFormat::Plain => 0,
+                ImportsFormat::Addend64 => i64::from(addend),
+            };
+            import_names.push(name.clone());
+            imports.push(Import {
+                lib_ordinal: *lib_ordinal,
+                weak_import: false,
+                name_offset: 0, // patched once the name blob is laid out
+                addend: table_addend,
+            });
         }
 
         // ---- fixup payload + slot words (mold layout) --------------------
@@ -901,9 +907,14 @@ impl ImageBuilder {
         buf[stroff as usize..stroff as usize + strtab.len()].copy_from_slice(&strtab);
         if nindirect > 0 {
             for (i, slot) in self.got.iter().enumerate() {
+                // The auth slots ride the same indirect shapes as their
+                // plain twins: an (auth) bind carries its symbol's output
+                // index, an (auth) rebase is unnamed (`INDIRECT_SYMBOL_LOCAL`).
                 let entry = match slot {
-                    SlotKind::Bind { sym_index, .. } => symbol_indices_out[*sym_index],
-                    SlotKind::Rebase { .. } => INDIRECT_SYMBOL_LOCAL,
+                    SlotKind::Bind { sym_index, .. } | SlotKind::AuthBind { sym_index, .. } => {
+                        symbol_indices_out[*sym_index]
+                    }
+                    SlotKind::Rebase { .. } | SlotKind::AuthRebase { .. } => INDIRECT_SYMBOL_LOCAL,
                 };
                 let at = indirectsymoff as usize + i * 4;
                 buf[at..at + 4].copy_from_slice(&entry.to_le_bytes());

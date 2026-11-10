@@ -60,10 +60,13 @@ fn string_until(data: &[u8], at: usize, end: usize) -> Option<(&[u8], usize)> {
 }
 
 /// Walks the trie and collects every terminal node's export.
-/// offsets, cycles, unterminated strings). Never panics.
+///
+/// Never panics: every structural violation (truncation, out-of-range
+/// offsets, cycles, unterminated strings) is a typed refusal.
 ///
 /// # Errors
 /// [`FormatError`] on any structural violation (truncation, out-of-range
+/// offsets, cycles, unterminated strings).
 pub fn exports(payload: &[u8]) -> Result<Vec<TrieExport>, FormatError> {
     if payload.is_empty() {
         return Ok(Vec::new());

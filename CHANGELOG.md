@@ -128,76 +128,76 @@ release automation.
 
 ### Features
 
-- **format:** the arm64e chain words decode and encode — M10 rung 4,
-  slice 1 (roadmap §10.4 row M10): `pgr_format::fixups::ChainWordArm64e`
-  names the `DYLD_CHAINED_PTR_ARM64E` word family — the two-bit
-  bind/auth discriminator (bits 62/63: the bind bit is *not* the 64
-  family's bit 63), 11-bit `next` counting 8-byte strides, unauth
-  rebases with a 43-bit VM-address target plus high-8, auth rebases
-  with a 32-bit runtime offset, binds with a 16-bit ordinal and a
-  signed 19-bit addend (±256 KiB, dyld's write-side embeddable limit),
-  auth words with the diversity/addrDiv/key PAC triple — and
-  `chain_stride(pointer_format)` names the stride a format's `next`
-  counts. The encoder set mirrors the 64 family's: range-checked,
-  typed refusals, round-trip-tested bit layouts.
-- **fixtures:** the builder speaks the arm64e pointer format —
-  `PointerFormatKind` + `set_pointer_format` emit the format-1 payload:
-  unauth `SlotKind::Rebase` targets are synthesized as VM addresses
-  (`target + delta`, dyld subtracts the base walking back), the new
-  `SlotKind::AuthRebase`/`AuthBind` carry the PAC fields, and auth
-  slots refuse under the 64_OFFSET format instead of emitting a word
-  dyld cannot read.
-- **verify:** the chain walk strides the arm64e family — the dyld
-  chain-walk simulation accepts pointer format 1 (8-byte strides,
-  unauth rebase targets translated the way dyld reads them and refused
-  below the image base, auth rebase offsets base-relative, bind
-  ordinals bound-checked on both shapes), the `__chain_starts` mirror
-  gate and the pre-pass slot counter accept the format, and the walk
-  names its contract (format, stride, pages) on a tracing span — inert
-  until a subscriber installs, the house convention. The Pass-3
-  producer encoding and the driver surface are the rung's next slice;
-  the pair gate stays 64_OFFSET-scoped this slice.
-- **verify:** the arm64e walk gets its consumer example —
-  `arm64e_walk` builds a format-1 executable through the builder knob,
-  decodes both chain words through the codec (PAC triple and all) and
-  strict-verifies the image; `PGR_TRACING=1` watches the walk's
-  contract spans.
+- **driver:** the chain format refuses the below-floor target — an
+  explicitly named `-fixup_chains_format` (either spelling) refuses when
+  the `-platform_version` target sits below the platform's chained-fixups
+  floor: the layout would plan the classic opcode streams and the named
+  family would never reach the image (a refusal, never a silently dropped
+  knob, M10 rung 4 slice 5). The decision reads the same consumer seam
+  the encoding query answers from, the refusal renders its fix as miette
+  help text, the flag's other refusals (classic path, resident session,
+  `-r`) ride the same typed variant with fitting help, and the
+  `chain_format_floor` consumer example walks the whole story — the
+  pre-link advisory, the refusal, the silent fallback, the above-floor
+  link, every image strict-verified.
 
 ### Bug Fixes
 
-- **emit:** the writer thread names its panic payload — the 4-writer
-  pool's `join()` used to flatten every panic into a generic "writer
-  thread panicked" io error, dropping the cause; the payload is now
-  downcast (`&str`/`String`) and carried in the message, the same
-  fix-not-verdict convention the resident stand-down and the tbd
-  refusals got.
+- **fixtures:** the auth slots ride the import table — the arm64e builder
+  registered only plain binds in the fixup import table, so any
+  auth-bind slot refused with "bind name missing from import table";
+  auth binds register their import (table addend 0 — the word has no
+  addend field), and the indirect symbol table covers all four slot
+  kinds (auth binds carry their symbol's output index, auth rebases ride
+  `INDIRECT_SYMBOL_LOCAL`, mirroring their plain twins).
+- **daemon:** the wire-version gate names v6 — the unit gate still
+  asserted the v5 protocol constant after the v6 chain-word-family byte
+  shipped.
+- **driver:** the usage line names the real spelling — `--help`
+  advertised `-print-fixup-encoding` while the binary intercepts
+  `--print-fixup-encoding`, and the `-incremental-verify` help line
+  re-gains its word order.
+
+### Refactor
+
+- the sweep drops the dead weight — the emit relocation test's orphaned
+  `EmitError::Internal` construction, the daemon reply's duplicated
+  error arms (and the `SessionError` import they alone kept alive), the
+  session's duplicated untouched-branch comment and the `( surfaced`
+  typo.
 
 ### Tests
 
-- **verify:** the arm64e read side gates its shapes — `tests/
-  m10_arm64e.rs` pins the strict-clean auth walk, the unauth VM-address
-  translation, the format-layer word decode, the below-floor refusal
-  (the `fixups_floor` gate fires on arm64e too), the mutated ordinal
-  and past-page-end stride refusals, and the `__chain_starts` mirror
-  both agreeing and disagreeing with the payload.
-
-### Performance
-
-- **verify:** bench the arm64e strict pass — `verify_arm64e/verify/
-  <arm64e_auth|offset64_control>` holds the strict pass on an
-  auth-chained executable next to a same-shape 64_OFFSET control (no
-  numbers recorded yet; the next gate run fills
-  docs/BENCHMARKS.md's rung-4 section).
+- **fixtures:** the auth slots gate their table — an auth-bind-only
+  arm64e image builds, its import table carries the bind, the payload
+  re-parses through the format layer with the ordinal and the
+  `DYLD_CHAINED_IMPORT` format in place, the words decode back through
+  the arm64e codec, the mixed auth-rebase/auth-bind shape keeps both,
+  and a plain-bind control pins the M2 behavior.
+- **driver:** the floor gate refuses the explicit family — both
+  spellings, both families, all five linked platforms one row below
+  their floors, the target and floor displayed, the miette help naming
+  the flag; the flag-less below-floor link keeps the silent
+  classic-stream fallback (strict-verified), the above-floor arm64e link
+  stays chained (strict-verified), and `-r` keeps its own refusal
+  wording below the floor.
 
 ### Documentation
 
-- the README's version badge and status note catch up to v0.11.0 (the
-  release had bumped Cargo.toml only), and the surface records rung 4
-  slice 1: the README status paragraph, the TDD §15.4 design record,
-  the benchmarks page's rung-4 bench section, and the COMPAT arm64e
-  read-side row. The `[Unreleased]` block is rewritten to carry only
-  unreleased work — it had duplicated the v0.11.0 entries verbatim
-  since the release.
+- record the rung 4 slice 5 and heal the drift: the README badge and
+  status catch up to v0.15.0 and the status paragraph records the slice,
+  the benchmarks page's title/status stop lagging at M5, COMPAT's two
+  stale ❌ rows retire (archive members and full export tries were
+  shipped), the migration guide stops bucketing implemented flags as
+  no-ops and maps the fixup-chain flags, and the rustdocs the sweep
+  found refresh — the arm64e constants' "schema only at M0" tags, the
+  format crate's scope and summary-walk docs (the walk names its
+  64-family scope instead of implying generic strides), the two
+  copy-pasted `# Errors` blocks and the signed-addend contradiction, the
+  mangled trie-walk comment, the verifier's export-trie and structural
+  module docs, the arm64e walk example's forward-looking prose, the
+  daemon `IMAGE` tag row (the v5 tile-stream tail) and the duplicated
+  auth-bind paragraph in the core fixup module.
 
 ## [0.10.0] - 2026-11-09
 
