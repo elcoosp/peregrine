@@ -40,6 +40,7 @@ each flag has a fixture".
 | `-platform_version <macos\|ios\|tvos\|watchos\|visionos> <min> <sdk>` (five platforms; SDK ≥ deployment target; the per-platform chained-fixups floor picks the fixup encoding) | ✅ | M10 | `opts` unit tests + `m10_platform::*` (core/driver/verify), `platform_matrix` example |
 | `-fixup_chains` / `-no_fixup_chains` | ✅ | M1 | `opts` unit tests |
 | `-fixup_chains_format <offset64\|arm64e>` (chain word family: the rung-4 producer names the encoding; the default stays the M2 `DYLD_CHAINED_PTR_64_OFFSET`) | ✅ | M10 | `m10_arm64e::*` (driver parse/flag gates + e2e verify-strict), `m10_arm64e_producer::*` (core word shapes) |
+| Authenticated arm64e chain words (library seam, rung 4 slice 3: `pgr_core::fixups::plan_fixups_with_auth` signs slots with a `FixupAuth` PAC triple — auth rebases carry the 32-bit runtime offset, auth binds move their whole addend to the import table; a policy under `offset64` refuses, no CLI flag this slice) | ✅ | M10 | `m10_arm64e_auth::*` + the `arm64e_auth` bench variant + the `fixup_chains_auth` example |
 | `-adhoc` / `-no_adhoc` | ✅ | M1 | `e2e::no_adhoc_omits_the_signature` |
 | `-headerpad` (advisory) / `-segalign` | ✅ | M1 | `opts` unit tests |
 | `.tbd` inputs (v3/v4) | ✅ | M2 | `pgr-format::tbd` tests, `e2e::m2_links_printf_from_tbd` |
@@ -82,7 +83,7 @@ each flag has a fixture".
 | Two-level namespace (`(dylib, name)` resolution) | ✅ | M2 | first-exporting `LC_LOAD_DYLIB` wins; ordinals in `n_desc` |
 | GOT/stub synthesis (arm64: `adrp x16 / ldr x16 / br x16`) | ✅ | M2 | `__DATA_CONST,__got` + `__TEXT,__stubs`, indirect symbol table |
 | Chained fixups: rebase + bind (`DYLD_CHAINED_PTR_64_OFFSET`, `IMPORT_ADDEND`) | ✅ | M0/M2 | import ordinals in first-use order (spike S6: matches `ld64.lld`) |
-| Chained fixups: arm64e read side (`DYLD_CHAINED_PTR_ARM64E` walk + `__chain_starts` mirror gate; the producer encoding is the rung's next slice) | ✅ | M10 | `m10_arm64e::*` + the `arm64e` bench + the `arm64e_walk` example |
+| Chained fixups: arm64e read side (`DYLD_CHAINED_PTR_ARM64E` walk + `__chain_starts` mirror gate; the producer encodes the family since rung 4 slice 2) | ✅ | M10 | `m10_arm64e::*` + the `arm64e` bench + the `arm64e_walk` example |
 | Addend split (inline 0..=255 vs import-entry `i32`) | ✅ | M2 | mirrors lld's `ChainedFixupsSection` |
 | Weak imports (`N_WEAK_REF` → weak binds, `MH_BINDS_TO_WEAK`) | ✅ | M2 | dynamic lookups and weak dylibs |
 | `-flat_namespace` (flat-lookup ordinal `0xFE`, no `MH_TWOLEVEL`) | ✅ | M2 | |
