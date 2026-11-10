@@ -47,8 +47,17 @@
 //! patched image's content hash) instead of the whole image — the session
 //! keeps every served image as resident output state, so a warm cycle
 //! moves only the changed tiles across the wire.
+//!
+//! M10 rung 4 slice 2 (wire v6): the config body carries the chain word
+//! family (one byte — `FixupPointerFormat`). The driver refuses
+//! `-resident` + `arm64e` this slice (the session's reuse gates ride the
+//! Offset64 shapes), so every wire request still names `offset64` — the
+//! byte exists so the wire can never silently drop the family a client
+//! asked for, and a fusion rung can widen the surface without the
+//! config's shape moving again.
 
 use pgr_core::icf::IcfMode;
+use pgr_core::fixups::FixupPointerFormat;
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::resolve::{Dylib, UndefinedPolicy};
 use sha2::{Digest, Sha256};
@@ -58,10 +67,12 @@ use sha2::{Digest, Sha256};
 /// the M9 fusion halves (record in, refreshed record + patch outcome out);
 /// v4 added the audited relink — the request's `audit` flag and the
 /// reply's audit verdict ([`pgr_emit::incremental::audit::AuditOutcome`]);
-/// **v5** adds the §7.2 output-residency rung — the request's `tiles` flag
+/// v5 added the §7.2 output-residency rung — the request's `tiles` flag
 /// and the reply's tile-stream image tail
-/// ([`pgr_emit::incremental::TilePatch`]).
-pub const PROTO_VERSION: u32 = 5;
+/// ([`pgr_emit::incremental::TilePatch`]); **v6** appends the chain word
+/// family to the config body (M10 rung 4 slice 2 — the family a client
+/// asked for crosses the wire verbatim, never silently dropped).
+pub const PROTO_VERSION: u32 = 6;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -503,6 +514,15 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         put_u8(out, u8::from(d.weak));
         put_u8(out, u8::from(d.reexport));
     }
+    // M10 rung 4 slice 2 (v6 wire): the chain word family rides the tail
+    // of the config body (the append-in-place upgrade convention).
+    put_u8(
+        out,
+        match cfg.chain_word_format {
+            FixupPointerFormat::Offset64 => 0,
+            FixupPointerFormat::Arm64e => 1,
+        },
+    );
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -594,6 +614,13 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             })
         })
         .collect::<Result<Vec<Dylib>, DecodeError>>()?;
+    // M10 rung 4 slice 2 (v6 wire): the chain word family (the tail byte;
+    // mirror of `encode_config`).
+    let chain_word_format = match r.u8()? {
+        0 => FixupPointerFormat::Offset64,
+        1 => FixupPointerFormat::Arm64e,
+        _ => return Err(malformed()),
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -631,6 +658,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         icf,
         layout_slack,
         slack_anchor,
+        chain_word_format,
     })
 }
 
@@ -690,6 +718,9 @@ mod tests {
                 name: "__text".into(),
                 padded: 0x4000,
             }],
+            // The v6 tail byte: a non-default family must survive the
+            // round trip verbatim (the wire never silently drops it).
+            chain_word_format: FixupPointerFormat::Arm64e,
         }
     }
 
