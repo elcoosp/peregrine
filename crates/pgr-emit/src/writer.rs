@@ -62,9 +62,17 @@ pub fn write_image(buf: &[u8], path: &Path) -> Result<(), EmitError> {
                     }));
                 }
                 for handle in handles {
-                    handle
-                        .join()
-                        .map_err(|_| std::io::Error::other("writer thread panicked"))??;
+                    handle.join().map_err(|payload| {
+                        // The panic payload *is* the cause: name it (the
+                        // house convention — a refusal carries its cause,
+                        // not just its class).
+                        let cause = payload
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "non-string panic payload".to_string());
+                        std::io::Error::other(format!("writer thread panicked: {cause}"))
+                    })??;
                 }
                 Ok(())
             })?;
