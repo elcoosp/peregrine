@@ -1261,3 +1261,23 @@ trie do not read it; `pgr-core/benches/dylibs.rs`,
 The honest reading: parity, as the shape predicts — the released weak/
 lazy surface costs a header byte per dylib and nothing in the passes.
 The bench is the parity gate, not a win.
+
+### M15 — the image base's decision cost
+
+The link across the `-pagezero_size` decisions over the same corpus (64
+objects, 256 rebase slots, one bind-free executable surface; the base
+is address arithmetic on the plan — every vmaddr is
+`fileoff + base` and the `64_OFFSET` rebase words encode
+`target − base`; `pgr-core/benches/pagezero.rs`,
+`pagezero/link_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_64_objects/default_4gib` | 794.7 µs |
+| `link_64_objects/custom_1gib` | 818.6 µs (+2.2%, p = 0.36) |
+| `link_64_objects/custom_16mib` | 841.2 µs (+4.5%, p = 0.62) |
+
+The honest reading: parity within noise, as the shape predicts — the
+released surface moves the constant-delta base and nothing in the
+passes (both deltas are statistically indistinguishable from zero at
+this corpus size). The bench is the parity gate, not a win.
