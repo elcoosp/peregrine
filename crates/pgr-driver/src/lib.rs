@@ -131,6 +131,15 @@ pub enum DriverError {
         /// What went wrong.
         message: String,
     },
+    /// The `-order_file` could not be read or parsed (M11): the parse
+    /// refusals name their line — the file is small, the fix is local.
+    #[error("-order_file {path}: {message}")]
+    OrderFile {
+        /// The order-file path.
+        path: String,
+        /// The parse refusal (line-tagged).
+        message: String,
+    },
 }
 
 /// Reads a symbol-list file (one symbol per line, `#` comments and blank
@@ -507,7 +516,29 @@ fn link_to_image_recorded(
         cache.as_ref(),
     )?;
     check_force_load(&result, &prepared.force_load)?;
+    // M11: the ld64-style advisory — an order-file entry that ranked no
+    // placed piece is a typo, not an error (the layout plans what the
+    // inputs define). Warn once per unranked entry, in entry order.
+    for name in &result.layout.order_unmatched {
+        tracing::warn!(
+            symbol = %String::from_utf8_lossy(name),
+            "the order-file entry ranked no placed piece"
+        );
+        eprintln!(
+            "pgr: warning: order file symbol {} not matched by any input",
+            String::from_utf8_lossy(name)
+        );
+    }
     let image = pgr_emit::build_image_fused(&result.layout, &result.objects)?;
+    // M11: the link map — the plan's own segments/sections/symbols,
+    // rendered deterministically and written beside the link.
+    if let Some(map_path) = &opts.map_path {
+        let map = pgr_core::map::build_link_map(&result.layout, &result.interner);
+        std::fs::write(Path::new(map_path), map.render()).map_err(|source| DriverError::Io {
+            path: map_path.clone(),
+            source,
+        })?;
+    }
     let record = if opts.incremental {
         Some(pgr_emit::incremental::LinkRecord::record(
             &result.layout,
@@ -771,6 +802,22 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     }
     if let Some(path) = &opts.unexported_list_path {
         config.unexported = read_symbol_list("-unexported_symbols_list", path)?;
+    }
+    // M11: the order file — read, parse (typed, line-tagged refusals),
+    // and rank before Pass 3. The advisory for entries that rank nothing
+    // rides the finished layout (ld64 warns; Peregrine does the same
+    // after the link, where the symbol universe is known).
+    if let Some(path) = &opts.order_file {
+        let text = std::fs::read_to_string(path).map_err(|source| DriverError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let file =
+            pgr_core::order::OrderFile::parse(&text).map_err(|e| DriverError::OrderFile {
+                path: path.clone(),
+                message: e.to_string(),
+            })?;
+        config.symbol_order = Some(pgr_core::order::SymbolOrder::build(&file));
     }
     let force_load: Vec<Vec<u8>> = opts
         .force_load
@@ -1480,6 +1527,10 @@ pub fn usage() -> String {
     s.push_str("  -flat_namespace              flat-lookup binds (drop MH_TWOLEVEL)\n");
     s.push_str("  -undefined error|dynamic_lookup   unresolved-reference policy\n");
     s.push_str("  -u <symbol>                  force the symbol to be defined\n");
+    s.push_str("  -order_file <path>           rank symbols in the output (M11): one\n");
+    s.push_str("                               `symbol` or `object.o:symbol` per line;\n");
+    s.push_str("                               ranked pieces lead, unranked keep their\n");
+    s.push_str("                               order (refused with -r and -resident)\n");
     s.push_str("  -weak_library <path>         weak-load a dylib\n");
     s.push_str("  -source_version <A.B.C.D.E>  LC_SOURCE_VERSION\n");
     s.push_str("  -fixup_chains | -no_fixup_chains    chained fixups (default on)\n");
@@ -1490,6 +1541,10 @@ pub fn usage() -> String {
     s.push_str("  -headerpad <n>               reserve header space (advisory)\n");
     s.push_str("  -segalign <n>                0x1000 or 0x4000 (default 0x4000)\n");
     s.push_str("  -sectcreate <seg> <sect> <file>   place file bytes in a section\n");
+    s.push_str("  -map <path>                  write the link map (segments,\n");
+    s.push_str("                               sections, symbols — the placed\n");
+    s.push_str("                               image's report; refused with -r,\n");
+    s.push_str("                               -incremental and -resident)\n");
     s.push_str("  -syslibroot <dir>            SDK root prefixed onto every search\n");
     s.push_str("                               path (repeatable; ld64 pairing rule)\n");
     s.push_str("  @<response-file>             expand arguments from a file\n");
