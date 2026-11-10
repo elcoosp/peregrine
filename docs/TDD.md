@@ -1211,4 +1211,4 @@ bounds check is the gate, the word was never read.
 
 ---
 
-*End of design document. Next step: M0 — build the verifier before the linker.*
+*End of design document. M0 built the verifier before the linker, exactly as planned; the frontier past M10 lives in README "Status" and docs/BENCHMARKS.md (M11 shipped the `-order_file` rank seam and the `-map` report; M12 makes the verifier's checks a selectable surface).*
