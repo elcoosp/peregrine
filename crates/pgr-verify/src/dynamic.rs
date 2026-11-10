@@ -4,9 +4,7 @@
 
 use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report, issue_from};
-use pgr_format::consts::{
-    DYLD_CHAINED_PTR_64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_START_NONE, PAGE_SIZE_16K,
-};
+use pgr_format::consts::{DYLD_CHAINED_PTR_START_NONE, PAGE_SIZE_16K};
 use pgr_format::fixups::{
     ChainWord64, parse_header, parse_imports, parse_starts_in_image, parse_starts_in_segment,
 };
@@ -129,19 +127,27 @@ pub(crate) fn check_fixups(
                 return;
             }
         };
-        if seg.pointer_format != DYLD_CHAINED_PTR_64_OFFSET
-            && seg.pointer_format != DYLD_CHAINED_PTR_64
-        {
+        let Some(stride) = pgr_format::fixups::chain_stride(seg.pointer_format) else {
             report.issues.push(Issue::error(
                 Code::FixupsPayload,
                 format!(
-                    "pointer format {} unsupported (need DYLD_CHAINED_PTR_64_OFFSET or _64)",
+                    "pointer format {} unsupported (need DYLD_CHAINED_PTR_64_OFFSET, _64 or ARM64E)",
                     seg.pointer_format
                 ),
                 Some(u64::from(lc.dataoff) + u64::from(off)),
             ));
             return;
-        }
+        };
+        // The walk names its contract on the tracing seam (inert until a
+        // subscriber installs — the house convention): the format, the
+        // stride its `next` field counts, the pages it will cover.
+        tracing::debug!(
+            pointer_format = seg.pointer_format,
+            stride,
+            pages = seg.page_count,
+            segment = seg_index,
+            "chain-walk contract"
+        );
         let page_size = u64::from(seg.page_size);
         if page_size != 0x1000 && page_size != PAGE_SIZE_16K {
             report.issues.push(Issue::error(
@@ -250,46 +256,104 @@ pub(crate) fn check_fixups(
                         ));
                         break;
                     }
-                    let word = ChainWord64::new(u64::from_le_bytes(
+                    let raw_word = u64::from_le_bytes(
                         bytes[slot_file as usize..slot_file as usize + 8]
                             .try_into()
                             .unwrap_or([0; 8]),
-                    ));
-                    if word.is_bind() {
-                        if word.bind_ordinal() as usize >= imports.len() {
-                            report.issues.push(Issue::error(
-                                Code::FixupsImport,
-                                format!(
-                                    "segment {seg_index} page {page}: bind ordinal {} beyond {} imports",
-                                    word.bind_ordinal(),
-                                    imports.len()
-                                ),
-                                Some(slot_file),
-                            ));
-                            break;
+                    );
+                    let arm64e =
+                        seg.pointer_format == pgr_format::consts::DYLD_CHAINED_PTR_ARM64E;
+                    if arm64e {
+                        let word = pgr_format::fixups::ChainWordArm64e::new(raw_word);
+                        if word.is_bind() {
+                            if word.bind_ordinal() as usize >= imports.len() {
+                                report.issues.push(Issue::error(
+                                    Code::FixupsImport,
+                                    format!(
+                                        "segment {seg_index} page {page}: bind ordinal {} beyond {} imports",
+                                        word.bind_ordinal(),
+                                        imports.len()
+                                    ),
+                                    Some(slot_file),
+                                ));
+                                break;
+                            }
+                        } else {
+                            // Rebase targets: the auth shape carries a
+                            // 32-bit VM offset from the image base; the
+                            // unauth shape a VM address, which dyld reads
+                            // as (high8 << 56) | (target − base). A target
+                            // below the base names no real content.
+                            let base = mach_seg.vmaddr.saturating_sub(mach_seg.fileoff);
+                            let target_offset = if word.is_auth() {
+                                u64::from(word.auth_rebase_offset())
+                            } else {
+                                let vmaddr = word.rebase_target();
+                                if vmaddr < base {
+                                    report.issues.push(Issue::error(
+                                        Code::FixupsChain,
+                                        format!(
+                                            "segment {seg_index} page {page}: unauth rebase vmaddr {vmaddr:#x} sits below the image base {base:#x}",
+                                        ),
+                                        Some(slot_file),
+                                    ));
+                                    break;
+                                }
+                                (vmaddr - base) | (u64::from(word.rebase_high8()) << 56)
+                            };
+                            let span = img.total_vmsize.saturating_sub(base);
+                            if target_offset >= span {
+                                report.issues.push(Issue::error(
+                                    Code::FixupsChain,
+                                    format!(
+                                        "segment {seg_index} page {page}: rebase target {target_offset:#x} beyond the image span {span:#x}",
+                                    ),
+                                    Some(slot_file),
+                                ));
+                                break;
+                            }
                         }
                     } else {
-                        // Rebase: final image offset = high8 << 56 | target.
-                        let target_offset =
-                            (u64::from(word.rebase_high8()) << 56) | word.rebase_target();
-                        if target_offset >= img.total_vmsize {
-                            report.issues.push(Issue::error(
-                                Code::FixupsChain,
-                                format!(
-                                    "segment {seg_index} page {page}: rebase target {target_offset:#x} beyond the image vmsize {:#x}",
-                                    img.total_vmsize
-                                ),
-                                Some(slot_file),
-                            ));
-                            break;
+                        let word = ChainWord64::new(raw_word);
+                        if word.is_bind() {
+                            if word.bind_ordinal() as usize >= imports.len() {
+                                report.issues.push(Issue::error(
+                                    Code::FixupsImport,
+                                    format!(
+                                        "segment {seg_index} page {page}: bind ordinal {} beyond {} imports",
+                                        word.bind_ordinal(),
+                                        imports.len()
+                                    ),
+                                    Some(slot_file),
+                                ));
+                                break;
+                            }
+                        } else {
+                            // Rebase: final image offset = high8 << 56 | target.
+                            let target_offset =
+                                (u64::from(word.rebase_high8()) << 56) | word.rebase_target();
+                            if target_offset >= img.total_vmsize {
+                                report.issues.push(Issue::error(
+                                    Code::FixupsChain,
+                                    format!(
+                                        "segment {seg_index} page {page}: rebase target {target_offset:#x} beyond the image vmsize {:#x}",
+                                        img.total_vmsize
+                                    ),
+                                    Some(slot_file),
+                                ));
+                                break;
+                            }
                         }
                     }
-                    let strides = u64::from(word.next());
+                    let strides = if arm64e {
+                        u64::from(pgr_format::fixups::ChainWordArm64e::new(raw_word).next())
+                    } else {
+                        u64::from(ChainWord64::new(raw_word).next())
+                    };
                     if strides == 0 {
                         break; // chain terminates
                     }
-                    let advance = strides * 4;
-                    slot_off += advance;
+                    slot_off += strides * stride;
                 }
             }
         }

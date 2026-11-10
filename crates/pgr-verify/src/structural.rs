@@ -215,6 +215,14 @@ fn count_fixup_slots(bytes: &[u8], lc: &LinkeditDataCommand, nsegments: usize) -
                 &seg,
                 p,
             ) {
+                // The stride the segment's `next` fields count (8-byte
+                // units for the arm64e family, 4-byte for the 64 pair);
+                // an unknown format counts nothing (best effort).
+                let Some(stride) = pgr_format::fixups::chain_stride(seg.pointer_format) else {
+                    continue;
+                };
+                let arm64e =
+                    seg.pointer_format == pgr_format::consts::DYLD_CHAINED_PTR_ARM64E;
                 let page_base = match bytes.get(seg.segment_offset as usize..) {
                     Some(_) => seg.segment_offset,
                     None => continue,
@@ -236,15 +244,17 @@ fn count_fixup_slots(bytes: &[u8], lc: &LinkeditDataCommand, nsegments: usize) -
                         else {
                             break;
                         };
-                        let word = pgr_format::fixups::ChainWord64::new(u64::from_le_bytes(
-                            word_bytes.try_into().unwrap_or([0; 8]),
-                        ));
+                        let raw = u64::from_le_bytes(word_bytes.try_into().unwrap_or([0; 8]));
                         total += 1;
-                        let next = u64::from(word.next());
+                        let next = if arm64e {
+                            u64::from(pgr_format::fixups::ChainWordArm64e::new(raw).next())
+                        } else {
+                            u64::from(pgr_format::fixups::ChainWord64::new(raw).next())
+                        };
                         if next == 0 {
                             break;
                         }
-                        slot_off += next * 4;
+                        slot_off += next * stride;
                     }
                 }
             }

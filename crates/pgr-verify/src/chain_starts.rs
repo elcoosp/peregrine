@@ -89,10 +89,15 @@ pub(crate) fn check_chain_starts(bytes: &[u8], img: &ParsedImage<'_>, report: &m
     }
     let fmt = u32::from_le_bytes(mirror[0..4].try_into().unwrap_or([0; 4]));
     let count = u32::from_le_bytes(mirror[4..8].try_into().unwrap_or([0; 4]));
-    if fmt != u32::from(DYLD_CHAINED_PTR_64_OFFSET) && fmt != u32::from(DYLD_CHAINED_PTR_64) {
+    if fmt != u32::from(DYLD_CHAINED_PTR_64_OFFSET)
+        && fmt != u32::from(DYLD_CHAINED_PTR_64)
+        && fmt != u32::from(pgr_format::consts::DYLD_CHAINED_PTR_ARM64E)
+    {
         report.issues.push(Issue::error(
             Code::LinkeditPayload,
-            format!("__chain_starts pointer format {fmt} is not DYLD_CHAINED_PTR_64(_OFFSET)"),
+            format!(
+                "__chain_starts pointer format {fmt} is not DYLD_CHAINED_PTR_64(_OFFSET) or ARM64E"
+            ),
             Some(addr),
         ));
         return;

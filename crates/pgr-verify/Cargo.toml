@@ -11,6 +11,10 @@ publish = false
 [dependencies]
 pgr-format = { workspace = true }
 sha2 = { workspace = true }
+# The arm64e walk names its contract on the tracing seam (inert until a
+# subscriber installs — the driver and the consumer examples install one
+# under their debug envs; M10 rung 4, slice 1).
+tracing = { workspace = true }
 
 [dev-dependencies]
 pgr-fixtures = { workspace = true }
@@ -21,6 +25,9 @@ proptest = { workspace = true }
 # the workspace's criterion pin (0.7 needs `cargo_bench_support` to
 # actually measure).
 criterion = { workspace = true }
+# The rung-4 consumer example installs a subscriber under PGR_TRACING=1
+# so the arm64e walk spans are watchable (the workspace convention).
+tracing-subscriber = { workspace = true }
 
 [[bin]]
 name = "pgr-verify"
@@ -29,6 +36,11 @@ path = "src/main.rs"
 # The platform-floor gate bench (M10 rung 3, slice 2).
 [[bench]]
 name = "platform"
+harness = false
+
+# The arm64e strict-pass bench (M10 rung 4, slice 1).
+[[bench]]
+name = "arm64e"
 harness = false
 
 [lints]

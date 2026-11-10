@@ -508,6 +508,8 @@ dependencies = [
  "pgr-format",
  "proptest",
  "sha2",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
