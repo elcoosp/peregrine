@@ -4,6 +4,24 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.15.0] - 2026-11-10
+### Documentation
+- Record the rung 4 slice 4 and heal the drift (9673372)
+
+### Features
+- **driver:** The arm64e pair gets its consumer example (2473ccd)
+- **verify:** The pair gate walks the arm64e family (d9ebbf4)
+
+### Performance
+- **verify:** Bench the arm64e pair replay (3711fe8)
+
+### Refactor
+- **verify:** The mirror gate drops its dead word (377082e)
+
+### Tests
+- **verify:** The arm64e pair gates its binds (f2e4eed)
+
+
 ## [0.14.0] - 2026-11-10
 ### Bug Fixes
 - **driver:** The resident refusal names the v6 wire (8c3170a)
