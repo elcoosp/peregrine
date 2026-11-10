@@ -4,6 +4,41 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.18.0] - 2026-11-10
+### Build
+- **deps:** The lock carries the dev-surface additions (ea5798f)
+- **emit:** The record bench joins the crate manifest (4c7b609)
+- **verify:** The baseline bench joins the crate manifest (28ab642)
+
+### Documentation
+- Record the M13 baseline and record-inspector numbers (a68f1d8)
+- The TDD trailer points at the M13 report surfaces (ca5c34f)
+- The README carries the M13 rows and the 0.17.0 badge (602671e)
+- **core:** The chain-format field's doc link resolves by path (971c006)
+
+### Features
+- **driver:** The CLI answers --print-record before the link (d78eec4)
+- **driver:** The record query joins the driver surface (f2bcdc5)
+- **emit:** The record summary opens the crate's example surface (a18e9a5)
+- **emit:** The record read surface joins the emit root (d1c3890)
+- **emit:** The record inspector wires into the incremental engine (c726dd0)
+- **emit:** The link record reads back as a typed summary (2e92b39)
+- **verify:** The baseline gate gets its consumer example (0f3eaae)
+- **verify:** The verifier CLI gates on a baseline (cdab2b8)
+- **verify:** The report surfaces wire into the library root (e987b2a)
+- **verify:** The baseline delta classifies a relink's findings (30325db)
+- **verify:** The report JSON learns its library reader (2b7f159)
+
+### Performance
+- **emit:** Bench the record inspector's read cost (28b518e)
+- **verify:** Bench the baseline gate's per-policy cost (c9f71d0)
+
+### Tests
+- **driver:** The --print-record surface gates its exit codes (b2631fa)
+- **emit:** The record inspector gates the frame layers (2edb141)
+- **verify:** The baseline gate gates round-trips, deltas, policies (32c9d03)
+
+
 ## [0.17.0] - 2026-11-10
 ### Build
 - **verify:** The checks bench joins the crate manifest (2abde88)
