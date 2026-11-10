@@ -65,6 +65,13 @@
 //! everything.
 
 pub mod audit;
+pub mod record_info;
+
+// The read side rides the engine's namespace (the root re-exports these
+// as `pgr_emit::incremental::{read_record, read_summary, ...}`).
+pub use record_info::{
+    RecordReadError, RecordSummary, read_record, read_record_bytes, read_summary,
+};
 
 use crate::EmitError;
 use crate::emit::{indirect_bytes, symtab_bytes};
@@ -89,7 +96,10 @@ const TILE: u64 = PAGE_SIZE_16K;
 const HASH_PAGE: u64 = 4096;
 
 /// Record framing magic (versioned; see [`FORMAT_VERSION`]).
-const MAGIC: &[u8; 8] = b"PGRINC1\0";
+// The frame magic is crate-visible so the typed read surface
+// (`record_info`) classifies foreign files at the same layer the
+// decoder does.
+pub(crate) const MAGIC: &[u8; 8] = b"PGRINC1\0";
 
 /// Record format revision. Bump when the payload layout changes; older
 /// records then fail to decode and the relink silently falls back to the
