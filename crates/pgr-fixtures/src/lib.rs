@@ -6,8 +6,10 @@
 //! The builder implements the TDD §8 layout contract directly:
 //!
 //! * segments 16 KiB aligned, `vmaddr = fileoff + delta` with
-//!   `delta = 0x1_0000_0000` for executables and `0` for dylibs,
-//! * `__PAGEZERO` = 4 GiB, `__TEXT` at `0x1_0000_0000` (executables),
+//!   `delta = 0x1_0000_0000` for executables and `0` for dylibs (the
+//!   M15 `set_pagezero` knob names a different executable delta),
+//! * `__PAGEZERO` = 4 GiB, `__TEXT` at `0x1_0000_0000` (executables;
+//!   the knob overrides),
 //! * chained fixups (`DYLD_CHAINED_PTR_64_OFFSET` by default, the
 //!   `DYLD_CHAINED_PTR_ARM64E` family under the pointer-format knob, M10
 //!   rung 4) with the mold-style payload: header | starts-in-image |
@@ -270,6 +272,9 @@ pub struct ImageBuilder {
     keep_relocs: bool,
     build_version: Option<(u32, u32, u32)>,
     pointer_format: PointerFormatKind,
+    /// M15: the `__PAGEZERO` vmsize override (`None` = the 4 GiB
+    /// Mach-O arm64 constant). Executables only.
+    pagezero: Option<u64>,
 }
 
 impl ImageBuilder {
@@ -290,6 +295,7 @@ impl ImageBuilder {
             keep_relocs: false,
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
+            pagezero: None,
         }
     }
 
@@ -309,6 +315,7 @@ impl ImageBuilder {
             keep_relocs: false,
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
+            pagezero: None,
         }
     }
 
@@ -361,6 +368,21 @@ impl ImageBuilder {
     /// on (no post-build repatching).
     pub fn set_build_version(&mut self, platform: u32, minos: u32, sdk: u32) {
         self.build_version = Some((platform, minos, sdk));
+    }
+
+    /// Sets the executable's `__PAGEZERO` vmsize (the image base) — the
+    /// M15 `-pagezero_size` knob. The default stays the 4 GiB Mach-O
+    /// arm64 constant every pre-M15 fixture built with; an override is
+    /// written during assembly (the `vmaddr = fileoff + delta` delta,
+    /// the segment command and every rebase word ride it), so the
+    /// ad-hoc signature is computed over the final bytes and strict
+    /// verification runs with the hash recompute on.
+    ///
+    /// # Panics
+    /// Never — a misaligned override is the verifier's finding to name
+    /// (the broken-shape gates build it on purpose).
+    pub fn set_pagezero(&mut self, vmsize: u64) {
+        self.pagezero = Some(vmsize);
     }
 
     /// Selects the chain-word pointer format (default: `Offset64`). The
@@ -494,12 +516,19 @@ impl ImageBuilder {
         }
 
         // ---- segment layout: 16 KiB aligned, constant vaddr-fileoff delta
-        let delta = if exec { PAGEZERO_SIZE_64 } else { 0 };
+        // M15: the delta is the configured `__PAGEZERO` vmsize (the
+        // default stays the 4 GiB constant; a broken override is the
+        // verifier's finding to name).
+        let delta = if exec {
+            self.pagezero.unwrap_or(PAGEZERO_SIZE_64)
+        } else {
+            0
+        };
         let mut placed: Vec<(String, u64, u64)> = Vec::new(); // name, fileoff, vmsize
         let mut sect_infos: Vec<SectionInfo> = Vec::new();
 
         if exec {
-            placed.push(("__PAGEZERO".into(), 0, PAGEZERO_SIZE_64));
+            placed.push(("__PAGEZERO".into(), 0, delta));
         }
         for (seg_i, seg) in segments.iter().enumerate() {
             let seg_fileoff = if seg_i == 0 {
@@ -719,7 +748,9 @@ impl ImageBuilder {
             w32(&mut buf, lc + 4, 72);
             buf[lc + 8..lc + 24].copy_from_slice(&pad_name(SEG_PAGEZERO));
             w64(&mut buf, lc + 24, 0);
-            w64(&mut buf, lc + 32, PAGEZERO_SIZE_64);
+            // M15: the vmsize rides the configured override (the default
+            // stays the 4 GiB constant).
+            w64(&mut buf, lc + 32, delta);
             w64(&mut buf, lc + 40, 0);
             w64(&mut buf, lc + 48, 0);
             w32(&mut buf, lc + 56, VM_PROT_NONE);
