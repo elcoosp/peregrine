@@ -69,5 +69,13 @@ harness = false
 name = "dylibs"
 harness = false
 
+# The M15 image-base bench: the link across the -pagezero_size
+# decisions (the 4 GiB default, a 1 GiB and a 16 MiB base) over the
+# same 64-object corpus — a shape-parity gate, the base is address
+# arithmetic on the plan.
+[[bench]]
+name = "pagezero"
+harness = false
+
 [lints]
 workspace = true
