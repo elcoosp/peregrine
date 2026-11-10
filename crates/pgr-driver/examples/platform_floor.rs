@@ -46,14 +46,14 @@ fn row(name: &'static str, platform: u32, target: u32) -> Row {
 /// names the table).
 fn rows() -> Vec<Row> {
     vec![
-        row("macos", PLATFORM_MACOS, 0x000B_0000),       // 11.0.0: below
-        row("macos", PLATFORM_MACOS, 0x000C_0000),       // 12.0.0: at the floor
-        row("ios", PLATFORM_IOS, 0x000E_0000),           // 14.0.0: below
-        row("ios", PLATFORM_IOS, 0x000F_0000),           // 15.0.0: at the floor
-        row("tvos", PLATFORM_TVOS, 0x000E_0000),         // 14.0.0: below
-        row("tvos", PLATFORM_TVOS, 0x000F_0000),         // 15.0.0: at the floor
-        row("watchos", PLATFORM_WATCHOS, 0x0007_0000),   // 7.0.0: below
-        row("watchos", PLATFORM_WATCHOS, 0x0008_0000),   // 8.0.0: at the floor
+        row("macos", PLATFORM_MACOS, 0x000B_0000), // 11.0.0: below
+        row("macos", PLATFORM_MACOS, 0x000C_0000), // 12.0.0: at the floor
+        row("ios", PLATFORM_IOS, 0x000E_0000),     // 14.0.0: below
+        row("ios", PLATFORM_IOS, 0x000F_0000),     // 15.0.0: at the floor
+        row("tvos", PLATFORM_TVOS, 0x000E_0000),   // 14.0.0: below
+        row("tvos", PLATFORM_TVOS, 0x000F_0000),   // 15.0.0: at the floor
+        row("watchos", PLATFORM_WATCHOS, 0x0007_0000), // 7.0.0: below
+        row("watchos", PLATFORM_WATCHOS, 0x0008_0000), // 8.0.0: at the floor
         row("visionos", PLATFORM_VISIONOS, 0x0001_0000), // 1.0.0: at the floor
     ]
 }
@@ -92,10 +92,15 @@ fn main() {
             .init();
     }
 
-    println!("{:<9} {:>8}  {}", "platform", "target", "encoding (Pass 3 plans)");
+    println!("{:<9} {:>8}  encoding (Pass 3 plans)", "platform", "target");
     for r in rows() {
         let encoding = FixupEncoding::for_target(r.platform, r.target);
-        println!("{:<9} {:>8}  {:?}", r.name, version_word(r.target), encoding);
+        println!(
+            "{:<9} {:>8}  {:?}",
+            r.name,
+            version_word(r.target),
+            encoding
+        );
         if encoding == FixupEncoding::ClassicOpcodes {
             let advisory = BelowFloor {
                 name: r.name.to_string(),
