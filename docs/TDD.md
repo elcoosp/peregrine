@@ -1167,6 +1167,48 @@ anchor), the `arm64e_auth` bench variant (the same corpus, every slot
 signed), and the `fixup_chains_auth` consumer example (the refusal
 rendered, then the unauth and signed plans decoded side by side).
 
+### 15.7 Rung 4, slice 4 — the pair gate walks the family
+
+The rung's one named deferral: §15.4 scoped the verifier's M3 pair gate
+to `DYLD_CHAINED_PTR_64_OFFSET` for its slice ("the pair gate stays
+64_OFFSET-scoped this slice"), and slices 2–3 did not move it — so an
+arm64e executable binding a name its dylib does not export passed the
+two-level contract silently, the exact R4 mitigation (TDD §12 M3 row)
+the gate exists to enforce. Slice 4 makes the replay family-blind.
+
+1. **The family-blind replay** (`pgr-verify::pair`): the per-segment
+   skip becomes the dynamic walk's dispatch — [`chain_stride`]
+   (`pgr_format::fixups`) names the families the read side walks and
+   the stride each `next` field counts (8 bytes under arm64e, 4 under
+   the 64 pair), and the word decodes through its segment's own
+   `pointer_format` ([`ChainWordArm64e`] under format 1, [`ChainWord64`]
+   otherwise — the bind bit and ordinal sit at different bit positions
+   per family, so one reader would misclassify every word). Auth binds
+   replay their ordinal exactly like plain binds: the signed word
+   carries no addend, and the addend is irrelevant to the two-level
+   check. A format the read side does not walk stays skipped (the
+   dynamic walk refuses it outright; the pair gate has no binds to
+   replay there).
+2. **The contract stays byte-for-byte**: the 64_OFFSET path is the
+   same walk it was (the e2e and m7 pair gates hold), the refusal
+   message names the bind, the ordinal and the install name as before,
+   and the pair gate's tracing seam now names the replayed family and
+   its stride per segment (`pair bind replay contract` — inert until a
+   subscriber installs, the house convention). The miette half rides
+   the consumer: the `arm64e_pair` example renders the missing-export
+   finding as a diagnostic with help text, the fix and not just the
+   verdict.
+
+Supporting pieces: the pair-gate gate matrix
+(`crates/pgr-verify/tests/m10_arm64e_pair.rs` — the auth-bind refusal,
+the 8-byte-stride replay reaching a second chained bind, the honest
+arm64e pair, and the 64_OFFSET controls), the pair-replay bench group
+(`verify_arm64e/pair_replay/<arm64e_auth|offset64_control>`), and the
+`arm64e_pair` consumer example. The `__chain_starts` mirror gate's
+dead word decode (built, then discarded with `let _ = word;` since the
+dynamic check took over ordinal validation) rides the sweep — the
+bounds check is the gate, the word was never read.
+
 ---
 
 *End of design document. Next step: M0 — build the verifier before the linker.*
