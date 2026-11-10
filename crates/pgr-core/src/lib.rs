@@ -25,10 +25,14 @@
 //! [`layout::chained_fixups_min_minos`] names the per-platform
 //! deployment floor (macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0,
 //! visionOS 1.0) below which the classic `LC_DYLD_INFO_ONLY` opcodes
-//! encode the same fixups. Rung 3 opens the floor to consumers:
+//! encode the same fixups. Rung 3 landed the floor as a consumer seam:
 //! [`platform::FixupEncoding`] names the fixup-encoding decision for a
-//! platform/target pair *before* the link runs — the same table
-//! [`layout::chained_fixups_min_minos`] encodes, one reader per side.
+//! platform/target pair *before* the link runs, and the canonical
+//! table it reads lives beside the platform constants
+//! (`pgr_format::consts::chained_fixups_floor`) — one table, three
+//! readers: this layout, the seam, and the verifier's `fixups_floor`
+//! gate (slice 2 adds the driver query
+//! `pgr --print-fixup-encoding` on top).
 
 pub mod cache;
 pub mod deadstrip;

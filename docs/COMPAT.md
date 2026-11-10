@@ -72,7 +72,7 @@ each flag has a fixture".
 | `-order_file` | ❌ (rejected) | M5 deferral (needs D1 ordering pass; flagged with the atomizer) | `opts::LATER_FLAGS` |
 | `-dylinker` (MH_DYLINKER outputs) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-sub_umbrella` / `-sub_library` (umbrella re-exports) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
-| `-ObjC` (archive member class pull) | ❌ | M6 (ObjC class/selector handling) | — |
+| `-ObjC` (archive member class pull) | ❌ (rejected, actionable) | M6 (ObjC class/selector handling) | `opts::LATER_FLAGS` |
 
 ## Linking semantics
 
@@ -98,7 +98,6 @@ each flag has a fixture".
 | Branch veneers/thunks for `BR26` overflow (> 128 MiB text) | ✅ | M6 | `pgr-core::thunks` tests, `pgr-verify::branch_range` |
 | `-order_file` | ❌ | later (needs the D1 ordering pass) | — |
 | TLV (`__thread_vars`, `tlv_bootstrap`) | ❌ | M5 | reloc types parsed and rejected today |
-
 | `-icf=safe` / `-icf=all` / `-no_icf` (identical code folding) | ✅ | M6 | `pgr-core::icf` tests, `m6_icf::*` |
 | `-syslibroot <dir>` (repeatable; ld64 pairing rule: 1 root = prefixed-only, ≥2 roots = union + original) | ✅ | M7 | `opts::effective_lib_dirs` tests, `m7_driver::m7_syslibroot_*` |
 | `@<response-file>` (nested, `#` comments, quotes/escapes; opportunistic expansion — a non-existent `@path` passes through, keeping `-install_name @rpath/...` intact) | ✅ | M7 | `opts::m7_response_file_*`, `m7_driver::m7_response_file_drives_a_real_link` |

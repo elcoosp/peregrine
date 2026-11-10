@@ -7,7 +7,11 @@
 //! duplication drift this seam closes. [`FixupEncoding::for_target`]
 //! names the decision for a (`-platform_version` platform, deployment
 //! target) pair from the *same* table the layout encodes — one table,
-//! two readers — so build systems, incremental planners and doc
+//! three readers since slice 2 (the layout, this seam, and the
+//! verifier's `fixups_floor` gate; the canonical copy lives beside the
+//! platform constants, `pgr_format::consts::chained_fixups_floor`, and
+//! the driver query `--print-fixup-encoding` puts the answer on the
+//! CLI) — so build systems, incremental planners and doc
 //! generators read the encoding without linking, and the below-floor
 //! answer rides a tracing event (the house observability convention:
 //! inert until a subscriber installs).
