@@ -8,13 +8,12 @@
 //! names the dylib must be exported by the dylib's trie") the gate
 //! exists to enforce. The gates here pin the family-blind contract:
 //! a missing export is caught under arm64e auth binds *and* the
-//! 64_OFFSET control, the 8-byte stride replay reaches the second bind
+//! `64_OFFSET` control, the 8-byte stride replay reaches the second bind
 //! of a chain (a 4-byte assumption lands mid-word and reads garbage),
 //! and an honest pair stays clean in both families.
 
 use pgr_fixtures::{
-    Image, ImageBuilder, PointerFormatKind, SectionSpec, SegmentSpec, SlotKind, SymbolSpec,
-    filler,
+    Image, ImageBuilder, PointerFormatKind, SectionSpec, SegmentSpec, SlotKind, SymbolSpec, filler,
 };
 use pgr_format::consts::{
     PLATFORM_MACOS, S_ATTR_PURE_INSTRUCTIONS, S_REGULAR, VM_PROT_EXECUTE, VM_PROT_READ,
@@ -56,7 +55,7 @@ fn data_const_segment() -> SegmentSpec {
 
 /// An executable whose `__got` binds `bind_names` (in order) from dylib
 /// ordinal 1, born in `pf`'s chain word family: auth binds under arm64e,
-/// plain binds under 64_OFFSET. Consecutive `__got` slots chain (the
+/// plain binds under `64_OFFSET`. Consecutive `__got` slots chain (the
 /// builder packs one chain per page), so two binds ride one chain and the
 /// second is reachable only through a correct stride replay.
 fn pair_exec(pf: PointerFormatKind, bind_names: &[&str]) -> Image {
@@ -187,7 +186,7 @@ fn arm64e_honest_pair_is_clean() {
     assert_eq!(pair.error_count(), 0, "{pair:?}");
 }
 
-/// The 64_OFFSET control keeps its pre-slice contract: a plain bind
+/// The `64_OFFSET` control keeps its pre-slice contract: a plain bind
 /// naming a missing export is caught (it always was), and the honest
 /// control pair stays clean.
 #[test]
