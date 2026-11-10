@@ -57,7 +57,7 @@ pub mod trie;
 
 pub use cache::PoiCache;
 pub use dyld_info::DyldInfoPlan;
-pub use fixups::{FixupKind, FixupPlan, MAX_CHAIN_STRIDE_BYTES, pack_page};
+pub use fixups::{FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page, pack_page_strided};
 pub use ids::{FileId, StringId};
 pub use interner::Interner;
 pub use layout::{
