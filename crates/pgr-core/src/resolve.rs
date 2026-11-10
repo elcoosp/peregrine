@@ -368,14 +368,6 @@ impl Resolution {
         self.defs.get(&id.0)
     }
 
-    /// All reference sites of a name (`(file, symbol index)` pairs).
-    #[must_use]
-    pub fn reference_sites(&self, id: StringId) -> &[(FileId, usize)] {
-        self.references
-            .get(&id.0)
-            .map_or(&[], std::vec::Vec::as_slice)
-    }
-
     /// All winning definitions keyed by name.
     pub fn definitions(&self) -> impl Iterator<Item = (crate::ids::StringId, &Def)> {
         self.defs.iter().map(|(k, d)| (crate::ids::StringId(*k), d))
