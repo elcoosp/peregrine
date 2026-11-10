@@ -33,6 +33,9 @@ fn main() -> ExitCode {
         Some("--print-fixup-encoding") => {
             return print_fixup_encoding(&args[1..]);
         }
+        Some("--print-record") => {
+            return print_record(&args[1..]);
+        }
         _ => {}
     }
 
@@ -140,6 +143,33 @@ fn print_fixup_encoding(rest: &[std::ffi::OsString]) -> ExitCode {
         Err(e) => {
             eprintln!("{PROGRAM}: error: {:?}", miette::Report::new(e));
             ExitCode::from(2)
+        }
+    }
+}
+
+/// The `--print-record` intercept (M13 rung 2): reads a `.pgr-inc`
+/// sidecar and prints its summary — the identity, skeleton and table
+/// counts the last `-incremental` link recorded. The text renders on
+/// stdout (deterministic, the map's contract); a frame refusal names
+/// its layer on stderr and exits 1 (a diagnosis, not a usage error);
+/// usage problems exit 2.
+fn print_record(rest: &[std::ffi::OsString]) -> ExitCode {
+    if rest.len() != 1 {
+        eprintln!("{PROGRAM}: error: --print-record <output.pgr-inc>");
+        return ExitCode::from(2);
+    }
+    let Some(path) = rest[0].to_str() else {
+        eprintln!("{PROGRAM}: error: --print-record <output.pgr-inc> (the path must be UTF-8)");
+        return ExitCode::from(2);
+    };
+    match pgr_driver::record_report(path) {
+        Ok(summary) => {
+            print!("{}", summary.render());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{PROGRAM}: error: {e}");
+            ExitCode::FAILURE
         }
     }
 }
