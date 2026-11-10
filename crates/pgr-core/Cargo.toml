@@ -38,5 +38,11 @@ harness = false
 name = "platform"
 harness = false
 
+# The rung-4 word-family bench (M10 rung 4, slice 2): the same slot
+# corpus planned as 64_OFFSET and ARM64E words.
+[[bench]]
+name = "arm64e"
+harness = false
+
 [lints]
 workspace = true
