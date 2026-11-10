@@ -1478,6 +1478,9 @@ pub fn usage() -> String {
     s.push_str("  -weak_library <path>         weak-load a dylib\n");
     s.push_str("  -source_version <A.B.C.D.E>  LC_SOURCE_VERSION\n");
     s.push_str("  -fixup_chains | -no_fixup_chains    chained fixups (default on)\n");
+    s.push_str("  -fixup_chains_format <fmt>   chain word family: offset64 (default)\n");
+    s.push_str("                               or arm64e (M10 rung 4); shapes the\n");
+    s.push_str("                               chained-fixup words, not the fixups\n");
     s.push_str("  -adhoc | -no_adhoc           ad-hoc code signature (default on)\n");
     s.push_str("  -headerpad <n>               reserve header space (advisory)\n");
     s.push_str("  -segalign <n>                0x1000 or 0x4000 (default 0x4000)\n");
