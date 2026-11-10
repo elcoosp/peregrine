@@ -496,6 +496,30 @@ pub const TOOL_SWIFT: u32 = 2;
 /// Build tool: ld.
 pub const TOOL_LD: u32 = 3;
 
+/// The chained-fixups availability floor per `LC_BUILD_VERSION` platform,
+/// as a packed `X.Y.Z` version word (`(X << 16) | (Y << 8) | Z`) — the
+/// canonical table (M10 rung 3, slice 2). dyld learned chained fixups with
+/// macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0 and visionOS 1.0; below
+/// the floor the classic `LC_DYLD_INFO_ONLY` opcode streams encode the
+/// *same* fixups (the encoding flips, never the fixups — TDD §3.6
+/// invariant 3). This lives beside the `PLATFORM_*` constants it reads
+/// so every reader shares one table with no re-derivation drift: the
+/// layout's fixup-encoding gate, the consumer seam
+/// (`pgr_core::platform::FixupEncoding`) and the verifier's
+/// `fixups_floor` gate.
+///
+/// An unknown platform conservatively keeps the macOS floor (12.0.0) —
+/// the value the verifier's unknown-platform error makes moot.
+#[must_use]
+pub fn chained_fixups_floor(platform: u32) -> u32 {
+    match platform {
+        PLATFORM_IOS | PLATFORM_TVOS => 0x000F_0000,
+        PLATFORM_WATCHOS => 0x0008_0000,
+        PLATFORM_VISIONOS => 0x0001_0000,
+        _ => 0x000C_0000,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Platform contract constants (TDD §3.6)
 // ---------------------------------------------------------------------------
