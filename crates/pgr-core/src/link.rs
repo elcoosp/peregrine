@@ -244,7 +244,7 @@ pub fn link_from_objects(
 
     // ---- M5/D12 liveness, then M6 ICF over the live text atoms --------------
     let live = crate::deadstrip::compute(&objects, &res, &interner, cfg);
-    let fold = crate::icf::fold(&objects, &res, &interner, cfg, &live)?;
+    let fold = crate::icf::fold(&objects, &res, cfg, &live)?;
 
     // ---- Pass 3: layout -------------------------------------------------------
     let layout = layout(&objects, &res, &interner, cfg, &live, &fold)?;
