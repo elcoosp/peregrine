@@ -884,7 +884,7 @@ Nothing else. No `RwLock`, no `Mutex<HashMap>`, no `OnceCell` in hot paths. This
 | **M4 — The speed pass** | Hash-bin interner wired end-to-end; two-level prefix-scan layout; disjoint-range emit + writer pool; mimalloc; `--time` instrumentation; benchmark harness (hyperfine vs `ld64.lld` and any ld64 goldens) | ≥5× median vs `ld64.lld` on the 100 MB corpus at 16 threads; no pass > 15% single-threaded wall time except flush; peak RSS ≤ 3× output |
 | **M5 — Ecosystem hardening** | `-dead_strip` (feeder GC), ICF (color-refinement, mold §4.6 algorithm), thunk/veneer batching for `BR26` overflow, `LC_DYLD_INFO` legacy fallback, ObjC selector/class stub handling, LTO object pass-through, two-process exit | Real-world corpus (ripgrep-like C/Rust fixtures) links & verifies; differential tests vs goldens stay green; determinism property survives ICF |
 
-Deliberately *not* milestones: arm64e, `-order_file` full semantics (rank-based subset only), bitcode lowering, iOS/tvOS platform targets beyond flag plumbing.
+Deliberately *not* milestones: arm64e (shipped at M10 rung 4 in the family-blind scope the line kept), `-order_file` full semantics (the rank-based subset shipped at M11; wildcards and section directives stay out), bitcode lowering, iOS/tvOS platform targets beyond flag plumbing.
 
 ---
 
