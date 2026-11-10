@@ -1,6 +1,6 @@
 //! The authenticated producer's consumer cycle, runnable (M10 rung 4,
 //! slice 3): a small fixup surface — two rebases and one bind — planned
-//! three ways. First as the 64_OFFSET family *with* an auth policy: the
+//! three ways. First as the `64_OFFSET` family *with* an auth policy: the
 //! planner refuses (that word family has no auth discriminator to set),
 //! and the refusal renders as a miette diagnostic with help text — the
 //! fix, not just the verdict, the same convention the driver's option
@@ -23,12 +23,12 @@
 //! ```
 
 use miette::Diagnostic;
+use pgr_core::LinkError;
 use pgr_core::fixups::{
     FixupAuth, FixupKind, FixupPointerFormat, FixupSlot, plan_fixups_with_auth,
     plan_fixups_with_format,
 };
 use pgr_core::interner::Interner;
-use pgr_core::LinkError;
 use pgr_format::consts::{DYLD_CHAINED_PTR_ARM64E, PAGE_SIZE_16K};
 use pgr_format::fixups::ChainWordArm64e;
 use thiserror::Error;
@@ -91,7 +91,7 @@ fn policies() -> Vec<FixupAuth> {
     ]
 }
 
-/// The 64_OFFSET-family refusal, re-rendered as a miette diagnostic: the
+/// The `64_OFFSET`-family refusal, re-rendered as a miette diagnostic: the
 /// planner's [`LinkError::Layout`] names the cause; the help names the
 /// fix. The miette seam the core planner stays out of (the workspace
 /// keeps `pgr-core` diagnostic-free) lands here, at the consumer.
@@ -144,10 +144,7 @@ fn main() {
     .expect_err("the 64_OFFSET family refuses auth slots");
     println!("the same slots, one auth policy, three plans");
     println!("  [refused] 64_OFFSET + auth policy:");
-    println!(
-        "{:?}",
-        miette::Report::new(AuthFamilyRefusal(refused))
-    );
+    println!("{:?}", miette::Report::new(AuthFamilyRefusal(refused)));
 
     // The accepted paths: the slice-2 unauth family beside the slice-3
     // signed one.
@@ -176,9 +173,8 @@ fn main() {
     println!("  unauth     arm64e + no policy");
     println!("  signed     arm64e + the policy");
     println!(
-        "  declared pointer_format = {} in every plan; chain heads and \
-         import tables match",
-        DYLD_CHAINED_PTR_ARM64E
+        "  declared pointer_format = {DYLD_CHAINED_PTR_ARM64E} in every plan; \
+         chain heads and import tables match"
     );
 
     for (vaddr, target) in [
