@@ -69,6 +69,14 @@ pub struct Dylib {
     /// M3 `-reexport_library`: the dylib loads as `LC_REEXPORT_DYLIB` and
     /// its exports join this image's export trie as REEXPORT nodes.
     pub reexport: bool,
+    /// M14 `-lazy_library`/`-lazy_framework`: the dylib loads as
+    /// `LC_LAZY_LOAD_DYLIB` — dyld's delay-load surface. Under chained
+    /// fixups the command participates in the two-level ordinal space
+    /// exactly like a plain load (the verifier's walk counts it); the
+    /// laziness is the loader's scheduling, the surface is the LC kind.
+    /// Mutually exclusive with `reexport` by flag shape; `weak` composes
+    /// (a weak lazy load binds weakly, the command kind stays lazy).
+    pub lazy: bool,
 }
 
 /// What to do with references no input and no dylib resolves.
