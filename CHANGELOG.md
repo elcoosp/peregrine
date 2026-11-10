@@ -4,6 +4,27 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.13.0] - 2026-11-10
+### Bug Fixes
+- **fixtures:** The chain build names its empty-slot refusal (29d96dc)
+
+### Documentation
+- Heal the v0.12.0 drift and record the rung 4 slice 2 (f23744e)
+
+### Features
+- **core:** The arm64e producer gets its consumer example (a873f09)
+- **daemon:** The wire carries the chain word family (c9116fd)
+- **driver:** The fixup-chains-format flag and its honest refusals (6d5c90f)
+- **core:** The chain planner speaks the arm64e word family (b8c3158)
+
+### Performance
+- **core:** Bench the arm64e word-family planner (4e374af)
+
+### Tests
+- **driver:** The arm64e flag gates its links (d19a10d)
+- **core:** The arm64e producer plans gate their shapes (ff3de8b)
+
+
 ## [0.12.0] - 2026-11-10
 ### Bug Fixes
 - **emit:** The writer thread names its panic payload (2b4006c)
