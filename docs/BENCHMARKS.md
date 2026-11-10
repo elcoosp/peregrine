@@ -1220,3 +1220,44 @@ one, and rendering the summary is a rounding error — a build system
 can ask "what did the last incremental link record" between every
 relink without noticing. The numbers are the dev-sandbox baselines the
 other sections use; the hardware gates stay specified, not measured.
+
+## M14 — the export filter's match cost
+
+The visibility closure's per-name cost (Pass 3 pays it once per
+external name per list): the exact form is the M3 matcher (memcmp),
+the star families are the M14 backtracking walk over the same 10,240-name
+universe with four-entry lists — the same per-name scan length in every
+family, so the only variable is the matcher itself
+(`pgr-core/benches/filter.rs`, `export_filter/match_10k_names/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `match_10k_names/exact` (4 exact entries) | 54.9 µs (≈5.4 ns/name) |
+| `match_10k_names/one_star` (4 `_x_*` globs) | 171.2 µs (≈16.7 ns/name) |
+| `match_10k_names/two_star` (4 `*_x_*` globs) | 430.2 µs (≈42.0 ns/name) |
+
+The honest reading: the widened matcher costs ~3× the exact memcmp at
+one star and ~8× at two — nanoseconds per name either way, against a
+Pass-3 layout that runs in milliseconds on the same corpus, so the
+filter stays off the hot path by three orders of magnitude. A list
+long enough to matter (hundreds of globs over hundreds of thousands of
+names) is the shape that would need a prefix index first; the bench is
+where that decision lives.
+
+### M14 rung 2 — the dylib surface's kind cost
+
+The link across the load-command kinds over the same corpus (one
+binder object, 256 unsigned relocs into 16 dylibs × 16 exports; the
+kind is one header opcode per dylib — binds, the import table and the
+trie do not read it; `pgr-core/benches/dylibs.rs`,
+`dylib_surface/link_256_binds/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_256_binds/load` (16 plain `LC_LOAD_DYLIB`) | 501.7 µs |
+| `link_256_binds/weak` (16 `LC_LOAD_WEAK_DYLIB`) | 502.0 µs |
+| `link_256_binds/lazy` (16 `LC_LAZY_LOAD_DYLIB`) | 501.7 µs |
+
+The honest reading: parity, as the shape predicts — the released weak/
+lazy surface costs a header byte per dylib and nothing in the passes.
+The bench is the parity gate, not a win.
