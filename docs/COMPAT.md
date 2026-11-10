@@ -39,6 +39,7 @@ each flag has a fixture".
 | `-o -arch -platform_version -e -static` | ✅ | M0/M1 | `opts` unit tests |
 | `-platform_version <macos\|ios\|tvos\|watchos\|visionos> <min> <sdk>` (five platforms; SDK ≥ deployment target; the per-platform chained-fixups floor picks the fixup encoding) | ✅ | M10 | `opts` unit tests + `m10_platform::*` (core/driver/verify), `platform_matrix` example |
 | `-fixup_chains` / `-no_fixup_chains` | ✅ | M1 | `opts` unit tests |
+| `-fixup_chains_format <offset64\|arm64e>` (chain word family: the rung-4 producer names the encoding; the default stays the M2 `DYLD_CHAINED_PTR_64_OFFSET`) | ✅ | M10 | `m10_arm64e::*` (driver parse/flag gates + e2e verify-strict), `m10_arm64e_producer::*` (core word shapes) |
 | `-adhoc` / `-no_adhoc` | ✅ | M1 | `e2e::no_adhoc_omits_the_signature` |
 | `-headerpad` (advisory) / `-segalign` | ✅ | M1 | `opts` unit tests |
 | `.tbd` inputs (v3/v4) | ✅ | M2 | `pgr-format::tbd` tests, `e2e::m2_links_printf_from_tbd` |
