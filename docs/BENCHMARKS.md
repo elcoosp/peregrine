@@ -1165,3 +1165,58 @@ full pass pays 20.6 µs, and the expensive recompute waits for the
 hand-off gate (or `--skip-hash-recompute`). The registry's `codes()`
 metadata is test-gated (`check_selection::single_check_never_reports_foreign_codes`),
 so a family can never quietly outgrow its declared domain.
+
+## M13 — the consumer report surfaces (pgr-verify/benches/baseline.rs, pgr-emit/benches/record_summary.rs)
+
+M13 makes the artifacts a build system gates on readable surfaces: rung
+1 is the verifier report's JSON interchange shape (one writer and one
+reader in the library) plus the baseline gate (`--baseline` +
+`--fail-on new|any`); rung 2 is the link record's inspector
+(`--print-record`, `pgr_emit::incremental::read_summary`). Both benches
+pin the same honesty: a gate or a query must cost far less than the
+work it summarizes, or the build system pays more for the seam than
+for the link.
+
+```sh
+cargo bench -p pgr-verify --bench baseline
+cargo bench -p pgr-emit --bench record_summary
+```
+
+Baseline gate (synthetic reports of N anchored findings; the delta is
+`BaselineDelta::between` under the two `IssueIdentity` policies; one
+real strict verify pass rides along for scale — the M12 fixture shape):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `baseline_gate/delta_offset/64` | 1.94 µs |
+| `baseline_gate/delta_code/64` | 1.56 µs |
+| `baseline_gate/delta_offset/256` | 20.2 µs |
+| `baseline_gate/delta_code/256` | 13.6 µs |
+| `baseline_gate/delta_offset/512` | 68.4 µs |
+| `baseline_gate/delta_code/512` | 47.0 µs |
+| `baseline_gate/to_json/512` (the writer) | 152.8 µs |
+| `baseline_gate/parse_json/512` (the reader) | 252.6 µs |
+| `baseline_gate/verify_for_scale` (one strict pass) | 20.6 µs |
+
+The honest reading: the delta is the cheap half of the gate — hundreds
+of findings classify in tens of microseconds, and the O(prev × next)
+match is deliberate at these counts (the bench is where the shape
+changes if reports ever grow past it). The JSON writer and reader cost
+more than the delta (they walk every message's bytes), and both stay
+well under one verify pass at parity sizes — the gate's total (verify
++ diff) is dominated by the verify it gates, which is the point.
+
+Record inspector (one real recorded link, two objects × 64 symbols,
+signed — the read surface beside the write side it mirrors):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `record_summary/record_and_encode` (the write side) | ~125 µs |
+| `record_summary/read_record` (frame + decode) | 11.1 µs |
+| `record_summary/of_render` (the summary text) | 1.5 µs |
+
+The honest reading: reading a record costs about a tenth of making
+one, and rendering the summary is a rounding error — a build system
+can ask "what did the last incremental link record" between every
+relink without noticing. The numbers are the dev-sandbox baselines the
+other sections use; the hardware gates stay specified, not measured.
