@@ -26,10 +26,24 @@ pub mod synth;
 use pgr_core::LinkArchive;
 use pgr_core::LinkArchiveMember;
 use pgr_core::LinkInput;
+use pgr_core::SymbolMatcher;
 use pgr_core::cache::PoiCache;
 use pgr_core::resolve::Dylib;
 use pgr_emit::write_image;
 use std::path::Path;
+
+/// The load-command kind a framework flag names (M14): plain load,
+/// weak load, or lazy load — the `-framework` search is shared, the
+/// kind is per flag list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DylibKind {
+    /// `-framework` (plain `LC_LOAD_DYLIB`).
+    Load,
+    /// `-weak_framework` (`LC_LOAD_WEAK_DYLIB`, weak binds).
+    Weak,
+    /// `-lazy_framework` (`LC_LAZY_LOAD_DYLIB`).
+    Lazy,
+}
 
 /// The driver outcome: bytes written, plus the plan for diagnostics.
 #[derive(Debug)]
@@ -148,9 +162,14 @@ pub enum DriverError {
     Record(#[from] pgr_emit::incremental::RecordReadError),
 }
 
-/// Reads a symbol-list file (one symbol per line, `#` comments and blank
-/// lines ignored — the ld64 subset Peregrine supports; see docs/COMPAT.md).
-fn read_symbol_list(flag: &str, path: &str) -> Result<Vec<Vec<u8>>, DriverError> {
+/// Reads a symbol-list file (one entry per line, `#` comments and blank
+/// lines ignored; M14: each line parses as a [`pgr_core::SymbolPattern`] —
+/// an exact name or a `*` glob, the ld64 subset Peregrine supports; see
+/// docs/COMPAT.md).
+fn read_symbol_patterns(
+    flag: &str,
+    path: &str,
+) -> Result<Vec<pgr_core::SymbolPattern>, DriverError> {
     let text = std::fs::read_to_string(path).map_err(|e| DriverError::SymbolList {
         flag: flag.to_string(),
         path: path.to_string(),
@@ -162,7 +181,17 @@ fn read_symbol_list(flag: &str, path: &str) -> Result<Vec<Vec<u8>>, DriverError>
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        out.push(line.as_bytes().to_vec());
+        // M14: a line is a `SymbolPattern` — exact, or a `*` glob. A
+        // malformed line refuses here, with the fix in the message (a
+        // typo must never silently widen or narrow the export surface).
+        let pattern = pgr_core::SymbolPattern::parse(line.as_bytes()).map_err(|e| {
+            DriverError::SymbolList {
+                flag: flag.to_string(),
+                path: path.to_string(),
+                message: e.to_string(),
+            }
+        })?;
+        out.push(pattern);
     }
     Ok(out)
 }
@@ -289,6 +318,7 @@ pub fn scan_dylib(path: &str, bytes: &[u8]) -> Result<Dylib, DriverError> {
         exports,
         weak: false,
         reexport: false,
+        lazy: false,
     })
 }
 
@@ -355,6 +385,7 @@ pub fn tbd_to_dylib_cached(
             .collect(),
         weak,
         reexport: false,
+        lazy: false,
     };
     if let Some(cache) = cache {
         let key = pgr_core::cache::PoiCache::content_key(bytes, false);
@@ -534,6 +565,35 @@ fn link_to_image_recorded(
             "pgr: warning: order file symbol {} not matched by any input",
             String::from_utf8_lossy(name)
         );
+    }
+    // M14: the filter's advisory — a list pattern that matched no
+    // symbol in the plan is a typo, not an error (the link is correct,
+    // the intent is not; ld64 warns the same way on order files). Warn
+    // once per unmatched pattern, in list order.
+    {
+        let patterns = prepared
+            .config
+            .exported_only
+            .iter()
+            .flatten()
+            .chain(prepared.config.unexported.iter());
+        for pattern in patterns {
+            let matched = result
+                .layout
+                .symbols
+                .iter()
+                .any(|s| pattern.matches(result.interner.bytes(s.name)));
+            if !matched {
+                tracing::warn!(
+                    pattern = %String::from_utf8_lossy(pattern.source()),
+                    "the export-filter pattern matched no symbol"
+                );
+                eprintln!(
+                    "pgr: warning: symbol list pattern {} matched no symbol",
+                    String::from_utf8_lossy(pattern.source())
+                );
+            }
+        }
     }
     let image = pgr_emit::build_image_fused(&result.layout, &result.objects)?;
     // M11: the link map — the plan's own segments/sections/symbols,
@@ -741,16 +801,28 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         }
     }
     // M5 `-framework` search (M7: ld64-effective `-F` dirs + defaults).
+    // M14: the weak/lazy framework kinds resolve through the same search
+    // after the plain frameworks (the lists are separate in `Options`;
+    // the LC order — and with it the two-level ordinals — is plain,
+    // weak, then lazy).
     let framework_dirs = opts::effective_framework_dirs(&opts.framework_dirs, &opts.syslibroots);
-    for name in &opts.frameworks {
+    for (name, kind) in opts
+        .frameworks
+        .iter()
+        .map(|n| (n, DylibKind::Load))
+        .chain(opts.weak_frameworks.iter().map(|n| (n, DylibKind::Weak)))
+        .chain(opts.lazy_frameworks.iter().map(|n| (n, DylibKind::Lazy)))
+    {
         match resolve_framework(name, &framework_dirs)? {
             Some((path, bytes)) => {
-                if looks_like_tbd(&bytes) {
-                    dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
+                let mut dylib = if looks_like_tbd(&bytes) {
+                    tbd_to_dylib_cached(&path, &bytes, kind == DylibKind::Weak, cache.as_ref())?
                 } else if pgr_format::MachHeader64::parse(&bytes)
                     .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
                 {
-                    dylibs.push(scan_dylib(&path, &bytes)?);
+                    let mut scanned = scan_dylib(&path, &bytes)?;
+                    scanned.weak = kind == DylibKind::Weak;
+                    scanned
                 } else {
                     return Err(DriverError::Tbd {
                         path,
@@ -758,7 +830,9 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
                             what: "framework payload is not a .tbd stub or Mach-O dylib".into(),
                         },
                     });
-                }
+                };
+                dylib.lazy = kind == DylibKind::Lazy;
+                dylibs.push(dylib);
             }
             None => {
                 return Err(DriverError::Tbd {
@@ -802,12 +876,13 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     if config.filetype != pgr_core::layout::OutputType::Execute {
         config.dynamic_linker = false;
     }
-    // M3 export filters.
+    // M3 export filters, M14 glob-widened (the patterns ride the config;
+    // the wire mirrors them — protocol v7).
     if let Some(path) = &opts.exported_list_path {
-        config.exported_only = Some(read_symbol_list("-exported_symbols_list", path)?);
+        config.exported_only = Some(read_symbol_patterns("-exported_symbols_list", path)?);
     }
     if let Some(path) = &opts.unexported_list_path {
-        config.unexported = read_symbol_list("-unexported_symbols_list", path)?;
+        config.unexported = read_symbol_patterns("-unexported_symbols_list", path)?;
     }
     // M11: the order file — read, parse (typed, line-tagged refusals),
     // and rank before Pass 3. The advisory for entries that rank nothing
@@ -869,6 +944,7 @@ fn map_input(
         let weak = opts_index.is_some_and(|i| opts.weak_library_inputs.contains(&i));
         let mut dylib = tbd_to_dylib_cached(path, &bytes, weak, cache)?;
         dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
+        dylib.lazy = opts_index.is_some_and(|i| opts.lazy_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
     }
@@ -879,6 +955,7 @@ fn map_input(
     {
         let mut dylib = scan_dylib(path, &bytes)?;
         dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
+        dylib.lazy = opts_index.is_some_and(|i| opts.lazy_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
     }
@@ -1538,6 +1615,9 @@ pub fn usage() -> String {
     s.push_str("                               ranked pieces lead, unranked keep their\n");
     s.push_str("                               order (refused with -r and -resident)\n");
     s.push_str("  -weak_library <path>         weak-load a dylib\n");
+    s.push_str("  -lazy_library <path>         lazy-load a dylib (LC_LAZY_LOAD_DYLIB)\n");
+    s.push_str("  -weak_framework <name>       weak-load a framework dylib\n");
+    s.push_str("  -lazy_framework <name>       lazy-load a framework dylib\n");
     s.push_str("  -source_version <A.B.C.D.E>  LC_SOURCE_VERSION\n");
     s.push_str("  -fixup_chains | -no_fixup_chains    chained fixups (default on)\n");
     s.push_str("  -fixup_chains_format <fmt>   chain word family: offset64 (default)\n");
