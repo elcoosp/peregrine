@@ -16,10 +16,20 @@ sha2 = { workspace = true }
 pgr-fixtures = { workspace = true }
 object = { workspace = true }
 proptest = { workspace = true }
+# The rung-3 floor-gate bench (the first bench in the crate): the strict
+# verify pass over below-floor and at-floor chained-fixup images, with
+# the workspace's criterion pin (0.7 needs `cargo_bench_support` to
+# actually measure).
+criterion = { workspace = true }
 
 [[bin]]
 name = "pgr-verify"
 path = "src/main.rs"
+
+# The platform-floor gate bench (M10 rung 3, slice 2).
+[[bench]]
+name = "platform"
+harness = false
 
 [lints]
 workspace = true
