@@ -4,6 +4,51 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.19.0] - 2026-11-10
+### Build
+- **core:** The filter and dylib benches join the manifest (1955c34)
+
+### Documentation
+- Record the M14 filter and dylib-surface numbers (625fa64)
+- The TDD trailer points at the M14 surfaces (b401987)
+- Migration's released flags leave the rejected list (782b069)
+- The README carries the M14 rows and the 0.18.0 badge (bdc5da0)
+- The compat table carries the M14 rows (df71f66)
+- **verify:** The dylib walk names the lazy command (21375e2)
+- **format:** The lazy constant notes its absent REQ bit (b540a28)
+
+### Features
+- **driver:** The lazy link's consumer example rides (078f6b7)
+- **driver:** The glob filter's consumer example rides (fd09fa2)
+- **format:** The lazy-load command decodes as a dylib command (c3e0049)
+- **daemon:** Protocol v7 carries filter patterns and lazy kinds (5d490b0)
+- **driver:** The weak and lazy dylib flags parse repeatable (0554cac)
+- **driver:** The driver parses filter patterns and lazy flags (1135f4b)
+- **core:** The layout reads pattern filters and lazy loads (6383b94)
+- **core:** The dylib input names its lazy-load kind (d3be52c)
+- **core:** The export filter seam joins the crate root (190ee00)
+- **core:** The export filter names its symbol patterns (f484c93)
+
+### Performance
+- **core:** Bench the dylib surface's kind parity (aa55d4b)
+- **core:** Bench the export filter's per-family match cost (6cbb789)
+
+### Refactor
+- **core:** The fold caller drops the interner argument (455929d)
+- **core:** Icf folds without the unused interner parameter (4064fcd)
+
+### Tests
+- **driver:** The lazy and weak flags gate their commands (f138449)
+- **driver:** The glob filter gates the surface and the wire (0bc36aa)
+- **core:** The glob seam gates parse, match and visibility (39cdf34)
+- **driver:** The m3 filter gates construct pattern lists (fb64937)
+- **emit:** The fused filter gates construct pattern lists (43a2ec3)
+- **emit:** The relink gates carry the lazy field (3932c4e)
+- **core:** The reuse gates carry the lazy field (2d7ab62)
+- **core:** The cache gates carry the lazy field (57a98a8)
+- **daemon:** The version gate asserts the v7 wire shape (f57d2ee)
+
+
 ## [0.18.0] - 2026-11-10
 ### Build
 - **deps:** The lock carries the dev-surface additions (ea5798f)
