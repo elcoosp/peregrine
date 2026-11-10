@@ -177,8 +177,13 @@ fn find_chain_starts(bytes: &[u8], img: &ParsedImage<'_>) -> Option<(u64, u64)> 
             continue;
         }
         let seg = pgr_format::SegmentCommand64::parse(cmd.bytes, 0).ok()?;
+        // The section table sits behind this command's own header: the
+        // offset is absolute (the file slice the parser indexes), so the
+        // command's file offset rides in front of the fixed size (the
+        // constant `SIZE` alone reads the first command's bytes — the
+        // gate silently went blind on every image).
         let sects = seg
-            .sections(bytes, pgr_format::SegmentCommand64::SIZE)
+            .sections(bytes, cmd.offset + pgr_format::SegmentCommand64::SIZE)
             .ok()?;
         for s in sects {
             if s.name() == Ok("__chain_starts") {
