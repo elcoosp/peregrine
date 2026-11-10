@@ -215,6 +215,7 @@ pub struct ImageBuilder {
     ident: String,
     imports_format: ImportsFormat,
     keep_relocs: bool,
+    build_version: Option<(u32, u32, u32)>,
 }
 
 impl ImageBuilder {
@@ -233,6 +234,7 @@ impl ImageBuilder {
             ident: ident.to_string(),
             imports_format: ImportsFormat::Plain,
             keep_relocs: false,
+            build_version: None,
         }
     }
 
@@ -250,6 +252,7 @@ impl ImageBuilder {
             ident: ident.to_string(),
             imports_format: ImportsFormat::Plain,
             keep_relocs: false,
+            build_version: None,
         }
     }
 
@@ -292,6 +295,16 @@ impl ImageBuilder {
     /// realism; real linked executables carry none).
     pub fn set_keep_relocs(&mut self, keep: bool) {
         self.keep_relocs = keep;
+    }
+
+    /// Pins the `LC_BUILD_VERSION` payload (platform, minos, sdk) — the
+    /// M10 rung 3 platform knob. The default stays the builder's
+    /// historical macOS 12.0.0 / SDK 14.4.0 row; an override is written
+    /// during assembly, so the ad-hoc signature is computed over the
+    /// final bytes and strict verification runs with the hash recompute
+    /// on (no post-build repatching).
+    pub fn set_build_version(&mut self, platform: u32, minos: u32, sdk: u32) {
+        self.build_version = Some((platform, minos, sdk));
     }
 
     fn prot(seg_name: &str) -> (u32, u32) {
@@ -671,11 +684,16 @@ impl ImageBuilder {
             w32(&mut buf, lc + 60, VM_PROT_READ);
             lc += 72;
         }
+        let (bv_platform, bv_minos, bv_sdk) = self.build_version.unwrap_or((
+            PLATFORM_MACOS,
+            0x000c_0000, // minos 12.0.0
+            0x000e_0400, // sdk 14.4.0
+        ));
         w32(&mut buf, lc, LC_BUILD_VERSION);
         w32(&mut buf, lc + 4, 32);
-        w32(&mut buf, lc + 8, PLATFORM_MACOS);
-        w32(&mut buf, lc + 12, 0x000c_0000); // minos 12.0.0
-        w32(&mut buf, lc + 16, 0x000e_0400); // sdk 14.4.0
+        w32(&mut buf, lc + 8, bv_platform);
+        w32(&mut buf, lc + 12, bv_minos);
+        w32(&mut buf, lc + 16, bv_sdk);
         w32(&mut buf, lc + 20, 1);
         w32(&mut buf, lc + 24, TOOL_LD);
         w32(&mut buf, lc + 28, 0x000f_0200);
