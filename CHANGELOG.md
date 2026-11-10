@@ -4,6 +4,30 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.17.0] - 2026-11-10
+### Build
+- **verify:** The checks bench joins the crate manifest (2abde88)
+
+### Documentation
+- Record the M12 selective-surface baselines (42eaf8c)
+- The TDD trailer points at the real frontier (0544c62)
+- Migration's rejected list releases -order_file (3b3a452)
+- The README carries the M12 rows (12217b7)
+
+### Features
+- **verify:** The selective surface gets its consumer example (5b4d701)
+- **verify:** The verifier CLI selects its families (1b60840)
+- **verify:** The selective surface wires into the library root (09018b9)
+- **verify:** The ImageCheck registry names the check families (c95ce74)
+- **verify:** The parsed image joins the public seam (bd48119)
+
+### Performance
+- **verify:** Bench the selective surface's per-family cost (fc8ed18)
+
+### Tests
+- **verify:** The selection surface gates parity and isolation (9a771c9)
+
+
 ## [0.16.0] - 2026-11-10
 ### Bug Fixes
 - **verify:** The pair replay matches ordinals through lib_ordinal (4ff3dd4)
