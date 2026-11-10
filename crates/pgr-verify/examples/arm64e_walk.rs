@@ -121,10 +121,7 @@ fn main() {
         let raw = u64::from_le_bytes(bytes[at..at + 8].try_into().expect("file-backed slot"));
         let word = ChainWordArm64e::new(raw);
         let (kind, payload) = if word.is_bind() {
-            (
-                "auth bind",
-                format!("ordinal {}", word.bind_ordinal()),
-            )
+            ("auth bind", format!("ordinal {}", word.bind_ordinal()))
         } else {
             (
                 "auth rebase",
