@@ -476,6 +476,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -508,6 +509,7 @@ dependencies = [
  "pgr-format",
  "proptest",
  "sha2",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
