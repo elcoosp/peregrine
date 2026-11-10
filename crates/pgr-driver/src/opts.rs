@@ -7,6 +7,7 @@
 //! ignored — a linker that pretends to understand a flag it drops is
 //! worse than one that says "not yet".
 
+use pgr_core::fixups::FixupPointerFormat;
 use pgr_core::layout::LinkConfig;
 use pgr_format::consts::{
     PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_VISIONOS, PLATFORM_WATCHOS,
@@ -538,6 +539,33 @@ fn apply_flag(
         }
         "-fixup_chains" => opts.config.fixup_chains = true,
         "-no_fixup_chains" => opts.config.fixup_chains = false,
+        "-fixup_chains_format" => {
+            // M10 rung 4, slice 2: the chain word family. ld64 separates
+            // flag and value; the attached form is matched below (the
+            // `-icf=` convention).
+            let v = next_value(args, i, arg)?;
+            opts.config.chain_word_format = parse_chain_format(&v).ok_or_else(|| {
+                OptsError::InvalidValue {
+                    flag: "-fixup_chains_format".into(),
+                    value: format!("{v} (offset64 | arm64e)"),
+                }
+            })?;
+            // The flag→config seam, spanned like the pipeline seams (inert
+            // until a subscriber installs).
+            tracing::debug!(
+                format = %v,
+                "the -fixup_chains_format seam shaped the config"
+            );
+        }
+        a if a.starts_with("-fixup_chains_format=") => {
+            let v = &a[21..];
+            opts.config.chain_word_format = parse_chain_format(v).ok_or_else(|| {
+                OptsError::InvalidValue {
+                    flag: "-fixup_chains_format".into(),
+                    value: format!("{v} (offset64 | arm64e)"),
+                }
+            })?;
+        }
         "-adhoc" => opts.config.adhoc = true,
         "-no_adhoc" => opts.config.adhoc = false,
         "-flat_namespace" => opts.config.flat_namespace = true,
@@ -813,6 +841,27 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
             message: "no input object files".into(),
         });
     }
+    // M10 rung 4, slice 2: the requested word family must be encodable
+    // where it is requested — a refusal, never a silently dropped knob.
+    if opts.config.chain_word_format == FixupPointerFormat::Arm64e {
+        if !opts.config.fixup_chains {
+            return Err(OptsError::InvalidValue {
+                flag: "-fixup_chains_format".into(),
+                value: "the classic opcode streams have no chain words to \
+                        shape; drop -fixup_chains_format or re-enable chained fixups"
+                    .into(),
+            });
+        }
+        if opts.resident {
+            return Err(OptsError::InvalidValue {
+                flag: "-fixup_chains_format".into(),
+                value: "the resident session plans Offset64 shapes this \
+                        slice (wire v5 carries no word family); drop -resident \
+                        or -fixup_chains_format"
+                    .into(),
+            });
+        }
+    }
     match opts.config.filetype {
         pgr_core::layout::OutputType::Execute => {
             if opts.config.install_name.is_some() {
@@ -868,6 +917,14 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
                     value: "-r preserves relocations verbatim; drop -icf".into(),
                 });
             }
+            if opts.config.chain_word_format == FixupPointerFormat::Arm64e {
+                return Err(OptsError::InvalidValue {
+                    flag: "-fixup_chains_format".into(),
+                    value: "-r writes an input object: no fixups exist to \
+                            shape; drop -fixup_chains_format"
+                        .into(),
+                });
+            }
             if opts.incremental {
                 return Err(OptsError::InvalidValue {
                     flag: "-incremental".into(),
@@ -892,6 +949,20 @@ pub fn parse_icf_level(v: &str) -> Option<pgr_core::icf::IcfMode> {
         "none" => Some(pgr_core::icf::IcfMode::None),
         "safe" => Some(pgr_core::icf::IcfMode::Safe),
         "all" => Some(pgr_core::icf::IcfMode::All),
+        _ => None,
+    }
+}
+
+/// Parses the `-fixup_chains_format` chain word family (M10 rung 4,
+/// slice 2): `offset64` is the M2 default, `arm64e` the rung-4 producer
+/// family. The encoding query (`fixup_encoding_report`) answers the
+/// *chained-vs-classic* half of the same decision — one flag each, no
+/// re-derivation drift.
+#[must_use]
+pub fn parse_chain_format(v: &str) -> Option<FixupPointerFormat> {
+    match v {
+        "offset64" => Some(FixupPointerFormat::Offset64),
+        "arm64e" => Some(FixupPointerFormat::Arm64e),
         _ => None,
     }
 }
