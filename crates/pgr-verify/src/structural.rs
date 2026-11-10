@@ -223,8 +223,7 @@ fn count_fixup_slots(bytes: &[u8], lc: &LinkeditDataCommand, nsegments: usize) -
                 let Some(stride) = pgr_format::fixups::chain_stride(seg.pointer_format) else {
                     continue;
                 };
-                let arm64e =
-                    seg.pointer_format == pgr_format::consts::DYLD_CHAINED_PTR_ARM64E;
+                let arm64e = seg.pointer_format == pgr_format::consts::DYLD_CHAINED_PTR_ARM64E;
                 let page_base = match bytes.get(seg.segment_offset as usize..) {
                     Some(_) => seg.segment_offset,
                     None => continue,
