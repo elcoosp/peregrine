@@ -417,7 +417,7 @@ checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
 
 [[package]]
 name = "pgr-core"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "criterion",
  "pgr-fixtures",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-daemon"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "pgr-core",
  "pgr-emit",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-driver"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "criterion",
  "miette",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-emit"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "criterion",
  "miette",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-fixtures"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "pgr-format",
  "sha2",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-format"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "pgr-verify"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "criterion",
  "object",

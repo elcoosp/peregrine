@@ -4,6 +4,11 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.18.0] - 2026-11-10
+### Documentation
+- **core:** The chain-word default's doc link resolves again (422d4e5)
+
+
 ## [0.17.0] - 2026-11-10
 ### Build
 - **verify:** The checks bench joins the crate manifest (2abde88)
