@@ -1,6 +1,6 @@
 # Peregrine Benchmarks — Recorded Baselines
 
-Status: **M0 through M10 rung 4 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
+Status: **M0 through M11 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
 end-to-end link baseline + architecture doc §10.3 M2 dynamic-link baseline +
 M3 export-trie gate "trie build < 10 ms for 10⁵ exports" + M4 fused-emit
 byte-identity gate and its sandbox perf half + M5 archive/dead-strip/
@@ -1133,3 +1133,35 @@ tables plus one sort per section — the numbers above include the whole
 `link()` pass, so the map's own share is the delta against the plain
 link on the same corpus (the order bench's 2.51 ms no-order shape).
 Reporting never touches the link's hot path; the bench pins that.
+
+## M12 — the selective verification surface (pgr-verify/benches/checks.rs)
+
+M12 makes the verifier's checks a selectable surface: `CheckSet::parse`
+names the families, `verify_with_checks` drives the subset, and the CLI
+takes `--checks a,b,c`. The bench pins the *shape* of that surface on one
+at-floor chained-fixup executable (the rung-3 fixture: one `LC_LOAD_DYLIB`,
+a `__got` bind + rebase slot, an entry point): the whole-image pass beside
+each single family.
+
+| Selection | time (dev sandbox) |
+|---|---|
+| `verify_checks/full` (the whole-image pass) | 20.6 µs |
+| `verify_checks/single/structure` | 0.34 µs |
+| `verify_checks/single/segments` | 0.56 µs |
+| `verify_checks/single/symbols` | 0.32 µs |
+| `verify_checks/single/linkedit` | 0.53 µs |
+| `verify_checks/single/fixups` | 0.48 µs |
+| `verify_checks/single/chain_starts` | 0.34 µs |
+| `verify_checks/single/branch_range` | 0.34 µs |
+| `verify_checks/single/dyld_info` | 0.34 µs |
+| `verify_checks/single/signature` | 20.1 µs |
+
+The honest reading: on this small fixture the signature family is the
+whole pass — the SHA-256 page-hash recompute dominates (20.1 of 20.6 µs)
+— and every other family costs half a microsecond or less. That is the
+point of the surface, not a claim about large images: a build system that
+runs `--checks segments,fixups` on every relink pays ~1 µs here where the
+full pass pays 20.6 µs, and the expensive recompute waits for the
+hand-off gate (or `--skip-hash-recompute`). The registry's `codes()`
+metadata is test-gated (`check_selection::single_check_never_reports_foreign_codes`),
+so a family can never quietly outgrow its declared domain.
