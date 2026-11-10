@@ -56,8 +56,8 @@
 //! asked for, and a fusion rung can widen the surface without the
 //! config's shape moving again.
 
-use pgr_core::icf::IcfMode;
 use pgr_core::fixups::FixupPointerFormat;
+use pgr_core::icf::IcfMode;
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::resolve::{Dylib, UndefinedPolicy};
 use sha2::{Digest, Sha256};
@@ -659,6 +659,12 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         layout_slack,
         slack_anchor,
         chain_word_format,
+        // M11: the order-file rank table is a driver-side Pass-3 input
+        // the v6 wire does not carry — the driver refuses
+        // `-order_file` + `-resident` at parse time (the same honest
+        // scope note `-fixup_chains_format` rides), so a decoded config
+        // is always order-free.
+        symbol_order: None,
     })
 }
 
@@ -670,6 +676,7 @@ mod tests {
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, TAG_LINK,
         content_hash, put_u32,
     };
+    use pgr_core::fixups::FixupPointerFormat;
     use pgr_core::layout::LinkConfig;
     use pgr_core::resolve::Dylib;
 
@@ -721,6 +728,7 @@ mod tests {
             // The v6 tail byte: a non-default family must survive the
             // round trip verbatim (the wire never silently drops it).
             chain_word_format: FixupPointerFormat::Arm64e,
+            symbol_order: None,
         }
     }
 
