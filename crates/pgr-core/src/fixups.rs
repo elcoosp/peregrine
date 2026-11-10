@@ -3,9 +3,14 @@
 //! (rebases *and* binds + import table) and the `__TEXT,__chain_starts`
 //! static mirror (§7.5).
 //!
-//! Pointer format: `DYLD_CHAINED_PTR_64_OFFSET` — rebase targets are
-//! image-base-relative offsets. Import format:
-//! `DYLD_CHAINED_IMPORT_ADDEND` (TDD §7.2 locks both).
+//! Pointer formats (M10 rung 4, slice 2): the planner encodes either
+//! `DYLD_CHAINED_PTR_64_OFFSET` — the M2 default (TDD §7.2), rebase
+//! targets image-base-relative offsets — or the `DYLD_CHAINED_PTR_ARM64E`
+//! family whose unauth rebases carry VM addresses and whose `next` counts
+//! 8-byte strides ([`FixupPointerFormat`]). The read side has walked both
+//! families since rung 4 slice 1; the import table stays
+//! `DYLD_CHAINED_IMPORT_ADDEND` in both — its format is a separate payload
+//! field a loader reads independently of the word family.
 //!
 //! Import ordinals (M2): assigned in **first-use order over address-sorted
 //! fixups** (mold's model, TDD §7.3). Architecture-delta D7 proposed a
@@ -34,15 +39,67 @@ use crate::ids::StringId;
 use crate::interner::Interner;
 use crate::stable_imports::StableImport;
 use pgr_format::consts::{
-    DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_START_MULTI,
-    DYLD_CHAINED_PTR_START_MULTI_MASK, DYLD_CHAINED_PTR_START_NONE,
+    DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
+    DYLD_CHAINED_PTR_START_MULTI, DYLD_CHAINED_PTR_START_MULTI_MASK, DYLD_CHAINED_PTR_START_NONE,
 };
-use pgr_format::fixups::{Import, encode_bind_word, encode_rebase_word};
+use pgr_format::fixups::{
+    Import, encode_arm64e_bind_word, encode_arm64e_rebase_word, encode_bind_word,
+    encode_rebase_word,
+};
 
 /// `next` counts 4-byte units with 12 bits; only 0 ends a chain (TDD §7.4).
 pub const MAX_CHAIN_STRIDE: u32 = 0xFFF;
 /// Maximum forward distance between two fixups in the same chain (16 380 B).
 pub const MAX_CHAIN_STRIDE_BYTES: u64 = (MAX_CHAIN_STRIDE as u64) * 4;
+
+/// The chain word family Pass 3 encodes (M10 rung 4, slice 2 — the
+/// producer half of the rung; the read side has walked both since slice 1).
+/// The default is the M2-locked `DYLD_CHAINED_PTR_64_OFFSET` (§7.2): the
+/// seam is invisible on every clean link until a consumer asks for the
+/// arm64e family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum FixupPointerFormat {
+    /// `DYLD_CHAINED_PTR_64_OFFSET` (6): rebase targets are image-base
+    /// relative offsets, `next` counts 4-byte units with 12 bits.
+    #[default]
+    Offset64,
+    /// `DYLD_CHAINED_PTR_ARM64E` (1): unauth rebase targets are VM
+    /// addresses (dyld subtracts the preferred load address walking back),
+    /// binds carry a 16-bit ordinal and a signed 19-bit inline addend, and
+    /// `next` counts 8-byte strides with 11 bits.
+    Arm64e,
+}
+
+impl FixupPointerFormat {
+    /// The `pointer_format` the payload's segment records and the
+    /// `__chain_starts` mirror declare.
+    #[must_use]
+    pub const fn pointer_format(self) -> u16 {
+        match self {
+            Self::Offset64 => DYLD_CHAINED_PTR_64_OFFSET,
+            Self::Arm64e => DYLD_CHAINED_PTR_ARM64E,
+        }
+    }
+
+    /// The byte stride `next` counts (the format's slot pitch).
+    #[must_use]
+    pub const fn stride_bytes(self) -> u64 {
+        match self {
+            Self::Offset64 => 4,
+            Self::Arm64e => 8,
+        }
+    }
+
+    /// The `next` field's maximum stride count (12 bits for the 64 family,
+    /// 11 for arm64e).
+    #[must_use]
+    pub const fn max_next(self) -> u32 {
+        match self {
+            Self::Offset64 => MAX_CHAIN_STRIDE,
+            Self::Arm64e => 0x7FF,
+        }
+    }
+}
 
 /// What dyld writes into one fixup slot at load time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +148,21 @@ pub struct PackingSlot {
 /// Packs one page's fixups into chains (TDD §7.4, the stride-bounded greedy
 /// linker). `page_off` must be ascending across `fx`. Returns the chain
 /// heads as page offsets, in ascending slot order.
+///
+/// The 64 family's 4-byte stride (TDD §7.4); the format-generic form is
+/// [`pack_page_strided`].
 #[must_use]
 pub fn pack_page(fx: &mut [PackingSlot]) -> Vec<u16> {
+    pack_page_strided(fx, 4, MAX_CHAIN_STRIDE)
+}
+
+/// [`pack_page`] with the word family's stride: `next` counts `stride`
+/// byte jumps and may not exceed `max_next` (12 strides-of-4 for the 64
+/// family, 11 strides-of-8 for arm64e). Slots whose gap leaves the
+/// `[stride, max_next * stride]` window start a fresh chain.
+#[must_use]
+pub fn pack_page_strided(fx: &mut [PackingSlot], stride: u64, max_next: u32) -> Vec<u16> {
+    let max_gap = u64::from(max_next) * stride;
     debug_assert!(fx.windows(2).all(|w| w[0].page_off <= w[1].page_off));
     let mut heads = Vec::new();
     let mut i = 0usize;
@@ -101,13 +171,13 @@ pub fn pack_page(fx: &mut [PackingSlot]) -> Vec<u16> {
         let mut j = i;
         while j + 1 < fx.len() {
             let gap = u64::from(fx[j + 1].page_off - fx[j].page_off);
-            if !(4..=MAX_CHAIN_STRIDE_BYTES).contains(&gap) {
+            if !(stride..=max_gap).contains(&gap) {
                 break; // must start a fresh chain
             }
             j += 1;
         }
         for k in i..j {
-            fx[k].next = (fx[k + 1].page_off - fx[k].page_off) / 4;
+            fx[k].next = (fx[k + 1].page_off - fx[k].page_off) as u32 / stride as u32;
         }
         fx[j].next = 0; // terminate
         i = j + 1;
@@ -116,7 +186,8 @@ pub fn pack_page(fx: &mut [PackingSlot]) -> Vec<u16> {
 }
 
 /// Encodes a rebase chain word for `DYLD_CHAINED_PTR_64_OFFSET` (bit 63
-/// clear): `target44 | high8 << 36 | next << 51`.
+/// clear): `target44 | high8 << 36 | next << 51` — the target is the
+/// image-base-relative offset.
 fn rebase_word(target_vaddr: u64, image_base: u64) -> Result<u64, LinkError> {
     let off = target_vaddr
         .checked_sub(image_base)
@@ -136,6 +207,28 @@ fn rebase_word(target_vaddr: u64, image_base: u64) -> Result<u64, LinkError> {
     encode_rebase_word(off & 0xF_FFFF_FFFF, (off >> 36) as u8, 0).map_err(|e| LinkError::Internal {
         message: format!("rebase word encode: {e}"),
     })
+}
+
+/// Encodes an unauth arm64e rebase chain word: `target43 | high8 << 43 |
+/// next << 51` — format 1 carries the **VM address** (dyld subtracts the
+/// preferred load address walking back), so the image base does not
+/// participate. Bits 43..56 of a VM address have no home in the word (the
+/// target field is 43 bits and `high8` covers 56..64): a target that
+/// leaves them set refuses instead of silently truncating.
+fn rebase_word_arm64e(target_vaddr: u64) -> Result<u64, LinkError> {
+    if (target_vaddr >> 43) & 0x1FFF != 0 {
+        return Err(LinkError::Layout {
+            message: format!(
+                "arm64e rebase target {target_vaddr:#x} exceeds the word fields \
+                 (43-bit target + high8; bits 43..56 have no home)"
+            ),
+        });
+    }
+    let high8 = (target_vaddr >> 56) as u8;
+    encode_arm64e_rebase_word(target_vaddr & 0x7_FFFF_FFFF_FFFF, high8, 0)
+        .map_err(|e| LinkError::Internal {
+            message: format!("arm64e rebase word encode: {e}"),
+        })
 }
 
 /// Encodes a bind chain word (bit 63 set): `ordinal | addend8 << 24 |
@@ -293,10 +386,10 @@ pub(crate) fn import_key_identity(k: &ImportKey) -> StableImport {
 fn import_table_ordinals(
     bind_keys: &[ImportKey],
     import_anchor: Option<&[StableImport]>,
-) -> (Vec<u32>, Vec<StableImport>) {
+) -> Result<(Vec<u32>, Vec<StableImport>), LinkError> {
     let incoming: Vec<StableImport> = bind_keys.iter().map(import_key_identity).collect();
     match import_anchor {
-        None => ((0..bind_keys.len() as u32).collect(), incoming),
+        None => Ok(((0..bind_keys.len() as u32).collect(), incoming)),
         Some(anchor) => {
             let mut table = crate::stable_imports::StableImports::anchored(anchor.to_vec());
             let assignments = table.insert(incoming.clone());
@@ -304,16 +397,22 @@ fn import_table_ordinals(
                 .iter()
                 .map(|a| (&a.key, a.ordinal as u32))
                 .collect();
-            let ordinals = incoming
-                .iter()
-                .map(|k| {
-                    ordinal_of.get(k).copied().unwrap_or_else(|| {
-                        // `insert` answers every incoming key; unreachable.
-                        u32::try_from(table.len()).unwrap_or(u32::MAX)
-                    })
-                })
-                .collect();
-            (ordinals, table.keys().to_vec())
+            // `insert` answers every incoming key by contract; an unanswered
+            // key is a named internal failure, never a silent sentinel
+            // ordinal (the pre-slice-2 fallback masked this arm with
+            // `u32::MAX`, which would encode a bogus bind).
+            let mut ordinals = Vec::with_capacity(incoming.len());
+            for k in &incoming {
+                let Some(o) = ordinal_of.get(k).copied() else {
+                    return Err(LinkError::Internal {
+                        message: "the anchored import table did not answer an \
+                                  incoming key (insert is total over new keys)"
+                            .into(),
+                    });
+                };
+                ordinals.push(o);
+            }
+            Ok((ordinals, table.keys().to_vec()))
         }
     }
 }
@@ -349,13 +448,53 @@ pub fn plan_fixups(
 /// [`LinkError::Layout`] on slots outside any segment, misaligned slots, or
 /// targets beyond the 44-bit field.
 pub fn plan_fixups_with_imports(
-    mut slots: Vec<FixupSlot>,
+    slots: Vec<FixupSlot>,
     segments: &[(u64, u64, u64)],
     image_base: u64,
     page_size: u64,
     interner: &Interner,
     import_anchor: Option<&[StableImport]>,
 ) -> Result<FixupPlan, LinkError> {
+    plan_fixups_with_format(
+        slots,
+        segments,
+        image_base,
+        page_size,
+        interner,
+        import_anchor,
+        FixupPointerFormat::Offset64,
+    )
+}
+
+/// [`plan_fixups_with_imports`] with the chain word family named (M10
+/// rung 4, slice 2): `format` chooses the word encoding, the stride
+/// semantics (`next` counts 4- or 8-byte units), and the `pointer_format`
+/// the payload records and the `__chain_starts` mirror declare. The
+/// default [`FixupPointerFormat::Offset64`] is byte-identical to the M2
+/// planner (the seam is invisible unless asked for). The import table
+/// stays `DYLD_CHAINED_IMPORT_ADDEND` in both families — its format is a
+/// separate payload field a loader reads independently.
+///
+/// # Errors
+/// [`LinkError::Layout`] on slots outside any segment, misaligned slots,
+/// targets the word fields cannot represent, or an arm64e import table
+/// beyond the 16-bit ordinal.
+pub fn plan_fixups_with_format(
+    mut slots: Vec<FixupSlot>,
+    segments: &[(u64, u64, u64)],
+    image_base: u64,
+    page_size: u64,
+    interner: &Interner,
+    import_anchor: Option<&[StableImport]>,
+    format: FixupPointerFormat,
+) -> Result<FixupPlan, LinkError> {
+    // The producer names its family on the tracing seam (the house
+    // observability convention: inert until a subscriber installs).
+    tracing::debug!(
+        pointer_format = format.pointer_format(),
+        slots = slots.len(),
+        "the chain word format encodes the plan"
+    );
     slots.sort_by_key(|s| s.vaddr);
     for s in &slots {
         if s.vaddr % 8 != 0 {
@@ -372,11 +511,23 @@ pub fn plan_fixups_with_imports(
     // half. The anchor (when present) then fixes the recorded ordinals.
     let (_first_use, _first_use_pool, has_weak_binds, bind_keys) =
         build_import_table(&slots, interner);
-    let (ordinals, table_keys) = import_table_ordinals(&bind_keys, import_anchor);
+    let (ordinals, table_keys) = import_table_ordinals(&bind_keys, import_anchor)?;
     // The on-disk table and name pool follow the ordinal order: first-use
     // without an anchor (byte-identical to M2), recorded-order + appended
     // with one.
     let (imports, import_names) = imports_from_keys(&table_keys);
+    // The arm64e bind word carries a 16-bit ordinal; a bind surface that
+    // outgrows it must refuse at plan time, not encode a truncated one
+    // (the 64 family's 24-bit field never trips this).
+    if format == FixupPointerFormat::Arm64e && imports.len() > usize::from(u16::MAX) {
+        return Err(LinkError::Layout {
+            message: format!(
+                "the import table carries {} entries; the arm64e bind \
+                 ordinal field is 16-bit",
+                imports.len()
+            ),
+        });
+    }
 
     // ---- group slots per segment ----------------------------------------
     let mut per_segment: Vec<Vec<FixupSlot>> = vec![Vec::new(); segments.len()];
@@ -404,7 +555,12 @@ pub fn plan_fixups_with_imports(
                 let page = (rel / page_size) as usize;
                 let off_in_page = (rel % page_size) as u32;
                 let word_base = match s.kind {
-                    FixupKind::Rebase { target_vaddr } => rebase_word(target_vaddr, image_base)?,
+                    FixupKind::Rebase { target_vaddr } => match format {
+                        FixupPointerFormat::Offset64 => rebase_word(target_vaddr, image_base)?,
+                        // Format 1: the VM address rides the word, dyld
+                        // subtracts the preferred load address walking back.
+                        FixupPointerFormat::Arm64e => rebase_word_arm64e(target_vaddr)?,
+                    },
                     FixupKind::Bind {
                         name,
                         addend,
@@ -437,7 +593,20 @@ pub fn plan_fixups_with_imports(
                         } else {
                             0
                         };
-                        bind_word(ordinal, inline)?
+                        // The M2 addend split rule holds in both families:
+                        // 0..=255 travels inline, everything else in the
+                        // import entry. The arm64e word's signed 19-bit
+                        // field would admit more, but the import-table plan
+                        // (and its M9 anchor) must not diverge per format.
+                        match format {
+                            FixupPointerFormat::Offset64 => bind_word(ordinal, inline)?,
+                            FixupPointerFormat::Arm64e => {
+                                encode_arm64e_bind_word(u64::from(ordinal), i64::from(inline), 0)
+                                    .map_err(|e| LinkError::Internal {
+                                        message: format!("arm64e bind word encode: {e}"),
+                                    })?
+                            }
+                        }
                     }
                 };
                 pages[page].push(PackingSlot {
@@ -458,7 +627,11 @@ pub fn plan_fixups_with_imports(
                     continue;
                 }
                 let mut packed_words = page.clone();
-                let heads = pack_page(&mut packed_words);
+                let heads = pack_page_strided(
+                    &mut packed_words,
+                    format.stride_bytes(),
+                    format.max_next(),
+                );
                 for slot in &packed_words {
                     let slot_vaddr = vmaddr + page_i as u64 * page_size + u64::from(slot.page_off);
                     seg.slot_words
@@ -472,8 +645,8 @@ pub fn plan_fixups_with_imports(
                     overflow_heads.push(heads.clone());
                     page_start.push(DYLD_CHAINED_PTR_START_MULTI);
                 }
-                // Head slots: `pack_page` returns the chain starts in
-                // ascending page-offset order.
+                // Head slots: `pack_page_strided` returns the chain starts
+                // in ascending page-offset order.
                 for h in heads {
                     let head_vaddr = vmaddr + page_i as u64 * page_size + u64::from(h);
                     seg.head_image_offs.push((head_vaddr - image_base) as u32);
@@ -541,7 +714,7 @@ pub fn plan_fixups_with_imports(
         let at = starts_offset + record_offsets[i] as usize;
         payload[at..at + 4].copy_from_slice(&(seg.record_size() as u32).to_le_bytes());
         payload[at + 4..at + 6].copy_from_slice(&(page_size as u16).to_le_bytes());
-        payload[at + 6..at + 8].copy_from_slice(&DYLD_CHAINED_PTR_64_OFFSET.to_le_bytes());
+        payload[at + 6..at + 8].copy_from_slice(&format.pointer_format().to_le_bytes());
         // segment_offset is image-base-relative; under the constant-delta
         // contract that equals the segment's file offset (the verifier
         // asserts exactly this).
@@ -595,7 +768,7 @@ pub fn plan_fixups_with_imports(
     slot_words.sort_by_key(|(v, _)| *v);
 
     let mut chain_starts = Vec::with_capacity(8 + total_heads * 4);
-    chain_starts.extend_from_slice(&(u32::from(DYLD_CHAINED_PTR_64_OFFSET)).to_le_bytes());
+    chain_starts.extend_from_slice(&u32::from(format.pointer_format()).to_le_bytes());
     chain_starts.extend_from_slice(&(total_heads as u32).to_le_bytes());
     for seg in &chains {
         for h in &seg.head_image_offs {

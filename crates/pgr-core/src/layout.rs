@@ -18,7 +18,7 @@
 //! invariant under 16 KiB-aligned address shifts, so one re-run converges.
 
 use crate::LinkError;
-use crate::fixups::{FixupKind, FixupPlan, FixupSlot, plan_fixups_with_imports};
+use crate::fixups::{FixupKind, FixupPlan, FixupSlot};
 use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
 use crate::object::{InputObject, RelocKind, RelocTarget};
@@ -195,6 +195,13 @@ pub struct LinkConfig {
     /// refuses (§7.3's bottom rung — always available, always correct).
     /// `None` (every clean link) resolves in full.
     pub resolve_reuse: Option<crate::resolve_reuse::ResolveReuseSeed>,
+    /// M10 rung 4, slice 2 — the chain word family Pass 3 encodes (the
+    /// producer half of the arm64e rung; the read side walks both since
+    /// slice 1). The default [`FixupPointerFormat::Offset64`] is the M2-locked
+    /// encoding (TDD §7.2): every clean link is byte-identical to the
+    /// pre-seam planner. The classic opcode path (`fixup_chains = false`)
+    /// does not read this — the opcode streams have one word shape.
+    pub chain_word_format: crate::fixups::FixupPointerFormat,
 }
 
 impl Default for LinkConfig {
@@ -229,6 +236,7 @@ impl Default for LinkConfig {
             sig_anchor: None,
             record_resolution: false,
             resolve_reuse: None,
+            chain_word_format: crate::fixups::FixupPointerFormat::Offset64,
         }
     }
 }
@@ -1030,13 +1038,14 @@ pub fn layout(
                 stable_keys: Vec::new(),
             }
         } else if chains_enabled {
-            plan_fixups_with_imports(
+            crate::fixups::plan_fixups_with_format(
                 slots,
                 &segs,
                 image_base,
                 PAGE_SIZE_16K,
                 interner,
                 cfg.stable_imports.as_deref(),
+                cfg.chain_word_format,
             )?
         } else {
             // M6 legacy: the classic opcode streams replace the chained
