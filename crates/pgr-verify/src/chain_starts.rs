@@ -9,7 +9,7 @@ use pgr_format::consts::{
     DYLD_CHAINED_PTR_64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_START_NONE,
 };
 use pgr_format::fixups::{
-    ChainWord64, page_chain_starts, parse_header, parse_starts_in_image, parse_starts_in_segment,
+    page_chain_starts, parse_header, parse_starts_in_image, parse_starts_in_segment,
 };
 
 /// Validates the `__chain_starts` static mirror against the chained-fixups
@@ -133,16 +133,21 @@ pub(crate) fn check_chain_starts(bytes: &[u8], img: &ParsedImage<'_>, report: &m
             return;
         };
         let head = u32::from_le_bytes(word_bytes.try_into().unwrap_or([0; 4]));
-        let Some(slot) = bytes.get(head as usize..head as usize + 8) else {
+        // The bounds check is the gate: the head must name 8 bytes the
+        // file actually carries. The word itself is not decoded here —
+        // bind ordinals are validated by the dynamic check (which decodes
+        // through the segment's own family); the mirror's contract is the
+        // head-listing agreement below. (The rung-4 slice-4 sweep dropped
+        // the 64-family decode this gate used to build and discard.)
+        if bytes.get(head as usize..head as usize + 8).is_none() {
             report.issues.push(Issue::error(
                 Code::LinkeditPayload,
                 format!("__chain_starts head {k} ({head:#x}) is outside the file"),
                 Some(addr),
             ));
             continue;
-        };
-        let word = ChainWord64::new(u64::from_le_bytes(slot.try_into().unwrap_or([0; 8])));
-        // The head must decode as a chain word: 8-aligned (the mirror's
+        }
+        // The head must name a chain word slot: 8-aligned (the mirror's
         // heads are image offsets) and within a fixup-carrying segment.
         if head % 8 != 0 {
             report.issues.push(Issue::error(
@@ -151,9 +156,6 @@ pub(crate) fn check_chain_starts(bytes: &[u8], img: &ParsedImage<'_>, report: &m
                 Some(addr),
             ));
         }
-        // Bind ordinals are validated by the dynamic check; here only the
-        // head-listing agreement matters.
-        let _ = word;
         if let Some(expected) = payload_heads.get(k) {
             if head != *expected {
                 report.issues.push(Issue::error(
