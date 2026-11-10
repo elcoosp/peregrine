@@ -1001,3 +1001,25 @@ sit inside each other's noise, and any divergence is the finding.
 cargo bench -p pgr-core --bench platform
 cargo bench -p pgr-verify --bench platform
 ```
+
+## Recorded baseline (M10 rung 4, slice 1 — the arm64e read side)
+
+Rung 4 opens the arm64e word family on the read side: the builder's
+pointer-format knob emits `DYLD_CHAINED_PTR_ARM64E` chains and the
+verifier walks them under the same closure contract (8-byte strides,
+VM-address unauth rebase targets, 32-bit auth runtime offsets). The
+bench pin (`pgr-verify/verify_arm64e/verify/<arm64e_auth|offset64_control>`)
+holds the strict pass on an auth-chained executable next to an honest
+same-shape 64_OFFSET control, so rotation catches a regression in
+either family and the two stay comparable by construction.
+
+**No numbers are recorded yet** (the bench lands with this slice; the
+next gate run fills this section the way the rung-3 section above was
+filled — criterion medians on the 2-core KVM dev sandbox). The honest
+expectation: the arm64e shape sits inside the control's noise band —
+the walk does the same work per slot with a wider stride — and any
+divergence is the finding.
+
+```sh
+cargo bench -p pgr-verify --bench arm64e
+```
