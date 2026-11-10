@@ -410,17 +410,18 @@ impl ChainWordArm64e {
         Self { raw }
     }
 
-    /// True when the word is authenticated (bit 63 set): the payload rides
+    /// True when the word is authenticated (bit 62 set): the payload rides
     /// a diversity/key pair, not a plain target or addend.
     #[must_use]
     pub const fn is_auth(&self) -> bool {
-        self.raw >> 63 & 1 == 1
+        self.raw >> 62 & 1 == 1
     }
 
-    /// True when the word is a bind (bit 62 set); rebases leave it clear.
+    /// True when the word is a bind (bit 63 set — the same top-bit bind
+    /// flag the `DYLD_CHAINED_PTR_64` family uses); rebases leave it clear.
     #[must_use]
     pub const fn is_bind(&self) -> bool {
-        self.raw >> 62 & 1 == 1
+        self.raw >> 63 & 1 == 1
     }
 
     /// Distance to the next fixup in strides of 8 bytes (0 terminates).
@@ -430,12 +431,12 @@ impl ChainWordArm64e {
     }
 
     /// Unauth rebase target: a VM address under format 1 (43-bit field,
-    /// bits 0..43). Auth words repurpose bits 32..43 for the diversity
+    /// bits 0..42). Auth words repurpose bits 32..43 for the diversity
     /// value — read those through [`Self::auth_diversity`] and the 32-bit
     /// [`Self::auth_rebase_offset`] instead.
     #[must_use]
     pub const fn rebase_target(&self) -> u64 {
-        self.raw & 0x7_ffff_ffff_ffff
+        self.raw & 0x7ff_ffff_ffff
     }
 
     /// Unauth rebase high 8 bits (bits 43..51): the top byte of the final
@@ -515,7 +516,7 @@ pub fn encode_arm64e_rebase_word(target: u64, high8: u8, next: u32) -> Result<u6
 }
 
 /// Encodes an unauth arm64e bind chain word: `ordinal | addend << 32 |
-/// next << 51 | 1 << 62`. The addend is the signed 19-bit inline field
+/// next << 51 | 1 << 63`. The addend is the signed 19-bit inline field
 /// (±256 KiB); larger addends travel in the import entry
 /// (`DYLD_CHAINED_IMPORT_ADDEND64`).
 ///
@@ -543,10 +544,7 @@ pub fn encode_arm64e_bind_word(ordinal: u32, addend: i64, next: u32) -> Result<u
             value: u64::from(next),
         });
     }
-    Ok(u64::from(ordinal)
-        | (addend as u64 & 0x7_ffff) << 32
-        | u64::from(next) << 51
-        | 1 << 62)
+    Ok(u64::from(ordinal) | (addend as u64 & 0x7_ffff) << 32 | u64::from(next) << 51 | 1 << 63)
 }
 
 /// Encodes an authenticated arm64e rebase chain word: `target | diversity
@@ -588,11 +586,11 @@ pub fn encode_arm64e_auth_rebase_word(
         | u64::from(addr_div) << 48
         | u64::from(key) << 49
         | u64::from(next) << 51
-        | 1 << 63)
+        | 1 << 62)
 }
 
 /// Encodes an authenticated arm64e bind chain word: `ordinal | diversity
-/// << 32 | addrDiv << 48 | key << 49 | next << 51 | 1 << 62 | 1 << 63`.
+/// << 32 | addrDiv << 48 | key << 49 | next << 51 | 1 << 62 | 1 << 63` (auth | bind).
 /// Auth binds carry no inline addend (the table addend travels in the
 /// `DYLD_CHAINED_IMPORT_ADDEND64` entry).
 ///
@@ -821,7 +819,8 @@ mod tests {
 
     /// Same for the unauth arm64e bind word: ordinal 16b, addend signed
     /// 19b (LLVM `dyld_chained_ptr_arm64e_bind`), next 11b, bind=1 (bit
-    /// 62), auth=0 (bit 63). A negative addend sign-extends back.
+    /// 63 — the top-bit bind flag the 64 family shares), auth=0 (bit
+    /// 62). A negative addend sign-extends back.
     #[test]
     fn arm64e_bind_word_bit_layout() {
         let word = encode_arm64e_bind_word(0x1234, -3, 1).unwrap();
@@ -831,13 +830,12 @@ mod tests {
         assert_eq!(w.bind_ordinal(), 0x1234);
         assert_eq!(w.bind_addend(), -3);
         assert_eq!(w.next(), 1);
-        assert_eq!(word >> 62, 2);
-        assert_eq!(word >> 63, 0);
+        assert_eq!(word >> 62, 2, "bind flag on bit 63, auth bit clear");
     }
 
     /// The two authenticated shapes: the PAC triple (diversity, addrDiv,
-    /// key) reads back, the auth bit rides bit 63, and the rebase/bind
-    /// discriminator stays on bit 62.
+    /// key) reads back, the auth bit rides bit 62, and the rebase/bind
+    /// discriminator stays on bit 63.
     #[test]
     fn arm64e_auth_words_bit_layout() {
         let rebase = encode_arm64e_auth_rebase_word(0x1234_5678, 0xBEEF, true, 2, 0x7ff).unwrap();
