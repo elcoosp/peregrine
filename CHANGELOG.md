@@ -4,6 +4,69 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.16.0] - 2026-11-10
+### Bug Fixes
+- **verify:** The pair replay matches ordinals through lib_ordinal (4ff3dd4)
+- **verify:** The chain-starts mirror reads the right section table (7bd8337)
+- **fixtures:** The minimal trie exports every defined symbol (c2cac09)
+- **format:** The arm64e family honors dyld's bit layout (29ddc5d)
+
+### Build
+- **core:** Register the order and map benches (631160b)
+
+### Documentation
+- Record the M11 bench baselines (a4fc81c)
+- The README carries the M11 rows (7547b36)
+- The not-milestones line names what M11 shipped (61dd84f)
+- The compat table carries the M11 flag rows (50f0e89)
+
+### Features
+- **driver:** The link map gets its consumer example (238f26c)
+- **driver:** The order file gets its consumer example (a78bfc3)
+- **driver:** The driver ranks, warns and writes the map (88366cf)
+- **driver:** -order_file and -map join the flag surface (5c03334)
+- **core:** An order file rides the atom split like dead-strip (8f17e16)
+- **core:** The layout ranks ordered pieces as a stable sort (7f456f0)
+- **core:** Wire the order and map modules into the library root (2bab54d)
+- **core:** Render the placed image's link map (fd948e8)
+- **core:** Parse the order file into a rank table (adcc5c3)
+
+### Performance
+- **core:** Bench the link-map report (d97685f)
+- **core:** Bench the order-file rank seam (8f4c426)
+
+### Refactor
+- **core:** The packer drops its redundant casts (27a2b13)
+- **daemon:** The v6 wire decodes an order-free config (d6598d6)
+
+### Tests
+- **verify:** The advisory vehicle carries no fixup slots (8611be6)
+- **driver:** The -map surface gates its report and its refusals (a2e25af)
+- **driver:** The order-file surface gates its ranks and refusals (d8d67ce)
+- **core:** The link map gates its rows and its determinism (8fd67f2)
+- **core:** The order file gates its parse and its ranks (bf1d12f)
+
+### Style
+- **core:** The producer example rides the fmt pass (b763575)
+- **driver:** The platform-floor example rides the fmt pass (6478e4c)
+- **driver:** The fixup-chains-auth example rides the fmt pass (88f3b64)
+- **driver:** The encoding-query example rides the fmt pass (566396e)
+- **driver:** The chain-format-floor example rides the fmt pass (e8f2be9)
+- **driver:** The arm64e pair example rides the fmt pass (95f0ef0)
+- **verify:** The walk example rides the fmt pass (3c96895)
+- **verify:** The platform bench rides the fmt pass (7361206)
+- **verify:** The arm64e bench rides the fmt pass (83506ce)
+- **driver:** The encoding-query test rides the fmt pass (a2ee058)
+- **driver:** The arm64e surface tests ride the fmt pass (97f397b)
+- **verify:** The pair test rides the fmt pass (7fa1a1e)
+- **verify:** The family read-side tests ride the fmt pass (dad2b71)
+- **core:** The producer test rides the fmt pass (ac7d16d)
+- **core:** The family tests ride the fmt pass (59d4f2e)
+- **fixtures:** The auth-slot tests ride the fmt pass (6c7040b)
+- **verify:** The structural gate rides the fmt pass (212572b)
+- **verify:** The dyld walk rides the fmt pass (b80be9f)
+
+
 ## [0.15.0] - 2026-11-10
 ### Documentation
 - Record the rung 4 slice 4 and heal the drift (9673372)
