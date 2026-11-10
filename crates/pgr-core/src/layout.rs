@@ -133,12 +133,15 @@ pub struct LinkConfig {
     pub current_version: u32,
     /// M3 `-compatibility_version` (dylibs, packed).
     pub compatibility_version: u32,
-    /// M3 `-exported_symbols_list`: when set, ONLY these names export
-    /// (exact-name subset of ld64's glob form; see docs/COMPAT.md).
-    pub exported_only: Option<Vec<Vec<u8>>>,
-    /// M3 `-unexported_symbols_list`: names removed from the export surface
-    /// (marked `N_PEXT` in the symtab, absent from the trie).
-    pub unexported: Vec<Vec<u8>>,
+    /// M3 `-exported_symbols_list`, M14-widened: when set, ONLY the
+    /// names these patterns select export (an exact name or a `*` glob —
+    /// see [`crate::export_filter`]; the M3 exact-name subset is the
+    /// all-exact form of the same seam).
+    pub exported_only: Option<Vec<crate::export_filter::SymbolPattern>>,
+    /// M3 `-unexported_symbols_list`, M14-widened: names the patterns
+    /// select are removed from the export surface (marked `N_PEXT` in
+    /// the symtab, absent from the trie).
+    pub unexported: Vec<crate::export_filter::SymbolPattern>,
     /// M3 `-mark_dead_strippable_dylib`: sets `MH_DEAD_STRIPPABLE_DYLIB`.
     pub dead_strippable: bool,
     /// M5 `-dead_strip`: drop unreferenced atoms (D12; roots are the entry,
@@ -1132,18 +1135,25 @@ pub fn layout(
     // when classic streams carry bytes.
     let dyld_info = final_dyld_info;
 
-    // ---- export visibility (M3) ------------------------------------------------
-    // `-exported_symbols_list` restricts the surface to the listed names;
-    // `-unexported_symbols_list` removes names. Hidden externals stay in the
-    // symtab as private externals (`N_PEXT`) — ld64's behavior — and never
-    // reach the trie.
+    // ---- export visibility (M3, M14) -------------------------------------------
+    // `-exported_symbols_list` restricts the surface to the names its
+    // patterns select; `-unexported_symbols_list` removes names. Hidden
+    // externals stay in the symtab as private externals (`N_PEXT`) —
+    // ld64's behavior — and never reach the trie. M14 widens the lists
+    // from exact names to `SymbolPattern`s (exact or `*` glob); the
+    // M3 semantics are the all-exact form of the same contract.
+    if !cfg.unexported.is_empty() || cfg.exported_only.is_some() {
+        // The house observability convention: the contract line is
+        // inert until a subscriber installs (the binaries do under
+        // their debug envs).
+        tracing::debug!(
+            only = cfg.exported_only.as_ref().map_or(0, std::vec::Vec::len),
+            hidden = cfg.unexported.len(),
+            "export filter active; matching may be glob-widened, the M3 contract holds"
+        );
+    }
     let visible = |name: &[u8]| -> bool {
-        if let Some(only) = &cfg.exported_only {
-            if !only.iter().any(|n| n.as_slice() == name) {
-                return false;
-            }
-        }
-        !cfg.unexported.iter().any(|n| n.as_slice() == name)
+        crate::export_filter::is_export_visible(cfg.exported_only.as_deref(), &cfg.unexported, name)
     };
 
     // ---- symbol table ---------------------------------------------------------
@@ -3355,7 +3365,12 @@ fn build_header(
         .dylibs
         .iter()
         .map(|d| {
-            if d.weak {
+            if d.lazy {
+                // M14 `-lazy_library`/`-lazy_framework`: dyld's delay-load
+                // command; the two-level ordinal space counts it like a
+                // plain load.
+                pgr_format::consts::LC_LAZY_LOAD_DYLIB
+            } else if d.weak {
                 pgr_format::consts::LC_LOAD_WEAK_DYLIB
             } else if d.reexport {
                 pgr_format::consts::LC_REEXPORT_DYLIB
