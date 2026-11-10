@@ -44,5 +44,17 @@ harness = false
 name = "arm64e"
 harness = false
 
+# The M11 order-file bench: the same corpus laid out with and without a
+# rank table (the atom split plus one stable sort per bucket).
+[[bench]]
+name = "order"
+harness = false
+
+# The M11 link-map bench: the plan rendered to the structured map and
+# its deterministic text (a reporting seam, kept off the hot path).
+[[bench]]
+name = "map"
+harness = false
+
 [lints]
 workspace = true
