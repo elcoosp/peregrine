@@ -116,7 +116,11 @@ pub const LC_CODE_SIGNATURE: u32 = 0x1d;
 pub const LC_SEGMENT_SPLIT_INFO: u32 = 0x1e;
 /// Re-export another dylib's symbols.
 pub const LC_REEXPORT_DYLIB: u32 = 0x1f | LC_REQ_DYLD;
-/// Lazy-load a dylib.
+/// Lazy-load a dylib (`-lazy_library`/`-lazy_framework`). Deliberately
+/// *without* the `LC_REQ_DYLD` bit — `loader.h` keeps this one of the
+/// few dylib commands the REQ bit never rides (unlike
+/// `LC_LOAD_WEAK_DYLIB`/`LC_REEXPORT_DYLIB`/`LC_LOAD_UPWARD_DYLIB`);
+/// the object-crate crosscheck pins it.
 pub const LC_LAZY_LOAD_DYLIB: u32 = 0x20;
 /// Classic `dyld_info` rebase/bind opcode streams (pre-macOS 12 fallback).
 pub const LC_DYLD_INFO: u32 = 0x22;
