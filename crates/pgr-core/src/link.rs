@@ -146,7 +146,10 @@ pub fn link_cached(
     cache: Option<&crate::cache::PoiCache>,
 ) -> Result<LinkResult, LinkError> {
     // ---- Pass 1: parse & collect names for the interner --------------------
-    let objects = parse_inputs(inputs, parallel, cfg.dead_strip, cache)?;
+    // M11: an order file ranks symbols — the atom split feeds it the same
+    // way dead-strip does (and rides the same cache-key flag).
+    let split_symbols = cfg.dead_strip || cfg.symbol_order.is_some();
+    let objects = parse_inputs(inputs, parallel, split_symbols, cache)?;
     link_from_objects(objects, archives, cfg, parallel, cache)
 }
 
