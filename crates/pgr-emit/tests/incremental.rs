@@ -918,6 +918,7 @@ fn import_lib(exports: &[&str]) -> Dylib {
         exports: exports.iter().map(|s| s.as_bytes().to_vec()).collect(),
         weak: false,
         reexport: false,
+        lazy: false,
     }
 }
 
