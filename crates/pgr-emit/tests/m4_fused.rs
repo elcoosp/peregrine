@@ -114,6 +114,7 @@ fn bench_dylib(exports: &[&str]) -> Dylib {
         exports: exports.iter().map(|s| s.as_bytes().to_vec()).collect(),
         weak: false,
         reexport: false,
+        lazy: false,
     }
 }
 
@@ -319,14 +320,17 @@ fn m4_fused_matches_reference_export_filters() {
         install_name: Some("@rpath/libm4.dylib".into()),
         ..LinkConfig::default()
     };
-    cfg.exported_only = Some(vec![b"_main".to_vec(), b"__mh_execute_header".to_vec()]);
+    cfg.exported_only = Some(vec![
+        pgr_core::SymbolPattern::exact(b"_main"),
+        pgr_core::SymbolPattern::exact(b"__mh_execute_header"),
+    ]);
     assert_fused_matches_reference(&hello_greet(), &cfg);
 
     let mut cfg2 = LinkConfig {
         ident: "m4-filters-unexport".into(),
         ..LinkConfig::default()
     };
-    cfg2.unexported = vec![b"_msg".to_vec()];
+    cfg2.unexported = vec![pgr_core::SymbolPattern::exact(b"_msg")];
     assert_fused_matches_reference(&hello_greet(), &cfg2);
 }
 
