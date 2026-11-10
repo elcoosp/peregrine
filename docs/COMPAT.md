@@ -29,6 +29,7 @@ each flag has a fixture".
 | `MH_DYLIB` / `MH_BUNDLE` outputs (`-dylib` / `-bundle`) | ✅ | M3 | `e2e::m3_dylib_output_passes_verifier_strict`, `e2e::m3_bundle_output_passes_verifier` |
 | `MH_OBJECT` output (`-r`; sections + preserved relocation entries, open undefineds) | ✅ | M10 | `m10_relocatable::r_output_relinks_into_an_executable` (two-step self-consumption), `object_emit::*`, `object_relocs::*` |
 | `LC_DYLD_INFO_ONLY` (classic rebase/bind opcode streams; `minos < 12.0.0` and `-no_fixup_chains`) | ✅ | M6 | `m6_legacy::*` (stream decode + verifier walk `dyld_info::check_dyld_info`) |
+| `LC_LAZY_LOAD_DYLIB` (`-lazy_library`/`-lazy_framework`; the two-level ordinal space counts it like a plain load — M14) | ✅ | M14 | `m14_lazy_dylibs::*` (driver), `pgr_core::resolve::Dylib::lazy` |
 | `__init_offsets` / `-init_offsets` | ❌ | later (newer deployment targets) | — |
 | `LC_ENCRYPTION_INFO` | ❌ | won't support (iOS App Store path) | — |
 
@@ -56,8 +57,8 @@ each flag has a fixture".
 | `-install_name` (dylibs; defaults to the output path) | ✅ | M3 | `opts::tests::m3_dylib_flags_shape_the_config` |
 | `-current_version` / `-compatibility_version` (dylibs) | ✅ | M3 | `opts::tests::m3_dylib_flags_shape_the_config` |
 | `-reexport_library <path>` | ✅ | M3 | `opts::tests::m3_reexport_library_records_the_input`, `e2e::m3_reexport_library_lands_in_the_trie` |
-| `-exported_symbols_list <file>` (exact-name subset; globs are a later milestone) | ✅ | M3 | `e2e::m3_export_filters_shape_trie_and_symtab` |
-| `-unexported_symbols_list <file>` (exact-name subset) | ✅ | M3 | `e2e::m3_export_filters_shape_trie_and_symtab` (N_PEXT semantics) |
+| `-exported_symbols_list <file>` (`*` glob subset: each star matches any, possibly empty, byte run — the ld64 wildcard form; M14) | ✅ | M3/M14 | `e2e::m3_export_filters_shape_trie_and_symtab`, `m14_export_filter::*` (core + driver), `pgr_core::export_filter` |
+| `-unexported_symbols_list <file>` (`*` glob subset, same matcher; N_PEXT semantics) | ✅ | M3/M14 | `e2e::m3_export_filters_shape_trie_and_symtab` (N_PEXT semantics), `m14_export_filter::*` |
 | `-mark_dead_strippable_dylib` | ✅ | M3 | `opts::tests::m3_dylib_flags_shape_the_config` |
 | Mach-O dylib inputs (`.dylib` scan: install name + trie/symtab exports) | ✅ | M3 | `pgr_driver::scan_dylib`, `e2e::m3_exec_against_pgr_dylib_passes_the_pair_gate` |
 | `.a` archives (ranlib `__.SYMDEF`/`/`/`__.SYMDEF_64`, BSD `#1/` + GNU `//` long names; lazy member pull) | ✅ | M5 | `pgr_format::archive` tests + proptests, `m5_archives::*` |
@@ -70,7 +71,7 @@ each flag has a fixture".
 | `-filelist <path>[,<dir>]` | ✅ | M5 | `m5_flags::m5_filelist_expands_inputs_in_order` |
 | `-framework <name>` / `-F <dir>` (`.tbd`/dylib payloads) | ✅ | M5 | `m5_flags::m5_framework_search_finds_stub_dylibs` |
 | `-sectcreate <seg> <sect> <file>` | ✅ | M5 | `m5_flags::m5_sectcreate_places_file_contents` |
-| `-weak_framework` / `-lazy_framework` / `-lazy_library` | ❌ (rejected, actionable) | later | `opts::LATER_FLAGS` |
+| `-weak_framework <name>` / `-lazy_framework <name>` / `-lazy_library <path>` (repeatable; the framework forms search `-F` dirs like `-framework`, the library form is a path input; weak loads ride `LC_LOAD_WEAK_DYLIB` + weak binds, lazy loads ride `LC_LAZY_LOAD_DYLIB` — M14) | ✅ | M14 | `opts::tests::m14_lazy_weak_flags_shape_the_config`, `m14_lazy_dylibs::*` (driver), the `dylibs` bench + the `lazy_library_link` example |
 | `-order_file` (rank-based subset: `symbol` / `object.o:symbol`) | ✅ | M11 | `m11_order_file::*` (core + driver), `pgr_core::order` |
 | `-dylinker` (MH_DYLINKER outputs) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-sub_umbrella` / `-sub_library` (umbrella re-exports) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
@@ -92,7 +93,7 @@ each flag has a fixture".
 | Full export trie for dylibs + re-export nodes (`flags & 0x08`) | ✅ | M3 | `e2e::m3_reexport_library_lands_in_the_trie`; verifier walk validates ordinals/strings |
 | Dylib/bundle output contract (`__TEXT.vmaddr == fileoff`, no `LC_MAIN`/dylinker) | ✅ | M3 | `pgr-verify::check_dylib_contract`, `e2e::m3_dylib_output_passes_verifier_strict` |
 | Dylib + executable pair gate (two-level binds vs the dylib's trie) | ✅ | M3 | `pgr_verify::pair::verify_dylib_pair`, `e2e::m3_exec_against_pgr_dylib_passes_the_pair_gate` |
-| Export filters (`N_PEXT` symtab marking, trie exclusion) | ✅ | M3 | `e2e::m3_export_filters_shape_trie_and_symtab` |
+| Export filters (`N_PEXT` symtab marking, trie exclusion; M14: the lists match `*` globs — `pgr_core::export_filter`, the exact form is the M3 seam's all-exact shape) | ✅ | M3/M14 | `e2e::m3_export_filters_shape_trie_and_symtab`, `m14_export_filter::*` |
 | Indirect symbol table (`__got`/`__stubs` slots) | ✅ | M2 | `INDIRECT_SYMBOL_LOCAL` for unnamed rebases |
 | Direct page reloc to an external symbol | ❌ **rejected** (ld64/lld both reject or mis-link) | M2 | error message points at GOT-load relocs |
 | `-dead_strip` | ✅ | M5 | D12 |
