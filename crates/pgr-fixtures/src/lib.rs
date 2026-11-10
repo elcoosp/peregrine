@@ -1036,7 +1036,14 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
     page_slots.sort_by_key(|(p, _)| *p);
     let mut words = vec![0u64; got.len()];
     let mut page_start: Vec<u16> = Vec::new();
-    let npages = ((slot_fileoffs.last().unwrap() - got_seg_fileoff + 1).div_ceil(page_size)) as u16;
+    // The page count rides the last slot's file offset; an empty slot
+    // list here means the caller built __got slots without recording
+    // their placement — a named refusal, not a panic on `.last()`
+    // (the pre-slice-2 code unwrapped and crashed deep in the builder).
+    let last_slot = slot_fileoffs.last().copied().ok_or_else(|| {
+        BuildError("chain build got no __got slot placements (set_got must run)".into())
+    })?;
+    let npages = ((last_slot - got_seg_fileoff + 1).div_ceil(page_size)) as u16;
     for p in 0..npages {
         let Some((_, slots)) = page_slots.iter().find(|(pg, _)| *pg == u32::from(p)) else {
             page_start.push(DYLD_CHAINED_PTR_START_NONE);
