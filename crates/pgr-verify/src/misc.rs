@@ -6,7 +6,7 @@ use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report};
 use pgr_format::consts::{
     LC_DATA_IN_CODE, LC_FUNCTION_STARTS, LC_MAIN, PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS,
-    PLATFORM_VISIONOS, PLATFORM_WATCHOS,
+    PLATFORM_VISIONOS, PLATFORM_WATCHOS, chained_fixups_floor,
 };
 use pgr_format::load_command::LoadCommandKind;
 
@@ -112,6 +112,32 @@ pub(crate) fn check_entry_and_version(bytes: &[u8], img: &ParsedImage<'_>, repor
             report.issues.push(Issue::error(
                 Code::LinkeditPayload,
                 "LC_BUILD_VERSION tool entries exceed cmdsize",
+                None,
+            ));
+        }
+        // M10 rung 3, slice 2: the verifier reads the encoding floor — the
+        // same per-platform table the layout's fixup-encoding gate and
+        // `pgr_core::platform::FixupEncoding` encode, canonical beside the
+        // `PLATFORM_*` constants (`pgr_format::consts::chained_fixups_floor`).
+        // Chained words below the floor cannot load on that target's dyld;
+        // the message carries the fix (raise the target or relink with
+        // `-no_fixup_chains`). Above the floor the classic streams are a
+        // producer choice (`-no_fixup_chains`) and stay silent, and the
+        // gate stays silent for unknown platforms (the unknown-platform
+        // error above already refused them).
+        let floor = chained_fixups_floor(bv.platform);
+        if known && img.fixups.is_some() && bv.minos < floor {
+            report.issues.push(Issue::error(
+                Code::FixupsFloor,
+                format!(
+                    "deployment target {} is below the chained-fixups floor {} \
+                     for platform {} while the image carries LC_DYLD_CHAINED_FIXUPS — \
+                     raise the target to at least the floor or relink with \
+                     -no_fixup_chains (the classic opcode streams encode the same fixups)",
+                    fmt_packed_version(bv.minos),
+                    fmt_packed_version(floor),
+                    bv.platform,
+                ),
                 None,
             ));
         }

@@ -11,7 +11,13 @@
 //! platforms (`macos`, `ios`, `tvos`, `watchos`, `visionos`) verify clean,
 //! an unknown platform constant is an error, and an SDK older than the
 //! deployment target is refused — the platform the linker declares is the
-//! platform the verifier checks, not "macOS or warn".
+//! platform the verifier checks, not "macOS or warn". Rung 3 closes the
+//! encoding half of the same gate: the verifier reads the per-platform
+//! chained-fixups floor (`pgr_format::consts::chained_fixups_floor`, the
+//! canonical table the layout and `pgr_core::platform::FixupEncoding`
+//! encode — one table, three readers), so chained words below the
+//! declared platform's floor are a named `fixups_floor` error with the
+//! fix in the message.
 //!
 //! Decomposition:
 //!
@@ -95,6 +101,10 @@ pub enum Code {
     /// The classic `LC_DYLD_INFO` opcode streams are malformed or name an
     /// import outside the load-dylib list (M6 legacy fallback).
     DyldInfoStreams,
+    /// `LC_DYLD_CHAINED_FIXUPS` rides in an image whose declared
+    /// deployment target sits below the platform's chained-fixups floor
+    /// (M10 rung 3) — the target's dyld cannot walk the chains.
+    FixupsFloor,
     /// Suspicious but non-fatal condition.
     Suspicious,
 }
@@ -121,6 +131,7 @@ impl Code {
             Code::ExportTrie => "export_trie",
             Code::BranchRange => "branch_range",
             Code::DyldInfoStreams => "dyld_info_streams",
+            Code::FixupsFloor => "fixups_floor",
             Code::Suspicious => "suspicious",
         }
     }
