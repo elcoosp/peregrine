@@ -62,6 +62,13 @@
 //! never silently flatten a glob into an exact name (the resident
 //! relink's export surface would move). A malformed pattern refuses at
 //! decode time, like every other shape the wire carries.
+//!
+//! M15 (wire v8): the config body's tail carries the image base — the
+//! `__PAGEZERO` vmsize a `-pagezero_size` link plans with — as a
+//! validated u64. A resident relink lays out the base the client named,
+//! never the default; a body naming a zero or misaligned base is
+//! malformed (the same validation the flag parse pays, so the wire can
+//! never silently move the image base a client asked for).
 
 use pgr_core::export_filter::SymbolPattern;
 use pgr_core::fixups::FixupPointerFormat;
@@ -81,8 +88,11 @@ use sha2::{Digest, Sha256};
 /// family to the config body (M10 rung 4 slice 2 — the family a client
 /// asked for crosses the wire verbatim, never silently dropped); **v7**
 /// re-encodes the export-filter lists as patterns (M14 — kind byte +
-/// source bytes; globs stay globs across the wire).
-pub const PROTO_VERSION: u32 = 7;
+/// source bytes; globs stay globs across the wire); **v8** appends the
+/// image base to the config body's tail (M15 — the validated
+/// `-pagezero_size` vmsize; a resident relink lays out the base the
+/// client named).
+pub const PROTO_VERSION: u32 = 8;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -561,6 +571,10 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
             FixupPointerFormat::Arm64e => 1,
         },
     );
+    // M15 (v8 wire): the image base (the validated `__PAGEZERO` vmsize)
+    // rides the tail — a resident relink lays out the base the client
+    // named, never the default.
+    put_u64(out, cfg.pagezero.vmsize());
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -662,6 +676,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         1 => FixupPointerFormat::Arm64e,
         _ => return Err(malformed()),
     };
+    // M15 (v8 wire): the image base — the same validation the flag
+    // parse pays, so a misaligned or zero base is malformed, never a
+    // silently defaulted decision.
+    let pagezero =
+        pgr_core::pagezero::PageZero::from_override(r.u64()?).map_err(|_| malformed())?;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -706,6 +725,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         // scope note `-fixup_chains_format` rides), so a decoded config
         // is always order-free.
         symbol_order: None,
+        pagezero,
     })
 }
 
@@ -780,6 +800,11 @@ mod tests {
             // The v6 tail byte: a non-default family must survive the
             // round trip verbatim (the wire never silently drops it).
             chain_word_format: FixupPointerFormat::Arm64e,
+            // The v8 tail: a non-default image base must survive the
+            // round trip verbatim (a resident relink lays out the base
+            // the client named, never the default).
+            pagezero: pgr_core::pagezero::PageZero::from_override(0x7F7F_7F7F_C000)
+                .expect("the override validates"),
             symbol_order: None,
         }
     }
@@ -960,5 +985,40 @@ mod tests {
         // Truncation inside the trailing flag byte is malformed.
         let body = back.encode();
         assert!(LinkRequest::decode(&body[..body.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn a_wire_garbage_pagezero_is_malformed() {
+        // v8: the config tail carries the pagezero vmsize as a validated
+        // value — a wire body naming a zero or misaligned base is
+        // malformed, not silently defaulted (the default would move the
+        // image base the client asked for).
+        let req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        };
+        let body = req.encode();
+        // The distinctive vmsize appears exactly once (every other field
+        // carries different bytes); corrupt those 8 bytes to a misaligned
+        // value.
+        let needle = 0x7F7F_7F7F_C000u64.to_le_bytes();
+        let mut hits = Vec::new();
+        for i in 0..body.len().saturating_sub(8) {
+            if body[i..i + 8] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the vmsize rides exactly once");
+        let mut bad = body;
+        bad[hits[0]..hits[0] + 8].copy_from_slice(&0x3000u64.to_le_bytes());
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
 }
