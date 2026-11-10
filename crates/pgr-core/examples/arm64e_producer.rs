@@ -16,11 +16,9 @@
 //! cargo run -p pgr-core --example arm64e_producer
 //! ```
 
-use pgr_core::fixups::{
-    FixupKind, FixupPointerFormat, FixupSlot, plan_fixups_with_format,
-};
+use pgr_core::fixups::{FixupKind, FixupPointerFormat, FixupSlot, plan_fixups_with_format};
 use pgr_core::interner::Interner;
-use pgr_format::consts::{DYLD_CHAINED_PTR_ARM64E, DYLD_CHAINED_PTR_64_OFFSET};
+use pgr_format::consts::{DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E};
 use pgr_format::fixups::{ChainWord64, ChainWordArm64e};
 
 /// One segment shaped like the layout's `__TEXT`: file mirrors vm under
@@ -108,8 +106,8 @@ fn main() {
 
     println!("the same slots, two word families");
     println!(
-        "  payload/mirror pointer_format: offset64 = {}, arm64e = {}",
-        DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E
+        "  payload/mirror pointer_format: offset64 = \
+         {DYLD_CHAINED_PTR_64_OFFSET}, arm64e = {DYLD_CHAINED_PTR_ARM64E}"
     );
     println!(
         "  chain heads: offset64 = {}, arm64e = {} (same fixups, same packer)",
