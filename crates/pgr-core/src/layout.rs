@@ -197,7 +197,9 @@ pub struct LinkConfig {
     pub resolve_reuse: Option<crate::resolve_reuse::ResolveReuseSeed>,
     /// M10 rung 4, slice 2 — the chain word family Pass 3 encodes (the
     /// producer half of the arm64e rung; the read side walks both since
-    /// slice 1). The default [`FixupPointerFormat::Offset64`] is the M2-locked
+    /// slice 1). The default
+    /// [`FixupPointerFormat::Offset64`](crate::fixups::FixupPointerFormat::Offset64)
+    /// is the M2-locked
     /// encoding (TDD §7.2): every clean link is byte-identical to the
     /// pre-seam planner. The classic opcode path (`fixup_chains = false`)
     /// does not read this — the opcode streams have one word shape.
