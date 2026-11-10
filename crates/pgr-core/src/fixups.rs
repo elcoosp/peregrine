@@ -28,7 +28,11 @@
 //! Addend split (mirrors ld64/lld): an addend in `0..=255` travels inline in
 //! the bind word's 8-bit field with a zero import addend; any other addend
 //! travels in the import entry (`i32`) with a zero word addend. dyld adds
-//! both (only one is ever nonzero).
+//! both (only one is ever nonzero). Auth binds (M10 rung 4, slice 3) are
+//! the named exception: their word has no addend field, so the full addend
+//! rides the import entry. Auth binds (M10 rung 4, slice 3) are
+//! the named exception: their word has no addend field, so the full addend
+//! rides the import entry.
 //!
 //! Determinism: slots are sorted by output address, pages packed in ascending
 //! order, multi-start overflow tables appended in first-discovery order — the
@@ -43,8 +47,8 @@ use pgr_format::consts::{
     DYLD_CHAINED_PTR_START_MULTI, DYLD_CHAINED_PTR_START_MULTI_MASK, DYLD_CHAINED_PTR_START_NONE,
 };
 use pgr_format::fixups::{
-    Import, encode_arm64e_bind_word, encode_arm64e_rebase_word, encode_bind_word,
-    encode_rebase_word,
+    Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word,
+    encode_arm64e_bind_word, encode_arm64e_rebase_word, encode_bind_word, encode_rebase_word,
 };
 
 /// `next` counts 4-byte units with 12 bits; only 0 ends a chain (TDD §7.4).
@@ -99,6 +103,24 @@ impl FixupPointerFormat {
             Self::Arm64e => 0x7FF,
         }
     }
+}
+
+/// The authentication policy for one fixup slot (M10 rung 4, slice 3):
+/// the PAC triple dyld verifies at load time (`fixup-chains.h`'s
+/// `diversity`/`addrDiv`/`key` bits; `key` is the 2-bit `ptrauth_key`).
+/// An entry names its slot by output vaddr. Planning with a policy under
+/// the default `DYLD_CHAINED_PTR_64_OFFSET` family refuses outright —
+/// that word has no auth discriminator to set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixupAuth {
+    /// The authenticated slot's output vaddr (the `FixupSlot` it signs).
+    pub vaddr: u64,
+    /// The 2-bit pointer-authentication key (0..=3).
+    pub key: u8,
+    /// The 16-bit diversity value.
+    pub diversity: u16,
+    /// Address diversity (`addrDiv`).
+    pub addr_div: bool,
 }
 
 /// What dyld writes into one fixup slot at load time.
@@ -239,6 +261,55 @@ fn bind_word(ordinal: u32, inline_addend: u8) -> Result<u64, LinkError> {
     })
 }
 
+/// Encodes an authenticated arm64e rebase chain word: the 32-bit runtime
+/// offset (`target − image base`, what dyld adds to the preferred load
+/// address) rides the target field with the slot's PAC triple. A target
+/// below the base or beyond the 32-bit field refuses with the slot named.
+fn rebase_word_arm64e_auth(
+    target_vaddr: u64,
+    image_base: u64,
+    slot_vaddr: u64,
+    policy: &FixupAuth,
+) -> Result<u64, LinkError> {
+    let runtime_offset = target_vaddr.checked_sub(image_base).ok_or(LinkError::Layout {
+        message: format!(
+            "auth rebase target {target_vaddr:#x} sits below the image base \
+             {image_base:#x} (slot {slot_vaddr:#x})"
+        ),
+    })?;
+    let off32 = u32::try_from(runtime_offset).map_err(|_| LinkError::Layout {
+        message: format!(
+            "auth rebase target {runtime_offset:#x} exceeds the 32-bit runtime \
+             offset (slot {slot_vaddr:#x})"
+        ),
+    })?;
+    encode_arm64e_auth_rebase_word(
+        u64::from(off32),
+        policy.diversity,
+        policy.addr_div,
+        policy.key,
+        0,
+    )
+    .map_err(|e| LinkError::Internal {
+        message: format!("arm64e auth rebase word encode: {e}"),
+    })
+}
+
+/// The M2 addend split (TDD §7.3): an addend in `0..=255` travels inline
+/// in the bind word with a zero import addend, anything else travels in
+/// the import entry with a zero word addend. The authenticated bind is
+/// the named exception (slice 3): its word has no inline addend field, so
+/// the full addend rides the import entry. Returns `(inline, outlined)`.
+fn addend_split(addend: i64, auth: bool) -> (u8, i64) {
+    if auth {
+        (0, addend)
+    } else if (0..=255).contains(&addend) {
+        (addend as u8, 0)
+    } else {
+        (0, addend)
+    }
+}
+
 /// Packing result for one segment.
 #[derive(Debug, Default)]
 struct SegmentChains {
@@ -307,9 +378,25 @@ pub(crate) struct ImportKey {
 /// `(imports, name pool, has_weak, dedup keys)`. Shared by the chained path
 /// (`plan_fixups`) and the M6 classic path (`dyld_info`) — the symtab and
 /// indirect-symbol-table construction reads the same metadata either way.
+/// The classic path carries no auth policy: the M2 split rule (0..=255
+/// inline) holds for every bind.
 pub(crate) fn build_import_table(
     slots: &[FixupSlot],
     interner: &Interner,
+) -> (Vec<Import>, Vec<u8>, bool, Vec<ImportKey>) {
+    build_import_table_with_auth(slots, interner, &std::collections::HashMap::new())
+}
+
+/// [`build_import_table`] with the auth policy (M10 rung 4, slice 3): a
+/// bind whose slot is signed has **no inline addend** — the auth bind
+/// word has no addend field — so the full addend travels in the import
+/// entry, making the signed bind a distinct dedup key beside its unauth
+/// self. The M9 anchor treats the signed key like any other new key: it
+/// appends without renumbering (§7.3 step 5).
+pub(crate) fn build_import_table_with_auth(
+    slots: &[FixupSlot],
+    interner: &Interner,
+    auth: &std::collections::HashMap<u64, FixupAuth>,
 ) -> (Vec<Import>, Vec<u8>, bool, Vec<ImportKey>) {
     let mut bind_keys: Vec<ImportKey> = Vec::new();
     let mut seen: std::collections::HashSet<(u8, Vec<u8>, i64, bool)> =
@@ -325,11 +412,8 @@ pub(crate) fn build_import_table(
         else {
             continue;
         };
-        let outlined = if (0..=255).contains(&addend) {
-            0
-        } else {
-            addend
-        };
+        let signed = auth.contains_key(&slot.vaddr);
+        let (_inline, outlined) = addend_split(addend, signed);
         let key = (lib_ordinal, interner.bytes(name).to_vec(), outlined, weak);
         if seen.insert(key.clone()) {
             bind_keys.push(ImportKey {
@@ -480,7 +564,7 @@ pub fn plan_fixups_with_imports(
 /// targets the word fields cannot represent, or an arm64e import table
 /// beyond the 16-bit ordinal.
 pub fn plan_fixups_with_format(
-    mut slots: Vec<FixupSlot>,
+    slots: Vec<FixupSlot>,
     segments: &[(u64, u64, u64)],
     image_base: u64,
     page_size: u64,
@@ -488,12 +572,53 @@ pub fn plan_fixups_with_format(
     import_anchor: Option<&[StableImport]>,
     format: FixupPointerFormat,
 ) -> Result<FixupPlan, LinkError> {
+    plan_fixups_with_auth(
+        slots,
+        segments,
+        image_base,
+        page_size,
+        interner,
+        import_anchor,
+        format,
+        &[],
+    )
+}
+
+/// [`plan_fixups_with_format`] with the authentication policy (M10 rung
+/// 4, slice 3): each [`FixupAuth`] entry signs its slot's word — auth
+/// rebases carry the 32-bit runtime offset (`target − image base`) with
+/// the PAC triple, auth binds carry the ordinal with the PAC triple and
+/// move their whole addend into the import entry (the word has no
+/// addend field). An empty policy plans byte-identically to the slice-2
+/// planner; the 64_OFFSET family refuses a policy outright, as does an
+/// entry that names no slot or names one twice.
+///
+/// # Errors
+/// [`LinkError::Layout`] on slots outside any segment, misaligned slots,
+/// targets the word fields cannot represent, an arm64e import table
+/// beyond the 16-bit ordinal, an auth policy under the 64_OFFSET family,
+/// an auth entry naming no slot or named twice, and auth rebase targets
+/// beyond the 32-bit runtime offset.
+pub fn plan_fixups_with_auth(
+    mut slots: Vec<FixupSlot>,
+    segments: &[(u64, u64, u64)],
+    image_base: u64,
+    page_size: u64,
+    interner: &Interner,
+    import_anchor: Option<&[StableImport]>,
+    format: FixupPointerFormat,
+    auth: &[FixupAuth],
+) -> Result<FixupPlan, LinkError> {
     // The producer names its family on the tracing seam (the house
     // observability convention: inert until a subscriber installs).
     tracing::debug!(
         pointer_format = format.pointer_format(),
         slots = slots.len(),
         "the chain word format encodes the plan"
+    );
+    tracing::debug!(
+        auth_slots = auth.len(),
+        "the fixup auth policy signs the plan"
     );
     slots.sort_by_key(|s| s.vaddr);
     for s in &slots {
@@ -504,13 +629,60 @@ pub fn plan_fixups_with_format(
         }
     }
 
+    // ---- the auth policy (M10 rung 4, slice 3) ----------------------------
+    // One signer per slot, validated before anything encodes: the
+    // 64_OFFSET family cannot carry auth words, a duplicate entry would
+    // make the signing ambiguous, and an entry naming no slot is a plan
+    // bug. The map rides the word loop and the import-table build (the
+    // signed bind's addend split differs).
+    let auth_map: std::collections::HashMap<u64, FixupAuth> = if auth.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        if format == FixupPointerFormat::Offset64 {
+            return Err(LinkError::Layout {
+                message: format!(
+                    "{} auth slot(s) declared; auth slots require the arm64e \
+                     pointer format — the 64_OFFSET family has no auth \
+                     discriminator to set",
+                    auth.len()
+                ),
+            });
+        }
+        let mut map: std::collections::HashMap<u64, FixupAuth> =
+            std::collections::HashMap::with_capacity(auth.len());
+        for p in auth {
+            if map.insert(p.vaddr, *p).is_some() {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "the auth policy names slot {:#x} twice; one slot, \
+                         one signer",
+                        p.vaddr
+                    ),
+                });
+            }
+        }
+        let slot_vaddrs: std::collections::HashSet<u64> = slots.iter().map(|s| s.vaddr).collect();
+        for p in auth {
+            if !slot_vaddrs.contains(&p.vaddr) {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "the auth policy names {:#x}, which is no fixup slot \
+                         in the plan",
+                        p.vaddr
+                    ),
+                });
+            }
+        }
+        map
+    };
+
     // ---- import table: first-use order over address-sorted slots ----------
     // Key: (lib_ordinal, name bytes, outlined addend, weak). lld splits the
     // addend: 0..=255 inline in the word, everything else in the import
     // entry; only one side is ever nonzero, so dedup keys on the outlined
     // half. The anchor (when present) then fixes the recorded ordinals.
     let (_first_use, _first_use_pool, has_weak_binds, bind_keys) =
-        build_import_table(&slots, interner);
+        build_import_table_with_auth(&slots, interner, &auth_map);
     let (ordinals, table_keys) = import_table_ordinals(&bind_keys, import_anchor)?;
     // The on-disk table and name pool follow the ordinal order: first-use
     // without an anchor (byte-identical to M2), recorded-order + appended
@@ -554,12 +726,21 @@ pub fn plan_fixups_with_format(
                 let rel = s.vaddr - vmaddr;
                 let page = (rel / page_size) as usize;
                 let off_in_page = (rel % page_size) as u32;
+                // The slot's signer, when the policy names it (slice 3).
+                let policy = auth_map.get(&s.vaddr);
                 let word_base = match s.kind {
                     FixupKind::Rebase { target_vaddr } => match format {
                         FixupPointerFormat::Offset64 => rebase_word(target_vaddr, image_base)?,
                         // Format 1: the VM address rides the word, dyld
                         // subtracts the preferred load address walking back.
-                        FixupPointerFormat::Arm64e => rebase_word_arm64e(target_vaddr)?,
+                        // A signed slot swaps the shape: the 32-bit runtime
+                        // offset plus the PAC triple.
+                        FixupPointerFormat::Arm64e => match policy {
+                            Some(p) => {
+                                rebase_word_arm64e_auth(target_vaddr, image_base, s.vaddr, p)?
+                            }
+                            None => rebase_word_arm64e(target_vaddr)?,
+                        },
                     },
                     FixupKind::Bind {
                         name,
@@ -570,12 +751,13 @@ pub fn plan_fixups_with_format(
                         // Full-identity lookup: the same name bound through
                         // two libraries (or with different weak/addend
                         // splits) is two imports — a name+addend match
-                        // would encode the wrong library's ordinal.
-                        let outlined = if (0..=255).contains(&addend) {
-                            0
-                        } else {
-                            addend
-                        };
+                        // would encode the wrong library's ordinal. A
+                        // signed bind is its own key: the word has no
+                        // inline addend field, so the full addend travels
+                        // in the import entry (slice 3's named exception
+                        // to the M2 split).
+                        let signed = policy.is_some();
+                        let (inline, outlined) = addend_split(addend, signed);
                         let key_pos = bind_keys
                             .iter()
                             .position(|k| {
@@ -588,24 +770,36 @@ pub fn plan_fixups_with_format(
                                 message: "bind slot missing from the import table".into(),
                             })?;
                         let ordinal = ordinals[key_pos];
-                        let inline = if (0..=255).contains(&addend) {
-                            addend as u8
-                        } else {
-                            0
-                        };
                         // The M2 addend split rule holds in both families:
                         // 0..=255 travels inline, everything else in the
                         // import entry. The arm64e word's signed 19-bit
                         // field would admit more, but the import-table plan
-                        // (and its M9 anchor) must not diverge per format.
+                        // (and its M9 anchor) must not diverge per format —
+                        // the one named exception is the auth bind (the
+                        // word has no addend field; `addend_split` already
+                        // moved the whole addend to the entry).
                         match format {
                             FixupPointerFormat::Offset64 => bind_word(ordinal, inline)?,
-                            FixupPointerFormat::Arm64e => {
-                                encode_arm64e_bind_word(u64::from(ordinal), i64::from(inline), 0)
+                            FixupPointerFormat::Arm64e => match policy {
+                                Some(p) => {
+                                    encode_arm64e_auth_bind_word(
+                                        ordinal,
+                                        p.diversity,
+                                        p.addr_div,
+                                        p.key,
+                                        0,
+                                    )
                                     .map_err(|e| LinkError::Internal {
-                                        message: format!("arm64e bind word encode: {e}"),
+                                        message: format!("arm64e auth bind word encode: {e}"),
                                     })?
-                            }
+                                }
+                                None => {
+                                    encode_arm64e_bind_word(u64::from(ordinal), i64::from(inline), 0)
+                                        .map_err(|e| LinkError::Internal {
+                                            message: format!("arm64e bind word encode: {e}"),
+                                        })?
+                                }
+                            },
                         }
                     }
                 };
