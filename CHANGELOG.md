@@ -4,6 +4,31 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.11.0] - 2026-11-10
+### Bug Fixes
+- **core:** The resolve-reuse fallback names its refusal cause (364ef9e)
+
+### Documentation
+- Record the rung 3 slice 2 across the surface (8c5c018)
+
+### Features
+- **driver:** The encoding query gets its consumer example (b4109c0)
+- **driver:** The encoding query and the honest refusal hints (2b63b4a)
+- **fixtures:** The image builder takes its build version (2a22a5c)
+- **verify:** The build-version gate checks the chained-fixups floor (ecdf3e6)
+
+### Performance
+- **verify:** Bench the platform floor gate (cd0792c)
+
+### Refactor
+- Drop the dead public seams (fab339c)
+- The floor table moves beside the platform constants (ec18b8a)
+
+### Tests
+- **verify:** The floor gate matrix rides the builder knob (5a48cb6)
+- **driver:** The encoding query answers before the link (20f8c5c)
+
+
 
 > **Release-ladder reconciliation (2026-11-09).** The headings below used to
 > follow the design-doc milestone stream (0.7.0 → 1.2.0 for M6 → M9 v1), but
