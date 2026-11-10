@@ -89,8 +89,9 @@ tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 
 A linker that silently drops a flag it does not implement is worse than one
 that says so. These are rejected with the roadmap entry in the message:
-`-dylinker`, `-weak_framework`, `-lazy_framework`, `-lazy_library`,
-`-order_file`, `-U`, `-pagezero_size`, `-sub_library`, `-sub_umbrella`.
+`-dylinker`, `-weak_framework`, `-lazy_framework`, `-lazy_library`, `-U`,
+`-pagezero_size`, `-sub_library`, `-sub_umbrella`. (`-order_file` left this
+list when its rank-based subset shipped at M11, alongside `-map`.)
 
 ## Peregrine-specific: the Stage A link cache
 
