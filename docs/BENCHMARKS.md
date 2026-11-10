@@ -1084,3 +1084,52 @@ per pair — and any divergence is the finding.
 ```sh
 cargo bench -p pgr-verify --bench arm64e
 ```
+
+## Recorded baseline (M11 rung 1 — the order-file rank seam)
+
+Rung 1 ships `-order_file`: the parsed order file's ranks ride Pass 3 as
+the §8.4 stable sort, the ordered link goes atom-granular (the rank
+names symbols, so the ordered buckets split at symbol boundaries the
+same way `-dead_strip` forces them to), and every user-content bucket
+pays one stable sort on the matched entry index.
+
+```sh
+cargo bench -p pgr-core --bench order
+```
+
+| Corpus (12 objects × 256 atoms, 3 072 pieces) | time (dev sandbox) |
+|---|---|
+| `order_file/layout/no_order` | 2.51 ms |
+| `order_file/layout/ranked` (1 536 ranked entries, half the corpus) | 5.41 ms |
+
+The honest reading: the ranked shape pays the **atom split** the order
+file forces (pieces per symbol instead of per section — the same cost
+`-dead_strip` pays for the same reason) plus the rank pass and the
+per-bucket stable sort. The comparison is shape-parity, not a
+like-for-like win: the no-order layout packs 12 whole-section pieces,
+the ranked one places and ranks 3 072 atoms. The rank pass itself is
+linear in the piece count (one hash probe per piece over
+`(file, atom start)`), which is the property the next perf pass should
+hold onto.
+
+## Recorded baseline (M11 rung 2 — the `-map` link-map report)
+
+Rung 2 ships `-map <path>`: the placed image's report rendered from the
+plan's own tables (`Layout::segments`/`sections`/`symbols`) — segments,
+sections, symbol rows sorted by address then name. The builder is a
+pure function of the plan; the render is deterministic (the double-link
+map gate rides the same byte-identity contract as the image).
+
+```sh
+cargo bench -p pgr-core --bench map
+```
+
+| Corpus (12 objects × 256 symbols, 3 072 rows) | time (dev sandbox) |
+|---|---|
+| `link_map/build_render/3072` (plan → map → text, incl. the link) | 3.03 ms |
+
+The honest reading: the reporting seam costs a walk over the plan's own
+tables plus one sort per section — the numbers above include the whole
+`link()` pass, so the map's own share is the delta against the plain
+link on the same corpus (the order bench's 2.51 ms no-order shape).
+Reporting never touches the link's hot path; the bench pins that.
