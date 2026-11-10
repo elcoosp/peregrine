@@ -4,6 +4,30 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.14.0] - 2026-11-10
+### Bug Fixes
+- **driver:** The resident refusal names the v6 wire (8c3170a)
+
+### Documentation
+- Record the rung 4 slice 3 and heal the drift (edb927b)
+
+### Features
+- **driver:** The auth producer gets its consumer example (e93ec5e)
+- **core:** The arm64e producer plans auth words (c7b7814)
+
+### Miscellaneous Tasks
+- **deps:** Pgr-emit rides the workspace table (b729598)
+
+### Performance
+- **core:** Bench the auth word family (8107113)
+
+### Refactor
+- **driver:** The daemon fallbacks speak spans (1528c4a)
+
+### Tests
+- **core:** The auth producer gates their shapes (c86df11)
+
+
 ## [0.13.0] - 2026-11-10
 ### Bug Fixes
 - **fixtures:** The chain build names its empty-slot refusal (29d96dc)
