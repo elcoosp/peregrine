@@ -11,6 +11,9 @@ publish = false
 [dependencies]
 pgr-format = { workspace = true }
 sha2 = { workspace = true }
+# Typed error surfaces (the report-JSON reader's refusals — M13 rung 1;
+# every other crate's errors ride the same derive).
+thiserror = { workspace = true }
 # The arm64e walk names its contract on the tracing seam (inert until a
 # subscriber installs — the driver and the consumer examples install one
 # under their debug envs; M10 rung 4, slice 1).
@@ -47,6 +50,12 @@ harness = false
 # single check family on one at-floor chained-fixup executable.
 [[bench]]
 name = "checks"
+harness = false
+
+# The M13 baseline-gate bench: the delta's per-policy cost and the
+# report JSON's write/read beside one real verify pass (for scale).
+[[bench]]
+name = "baseline"
 harness = false
 
 [lints]
