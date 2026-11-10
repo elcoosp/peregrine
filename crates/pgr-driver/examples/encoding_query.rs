@@ -71,7 +71,7 @@ fn main() {
     //    its chained-fixups floor. Below-floor rows answer classic
     //    opcodes and carry the miette advisory; the answer comes from
     //    the same table the layout reads, never a re-derivation.
-    println!("{:<9} {:>8}  {}", "platform", "target", "encoding (Pass 3 plans)");
+    println!("{:<9} {:>8}  encoding (Pass 3 plans)", "platform", "target");
     for (name, minos, sdk) in [
         ("macos", "11.0", "14.0"),
         ("macos", "12.0", "14.0"),
@@ -81,7 +81,12 @@ fn main() {
         ("visionos", "1.0", "1.0"),
     ] {
         let report = fixup_encoding_report(name, minos, sdk).expect("the linked platforms query");
-        println!("{:<9} {:>8}  {:?}", name, report.minos_text(), report.encoding);
+        println!(
+            "{:<9} {:>8}  {:?}",
+            name,
+            report.minos_text(),
+            report.encoding
+        );
         if let Some(advisory) = report.advisory {
             println!("{:?}", miette::Report::new(advisory));
         }
@@ -92,7 +97,10 @@ fn main() {
     //    the output must carry the chained words — the strict verifier
     //    (hash recompute on) closes the loop the roadmap scopes.
     let at_floor = fixup_encoding_report("macos", "12.0", "14.0").expect("the at-floor row");
-    assert!(at_floor.advisory.is_none(), "the at-floor row is advisory-free");
+    assert!(
+        at_floor.advisory.is_none(),
+        "the at-floor row is advisory-free"
+    );
     let dir = std::env::temp_dir().join("pgr_driver_encoding_query");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
