@@ -261,8 +261,7 @@ pub(crate) fn check_fixups(
                             .try_into()
                             .unwrap_or([0; 8]),
                     );
-                    let arm64e =
-                        seg.pointer_format == pgr_format::consts::DYLD_CHAINED_PTR_ARM64E;
+                    let arm64e = seg.pointer_format == pgr_format::consts::DYLD_CHAINED_PTR_ARM64E;
                     if arm64e {
                         let word = pgr_format::fixups::ChainWordArm64e::new(raw_word);
                         if word.is_bind() {
