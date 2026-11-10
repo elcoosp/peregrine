@@ -7,7 +7,7 @@
 | **Codename** | Peregrine (binary: `pgr`) |
 | **Target** | arm64-apple-darwin executables, dylibs, bundles (macOS 12+ default path) |
 | **Host** | Linux (primary development sandbox); macOS (deployment as an `ld` replacement) |
-| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay); M10 rides the same seams at both ends — rung 1 stops Passes 1–2 short for the `-r` relocatable output (`pgr_core::link_reloc`, `pgr_emit::build_object_image`, the object contract in the verifier), rung 2 makes the fixup-encoding gate per-platform (`chained_fixups_min_minos`, the `-platform_version` surface, the verifier's declared-platform gate) — and rung 3 lands the consumer seam: `pgr_core::platform::FixupEncoding` names the encoding decision before the link runs (slice 1), `pgr --print-fixup-encoding` / `pgr_driver::fixup_encoding_report` put it on the driver surface and the verifier's `fixups_floor` gate reads the same canonical table (`pgr_format::consts::chained_fixups_floor` — one table, three readers; slice 2) — §15 is the M10 design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
+| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay); M10 rides the same seams at both ends — rung 1 stops Passes 1–2 short for the `-r` relocatable output (`pgr_core::link_reloc`, `pgr_emit::build_object_image`, the object contract in the verifier), rung 2 makes the fixup-encoding gate per-platform (`chained_fixups_min_minos`, the `-platform_version` surface, the verifier's declared-platform gate) — and rung 3 lands the consumer seam: `pgr_core::platform::FixupEncoding` names the encoding decision before the link runs (slice 1), `pgr --print-fixup-encoding` / `pgr_driver::fixup_encoding_report` put it on the driver surface and the verifier's `fixups_floor` gate reads the same canonical table (`pgr_format::consts::chained_fixups_floor` — one table, three readers; slice 2) — rung 4 opens the arm64e word family on both sides of the image: slice 1 the read side (`ChainWordArm64e`, the fixtures' pointer-format knob, the verifier's walk), slice 2 the unauth producer (`plan_fixups_with_format`, the `-fixup_chains_format` surface, the v6 wire tail byte), slice 3 the authenticated producer (`FixupAuth` policies, the 32-bit runtime offset, the auth bind's addend-split exception with the anchor appending) — §15 is the M10 design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
 | **Date** | 2026-11-09 |
 | **Companion diagrams** | `assets/pipeline.png`, `assets/output-map.png`, `assets/alignment.png`, `assets/fixup-chain.png` |
 
@@ -1116,6 +1116,56 @@ verify-strict gates (`crates/pgr-driver/tests/m10_arm64e.rs`), the
 `arm64e` planner bench (both families over the same slot corpus), and
 the `arm64e_producer` consumer example (the same slots planned twice,
 decoded side by side).
+
+### 15.6 Rung 4, slice 3 — the authenticated producer
+
+The M10 row's remaining arm64e target: **auth rebase/bind words**. The
+read side has walked them since slice 1 (`dynamic.rs` branches on
+`is_auth()`) and the format layer has carried the range-checked auth
+encoders since the family landed — with no producer caller. Slice 3
+closes that seam: the same Pass-3 planner takes an authentication
+policy (`plan_fixups_with_auth`), the family's last word shapes become
+producible, and the words the fixtures faked are the words the pipeline
+now plans.
+
+1. **The policy seam** (`pgr_core::fixups::FixupAuth`): one entry per
+   signed slot, naming it by output vaddr and carrying the PAC triple
+   (`diversity`/`addrDiv`/`key` — `fixup-chains.h`'s authenticated-word
+   fields). An **auth rebase** swaps the unauth shape: the word carries
+   the **32-bit runtime offset** (`target − image base`, what dyld adds
+   to the preferred load address) instead of the VM address, plus the
+   triple; a target below the base or beyond the 32-bit field refuses
+   with the slot named. An **auth bind** carries the ordinal with the
+   triple and **no inline addend** — the word has no addend field, so
+   the full addend travels in the `DYLD_CHAINED_IMPORT_ADDEND` entry:
+   the M2 split's one named exception, and the signed bind is a distinct
+   dedup key beside its unauth self. The M9 anchor treats the signed
+   key like any new key: it appends without renumbering (§7.3 step 5).
+2. **The refusals keep naming their cause**: a policy under the
+   64_OFFSET family refuses outright (that word has no auth
+   discriminator to set — the fixtures' own refusal, now the planner's),
+   as does an entry that names no fixup slot or names one twice, and an
+   empty policy plans byte-identically to the slice-2 planner (the
+   §7.2 lock extends to the auth seam). The declared `pointer_format`
+   and the `__chain_starts` mirror do not move — authentication changes
+   words, not the family. The planner's auth seam rides the same
+   tracing span convention (inert until a subscriber installs), and the
+   consumer-side refusal renders as miette help text in the
+   `fixup_chains_auth` example — the fix, not just the verdict.
+3. **The scope stays in Pass 3**: emit consumes the plan's words
+   verbatim (auth words ride the same tiles), the verifier reads them
+   (slice 1), the driver surface is untouched this slice (no CLI flag —
+   the resident session's reuse gates still plan Offset64 shapes, the
+   v6 wire mirrors the family when they move), and the fixture builder
+   already speaks the shapes (slice 1), so the gates compare the
+   planner's words against the read side's expectations directly.
+
+Supporting pieces: the auth word-shape gates
+(`crates/pgr-core/tests/m10_arm64e_auth.rs` — rebase/bind shapes, the
+split beside the unauth bind, the byte-identity lock, the refusals, the
+anchor), the `arm64e_auth` bench variant (the same corpus, every slot
+signed), and the `fixup_chains_auth` consumer example (the refusal
+rendered, then the unauth and signed plans decoded side by side).
 
 ---
 

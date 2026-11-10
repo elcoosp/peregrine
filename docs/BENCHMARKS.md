@@ -1042,3 +1042,25 @@ encoder branch — and any divergence is the finding.
 ```sh
 cargo bench -p pgr-core --bench arm64e
 ```
+
+## Recorded baseline (M10 rung 4, slice 3 — the authenticated producer)
+
+Slice 3 closes the family's named target: the same planner takes an
+authentication policy (`pgr_core::fixups::plan_fixups_with_auth`) and
+the bench grows the matching variant
+(`pgr-core/plan_fixups_word_family/arm64e_auth/<1k|10k|100k>`) — the
+same mixed rebase/bind corpus as the slice-2 rows with every slot
+signed, so the auth curve reads directly against both family curves.
+The auth rebase swaps the target shape (32-bit runtime offset instead
+of the VM address) and the auth bind moves its whole addend into the
+import entry, so the table build runs its split too.
+
+**No numbers are recorded yet** (the variant lands with this slice; the
+next gate run fills this section like the slice-2 section above). The
+honest expectation: `arm64e_auth` sits inside the `arm64e` noise band —
+the packer, the payload and the mirror are the same work, one encoder
+branch per word — and any divergence is the finding.
+
+```sh
+cargo bench -p pgr-core --bench arm64e
+```
