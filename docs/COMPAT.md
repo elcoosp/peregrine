@@ -73,6 +73,7 @@ each flag has a fixture".
 | `-sectcreate <seg> <sect> <file>` | ✅ | M5 | `m5_flags::m5_sectcreate_places_file_contents` |
 | `-weak_framework <name>` / `-lazy_framework <name>` / `-lazy_library <path>` (repeatable; the framework forms search `-F` dirs like `-framework`, the library form is a path input; weak loads ride `LC_LOAD_WEAK_DYLIB` + weak binds, lazy loads ride `LC_LAZY_LOAD_DYLIB` — M14) | ✅ | M14 | `opts::tests::m14_lazy_weak_flags_shape_the_config`, `m14_lazy_dylibs::*` (driver), the `dylibs` bench + the `lazy_library_link` example |
 | `-order_file` (rank-based subset: `symbol` / `object.o:symbol`) | ✅ | M11 | `m11_order_file::*` (core + driver), `pgr_core::order` |
+| `-pagezero_size <n>` (the `__PAGEZERO` vmsize an executable plans with — the constant-delta base; decimal or `0x`-hex, a non-zero multiple of the 16 KiB arm64 page, the 4 GiB default unchanged; non-executable outputs refuse the knob — M15) | ✅ | M15 | `m15_pagezero::*` (core + driver), `pgr_core::pagezero` |
 | `-dylinker` (MH_DYLINKER outputs) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-sub_umbrella` / `-sub_library` (umbrella re-exports) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-ObjC` (archive member class pull) | ❌ (rejected, actionable) | M6 (ObjC class/selector handling) | `opts::LATER_FLAGS` |
