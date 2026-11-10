@@ -77,9 +77,13 @@ impl LoadCommandKind {
     /// Classifies a raw opcode.
     #[must_use]
     pub const fn from_cmd(cmd: u32) -> Self {
-        // Weak/upward dylibs share the dylib layout; classify them together.
-        let weak_or_upward =
-            cmd == crate::consts::LC_LOAD_WEAK_DYLIB || cmd == crate::consts::LC_LOAD_UPWARD_DYLIB;
+        // Weak/upward/lazy dylibs share the dylib layout; classify them
+        // together (M14: `LC_LAZY_LOAD_DYLIB` — the lazy-load kind rides
+        // the same `dylib_command` shape and the same two-level ordinal
+        // space).
+        let weak_or_upward_or_lazy = cmd == crate::consts::LC_LOAD_WEAK_DYLIB
+            || cmd == crate::consts::LC_LOAD_UPWARD_DYLIB
+            || cmd == crate::consts::LC_LAZY_LOAD_DYLIB;
         match cmd {
             LC_SEGMENT_64 => Self::Segment64,
             LC_SYMTAB => Self::Symtab,
@@ -104,7 +108,7 @@ impl LoadCommandKind {
             | crate::consts::LC_SEGMENT_SPLIT_INFO
             | crate::consts::LC_DYLD_INFO
             | crate::consts::LC_DYLD_INFO_ONLY => Self::LinkeditData(cmd),
-            _ if weak_or_upward => Self::LoadDylib,
+            _ if weak_or_upward_or_lazy => Self::LoadDylib,
             _ => Self::Unknown(cmd),
         }
     }
