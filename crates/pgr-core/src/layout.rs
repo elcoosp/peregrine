@@ -202,6 +202,19 @@ pub struct LinkConfig {
     /// pre-seam planner. The classic opcode path (`fixup_chains = false`)
     /// does not read this — the opcode streams have one word shape.
     pub chain_word_format: crate::fixups::FixupPointerFormat,
+    /// M11 rung 1 — `-order_file`: the parsed order file's rank table
+    /// (see [`crate::order`]). When set, the ordered buckets go
+    /// atom-granular (the rank names symbols, so pieces must be
+    /// symbol-boundary atoms to receive one) and every user-content
+    /// bucket applies the ranks as a *stable sort* (TDD §8.4): ranked
+    /// pieces land first in rank order, unranked pieces keep the
+    /// canonical input order behind them. Synthetic sections
+    /// (`__got`/`__stubs`/`__chain_starts` — contract-coupled to the
+    /// fixup plan's first-use ordinals), `__common` (name-sorted
+    /// allocation) and `__cstring` (the D4 dedup remap) keep their own
+    /// order — the rank-based subset orders content, not contracts.
+    /// `None` (every clean link) packs exactly as before, bit-for-bit.
+    pub symbol_order: Option<crate::order::SymbolOrder>,
 }
 
 impl Default for LinkConfig {
@@ -237,6 +250,7 @@ impl Default for LinkConfig {
             record_resolution: false,
             resolve_reuse: None,
             chain_word_format: crate::fixups::FixupPointerFormat::Offset64,
+            symbol_order: None,
         }
     }
 }
@@ -451,6 +465,12 @@ pub struct Layout {
     pub ident: String,
     /// The Mach-O file type (`MH_EXECUTE`/`MH_DYLIB`/`MH_BUNDLE`).
     pub filetype: u32,
+    /// M11 rung 1: the order-file entries that matched **no** placed
+    /// piece, in entry order (raw name bytes). Empty without an order
+    /// file and whenever every entry ranked something — the driver
+    /// surfaces it as the ld64-style advisory (a rank that landed
+    /// nowhere is a typo, not an error).
+    pub order_unmatched: Vec<Vec<u8>>,
     /// The image base (`__PAGEZERO` vmsize for executables, `0` for
     /// dylibs/bundles): every absolute fixup/trie address is relative to it.
     pub image_base: u64,
@@ -866,6 +886,9 @@ struct PlacedState {
     /// The relocation scan redirects out-of-range branches through this
     /// table instead of erroring.
     veneer_addr_of: std::collections::HashMap<(u32, usize, u32), u64>,
+    /// M11: the order-file entry indexes that matched at least one piece
+    /// (the unmatched report's complement). Empty without an order file.
+    order_matched: std::collections::BTreeSet<usize>,
 }
 
 /// One flat piece: output section, position within its piece list, absolute
@@ -1006,6 +1029,7 @@ pub fn layout(
             live,
             fold,
             &veneers,
+            interner,
         )?;
         resolve_all(objects, &mut state, res, interner, cfg, fold)?;
         // M6 veneer scan: every out-of-range branch site plans one veneer.
@@ -1470,10 +1494,23 @@ pub fn layout(
         fold,
     );
 
+    // M11: the advisory's data — entries whose rank landed on no piece.
+    let order_unmatched = match &cfg.symbol_order {
+        Some(order) => order
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !state.order_matched.contains(idx))
+            .map(|(_, e)| e.symbol.clone().into_bytes())
+            .collect(),
+        None => Vec::new(),
+    };
+
     Ok(Layout {
         ident: cfg.ident.clone(),
         filetype: cfg.filetype.filetype(),
         image_base,
+        order_unmatched,
         segments: state.segments,
         sections: state.sections,
         linkedit: LinkeditPlan {
@@ -1683,6 +1720,7 @@ fn build_bucket_pieces(
     commons: &[(StringId, &Def)],
     live: &crate::deadstrip::LiveSet,
     fold: &crate::icf::FoldPlan,
+    order_active: bool,
 ) -> Result<(Vec<Vec<Piece>>, Vec<(usize, Vec<CStringInstance>)>), LinkError> {
     let mut pieces_of_bucket: Vec<Vec<Piece>> = vec![Vec::new(); buckets.len()];
     let mut cstring_instances: Vec<(usize, Vec<CStringInstance>)> = Vec::new();
@@ -1711,13 +1749,16 @@ fn build_bucket_pieces(
                 // string. Deterministic: files in FileId order, strings in
                 // offset order.
                 let bucket = &mut pieces_of_bucket[bi];
-                // D4's find-or-insert in one walk: the check-push-find-again
-                // dance it replaced re-scanned the list twice and named the
-                // borrow-checked gap with an `unreachable!` — a panic, not a
-                // typed refusal (TDD §2: typed errors, never panic).
-                let list = match cstring_instances.iter_mut().find(|(b, _)| *b == bi) {
-                    Some((_, list)) => list,
-                    None => {
+                // D4's find-or-insert: the match form used to hold the
+                // mutable borrow across the insert arm (clippy
+                // single_match_else); the `if let` shape drops the
+                // scrutinee borrow before the `else` (edition 2024), so
+                // the insert is a plain arm, not a dance — and a panic,
+                // not a typed refusal (TDD §2), stays out of the path.
+                let list =
+                    if let Some((_, list)) = cstring_instances.iter_mut().find(|(b, _)| *b == bi) {
+                        list
+                    } else {
                         cstring_instances.push((bi, Vec::new()));
                         let Some((_, list)) = cstring_instances.last_mut() else {
                             return Err(LinkError::Internal {
@@ -1725,8 +1766,7 @@ fn build_bucket_pieces(
                             });
                         };
                         list
-                    }
-                };
+                    };
                 for range in obj.atoms_of(si) {
                     if live.is_active() && live.is_atom_dead(obj.file.0, si, range.start) {
                         list.push(CStringInstance {
@@ -1783,7 +1823,12 @@ fn build_bucket_pieces(
             // matters). Atomization is a content-section concern.
             // M6 ICF: text sections go piece-granular when folding may
             // remove atoms (dead-strip already implies the atom path).
+            // M11: an order file ranks symbols — the ordered link goes
+            // atom-granular so a named symbol's piece can receive its
+            // rank (objects without the subsections flag keep their
+            // whole-section atom and rank through its offset-0 symbol).
             let atom_granular = live.is_active()
+                || order_active
                 || (!fold.is_empty() && in_sect.flags & S_ATTR_PURE_INSTRUCTIONS != 0);
             if in_sect.zerofill || !atom_granular {
                 pieces_of_bucket[bi].push(Piece {
@@ -1881,9 +1926,28 @@ fn place(
     live: &crate::deadstrip::LiveSet,
     fold: &crate::icf::FoldPlan,
     veneers: &[crate::thunks::VeneerSpec],
+    interner: &Interner,
 ) -> Result<PlacedState, LinkError> {
-    let (mut pieces_of_bucket, cstring_instances) =
-        build_bucket_pieces(objects, buckets, bucket_of, commons, live, fold)?;
+    let (mut pieces_of_bucket, cstring_instances) = build_bucket_pieces(
+        objects,
+        buckets,
+        bucket_of,
+        commons,
+        live,
+        fold,
+        cfg.symbol_order.is_some(),
+    )?;
+    // ---- M11: the order file's ranks (TDD §8.4) -----------------------------
+    // Applied *before* the synthetic pieces (whose buckets keep their
+    // first-use contract order) and the veneers (which insert right after
+    // their site piece). The sort is stable and keyed on the entry index,
+    // so ties keep the canonical input order and nothing reads a hash
+    // iteration order.
+    let mut order_matched: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    if let Some(order) = &cfg.symbol_order {
+        let matched = apply_symbol_order(objects, buckets, &mut pieces_of_bucket, order, interner);
+        order_matched.extend(matched);
+    }
 
     // ---- M2 synthetic pieces: __got slots + __stubs entries ------------------
     // First-use order (scan_needs) determines slot order, matching the
@@ -2137,10 +2201,14 @@ fn place(
                         ),
                         addr,
                     );
-                } else if live.is_active() || !fold.is_empty() {
+                } else if live.is_active() || !fold.is_empty() || cfg.symbol_order.is_some() {
                     // Atom identity: section-relative input start → output
                     // vaddr. The containment lookups (defs, section-target
-                    // relocs) read this table.
+                    // relocs) read this table. M11: an order file moves
+                    // atoms, so the identity table must exist even without
+                    // strip/fold — the section-base fallback would place
+                    // every symbol at its *input* offset (wrong under
+                    // reordering).
                     atom_addr
                         .entry((p.file.0, p.in_sect))
                         .or_default()
@@ -2197,7 +2265,102 @@ fn place(
         got_slot_addr,
         stub_addr,
         veneer_addr_of,
+        order_matched,
     })
+}
+
+/// Applies the order file's ranks to every user-content bucket (M11 rung
+/// 1, TDD §8.4): a stable sort on the matched entry index — ranked
+/// pieces first in rank order, unranked pieces keeping the canonical
+/// input order behind them. Contract-coupled buckets keep their own
+/// order: `__got`/`__stubs`/`__chain_starts` mirror the fixup plan's
+/// first-use ordinals, `__common` is name-sorted for deterministic
+/// allocation, `__cstring` buckets are the D4 dedup surface (the
+/// instance remap references the canonical piece stream). Returns the
+/// entry indexes that matched at least one piece.
+fn apply_symbol_order(
+    objects: &[InputObject],
+    buckets: &BucketTable,
+    pieces_of_bucket: &mut [Vec<Piece>],
+    order: &crate::order::SymbolOrder,
+    interner: &Interner,
+) -> std::collections::BTreeSet<usize> {
+    let contract_bucket = |name: &str| {
+        matches!(
+            name,
+            "__got" | "__stubs" | "__chain_starts" | "__common" | "__cstring"
+        )
+    };
+    // Per object: (input section, atom start) → best (lowest) entry index
+    // across the symbols defined exactly there. Built once per placement
+    // round; the lookup never enumerates a hash map (TDD §8.4).
+    let mut rank_of_atom: Vec<std::collections::HashMap<(usize, u64), usize>> =
+        Vec::with_capacity(objects.len());
+    for obj in objects {
+        let mut map = std::collections::HashMap::new();
+        let base = std::path::Path::new(&obj.name)
+            .file_name()
+            .map_or_else(|| obj.name.clone(), |f| f.to_string_lossy().into_owned());
+        for sym in &obj.symbols {
+            if sym.stab || sym.alt_entry {
+                continue;
+            }
+            let Some(sect) = sym.section else { continue };
+            let name = interner.bytes(sym.name);
+            let Some(rank) = order.rank_of(&base, name) else {
+                continue;
+            };
+            // The key mirrors the piece identity: build_bucket_pieces
+            // keys atoms on the *absolute* input offset
+            // (`section.data.start + atom start`), the symbol's `value`
+            // is section-relative.
+            let Some(in_sect) = obj.sections.get(sect) else {
+                continue;
+            };
+            let key = (sect, in_sect.data.start + sym.value);
+            match map.get(&key) {
+                Some(&best) if best <= rank => {}
+                _ => {
+                    map.insert(key, rank);
+                }
+            }
+        }
+        rank_of_atom.push(map);
+    }
+    let mut matched = std::collections::BTreeSet::new();
+    for (bi, (_, name, flags, zerofill)) in buckets.iter().enumerate() {
+        if *zerofill || contract_bucket(name) {
+            continue;
+        }
+        if *flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS {
+            continue;
+        }
+        let pieces = &mut pieces_of_bucket[bi];
+        if pieces.is_empty() {
+            continue;
+        }
+        // Piece rank: the lowest entry index among the piece's defining
+        // symbols (`None` = unranked, sorts last via the sentinel).
+        let rank_of_piece = |p: &Piece| -> Option<usize> {
+            let map = rank_of_atom.get(p.file.0 as usize)?;
+            map.get(&(p.in_sect, p.in_range.start)).copied()
+        };
+        let mut keyed: Vec<(Option<usize>, Piece)> = Vec::with_capacity(pieces.len());
+        for p in pieces.drain(..) {
+            let rank = rank_of_piece(&p);
+            if let Some(r) = rank {
+                matched.insert(r);
+            }
+            keyed.push((rank, p));
+        }
+        // Ascending entry index, unranked last (the sentinel); the sort
+        // is stable, so the canonical input order survives every tie
+        // (TDD §8.4). `Option`'s own order would put `None` first — the
+        // exact inverse of the rank semantics.
+        keyed.sort_by_key(|(rank, _)| rank.unwrap_or(usize::MAX));
+        pieces.extend(keyed.into_iter().map(|(_, p)| p));
+    }
+    matched
 }
 
 /// Resolves every piece's patches and fixup slots against placed addresses.
