@@ -6,10 +6,12 @@
 //! `dyld_chained_starts_in_image` (per-segment start tables), the import
 //! table, and the imports' name blob. Fixup words live in the segment data
 //! itself and chain page-locally via a 12-bit `next` field counting 4-byte
-//! strides; chains never cross a page (TDD §7).
+//! strides (the 64 family) or an 11-bit `next` counting 8-byte strides
+//! (the arm64e family, M10 rung 4); chains never cross a page (TDD §7).
 
 use crate::consts::{
     DYLD_CHAINED_IMPORT, DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_IMPORT_ADDEND64,
+    DYLD_CHAINED_PTR_64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
     DYLD_CHAINED_PTR_START_MULTI, DYLD_CHAINED_PTR_START_MULTI_MASK, DYLD_CHAINED_PTR_START_NONE,
 };
 use crate::cursor::Cursor;
@@ -365,6 +367,271 @@ pub fn encode_bind_word(ordinal: u32, addend: u8, next: u32) -> Result<u64, Form
     Ok(u64::from(ordinal) | u64::from(addend) << 24 | u64::from(next) << 51 | 1 << 63)
 }
 
+/// The byte stride a pointer format's `next` field counts: 8 bytes for the
+/// arm64e userland family, 4 for the `DYLD_CHAINED_PTR_64(_OFFSET)` pair.
+/// `None` for a format the read side does not walk (the M10 rung-4 slice
+/// scopes the read side to these two families; the kernel-cache formats
+/// stay refused).
+#[must_use]
+pub const fn chain_stride(pointer_format: u16) -> Option<u64> {
+    match pointer_format {
+        DYLD_CHAINED_PTR_ARM64E => Some(8),
+        DYLD_CHAINED_PTR_64 | DYLD_CHAINED_PTR_64_OFFSET => Some(4),
+        _ => None,
+    }
+}
+
+/// A decoded 64-bit chain word (`DYLD_CHAINED_PTR_ARM64E`, format 1).
+///
+/// The family discriminates on two top bits: `bind` (bit 62) and `auth`
+/// (bit 63) — rebase (00), auth rebase (01), bind (10), auth bind (11).
+/// The bind bit is *not* the 64 family's bit 63, so reading a format-1
+/// word with [`ChainWord64`] misclassifies every word. Layout per LLVM
+/// `MachO.h` / Apple `fixup-chains.h`: unauth rebases carry a 43-bit
+/// target (a VM address under format 1, dyld subtracts the preferred load
+/// address) plus a high-8 byte, auth rebases a 32-bit runtime offset (VM
+/// offset from the image base), binds a 16-bit ordinal and a signed 19-bit
+/// inline addend (±256 KiB — dyld's write-side embeddable limit), auth
+/// words a diversity/address-diversity/key PAC triple. `next` is 11 bits
+/// counted in 8-byte strides (see [`chain_stride`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainWordArm64e {
+    /// Raw little-endian word as stored in the slot.
+    pub raw: u64,
+}
+
+impl ChainWordArm64e {
+    /// Wraps the raw slot word.
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self { raw }
+    }
+
+    /// True when the word is authenticated (bit 63 set): the payload rides
+    /// a diversity/key pair, not a plain target or addend.
+    #[must_use]
+    pub const fn is_auth(&self) -> bool {
+        self.raw >> 63 & 1 == 1
+    }
+
+    /// True when the word is a bind (bit 62 set); rebases leave it clear.
+    #[must_use]
+    pub const fn is_bind(&self) -> bool {
+        self.raw >> 62 & 1 == 1
+    }
+
+    /// Distance to the next fixup in strides of 8 bytes (0 terminates).
+    #[must_use]
+    pub const fn next(&self) -> u32 {
+        ((self.raw >> 51) & 0x7ff) as u32
+    }
+
+    /// Unauth rebase target: a VM address under format 1 (43-bit field,
+    /// bits 0..43). Auth words repurpose bits 32..43 for the diversity
+    /// value — read those through [`Self::auth_diversity`] and the 32-bit
+    /// [`Self::auth_rebase_offset`] instead.
+    #[must_use]
+    pub const fn rebase_target(&self) -> u64 {
+        self.raw & 0x7_ffff_ffff_ffff
+    }
+
+    /// Unauth rebase high 8 bits (bits 43..51): the top byte of the final
+    /// value, composed exactly as dyld reads it
+    /// (`(high8 << 56) | (target − preferred_load_address)`).
+    #[must_use]
+    pub const fn rebase_high8(&self) -> u8 {
+        ((self.raw >> 43) & 0xff) as u8
+    }
+
+    /// Auth rebase runtime offset: the 32-bit VM offset from the image
+    /// base (bits 0..32).
+    #[must_use]
+    pub const fn auth_rebase_offset(&self) -> u32 {
+        (self.raw & 0xffff_ffff) as u32
+    }
+
+    /// Bind ordinal into the import table (bits 0..16, both bind shapes).
+    #[must_use]
+    pub const fn bind_ordinal(&self) -> u32 {
+        (self.raw & 0xffff) as u32
+    }
+
+    /// Unauth bind inline addend: the signed 19-bit field (bits 32..51,
+    /// ±256 KiB) sign-extended. Auth binds carry no addend.
+    #[must_use]
+    pub const fn bind_addend(&self) -> i64 {
+        let field = ((self.raw >> 32) & 0x7_ffff) as i64;
+        if field >> 18 & 1 == 1 {
+            field | !0x7_ffff
+        } else {
+            field
+        }
+    }
+
+    /// Auth diversity value (bits 32..48).
+    #[must_use]
+    pub const fn auth_diversity(&self) -> u16 {
+        ((self.raw >> 32) & 0xffff) as u16
+    }
+
+    /// Auth address-diversity bit (bit 48).
+    #[must_use]
+    pub const fn auth_addr_div(&self) -> bool {
+        self.raw >> 48 & 1 == 1
+    }
+
+    /// Auth PAC key (bits 49..51): 0 IA, 1 IB, 2 DA, 3 DB.
+    #[must_use]
+    pub const fn auth_key(&self) -> u8 {
+        ((self.raw >> 49) & 0x3) as u8
+    }
+}
+
+/// Encodes an unauth arm64e rebase chain word: `target | high8 << 43 |
+/// next << 51` (bits 62/63 clear). `target` is a VM address under format 1
+/// and must fit 43 bits; `next` counts 8-byte strides.
+///
+/// # Errors
+/// [`FormatError`] when a field exceeds its width.
+pub fn encode_arm64e_rebase_word(target: u64, high8: u8, next: u32) -> Result<u64, FormatError> {
+    if target >> 43 != 0 {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e rebase target exceeds 43-bit field",
+            value: target,
+        });
+    }
+    if next > 0x7ff {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e chain next exceeds 11-bit stride count",
+            value: u64::from(next),
+        });
+    }
+    Ok(u64::from(high8) << 43 | target | u64::from(next) << 51)
+}
+
+/// Encodes an unauth arm64e bind chain word: `ordinal | addend << 32 |
+/// next << 51 | 1 << 62`. The addend is the signed 19-bit inline field
+/// (±256 KiB); larger addends travel in the import entry
+/// (`DYLD_CHAINED_IMPORT_ADDEND64`).
+///
+/// # Errors
+/// [`FormatError`] when a field exceeds its width.
+pub fn encode_arm64e_bind_word(ordinal: u32, addend: i64, next: u32) -> Result<u64, FormatError> {
+    if ordinal >> 16 != 0 {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e bind ordinal exceeds 16-bit field",
+            value: u64::from(ordinal),
+        });
+    }
+    if !(-0x8_0000..=0x7_ffff).contains(&addend) {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e bind addend exceeds the signed 19-bit field",
+            value: addend as u64,
+        });
+    }
+    if next > 0x7ff {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e chain next exceeds 11-bit stride count",
+            value: u64::from(next),
+        });
+    }
+    Ok(u64::from(ordinal)
+        | (addend as u64 & 0x7_ffff) << 32
+        | u64::from(next) << 51
+        | 1 << 62)
+}
+
+/// Encodes an authenticated arm64e rebase chain word: `target | diversity
+/// << 32 | addrDiv << 48 | key << 49 | next << 51 | 1 << 63`. `target` is
+/// the 32-bit runtime offset (VM offset from the image base).
+///
+/// # Errors
+/// [`FormatError`] when a field exceeds its width.
+pub fn encode_arm64e_auth_rebase_word(
+    target: u64,
+    diversity: u16,
+    addr_div: bool,
+    key: u8,
+    next: u32,
+) -> Result<u64, FormatError> {
+    if target >> 32 != 0 {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e auth rebase target exceeds the 32-bit runtime offset",
+            value: target,
+        });
+    }
+    if key > 3 {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e auth key exceeds the 2-bit field",
+            value: u64::from(key),
+        });
+    }
+    if next > 0x7ff {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e chain next exceeds 11-bit stride count",
+            value: u64::from(next),
+        });
+    }
+    Ok(target
+        | u64::from(diversity) << 32
+        | u64::from(addr_div) << 48
+        | u64::from(key) << 49
+        | u64::from(next) << 51
+        | 1 << 63)
+}
+
+/// Encodes an authenticated arm64e bind chain word: `ordinal | diversity
+/// << 32 | addrDiv << 48 | key << 49 | next << 51 | 1 << 62 | 1 << 63`.
+/// Auth binds carry no inline addend (the table addend travels in the
+/// `DYLD_CHAINED_IMPORT_ADDEND64` entry).
+///
+/// # Errors
+/// [`FormatError`] when a field exceeds its width.
+pub fn encode_arm64e_auth_bind_word(
+    ordinal: u32,
+    diversity: u16,
+    addr_div: bool,
+    key: u8,
+    next: u32,
+) -> Result<u64, FormatError> {
+    if ordinal >> 16 != 0 {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e bind ordinal exceeds 16-bit field",
+            value: u64::from(ordinal),
+        });
+    }
+    if key > 3 {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e auth key exceeds the 2-bit field",
+            value: u64::from(key),
+        });
+    }
+    if next > 0x7ff {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "arm64e chain next exceeds 11-bit stride count",
+            value: u64::from(next),
+        });
+    }
+    Ok(u64::from(ordinal)
+        | u64::from(diversity) << 32
+        | u64::from(addr_div) << 48
+        | u64::from(key) << 49
+        | u64::from(next) << 51
+        | 1 << 62
+        | 1 << 63)
+}
+
 /// Parses the import table (`imports_count` entries at `imports_offset`).
 ///
 /// # Errors
@@ -449,13 +716,15 @@ pub fn parse_imports(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChainWord64, encode_bind_word, encode_rebase_word, page_chain_starts, parse_header,
-        parse_imports, parse_starts_in_image, parse_starts_in_segment,
+        ChainWord64, ChainWordArm64e, chain_stride, encode_arm64e_auth_bind_word,
+        encode_arm64e_auth_rebase_word, encode_arm64e_bind_word, encode_arm64e_rebase_word,
+        encode_bind_word, encode_rebase_word, page_chain_starts, parse_header, parse_imports,
+        parse_starts_in_image, parse_starts_in_segment,
     };
     use crate::consts::{
-        DYLD_CHAINED_IMPORT, DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET,
-        DYLD_CHAINED_PTR_START_MULTI, DYLD_CHAINED_PTR_START_MULTI_MASK,
-        DYLD_CHAINED_PTR_START_NONE,
+        DYLD_CHAINED_IMPORT, DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64,
+        DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E, DYLD_CHAINED_PTR_START_MULTI,
+        DYLD_CHAINED_PTR_START_MULTI_MASK, DYLD_CHAINED_PTR_START_NONE,
     };
 
     /// M7 (fuzzing at scale): a mutated `imports_count` must produce a typed
@@ -531,6 +800,85 @@ mod tests {
         assert!(encode_rebase_word(1 << 36, 0, 0).is_err());
         assert!(encode_rebase_word(0, 0, 0x1000).is_err());
         assert!(encode_bind_word(1 << 24, 0, 0).is_err());
+    }
+
+    /// Round-trips an unauth arm64e rebase word: target 43b, high8 8b,
+    /// next 11b (8-byte strides), bind=0 (bit 62), auth=0 (bit 63).
+    #[test]
+    fn arm64e_rebase_word_bit_layout() {
+        let word = encode_arm64e_rebase_word(0x0001_2345_6789, 0xAB, 0x400).unwrap();
+        let w = ChainWordArm64e::new(word);
+        assert!(!w.is_bind());
+        assert!(!w.is_auth());
+        assert_eq!(w.rebase_target(), 0x0001_2345_6789);
+        assert_eq!(w.rebase_high8(), 0xAB);
+        assert_eq!(w.next(), 0x400);
+        assert_eq!(word >> 62, 0);
+    }
+
+    /// Same for the unauth arm64e bind word: ordinal 16b, addend signed
+    /// 19b (LLVM `dyld_chained_ptr_arm64e_bind`), next 11b, bind=1 (bit
+    /// 62), auth=0 (bit 63). A negative addend sign-extends back.
+    #[test]
+    fn arm64e_bind_word_bit_layout() {
+        let word = encode_arm64e_bind_word(0x1234, -3, 1).unwrap();
+        let w = ChainWordArm64e::new(word);
+        assert!(w.is_bind());
+        assert!(!w.is_auth());
+        assert_eq!(w.bind_ordinal(), 0x1234);
+        assert_eq!(w.bind_addend(), -3);
+        assert_eq!(w.next(), 1);
+        assert_eq!(word >> 62, 2);
+        assert_eq!(word >> 63, 0);
+    }
+
+    /// The two authenticated shapes: the PAC triple (diversity, addrDiv,
+    /// key) reads back, the auth bit rides bit 63, and the rebase/bind
+    /// discriminator stays on bit 62.
+    #[test]
+    fn arm64e_auth_words_bit_layout() {
+        let rebase = encode_arm64e_auth_rebase_word(0x1234_5678, 0xBEEF, true, 2, 0x7ff).unwrap();
+        let r = ChainWordArm64e::new(rebase);
+        assert!(r.is_auth());
+        assert!(!r.is_bind());
+        assert_eq!(r.auth_rebase_offset(), 0x1234_5678);
+        assert_eq!(r.auth_diversity(), 0xBEEF);
+        assert!(r.auth_addr_div());
+        assert_eq!(r.auth_key(), 2);
+        assert_eq!(r.next(), 0x7ff);
+        let bind = encode_arm64e_auth_bind_word(0x0042, 1, false, 3, 8).unwrap();
+        let b = ChainWordArm64e::new(bind);
+        assert!(b.is_auth());
+        assert!(b.is_bind());
+        assert_eq!(b.bind_ordinal(), 0x42);
+        assert_eq!(b.auth_diversity(), 1);
+        assert!(!b.auth_addr_div());
+        assert_eq!(b.auth_key(), 3);
+        assert_eq!(b.next(), 8);
+    }
+
+    /// Every encoder refuses its oversized fields, the way the 64-family
+    /// encoders do.
+    #[test]
+    fn arm64e_encode_rejects_oversized_fields() {
+        assert!(encode_arm64e_rebase_word(1 << 43, 0, 0).is_err());
+        assert!(encode_arm64e_rebase_word(0, 0, 0x800).is_err());
+        assert!(encode_arm64e_bind_word(1 << 16, 0, 0).is_err());
+        assert!(encode_arm64e_bind_word(0, 0x8_0000, 0).is_err());
+        assert!(encode_arm64e_bind_word(0, -0x8_0001, 0).is_err());
+        assert!(encode_arm64e_auth_rebase_word(1 << 32, 0, false, 0, 0).is_err());
+        assert!(encode_arm64e_auth_rebase_word(0, 0, false, 4, 0).is_err());
+        assert!(encode_arm64e_auth_bind_word(1 << 16, 0, false, 0, 0).is_err());
+    }
+
+    /// The stride table the walker reads: 8-byte strides for arm64e, 4
+    /// for the 64 family, nothing for a format the read side refuses.
+    #[test]
+    fn chain_stride_by_pointer_format() {
+        assert_eq!(chain_stride(DYLD_CHAINED_PTR_ARM64E), Some(8));
+        assert_eq!(chain_stride(DYLD_CHAINED_PTR_64), Some(4));
+        assert_eq!(chain_stride(DYLD_CHAINED_PTR_64_OFFSET), Some(4));
+        assert_eq!(chain_stride(3), None);
     }
 
     /// Builds a minimal-but-complete payload exactly the way mold does:
