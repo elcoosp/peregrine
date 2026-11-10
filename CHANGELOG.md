@@ -45,90 +45,76 @@ release automation.
 
 ### Features
 
-- **core/driver:** M10 rung 3, slice 1 — the platform floor becomes a
-  nameable consumer seam: `pgr_core::platform::FixupEncoding` answers
-  "chained fixups or the classic `LC_DYLD_INFO_ONLY` opcode streams?"
-  for a platform/target pair *before* the link runs, reading the same
-  per-platform floor table `chained_fixups_min_minos` encodes (one
-  table, two readers — no re-derivation drift). The decision rides a
-  tracing event, the below-floor advisory renders miette help text (the
-  fix, not just the verdict), and the `platform_floor` consumer example
-  plus the `platform` bench ride along. In the same pass the layout's
-  two logically-infallible `unreachable!`s became the house's typed
-  `LinkError::Internal` refusals (TDD §2: typed errors, never panic).
-- **driver:** M10 rung 3, slice 2 — the encoding decision crosses the
-  surface: `pgr --print-fixup-encoding <platform> <min> <sdk>` (and the
-  same-named library seam `pgr_driver::fixup_encoding_report`) answers
-  the query a build system asks before it links — the encoding Pass 3
-  plans with, its floor, and (below the floor) a miette advisory that
-  names the fix. The refusals are exactly the `-platform_version`
-  surface's (unknown platform names the five, `sdk < minos` refuses,
-  malformed versions refuse), the query rides the `encoding_query`
-  tracing span, and the `encoding_query` consumer example walks the
-  full loop — query, link the at-floor row, strict-verify.
-- **verify:** the build-version gate reads the encoding floor (the
-  rung-3 verifier half): an image that carries `LC_DYLD_CHAINED_FIXUPS`
-  while its declared deployment target sits below the platform's
-  chained-fixups floor cannot load on that target's dyld, so the gate
-  names it — the new `fixups_floor` issue code, error severity, the fix
-  riding the message (raise the target or relink with
-  `-no_fixup_chains`). At-floor images and fixup-free below-floor
-  images stay silent, and the gate reads the same canonical table as
-  the layout and the query — one table, three readers, no
-  re-derivation drift.
-- **fixtures:** `ImageBuilder::set_build_version` pins the
-  `LC_BUILD_VERSION` payload (platform, minos, sdk) — the platform knob
-  the rung-2 matrix had to fake with post-build repatching (which broke
-  the signature hashes and forced `skip_hash_recompute`). An override
-  is written during assembly, so strict verification runs with the
-  hash recompute on; the default row is unchanged.
+- **format:** the arm64e chain words decode and encode — M10 rung 4,
+  slice 1 (roadmap §10.4 row M10): `pgr_format::fixups::ChainWordArm64e`
+  names the `DYLD_CHAINED_PTR_ARM64E` word family — the two-bit
+  bind/auth discriminator (bits 62/63: the bind bit is *not* the 64
+  family's bit 63), 11-bit `next` counting 8-byte strides, unauth
+  rebases with a 43-bit VM-address target plus high-8, auth rebases
+  with a 32-bit runtime offset, binds with a 16-bit ordinal and a
+  signed 19-bit addend (±256 KiB, dyld's write-side embeddable limit),
+  auth words with the diversity/addrDiv/key PAC triple — and
+  `chain_stride(pointer_format)` names the stride a format's `next`
+  counts. The encoder set mirrors the 64 family's: range-checked,
+  typed refusals, round-trip-tested bit layouts.
+- **fixtures:** the builder speaks the arm64e pointer format —
+  `PointerFormatKind` + `set_pointer_format` emit the format-1 payload:
+  unauth `SlotKind::Rebase` targets are synthesized as VM addresses
+  (`target + delta`, dyld subtracts the base walking back), the new
+  `SlotKind::AuthRebase`/`AuthBind` carry the PAC fields, and auth
+  slots refuse under the 64_OFFSET format instead of emitting a word
+  dyld cannot read.
+- **verify:** the chain walk strides the arm64e family — the dyld
+  chain-walk simulation accepts pointer format 1 (8-byte strides,
+  unauth rebase targets translated the way dyld reads them and refused
+  below the image base, auth rebase offsets base-relative, bind
+  ordinals bound-checked on both shapes), the `__chain_starts` mirror
+  gate and the pre-pass slot counter accept the format, and the walk
+  names its contract (format, stride, pages) on a tracing span — inert
+  until a subscriber installs, the house convention. The Pass-3
+  producer encoding and the driver surface are the rung's next slice;
+  the pair gate stays 64_OFFSET-scoped this slice.
+- **verify:** the arm64e walk gets its consumer example —
+  `arm64e_walk` builds a format-1 executable through the builder knob,
+  decodes both chain words through the codec (PAC triple and all) and
+  strict-verifies the image; `PGR_TRACING=1` watches the walk's
+  contract spans.
 
 ### Bug Fixes
 
-- **core:** the resolve-reuse fallback names its refusal cause — the
-  Pass-2 reuse path used to flatten both refusal shapes through
-  `.ok()`, so a `ReuseFallback` shape move and an `install_reused`
-  invariant refusal were indistinguishable at the call site. Both now
-  ride a tracing event (`plan` refusals name the fallback reason, the
-  install refusal names the error); the fallback behavior itself is
-  unchanged (the equality contract in `tests/m9_resolve_reuse.rs`
-  holds as before).
+- **emit:** the writer thread names its panic payload — the 4-writer
+  pool's `join()` used to flatten every panic into a generic "writer
+  thread panicked" io error, dropping the cause; the payload is now
+  downcast (`&str`/`String`) and carried in the message, the same
+  fix-not-verdict convention the resident stand-down and the tbd
+  refusals got.
 
-### Refactor
+### Tests
 
-- the chained-fixups floor table moves beside the `PLATFORM_*`
-  constants it reads (`pgr_format::consts::chained_fixups_floor`, the
-  canonical copy; `pgr_core::layout::chained_fixups_min_minos`
-  delegates and keeps its documented path) — the verifier's floor gate
-  joins the layout and `FixupEncoding` as the table's third reader with
-  no new dependency edge.
-- the dead public seams go: `Resolution::reference_sites` (zero callers
-  anywhere in the workspace) and `pgr_emit::VERSION` (a "tooling smoke
-  test" re-export nothing smoked).
+- **verify:** the arm64e read side gates its shapes — `tests/
+  m10_arm64e.rs` pins the strict-clean auth walk, the unauth VM-address
+  translation, the format-layer word decode, the below-floor refusal
+  (the `fixups_floor` gate fires on arm64e too), the mutated ordinal
+  and past-page-end stride refusals, and the `__chain_starts` mirror
+  both agreeing and disagreeing with the payload.
 
 ### Performance
 
-- **verify:** the crate's first bench — `verify_platform_floor/verify`
-  over below-floor and at-floor chained-fixup executables born through
-  the builder's platform knob, pinning the strict verify pass on both
-  shapes (the gate itself is a floor compare; the bench exists so
-  rotation catches a regression in either shape).
+- **verify:** bench the arm64e strict pass — `verify_arm64e/verify/
+  <arm64e_auth|offset64_control>` holds the strict pass on an
+  auth-chained executable next to a same-shape 64_OFFSET control (no
+  numbers recorded yet; the next gate run fills
+  docs/BENCHMARKS.md's rung-4 section).
 
 ### Documentation
 
-- the surface records rung 3: the README status paragraph and the env
-  list (`PGR_TRACING`), the TDD design addendum for the M10 rungs
-  (`-r`, the platform plumbing, the encoding seam and its three
-  readers), the benchmarks page's rung-3 bench section, the COMPAT
-  `-ObjC` row (now refused with the roadmap hint, matching the README's
-  "rejected with a clear message" claim), and the rustdoc drift (the
-  stale "D7 stays open" note, the false `payload_off` claim, the
-  macOS-only trigger line, the per-process socket-path fiction in the
-  `-resident_socket` docs). The git-cliff template's glued-heading bug
-  is fixed in `cliff.toml` (the version heading and each bullet now end
-  their lines), and this file's malformed regenerated block — five
-  pre-rewrite hashes and a glued `0.10.0###Documentation` heading — is
-  gone.
+- the README's version badge and status note catch up to v0.11.0 (the
+  release had bumped Cargo.toml only), and the surface records rung 4
+  slice 1: the README status paragraph, the TDD §15.4 design record,
+  the benchmarks page's rung-4 bench section, and the COMPAT arm64e
+  read-side row. The `[Unreleased]` block is rewritten to carry only
+  unreleased work — it had duplicated the v0.11.0 entries verbatim
+  since the release.
 
 ## [0.10.0] - 2026-11-09
 

@@ -1017,6 +1017,60 @@ loop (query → link the at-floor row → strict-verify), and the
 verifier's first bench (`verify_platform_floor`) pins the strict pass
 on below-floor and at-floor shapes.
 
+### 15.4 Rung 4, slice 1 — the arm64e read side
+
+The M10 row's first unshipped target is arm64e: authenticated rebase/bind
+words under `DYLD_CHAINED_PTR_ARM64E` (pointer format 1). Before this
+slice the read side refused the format outright (`pointer format 1
+unsupported`), so no tool in the tree could inspect an arm64e image —
+the same shape rung 3 slice 1 faced with the encoding decision. The
+slice names the word family in the format layer and teaches the read
+side to walk it; the Pass-3 producer encoding and the driver surface
+are the rung's next slice.
+
+1. **The codec** (`pgr_format::fixups::ChainWordArm64e`): the family
+   discriminates on two top bits — `bind` (bit 62) and `auth` (bit 63) —
+   rebase (00), auth rebase (01), bind (10), auth bind (11). The bind
+   bit is *not* the 64 family's bit 63: reading a format-1 word with
+   `ChainWord64` misclassifies every word. Unauth rebases carry a
+   43-bit target plus a high-8 byte (a VM address under format 1; dyld
+   composes the image offset as `(high8 << 56) | (target − preferred
+   load address)`), auth rebases a 32-bit runtime offset (VM offset
+   from the image base), binds a 16-bit ordinal and a signed 19-bit
+   inline addend (±256 KiB — dyld's own write-side embeddable limit,
+   `bindMaxEmbeddableAddend`), auth words a diversity/addrDiv/key PAC
+   triple. `chain_stride(pointer_format)` names the stride the `next`
+   field counts — 8 bytes for arm64e, 4 for the 64 family — and the
+   encoder set mirrors the 64 family's (`encode_arm64e_*`, range
+   checked, typed refusals). The word's `zero` region is deliberately
+   not gated: dyld's legacy 27-bit-addend encoding overlaps it, so a
+   zero-bit refusal would false-positive on words dyld accepts.
+2. **The fixture builder** (`pgr_fixtures::PointerFormatKind`): the
+   `set_pointer_format` knob emits the format-1 payload — unauth
+   `SlotKind::Rebase` targets are synthesized as VM addresses
+   (`target + delta`), `SlotKind::AuthRebase`/`AuthBind` carry the PAC
+   fields, strides count 8-byte units, and the auth shapes refuse under
+   the 64_OFFSET format (unauth rebases and plain binds stay legal
+   arm64e words, so nothing else refuses).
+3. **The verifier**: the dyld chain-walk simulation accepts format 1 —
+   strides advance 8-byte units, unauth rebase targets translate the
+   way dyld reads them and refuse below the image base, auth rebase
+   offsets are base-relative, bind ordinals bound-check on both bind
+   shapes, the `__chain_starts` mirror gate accepts the format, and the
+   pre-pass slot counter strides the same way. The walk names its
+   contract (format, stride, pages) on the tracing seam — inert until a
+   subscriber installs, the house convention. The pair gate stays
+   64_OFFSET-scoped this slice. miette help-text rides the rung's next
+   slice deliberately: this slice adds no user-facing refusal — every
+   new refusal is a verifier/library message a consumer handles
+   programmatically, and the below-floor advisory already renders
+   miette on the driver surface.
+
+Supporting pieces: the `arm64e` strict-pass bench (auth shapes plus a
+64_OFFSET control), the `arm64e_walk` consumer example (`PGR_TRACING=1`
+watches the spans), and the read-side gate matrix in
+`tests/m10_arm64e.rs`.
+
 ---
 
 *End of design document. Next step: M0 — build the verifier before the linker.*
