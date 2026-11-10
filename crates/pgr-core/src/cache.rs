@@ -320,6 +320,7 @@ impl From<FrozenDylib> for Dylib {
             exports: f.exports,
             weak: false,
             reexport: false,
+            lazy: false,
         }
     }
 }
@@ -827,6 +828,7 @@ mod tests {
             exports: vec![b"_printf".to_vec(), b"_strlen".to_vec()],
             weak: false,
             reexport: false,
+            lazy: false,
         };
         let frozen = FrozenDylib::from(&d);
         let enc = encode_frozen_dylib(&frozen);
@@ -886,6 +888,7 @@ mod m7_versioned {
             exports: vec![b"_f".to_vec()],
             weak: false,
             reexport: false,
+            lazy: false,
         })
     }
 
