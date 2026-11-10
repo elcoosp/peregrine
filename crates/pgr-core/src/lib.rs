@@ -43,7 +43,9 @@ pub mod ids;
 pub mod interner;
 pub mod layout;
 pub mod link;
+pub mod map;
 pub mod object;
+pub mod order;
 pub mod platform;
 pub mod pool;
 pub mod propagate;
@@ -57,7 +59,9 @@ pub mod trie;
 
 pub use cache::PoiCache;
 pub use dyld_info::DyldInfoPlan;
-pub use fixups::{FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page, pack_page_strided};
+pub use fixups::{
+    FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page, pack_page_strided,
+};
 pub use ids::{FileId, StringId};
 pub use interner::Interner;
 pub use layout::{
