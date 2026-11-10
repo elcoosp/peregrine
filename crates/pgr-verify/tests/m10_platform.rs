@@ -181,10 +181,17 @@ fn a_zero_deployment_target_still_warns() {
 }
 
 /// The non-strict surface stays non-strict: warnings alone do not fail
-/// `is_ok` when `strict_warnings` is off (the M0 policy, unchanged).
+/// `is_ok` when `strict_warnings` is off (the M0 policy, unchanged). The
+/// vehicle carries no fixup slots — a chained-fixups image below the
+/// floor is a *named error* since rung 3 (the floor gate), and this gate
+/// pins the advisory policy, not the floor.
 #[test]
 fn warnings_stay_advisory_when_not_strict() {
-    let img = exec_builder().build().unwrap();
+    let mut b = ImageBuilder::executable("platform-advisory");
+    b.add_segment(text_segment(96));
+    b.add_segment(data_const_segment());
+    b.set_entry(0x40);
+    let img = b.build().unwrap();
     let bytes = repatch_build_version(&img.bytes, 1, 0, 0x000E_0000);
     let relaxed = Options {
         strict_warnings: false,
@@ -194,6 +201,15 @@ fn warnings_stay_advisory_when_not_strict() {
     assert!(
         report.is_ok(&relaxed),
         "warnings are advisory: {:#?}",
+        report.issues
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.severity == Severity::Warning
+                && i.message.contains("minimum OS version is 0")),
+        "the advisory warning rides along: {:#?}",
         report.issues
     );
 }
