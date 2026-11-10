@@ -16,7 +16,7 @@ use pgr_format::consts::{
     DYLD_CHAINED_IMPORT, DYLD_CHAINED_PTR_ARM64E, LC_DYLD_CHAINED_FIXUPS, PLATFORM_MACOS,
     S_ATTR_PURE_INSTRUCTIONS, S_REGULAR, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
 };
-use pgr_format::fixups::{parse_header, parse_imports, parse_starts_in_image, ChainWordArm64e};
+use pgr_format::fixups::{ChainWordArm64e, parse_header, parse_imports, parse_starts_in_image};
 use pgr_format::{LinkeditDataCommand, LoadCommandIter, LoadCommandKind, MachHeader64};
 
 fn text_segment(bytes_len: usize) -> SegmentSpec {
@@ -74,13 +74,8 @@ fn auth_bind_only() -> pgr_fixtures::Image {
 fn fixup_payload(image: &pgr_fixtures::Image) -> Vec<u8> {
     let bytes = &image.bytes;
     let header = MachHeader64::parse(bytes).expect("the fixture header parses");
-    let mut it = LoadCommandIter::new(
-        bytes,
-        MachHeader64::SIZE,
-        header.ncmds,
-        header.sizeofcmds,
-    )
-    .expect("the load commands parse");
+    let mut it = LoadCommandIter::new(bytes, MachHeader64::SIZE, header.ncmds, header.sizeofcmds)
+        .expect("the load commands parse");
     while let Some(cmd) = it.next_command().expect("the command walk holds") {
         if cmd.kind == LoadCommandKind::LinkeditData(LC_DYLD_CHAINED_FIXUPS) {
             let lc = LinkeditDataCommand::parse(cmd.bytes).expect("the payload command parses");
@@ -95,12 +90,19 @@ fn fixup_payload(image: &pgr_fixtures::Image) -> Vec<u8> {
 fn an_auth_bind_only_image_builds_and_registers_its_import() {
     let img = auth_bind_only();
     // The builder's recorded import table carries the auth bind.
-    assert_eq!(img.map.imports.len(), 1, "the auth bind registers its import");
+    assert_eq!(
+        img.map.imports.len(),
+        1,
+        "the auth bind registers its import"
+    );
     assert_eq!(
         img.map.imports[0].lib_ordinal, 1,
         "the bind rides its dylib ordinal"
     );
-    assert!(!img.map.imports[0].weak_import, "a plain undefined binds strong");
+    assert!(
+        !img.map.imports[0].weak_import,
+        "a plain undefined binds strong"
+    );
     assert_eq!(
         img.map.imports[0].addend, 0,
         "auth binds carry no table addend (the word has no addend field)"
@@ -115,7 +117,10 @@ fn an_auth_bind_only_image_builds_and_registers_its_import() {
     );
     let imports = parse_imports(&payload, &hdr).expect("the import table parses");
     assert_eq!(imports.len(), 1, "one import entry");
-    assert_eq!(imports[0].lib_ordinal, 1, "the ordinal lands in the payload");
+    assert_eq!(
+        imports[0].lib_ordinal, 1,
+        "the ordinal lands in the payload"
+    );
 
     // The segment record names the arm64e family.
     let starts = parse_starts_in_image(&payload, hdr.starts_offset as usize)
@@ -142,7 +147,11 @@ fn an_auth_bind_only_image_builds_and_registers_its_import() {
     let word = ChainWordArm64e::new(raw);
     assert!(word.is_bind() && word.is_auth(), "the slot is an auth bind");
     assert_eq!(word.bind_ordinal(), 0, "first-use ordinal 0");
-    assert_eq!(word.auth_diversity(), 0x4321, "the PAC triple rides the word");
+    assert_eq!(
+        word.auth_diversity(),
+        0x4321,
+        "the PAC triple rides the word"
+    );
 }
 
 #[test]
@@ -183,7 +192,10 @@ fn an_auth_rebase_plus_auth_bind_image_keeps_both_shapes() {
         let raw = u64::from_le_bytes(img.bytes[at..at + 8].try_into().unwrap());
         let word = ChainWordArm64e::new(raw);
         match i {
-            0 => assert!(!word.is_bind() && word.is_auth(), "slot 0 is the auth rebase"),
+            0 => assert!(
+                !word.is_bind() && word.is_auth(),
+                "slot 0 is the auth rebase"
+            ),
             1 => assert!(word.is_bind() && word.is_auth(), "slot 1 is the auth bind"),
             other => panic!("unexpected slot {other}"),
         }
@@ -210,8 +222,15 @@ fn a_plain_bind_image_is_unchanged() {
     b.set_entry(0x40);
     b.set_build_version(PLATFORM_MACOS, 0x000C_0000, 0x000E_0400);
     let img = b.build().expect("the plain-bind fixture builds");
-    assert_eq!(img.map.imports.len(), 1, "the plain bind registers its import");
-    assert_eq!(img.map.imports[0].addend, 0, "Plain keeps the addend inline");
+    assert_eq!(
+        img.map.imports.len(),
+        1,
+        "the plain bind registers its import"
+    );
+    assert_eq!(
+        img.map.imports[0].addend, 0,
+        "Plain keeps the addend inline"
+    );
     let payload = fixup_payload(&img);
     let hdr = parse_header(&payload).expect("the payload header parses");
     let imports = parse_imports(&payload, &hdr).expect("the import table parses");
