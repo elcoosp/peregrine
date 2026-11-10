@@ -26,7 +26,8 @@ pub mod writer;
 pub use emit::build_image;
 pub use incremental::{
     FallbackReason, Integrity, LinkRecord, PatchDecision, PatchError, PatchOutcome, PatchPlan,
-    apply_patch, check_output, plan_patch,
+    RecordReadError, RecordSummary, apply_patch, check_output, plan_patch, read_record,
+    read_summary,
 };
 pub use object::{ObjectRelocRefusal, build_object_image};
 pub use signature::{build_superblob, derive_uuid, page_hashes};
