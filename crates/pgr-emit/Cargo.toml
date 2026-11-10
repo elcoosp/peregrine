@@ -24,6 +24,10 @@ miette = { workspace = true }
 [dev-dependencies]
 pgr-fixtures = { workspace = true }
 criterion = { workspace = true }
+# The M13 record-summary example installs a subscriber under
+# PGR_TRACING=1 so the read-refusal spans are watchable (the workspace
+# convention — the crate's first consumer example).
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "emit"
@@ -35,6 +39,13 @@ harness = false
 
 [[bench]]
 name = "object"
+harness = false
+
+# The M13 record-inspector bench: the read surface (frame + decode,
+# summary render) beside the write side it mirrors, over one real
+# recorded link.
+[[bench]]
+name = "record_summary"
 harness = false
 
 [lints]
