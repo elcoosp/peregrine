@@ -33,9 +33,6 @@ pub use signature::{build_superblob, derive_uuid, page_hashes};
 pub use tile::{build_image_fused, build_image_fused_into};
 pub use writer::write_image;
 
-/// Crate version, re-exported for tooling smoke tests.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// A Pass 4/5 failure.
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
