@@ -1,10 +1,10 @@
 //! The verifier's arm64e bench (M10 rung 4, slice 1): `verify()` over
 //! three executables — two born in the `DYLD_CHAINED_PTR_ARM64E` family
 //! through the builder's pointer-format knob (an auth-rebase chain and an
-//! auth-bind chain) and one 64_OFFSET control — so rotation pins the
+//! auth-bind chain) and one `64_OFFSET` control — so rotation pins the
 //! strict pass on the new word family and keeps an honest same-shape
 //! baseline next to it. Slice 4 adds the pair-gate group: the M3 bind
-//! replay over an arm64e pair and a 64_OFFSET control pair, so the
+//! replay over an arm64e pair and a `64_OFFSET` control pair, so the
 //! family-blind walk keeps an honest same-shape baseline too. No numbers
 //! are claimed in docs/BENCHMARKS.md yet (the bench lands with the slice;
 //! the next gate run fills the section the way the rung-3 floor bench was
@@ -12,8 +12,7 @@
 
 use criterion::{BenchmarkId, Criterion};
 use pgr_fixtures::{
-    Image, ImageBuilder, PointerFormatKind, SectionSpec, SegmentSpec, SlotKind, SymbolSpec,
-    filler,
+    Image, ImageBuilder, PointerFormatKind, SectionSpec, SegmentSpec, SlotKind, SymbolSpec, filler,
 };
 use pgr_format::consts::{
     PLATFORM_MACOS, S_ATTR_PURE_INSTRUCTIONS, S_REGULAR, VM_PROT_EXECUTE, VM_PROT_READ,
@@ -92,9 +91,13 @@ fn bench_arm64e(c: &mut Criterion) {
     let mut group = c.benchmark_group("verify_arm64e");
     let auth = chained_exec(PointerFormatKind::Arm64e);
     let control = chained_exec(PointerFormatKind::Offset64);
-    group.bench_with_input(BenchmarkId::new("verify", "arm64e_auth"), &auth, |b, bytes| {
-        b.iter(|| verify(bytes, &strict()));
-    });
+    group.bench_with_input(
+        BenchmarkId::new("verify", "arm64e_auth"),
+        &auth,
+        |b, bytes| {
+            b.iter(|| verify(bytes, &strict()));
+        },
+    );
     group.bench_with_input(
         BenchmarkId::new("verify", "offset64_control"),
         &control,
