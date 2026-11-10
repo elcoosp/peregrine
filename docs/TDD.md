@@ -1211,4 +1211,4 @@ bounds check is the gate, the word was never read.
 
 ---
 
-*End of design document. M0 built the verifier before the linker, exactly as planned; the frontier past M10 lives in README "Status" and docs/BENCHMARKS.md (M11 shipped the `-order_file` rank seam and the `-map` report; M12 makes the verifier's checks a selectable surface).*
+*End of design document. M0 built the verifier before the linker, exactly as planned; the frontier past M10 lives in README "Status" and docs/BENCHMARKS.md (M11 shipped the `-order_file` rank seam and the `-map` report; M12 makes the verifier's checks a selectable surface; M13 makes the artifacts a build system gates on readable surfaces — the verifier report's JSON interchange shape and baseline gate (`pgr_verify::report_json`, `pgr_verify::baseline`, the `IssueIdentity` policy seam, `pgr-verify --baseline`/`--fail-on`) and the link record's inspector (`pgr_emit::incremental::read_record`/`read_summary` with typed `RecordReadError` frame refusals, `pgr --print-record`)).*
