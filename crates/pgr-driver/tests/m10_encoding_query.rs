@@ -27,7 +27,9 @@ fn below_the_floor_the_query_carries_the_advisory() {
     let report = fixup_encoding_report("ios", "14.0", "16.0").expect("ios below the floor");
     assert_eq!(report.encoding, FixupEncoding::ClassicOpcodes);
     assert_eq!(report.floor_text(), "15.0.0");
-    let advisory = report.advisory.expect("below-floor rows carry the advisory");
+    let advisory = report
+        .advisory
+        .expect("below-floor rows carry the advisory");
     let rendered = advisory.to_string();
     assert!(
         rendered.contains("14.0.0") && rendered.contains("15.0.0"),
@@ -62,8 +64,8 @@ fn every_linked_platform_answers_at_its_floor() {
 
 #[test]
 fn an_unknown_platform_names_the_linked_surface() {
-    let err =
-        fixup_encoding_report("watchsimulator", "1.0", "1.0").expect_err("unknown platforms refuse");
+    let err = fixup_encoding_report("watchsimulator", "1.0", "1.0")
+        .expect_err("unknown platforms refuse");
     let rendered = err.to_string();
     assert!(
         rendered.contains("not a linked platform"),
@@ -141,7 +143,10 @@ fn the_cli_refusals_match_the_flag_surface() {
 
     let (status, _, stderr) = run_query(&["--print-fixup-encoding", "macos", "14.0", "12.0"]);
     assert_eq!(status.code(), Some(2));
-    assert!(stderr.contains("older than the deployment target"), "{stderr}");
+    assert!(
+        stderr.contains("older than the deployment target"),
+        "{stderr}"
+    );
 
     let (status, _, stderr) = run_query(&["--print-fixup-encoding", "macos", "14.0"]);
     assert_eq!(status.code(), Some(2));
