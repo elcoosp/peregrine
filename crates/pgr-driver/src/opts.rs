@@ -14,8 +14,10 @@ use pgr_format::consts::{
 
 /// Maps a `-platform_version` platform name onto its `LC_BUILD_VERSION`
 /// constant (M10 rung 2). The five names are the platforms the pipeline
-/// links; anything else refuses with the surface in the hint.
-fn platform_const(name: &str) -> Option<u32> {
+/// links; anything else refuses with the surface in the hint. The
+/// encoding query (`fixup_encoding_report`, rung 3 slice 2) reads the
+/// same table — one mapping, two surfaces, no re-derivation drift.
+pub(crate) fn platform_const(name: &str) -> Option<u32> {
     match name {
         "macos" => Some(PLATFORM_MACOS),
         "ios" => Some(PLATFORM_IOS),
@@ -86,7 +88,9 @@ pub struct Options {
     /// contract: an unreachable daemon falls back to the one-shot link.
     pub resident: bool,
     /// M8 `-resident_socket <path>`: the daemon socket (default:
-    /// `$PGR_DAEMON_SOCK`, else `{tmpdir}/pgr-<uid>.sock`).
+    /// `$PGR_DAEMON_SOCK`, else `{tmpdir}/pgr-<uid|pid>.sock` — the
+    /// `SUDO_UID` when the environment carries it, else the process id;
+    /// `pgr_daemon::default_socket` is the derivation).
     pub resident_socket: Option<String>,
     /// M9 `-incremental` (architecture doc §7.3): the in-place incremental
     /// relink. Records the link state next to the output
@@ -224,7 +228,7 @@ const NOOP_FLAGS: [&str; 8] = [
 ];
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
-const LATER_FLAGS: [(&str, &str); 9] = [
+const LATER_FLAGS: [(&str, &str); 10] = [
     ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
     ("-weak_framework", "framework bundles are a later milestone"),
     ("-lazy_framework", "framework bundles are a later milestone"),
@@ -242,6 +246,10 @@ const LATER_FLAGS: [(&str, &str); 9] = [
     (
         "-sub_umbrella",
         "umbrella re-exports beyond -reexport_library are a later milestone",
+    ),
+    (
+        "-ObjC",
+        "ObjC/Swift semantics beyond section pass-through are a later milestone",
     ),
 ];
 
@@ -785,7 +793,7 @@ fn apply_flag(
         _ => {
             return Err(OptsError::Unsupported {
                 flag: arg.into(),
-                hint: "unknown flag (see --help for the M1 surface)".into(),
+                hint: "unknown flag (see --help for the linked surface)".into(),
             });
         }
     }

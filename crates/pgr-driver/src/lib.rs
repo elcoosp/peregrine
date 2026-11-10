@@ -1506,7 +1506,15 @@ pub fn usage() -> String {
     s.push_str("                               daemon (pgrd); falls back to the\n");
     s.push_str("                               one-shot link when unreachable\n");
     s.push_str("  -resident_socket <path>      daemon socket (default $PGR_DAEMON_SOCK,\n");
-    s.push_str("                               else {tmpdir}/pgr-<uid>.sock)\n");
+    s.push_str("                               else {tmpdir}/pgr-<uid|pid>.sock — SUDO_UID\n");
+    s.push_str("                               when present, else the process id)\n");
+    s.push_str("  -print-fixup-encoding <p> <min> <sdk>\n");
+    s.push_str("                               name the fixup encoding a\n");
+    s.push_str("                               -platform_version target plans\n");
+    s.push_str("                               (chained fixups or the classic\n");
+    s.push_str("                               opcode streams) before any link\n");
+    s.push_str("                               runs (M10); a below-floor answer\n");
+    s.push_str("                               renders its advisory on stderr\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
@@ -1514,6 +1522,142 @@ pub fn usage() -> String {
     s.push_str("-framework/-F, -sectcreate, __cstring merging. -order_file stays\n");
     s.push_str("roadmap-gated.\n");
     s
+}
+
+/// The fixup-encoding answer a build system reads before the link runs
+/// (M10 rung 3, slice 2 — roadmap §10.4 row M10: the encoding decision
+/// is a typed value a build system reads before Pass 3 runs; slice 1
+/// named it in `pgr_core::platform`, slice 2 puts it on the driver
+/// surface).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodingReport {
+    /// The encoding Pass 3 plans with for this target.
+    pub encoding: pgr_core::platform::FixupEncoding,
+    /// The platform's chained-fixups floor (the packed `X.Y.Z` word).
+    pub floor: u32,
+    /// The parsed deployment target (the packed `X.Y.Z` word).
+    pub minos: u32,
+    /// The below-floor advisory (the fix, not just the verdict);
+    /// `None` at or above the floor.
+    pub advisory: Option<BelowFloorAdvisory>,
+}
+
+impl EncodingReport {
+    /// The floor as the `-platform_version` grammar displays it.
+    #[must_use]
+    pub fn floor_text(&self) -> String {
+        fmt_version_word(self.floor)
+    }
+
+    /// The deployment target as the flag grammar displays it.
+    #[must_use]
+    pub fn minos_text(&self) -> String {
+        fmt_version_word(self.minos)
+    }
+}
+
+/// The below-floor advisory, rendered as miette help text (the fix, not
+/// just the verdict — the same convention the option refusals and the
+/// `platform_floor` example use).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
+#[error("{platform} {minos} links the classic opcode streams: chained fixups start at {floor}")]
+#[diagnostic(help(
+    "raise the deployment target to {floor} or plan for the classic `LC_DYLD_INFO_ONLY` \
+     streams — the encoding flips, the fixups do not"
+))]
+pub struct BelowFloorAdvisory {
+    /// The `-platform_version` platform name as written.
+    pub platform: String,
+    /// The deployment target, displayed (`X.Y.Z`).
+    pub minos: String,
+    /// The platform's chained-fixups floor, displayed (`X.Y.Z`).
+    pub floor: String,
+}
+
+/// The packed `X.Y.Z` word as the `-platform_version` grammar displays
+/// it (the same rendering the verifier's build-version messages use).
+fn fmt_version_word(v: u32) -> String {
+    format!("{}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff)
+}
+
+/// Answers the fixup-encoding question for a `-platform_version`
+/// (platform, deployment target, SDK) triple *before* any link runs —
+/// the build-system seam the roadmap scopes for rung 3. The decision
+/// comes from [`pgr_core::platform::FixupEncoding`], which reads the
+/// same per-platform floor table the layout encodes (one table, three
+/// readers — never a re-derivation).
+///
+/// The platform is the `-platform_version` spelling (`macos`, `ios`,
+/// `tvos`, `watchos`, `visionos`); the versions follow the flag's
+/// `X[.Y[.Z]]` grammar, and the same parse-time refusals apply: an
+/// unknown platform names the five linked platforms, and an SDK older
+/// than the deployment target refuses (the SDK ships the deployment
+/// target's interfaces). The query rides the tracing seam (inert until
+/// a subscriber installs), and a below-floor answer carries the miette
+/// advisory the `pgr` binary renders on stderr.
+///
+/// # Errors
+/// [`opts::OptsError::Unsupported`] on an unknown platform name,
+/// [`opts::OptsError::InvalidValue`] on an unparseable version,
+/// [`opts::OptsError::VersionOrder`] when the SDK is older than the
+/// deployment target.
+pub fn fixup_encoding_report(
+    platform: &str,
+    minos: &str,
+    sdk: &str,
+) -> Result<EncodingReport, opts::OptsError> {
+    let _query_span = tracing::info_span!(
+        "encoding_query",
+        platform = %platform,
+        minos = %minos,
+        sdk = %sdk,
+    )
+    .entered();
+    let constant = opts::platform_const(platform).ok_or_else(|| opts::OptsError::Unsupported {
+        flag: "-platform_version".into(),
+        hint: format!(
+            "platform {platform:?} is not a linked platform (the surface links \
+             macos, ios, tvos, watchos and visionos)"
+        ),
+    })?;
+    let minos_word = opts::parse_version(minos).ok_or_else(|| opts::OptsError::InvalidValue {
+        flag: "-platform_version".into(),
+        value: minos.into(),
+    })?;
+    let sdk_word = opts::parse_version(sdk).ok_or_else(|| opts::OptsError::InvalidValue {
+        flag: "-platform_version".into(),
+        value: sdk.into(),
+    })?;
+    if sdk_word < minos_word {
+        return Err(opts::OptsError::VersionOrder {
+            minos: minos.into(),
+            sdk: sdk.into(),
+        });
+    }
+    let encoding = pgr_core::platform::FixupEncoding::for_target(constant, minos_word);
+    let floor = pgr_core::platform::FixupEncoding::floor_for(constant);
+    let advisory = if encoding == pgr_core::platform::FixupEncoding::ClassicOpcodes {
+        Some(BelowFloorAdvisory {
+            platform: platform.to_string(),
+            minos: fmt_version_word(minos_word),
+            floor: fmt_version_word(floor),
+        })
+    } else {
+        None
+    };
+    tracing::debug!(
+        platform = %platform,
+        minos = %minos_word,
+        floor,
+        ?encoding,
+        "the encoding query answered before the link"
+    );
+    Ok(EncodingReport {
+        encoding,
+        floor,
+        minos: minos_word,
+        advisory,
+    })
 }
 
 #[cfg(test)]
