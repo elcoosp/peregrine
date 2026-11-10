@@ -1,17 +1,16 @@
 //! M10 rung 4, slice 1 — the verifier's arm64e read side (roadmap §10.4
 //! row M10): `DYLD_CHAINED_PTR_ARM64E` chains walk under the same closure
-//! contract as the 64_OFFSET family — 8-byte strides, VM-address unauth
+//! contract as the `64_OFFSET` family — 8-byte strides, VM-address unauth
 //! rebase targets, 32-bit auth runtime offsets — and every mutation the
 //! walker refuses names the slot it refuses. Before the slice the read
 //! side refused the format outright (`pointer format 1 unsupported`), so
 //! an arm64e image could not pass `--strict` at all.
 
 use pgr_fixtures::{
-    Image, ImageBuilder, PointerFormatKind, SectionSpec, SegmentSpec, SlotKind, SymbolSpec,
-    filler,
+    Image, ImageBuilder, PointerFormatKind, SectionSpec, SegmentSpec, SlotKind, SymbolSpec, filler,
 };
 use pgr_format::consts::{
-    DYLD_CHAINED_PTR_ARM64E, PLATFORM_IOS, PLATFORM_MACOS, S_REGULAR, S_ATTR_PURE_INSTRUCTIONS,
+    DYLD_CHAINED_PTR_ARM64E, PLATFORM_IOS, PLATFORM_MACOS, S_ATTR_PURE_INSTRUCTIONS, S_REGULAR,
     VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::fixups::ChainWordArm64e;
@@ -128,23 +127,30 @@ fn arm64e_words_decode_back_through_the_format_layer() {
                 .expect("the slot is file-backed"),
         );
         let word = ChainWordArm64e::new(raw);
+        // Both slots share a 16 KiB page: one chain, so the first word
+        // strides to the second and the second terminates (the walker's
+        // `next` is 8-byte strides, the got slots sit 8 bytes apart).
         match i {
             0 => {
-                assert!(!word.is_bind() && word.is_auth(), "slot 0 is the auth rebase");
+                assert!(
+                    !word.is_bind() && word.is_auth(),
+                    "slot 0 is the auth rebase"
+                );
                 assert_eq!(word.auth_rebase_offset(), 0x40);
                 assert_eq!(word.auth_diversity(), 0x1234);
                 assert!(word.auth_addr_div());
                 assert_eq!(word.auth_key(), 2);
+                assert_eq!(word.next(), 1, "the chain links to slot 1");
             }
             1 => {
                 assert!(word.is_bind() && word.is_auth(), "slot 1 is the auth bind");
                 assert_eq!(word.bind_ordinal(), 0, "first import");
                 assert_eq!(word.auth_diversity(), 0x4321);
                 assert_eq!(word.auth_key(), 0);
+                assert_eq!(word.next(), 0, "the chain terminates");
             }
             other => panic!("unexpected slot {other}"),
         }
-        assert_eq!(word.next(), 0, "a single chain per page terminates at 0");
     }
 }
 
@@ -243,9 +249,8 @@ fn mutated_arm64e_bind_ordinal_refuses() {
 fn mutated_arm64e_next_leaves_the_page() {
     let img = arm64e_exec();
     let at = (img.map.got_slot_addrs[0] - 0x1_0000_0000) as usize;
-    let word =
-        pgr_format::fixups::encode_arm64e_auth_rebase_word(0x40, 0x1234, true, 2, 0x7ff)
-            .expect("the mutated word encodes");
+    let word = pgr_format::fixups::encode_arm64e_auth_rebase_word(0x40, 0x1234, true, 2, 0x7ff)
+        .expect("the mutated word encodes");
     let mut bytes = img.bytes.clone();
     bytes[at..at + 8].copy_from_slice(&word.to_le_bytes());
     let report = verify(&bytes, &structural_only());
