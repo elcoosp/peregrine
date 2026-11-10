@@ -64,6 +64,7 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | `-source_version <n>` | same (`LC_SOURCE_VERSION`) |
 | `-adhoc` / `-no_adhoc` | same (the ad-hoc signature is on by default) |
 | `-segalign 0x1000\|0x4000` | same |
+| `-pagezero_size <n>` | same (the `__PAGEZERO` vmsize an executable plans with — the constant-delta image base; a non-zero multiple of the 16 KiB arm64 page, the 4 GiB default unchanged; M15) |
 | `-arch arm64` | same (arm64-apple-darwin exclusively) |
 
 ## Accepted no-ops
@@ -91,10 +92,11 @@ tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 
 A linker that silently drops a flag it does not implement is worse than one
 that says so. These are rejected with the roadmap entry in the message:
-`-dylinker`, `-U`, `-pagezero_size`, `-sub_library`, `-sub_umbrella`.
+`-dylinker`, `-U`, `-sub_library`, `-sub_umbrella`.
 (`-order_file` left this list when its rank-based subset shipped at M11,
 alongside `-map`; the weak/lazy dylib family — `-weak_framework`,
-`-lazy_framework`, `-lazy_library` — left it at M14.)
+`-lazy_framework`, `-lazy_library` — left it at M14, and `-pagezero_size`
+left it at M15, the image base becoming a validated `LinkConfig` decision.)
 
 ## Peregrine-specific: the Stage A link cache
 
