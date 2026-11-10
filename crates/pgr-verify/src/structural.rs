@@ -513,16 +513,19 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
         ));
     }
 
-    // __PAGEZERO / __TEXT base contract.
-    if exec {
-        if let Some(pz) = img.segments.first() {
-            if pz.name() == Ok("__PAGEZERO") {
-                if pz.vmaddr != 0 || pz.vmsize != PAGEZERO_SIZE_64 {
+    // __PAGEZERO / __TEXT base contract (M15: the base is the image's
+    // own `__PAGEZERO` vmsize — the invariant is verified, not the 4 GiB
+    // constant every pre-M15 image carried; `-pagezero_size` names a
+    // different base and the default stays bit-identical).
+    let pagezero_vmsize = if exec {
+        match img.segments.first() {
+            Some(pz) if pz.name() == Ok("__PAGEZERO") => {
+                if pz.vmaddr != 0 {
                     report.issues.push(Issue::error(
                         Code::ImageBase,
                         format!(
-                            "__PAGEZERO must cover 4 GiB unmapped (vmaddr {:#x}, vmsize {:#x})",
-                            pz.vmaddr, pz.vmsize
+                            "__PAGEZERO.vmaddr must be 0 (the unmapped prefix), got {:#x}",
+                            pz.vmaddr
                         ),
                         None,
                     ));
@@ -534,15 +537,36 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                         None,
                     ));
                 }
+                if pz.vmsize == 0 || pz.vmsize % PAGE_SIZE_16K != 0 {
+                    report.issues.push(Issue::error(
+                        Code::ImageBase,
+                        format!(
+                            "__PAGEZERO vmsize {:#x} must be a non-zero multiple of the \
+                             16 KiB arm64 page (the constant-delta base moves with it)",
+                            pz.vmsize
+                        ),
+                        None,
+                    ));
+                }
+                pz.vmsize
             }
+            // The canonical-order gate already named the missing
+            // segment; the delta check falls back to the historical
+            // constant so the findings do not cascade.
+            _ => PAGEZERO_SIZE_64,
         }
+    } else {
+        0
+    };
+    if exec {
         if let Some(text) = img.segments.iter().find(|s| s.name() == Ok("__TEXT")) {
-            if text.vmaddr != PAGEZERO_SIZE_64 || text.fileoff != 0 {
+            if text.vmaddr != pagezero_vmsize || text.fileoff != 0 {
                 report.issues.push(Issue::error(
                     Code::ImageBase,
                     format!(
-                        "__TEXT must start at 0x1_0000_0000 with fileoff 0 (vmaddr {:#x}, fileoff {:#x})",
-                        text.vmaddr, text.fileoff
+                        "__TEXT must start at the __PAGEZERO vmsize {:#x} with fileoff 0 \
+                         (vmaddr {:#x}, fileoff {:#x})",
+                        pagezero_vmsize, text.vmaddr, text.fileoff
                     ),
                     None,
                 ));
@@ -581,10 +605,12 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
             ));
         }
         // Delta consistency: vmaddr - fileoff must equal the image delta
-        // (base = 0x1_0000_0000 for exec, 0 otherwise). Objects carry the
-        // blob-relative convention instead (vmaddr 0, fileoff = header
-        // end) — skipped, the object contract checks the sections.
-        let delta = if exec { PAGEZERO_SIZE_64 } else { 0 };
+        // (base = the image's own __PAGEZERO vmsize for exec — M15
+        // generalized from the 4 GiB constant; 0 otherwise). Objects
+        // carry the blob-relative convention instead (vmaddr 0, fileoff
+        // = header end) — skipped, the object contract checks the
+        // sections.
+        let delta = pagezero_vmsize;
         if !object && seg.vmaddr.checked_sub(delta) != Some(seg.fileoff) {
             report.issues.push(Issue::error(
                 Code::SegmentContract,
