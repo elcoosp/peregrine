@@ -1,19 +1,22 @@
 //! Chained-fixup planner benchmark across the two word families (M10
-//! rung 4, slice 2): the same slot corpus planned as
-//! `DYLD_CHAINED_PTR_64_OFFSET` (the M2 default) and
-//! `DYLD_CHAINED_PTR_ARM64E` (the rung-4 producer family). The arm64e
-//! words cost one extra branch per slot in the encoder switch and the
-//! strided packer runs with an 8-byte stride; the corpus mirrors a
-//! mixed rebase/bind GOT-and-data surface at 16 KiB-page scale.
+//! rung 4, slice 2) and the authenticated policy (slice 3): the same
+//! slot corpus planned as `DYLD_CHAINED_PTR_64_OFFSET` (the M2 default),
+//! `DYLD_CHAINED_PTR_ARM64E` (the rung-4 producer family), and the same
+//! family with every slot signed (`FixupAuth` policies — the auth words
+//! cost one extra encoder branch and the auth bind's addend rides the
+//! import entry). The corpus mirrors a mixed rebase/bind GOT-and-data
+//! surface at 16 KiB-page scale.
 //!
 //! Baseline note (docs/BENCHMARKS.md): the numbers are recorded honestly
 //! as a *shape-parity* gate — the sandbox baselines below the rung have
 //! not been re-measured on dedicated hardware; this bench exists so the
-//! next perf pass measures both families against the same corpus.
+//! next perf pass measures both families (and the auth policy) against
+//! the same corpus.
 
 use criterion::{BenchmarkId, Criterion, Throughput};
 use pgr_core::fixups::{
-    FixupKind, FixupPointerFormat, FixupSlot, plan_fixups_with_format,
+    FixupAuth, FixupKind, FixupPointerFormat, FixupSlot, plan_fixups_with_auth,
+    plan_fixups_with_format,
 };
 use pgr_core::interner::Interner;
 
@@ -58,7 +61,8 @@ fn corpus(n: usize) -> (Interner, Vec<FixupSlot>) {
     (interner, slots)
 }
 
-/// Measures both word families over the 10³/10⁴/10⁵ slot corpora.
+/// Measures both word families — and the same family with every slot
+/// signed — over the 10³/10⁴/10⁵ slot corpora.
 fn bench_arm64e(c: &mut Criterion) {
     let mut group = c.benchmark_group("plan_fixups_word_family");
     for n in [1_000usize, 10_000, 100_000] {
@@ -86,6 +90,35 @@ fn bench_arm64e(c: &mut Criterion) {
                 },
             );
         }
+        // The authenticated half (slice 3): the same corpus, every slot
+        // signed (rebase and bind alike — the auth bind's addend moves
+        // to the import entry, so the table build runs its split too).
+        let policies: Vec<FixupAuth> = (0..n)
+            .map(|i| FixupAuth {
+                vaddr: TEXT_VM + (i as u64) * 8,
+                key: (i % 4) as u8,
+                diversity: (i % 0xFFFF) as u16,
+                addr_div: i % 2 == 0,
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::new("arm64e_auth", n),
+            &slots,
+            |b, s: &Vec<FixupSlot>| {
+                b.iter(|| {
+                    plan_fixups_with_auth(
+                        s.clone(),
+                        &[(TEXT_VM, SEG_SIZE, 0x4000)],
+                        IMAGE_BASE,
+                        PAGE,
+                        &interner,
+                        None,
+                        FixupPointerFormat::Arm64e,
+                        &policies,
+                    )
+                });
+            },
+        );
     }
     group.finish();
 }
