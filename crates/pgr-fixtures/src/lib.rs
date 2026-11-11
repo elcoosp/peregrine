@@ -275,6 +275,20 @@ pub struct ImageBuilder {
     /// M15: the `__PAGEZERO` vmsize override (`None` = the 4 GiB
     /// Mach-O arm64 constant). Executables only.
     pagezero: Option<u64>,
+    /// M17: the per-segment protection overrides (`(name, maxprot,
+    /// initprot)`; unnamed segments keep the house table). Written
+    /// during assembly, so the ad-hoc signature is computed over the
+    /// final bytes and strict verification runs with the hash recompute
+    /// on. The values are the knob's — a hand-broken pair is the
+    /// verifier's finding to name.
+    seg_prots: Vec<(String, u32, u32)>,
+    /// M18: the `LC_MAIN.stacksize` override (`None` = the pre-M18 zero
+    /// — dyld's own main-thread default). Executables only; written
+    /// during assembly, so the ad-hoc signature is computed over the
+    /// final bytes and strict verification runs with the hash recompute
+    /// on. The value is the knob's — a misaligned reserve is the
+    /// verifier's finding to name.
+    stack_size: Option<u64>,
 }
 
 impl ImageBuilder {
@@ -296,6 +310,8 @@ impl ImageBuilder {
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
             pagezero: None,
+            seg_prots: Vec::new(),
+            stack_size: None,
         }
     }
 
@@ -316,6 +332,8 @@ impl ImageBuilder {
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
             pagezero: None,
+            seg_prots: Vec::new(),
+            stack_size: None,
         }
     }
 
@@ -383,6 +401,33 @@ impl ImageBuilder {
     /// (the broken-shape gates build it on purpose).
     pub fn set_pagezero(&mut self, vmsize: u64) {
         self.pagezero = Some(vmsize);
+    }
+
+    /// Overrides one segment's `(maxprot, initprot)` pair — the M17
+    /// `-segprot` knob. Unnamed segments keep the house table; an
+    /// override is written during assembly (the `LC_SEGMENT_64` fields
+    /// and the ad-hoc signature ride it), so strict verification runs
+    /// with the hash recompute on.
+    ///
+    /// # Panics
+    /// Never — a hand-broken pair (an init beyond its ceiling, a W+X
+    /// mapping, a protected `__PAGEZERO`) is the verifier's finding to
+    /// name (the broken-shape gates build it on purpose).
+    pub fn set_segment_prot(&mut self, name: &str, maxprot: u32, initprot: u32) {
+        self.seg_prots.push((name.to_string(), maxprot, initprot));
+    }
+
+    /// Sets the executable's `LC_MAIN.stacksize` reserve — the M18
+    /// `-stack_size` knob. The default stays the pre-M18 zero (dyld's
+    /// own main-thread default); an override is written during assembly
+    /// (the load command and the ad-hoc signature ride it), so strict
+    /// verification runs with the hash recompute on.
+    ///
+    /// # Panics
+    /// Never — a misaligned reserve is the verifier's finding to name
+    /// (the broken-shape gates build it on purpose).
+    pub fn set_stack_size(&mut self, bytes: u64) {
+        self.stack_size = Some(bytes);
     }
 
     /// Selects the chain-word pointer format (default: `Offset64`). The
@@ -753,14 +798,29 @@ impl ImageBuilder {
             w64(&mut buf, lc + 32, delta);
             w64(&mut buf, lc + 40, 0);
             w64(&mut buf, lc + 48, 0);
-            w32(&mut buf, lc + 56, VM_PROT_NONE);
-            w32(&mut buf, lc + 60, VM_PROT_NONE);
+            // M17: the protection knob reaches `__PAGEZERO` too — the
+            // hand-broken-shape gates build a protected prefix on
+            // purpose (the verifier's protection half names it).
+            let pz_prot = self
+                .seg_prots
+                .iter()
+                .find(|(n, _, _)| n.as_bytes() == SEG_PAGEZERO)
+                .map_or((VM_PROT_NONE, VM_PROT_NONE), |&(_, max, init)| (max, init));
+            w32(&mut buf, lc + 56, pz_prot.0);
+            w32(&mut buf, lc + 60, pz_prot.1);
             lc += 72;
         }
         for (seg_i, seg) in segments.iter().enumerate() {
             let map_i = seg_i + usize::from(exec);
             let (_, fileoff, vmsize) = &placed[map_i];
-            let (maxprot, initprot) = Self::prot(&seg.name);
+            // M17: the named protection pair rides the segment (the
+            // house table falling out of `None`, the override table
+            // first-match-wins by name).
+            let (maxprot, initprot) = self
+                .seg_prots
+                .iter()
+                .find(|(n, _, _)| n == &seg.name)
+                .map_or_else(|| Self::prot(&seg.name), |&(_, max, init)| (max, init));
             w32(&mut buf, lc, LC_SEGMENT_64);
             w32(&mut buf, lc + 4, (72 + 80 * seg.sections.len()) as u32);
             buf[lc + 8..lc + 24].copy_from_slice(&pad_name(seg.name.as_bytes()));
@@ -834,7 +894,9 @@ impl ImageBuilder {
             w32(&mut buf, lc, LC_MAIN);
             w32(&mut buf, lc + 4, 24);
             w64(&mut buf, lc + 8, self.entryoff);
-            w64(&mut buf, lc + 16, 0);
+            // M18: the reserve rides the configured override (the
+            // default stays the pre-M18 zero).
+            w64(&mut buf, lc + 16, self.stack_size.unwrap_or(0));
             lc += 24;
         } else {
             w32(&mut buf, lc, LC_ID_DYLIB);
