@@ -266,6 +266,18 @@ pub struct LinkConfig {
     /// the relocatable output refuses it too (no segments) — the
     /// layout's re-check backs the driver surface's earlier refusal.
     pub image_base: Option<crate::image_base::ImageBase>,
+    /// M20 — the dylib umbrella region: the `-sub_umbrella` /
+    /// `-sub_library` members an umbrella dylib names beside its
+    /// `LC_ID_DYLIB` (see [`crate::umbrella`]). The default (the empty
+    /// table) keeps every pre-M20 link byte-identical; each member is
+    /// validated at construction
+    /// ([`UmbrellaMember::from_flag`](crate::umbrella::UmbrellaMember::from_flag),
+    /// duplicates refuse on [`Umbrella::push`](crate::umbrella::Umbrella::push)),
+    /// so an [`Umbrella`](crate::umbrella::Umbrella) in hand is always a
+    /// legal region; executables, bundles and the relocatable output
+    /// refuse the knob (the region is a dylib's identity block) — the
+    /// layout's re-check backs the driver surface's earlier refusal.
+    pub umbrella: crate::umbrella::Umbrella,
 }
 
 impl Default for LinkConfig {
@@ -307,6 +319,7 @@ impl Default for LinkConfig {
             seg_prots: crate::segprot::SegProts::default(),
             stack_size: None,
             image_base: None,
+            umbrella: crate::umbrella::Umbrella::new(),
         }
     }
 }
@@ -1088,6 +1101,35 @@ pub fn layout(
                 "-image_base moves a mapped image's preferred load address, but \
                  the relocatable output carries no segments",
                 "drop -image_base or link a dylib/bundle",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M20: the umbrella region is a dylib's identity block — the same
+    // re-check shape as the M19 base above, so no library caller can
+    // plan the shape either: an executable's identity is `LC_MAIN` +
+    // `LC_LOAD_DYLINKER`, a bundle dlopens without an umbrella region,
+    // and the relocatable output carries no identity commands at all.
+    if !cfg.umbrella.is_empty() && cfg.filetype != OutputType::Dylib {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Execute => (
+                "-sub_umbrella/-sub_library name an umbrella dylib's region, \
+                 but this output is an executable",
+                "the region rides LC_ID_DYLIB's identity block: link a dylib \
+                 (-dylib) or drop the flags",
+            ),
+            OutputType::Bundle => (
+                "-sub_umbrella/-sub_library name an umbrella dylib's region, \
+                 but this output is a bundle",
+                "bundles dlopen without an umbrella region: link a dylib \
+                 (-dylib) or drop the flags",
+            ),
+            _ => (
+                "-sub_umbrella/-sub_library name an umbrella dylib's region, but \
+                 the relocatable output carries no identity commands",
+                "drop the flags or link a dylib",
             ),
         };
         return Err(LinkError::Layout {
@@ -3729,6 +3771,9 @@ fn build_header(
         + u32::try_from(hi.dylibs.len()).map_err(|_| LinkError::Internal {
             message: "dylib count exceeds u32".into(),
         })?
+        + u32::try_from(cfg.umbrella.count()).map_err(|_| LinkError::Internal {
+            message: "umbrella member count exceeds u32".into(),
+        })?
         + u32::try_from(hi.rpaths.len()).map_err(|_| LinkError::Internal {
             message: "rpath count exceeds u32".into(),
         })?
@@ -3755,6 +3800,7 @@ fn build_header(
             + 24 // LC_UUID
             + if cfg.adhoc { 16 } else { 0 } // LC_CODE_SIGNATURE
             + hi.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
+            + cfg.umbrella.region_size()
             + hi.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
             + if hi.source_version.is_some() { 16 } else { 0 },
         "sizing formula drift"
@@ -3861,6 +3907,27 @@ fn build_header(
         buf[lc + 24..lc + 24 + name.len()].copy_from_slice(name.as_bytes());
         buf[lc + 24 + name.len()] = 0;
         lc += cmdsize;
+    }
+    // LC_SUB_UMBRELLA / LC_SUB_LIBRARY per umbrella member (M20): the
+    // identity block's region — dyld may load the umbrella when a member
+    // is requested by name. The commands land right after the install
+    // name (the ld64-canonical adjacency, before the load commands) in
+    // flag order, the deterministic order the region's tests pin.
+    if !cfg.umbrella.is_empty() {
+        for member in &cfg.umbrella {
+            let name = member.name().as_bytes();
+            let cmdsize = member.cmd_size();
+            w32(&mut buf, lc, member.kind().opcode());
+            w32(&mut buf, lc + 4, cmdsize as u32);
+            w32(&mut buf, lc + 8, 12); // name lc_str offset
+            buf[lc + 12..lc + 12 + name.len()].copy_from_slice(name);
+            buf[lc + 12 + name.len()] = 0;
+            lc += cmdsize;
+        }
+        tracing::debug!(
+            count = cfg.umbrella.count(),
+            "the umbrella region rides the identity block"
+        );
     }
     // LC_LOAD_DYLIB / LC_LOAD_WEAK_DYLIB / LC_REEXPORT_DYLIB per input
     // dylib, in ordinal order — the two-level namespace index base
@@ -4015,6 +4082,7 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc) -> usize 
             0
         }
         + cfg.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
+        + cfg.umbrella.region_size()
         + cfg.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
         + usize::from(cfg.source_version.is_some()) * 16 // LC_SOURCE_VERSION
         + usize::from(is_exec) * 24 // LC_MAIN
