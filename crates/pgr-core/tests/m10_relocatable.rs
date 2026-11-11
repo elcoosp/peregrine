@@ -101,7 +101,10 @@ fn relocatable_output_type_maps_to_mh_object() {
         OutputType::Relocatable.filetype(),
         pgr_format::consts::MH_OBJECT
     );
-    assert_eq!(OutputType::Relocatable.image_base(), 0);
+    assert_eq!(
+        pgr_core::pagezero::PageZero::default().base_for(OutputType::Relocatable, None),
+        0,
+    );
     assert!(!OutputType::Relocatable.is_executable());
 }
 
