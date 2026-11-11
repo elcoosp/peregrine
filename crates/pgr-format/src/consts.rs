@@ -102,6 +102,13 @@ pub const LC_LOAD_DYLIB: u32 = 0xc;
 pub const LC_ID_DYLIB: u32 = 0xd;
 /// Dynamic linker path (`/usr/lib/dyld`).
 pub const LC_LOAD_DYLINKER: u32 = 0xe;
+/// The umbrella dylib names a sub-umbrella member (`-sub_umbrella`,
+/// M20): dyld may load the umbrella when asked for the member by name.
+pub const LC_SUB_UMBRELLA: u32 = 0x13;
+/// The umbrella dylib names a sub-library member (`-sub_library`,
+/// M20) — the same region shape, the framework-umbrella's non-framework
+/// half.
+pub const LC_SUB_LIBRARY: u32 = 0x15;
 /// Link against a weak dylib (`-weak_library`).
 pub const LC_LOAD_WEAK_DYLIB: u32 = 0x18 | LC_REQ_DYLD;
 /// Segment, 64-bit.
