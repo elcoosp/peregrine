@@ -17,9 +17,7 @@
 //! * a zero vmsize refuses (the shape leaves `__TEXT` at address 0).
 
 use pgr_fixtures::{ImageBuilder, SectionSpec, SegmentSpec, filler};
-use pgr_format::consts::{
-    S_ATTR_PURE_INSTRUCTIONS, S_REGULAR, VM_PROT_EXECUTE, VM_PROT_READ,
-};
+use pgr_format::consts::{S_ATTR_PURE_INSTRUCTIONS, S_REGULAR, VM_PROT_EXECUTE, VM_PROT_READ};
 use pgr_verify::{Options, verify};
 
 fn opts() -> Options {
