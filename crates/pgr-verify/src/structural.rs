@@ -573,11 +573,19 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
             }
         }
     } else if let Some(text) = img.segments.iter().find(|s| s.name() == Ok("__TEXT")) {
-        if text.vmaddr != text.fileoff {
+        // M19: the constant-delta base is the image's own __TEXT delta —
+        // the M3 zero default or a named `-image_base` (any 16 KiB
+        // multiple; the per-segment contract below holds every segment
+        // to it). The old constant check (`vmaddr == fileoff`) would
+        // refuse exactly the shape the M19 knob exists to plan.
+        let base = text.vmaddr.wrapping_sub(text.fileoff);
+        if base % PAGE_SIZE_16K != 0 {
             report.issues.push(Issue::error(
                 Code::ImageBase,
                 format!(
-                    "dylib __TEXT vmaddr {:#x} must equal fileoff {:#x}",
+                    "dylib __TEXT vmaddr {:#x} - fileoff {:#x} must differ by a \
+                     multiple of the 16 KiB arm64 page (the constant-delta base \
+                     moves with it)",
                     text.vmaddr, text.fileoff
                 ),
                 None,
@@ -621,11 +629,19 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
         }
         // Delta consistency: vmaddr - fileoff must equal the image delta
         // (base = the image's own __PAGEZERO vmsize for exec — M15
-        // generalized from the 4 GiB constant; 0 otherwise). Objects
-        // carry the blob-relative convention instead (vmaddr 0, fileoff
-        // = header end) — skipped, the object contract checks the
-        // sections.
-        let delta = pagezero_vmsize;
+        // generalized from the 4 GiB constant; the image's own __TEXT
+        // delta otherwise — M19: the M3 zero default or a named
+        // `-image_base`). Objects carry the blob-relative convention
+        // instead (vmaddr 0, fileoff = header end) — skipped, the
+        // object contract checks the sections.
+        let delta = if exec {
+            pagezero_vmsize
+        } else {
+            img.segments
+                .iter()
+                .find(|s| s.name() == Ok("__TEXT"))
+                .map_or(0, |s| s.vmaddr.wrapping_sub(s.fileoff))
+        };
         if !object && seg.vmaddr.checked_sub(delta) != Some(seg.fileoff) {
             report.issues.push(Issue::error(
                 Code::SegmentContract,
