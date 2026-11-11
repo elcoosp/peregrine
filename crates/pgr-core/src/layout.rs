@@ -243,6 +243,29 @@ pub struct LinkConfig {
     /// and the layout re-checks both refusals (the relocatable output,
     /// the floor) so no caller can link a shape dyld cannot consume.
     pub init_offsets: crate::init_offsets::InitOffsets,
+    /// M17 — the segment protections: the per-segment `maxprot`/`initprot`
+    /// pairs an image plans with (see [`crate::segprot`]). The default
+    /// ([`SegProts::default`](crate::segprot::SegProts::default) — the empty
+    /// table) keeps the layout's house pairs (`__TEXT` RX/RX,
+    /// `__DATA_CONST`/`__DATA` RW/RW, `__LINKEDIT` R/R) — every pre-M17
+    /// link is byte-identical — and a `-segprot` decision names a
+    /// different pair for one planned segment. The values are validated at
+    /// construction ([`SegProt::from_bits`](crate::segprot::SegProt::from_bits)),
+    /// so a [`crate::segprot::SegProts`] in hand is always a legal table; the segment
+    /// packing reads it through
+    /// [`SegProts::prot_for`](crate::segprot::SegProts::prot_for) and the
+    /// `LC_SEGMENT_64` emit copies the planned pair.
+    pub seg_prots: crate::segprot::SegProts,
+    /// M18 — the stack reserve: the `LC_MAIN.stacksize` an executable
+    /// link plans with (see [`crate::stack_size`]). The default (`None`)
+    /// keeps the pre-M18 zero — dyld falls back to its own main-thread
+    /// default when the field is zero, so every pre-M18 link is
+    /// byte-identical — and a `-stack_size` override names a different
+    /// reserve. The value is validated at construction
+    /// ([`StackSize::from_override`](crate::stack_size::StackSize::from_override));
+    /// non-executable outputs refuse the knob (no `LC_MAIN`, no field
+    /// to land on — a refusal, never a silently dropped decision).
+    pub stack_size: Option<crate::stack_size::StackSize>,
 }
 
 impl Default for LinkConfig {
@@ -281,6 +304,8 @@ impl Default for LinkConfig {
             symbol_order: None,
             pagezero: crate::pagezero::PageZero::default(),
             init_offsets: crate::init_offsets::InitOffsets::default(),
+            seg_prots: crate::segprot::SegProts::default(),
+            stack_size: None,
         }
     }
 }
@@ -750,9 +775,51 @@ fn scan_branch_overflow(
     Ok(specs)
 }
 
+/// The live unsigned-pointer count — the fixups gate's input. The
+/// placement skips dead atoms, so their pointer slots never reach the
+/// payload; counting the pre-strip section relocs would promise a
+/// payload the link cannot build (the header-only `__chain_starts`
+/// mirror the verifier refuses). The `__init_offsets` sections ride the
+/// same skip as the bucketing (their pointers never count — the
+/// synthetic piece speaks for them). Without dead-strip the `LiveSet` is
+/// inactive and every reloc counts.
+fn count_live_fixup_slots(
+    objects: &[InputObject],
+    live: &crate::deadstrip::LiveSet,
+    init_skip: &std::collections::HashSet<(u32, usize)>,
+) -> usize {
+    let mut count = 0usize;
+    for (fi, obj) in objects.iter().enumerate() {
+        for (si, sect) in obj.sections.iter().enumerate() {
+            if init_skip.contains(&(fi as u32, si)) {
+                continue;
+            }
+            if !live.is_active() {
+                count += sect
+                    .relocs
+                    .iter()
+                    .filter(|r| r.kind == RelocKind::Unsigned)
+                    .count();
+                continue;
+            }
+            for r in &sect.relocs {
+                if r.kind != RelocKind::Unsigned {
+                    continue;
+                }
+                let atom_start = containing_atom_start(obj, si, u64::from(r.offset)).unwrap_or(0);
+                if !live.is_atom_dead(fi as u32, si, atom_start) {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 /// Buckets input sections by `(segment, name)`; returns the bucket table,
-/// the per-file section→bucket map (`usize::MAX` = skipped) and the count
-/// of chained-fixup pointer slots.
+/// the per-file section→bucket map (`usize::MAX` = skipped) and the
+/// pre-strip pointer-slot count (diagnostics only — the fixups gate
+/// reads [`count_live_fixup_slots`]).
 fn bucket_inputs(
     objects: &[InputObject],
     res: &Resolution,
@@ -1042,6 +1109,20 @@ pub fn layout(
             crate::init_offsets::collect_sections(objects)?
         }
     };
+    // M18: the stack reserve is an executable decision — `LC_MAIN`
+    // exists there only (the M3 contract: dylibs, bundles and
+    // relocatable outputs carry none), so a named reserve has no field
+    // to land on. The refusal rides here (not only on the driver
+    // surface) so every caller pays it: a silently dropped knob would
+    // shrink the stack the caller asked for.
+    if cfg.stack_size.is_some() && cfg.filetype != OutputType::Execute {
+        return Err(LinkError::Layout {
+            message: "-stack_size reserves the LC_MAIN stack, but this output carries no \
+                      LC_MAIN (the M3 contract: only executables have one); drop \
+                      -stack_size or link an executable"
+                .into(),
+        });
+    }
     let init_skip: std::collections::HashSet<(u32, usize)> =
         init_specs.iter().map(|s| (s.file, s.in_sect)).collect();
     let init_entries: usize = init_specs
@@ -1049,11 +1130,19 @@ pub fn layout(
         .map(|s| (objects[s.file as usize].sections[s.in_sect].size / 8) as usize)
         .sum();
     // ---- bucketing ---------------------------------------------------------
-    let (mut buckets, mut bucket_of, fixup_slot_count) = bucket_inputs(objects, res, &init_skip)?;
+    let (mut buckets, mut bucket_of, _pre_strip_slots) = bucket_inputs(objects, res, &init_skip)?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
     let needs = scan_needs(objects, res, interner, live)?;
     // The fixups payload exists when *any* slot is planned: input pointer
     // slots (M1 rebases), synthesized GOT binds and POINTER_TO_GOT rebases.
+    // The gate counts LIVE slots — the placement skips dead atoms, so
+    // their pointer slots never reach the payload, and counting them
+    // (the pre-fix gate read the section relocs pre-strip) would promise
+    // a payload the link cannot build: a header-only `__chain_starts`
+    // mirror beside no `LC_DYLD_CHAINED_FIXUPS` — exactly the shape the
+    // verifier's own contract refuses. Without dead-strip the LiveSet is
+    // inactive and every slot counts, byte-identical to the pre-fix gate.
+    let fixup_slot_count = count_live_fixup_slots(objects, live, &init_skip);
     let has_fixups = fixup_slot_count > 0 || !needs.got.is_empty();
     let chains_floor = chained_fixups_min_minos(cfg.platform);
     let use_chains = cfg.fixup_chains && has_fixups && cfg.minos >= chains_floor;
@@ -2228,12 +2317,18 @@ fn place(
     }
 
     for seg_name in ["__TEXT", "__DATA_CONST", "__DATA"] {
-        let (maxprot, initprot) = match seg_name {
-            "__TEXT" => (
-                VM_PROT_READ | VM_PROT_EXECUTE,
-                VM_PROT_READ | VM_PROT_EXECUTE,
-            ),
-            _ => (VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE),
+        // M17: the named decision rides the planned segment, the house
+        // table falling out of `None` (the default — every pre-M17 link
+        // plans the pairs it always planned).
+        let (maxprot, initprot) = match cfg.seg_prots.prot_for(seg_name) {
+            Some(p) => (p.maxprot(), p.initprot()),
+            None => match seg_name {
+                "__TEXT" => (
+                    VM_PROT_READ | VM_PROT_EXECUTE,
+                    VM_PROT_READ | VM_PROT_EXECUTE,
+                ),
+                _ => (VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE),
+            },
         };
         let prev_end = segments
             .last()
@@ -3775,13 +3870,21 @@ fn build_header(
         lc += 16;
     }
     // LC_MAIN: executables only (M3: dylibs and bundles carry none).
+    // M18: the stack reserve rides the command's `stacksize` field (the
+    // default `None` keeps the pre-M18 zero — the command is 24 bytes
+    // either way, nothing else in the plan moves).
     let entryoff_at;
     if is_exec {
         w32(&mut buf, lc, pgr_format::consts::LC_MAIN);
         w32(&mut buf, lc + 4, 24);
         entryoff_at = lc + 8;
         w64(&mut buf, entryoff_at, hi.entryoff);
-        w64(&mut buf, lc + 16, 0); // stacksize
+        w64(
+            &mut buf,
+            lc + 16,
+            cfg.stack_size
+                .map_or(0, crate::stack_size::StackSize::bytes),
+        );
         lc += 24;
     } else {
         entryoff_at = 0;
