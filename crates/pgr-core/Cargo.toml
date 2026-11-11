@@ -77,5 +77,14 @@ harness = false
 name = "pagezero"
 harness = false
 
+# The M16 initializer-offsets bench: the link across the initializer
+# forms (the classic pointer sections, the __init_offsets transform)
+# and both fixup paths (chained, classic opcode streams) over the same
+# 32-object corpus — a shape-parity gate, the transform is a
+# bucketing-time removal plus one synthetic u32 piece.
+[[bench]]
+name = "init_offsets"
+harness = false
+
 [lints]
 workspace = true
