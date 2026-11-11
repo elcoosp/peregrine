@@ -111,5 +111,13 @@ harness = false
 name = "image_base"
 harness = false
 
+# The M20 umbrella-region bench: the link across the -sub_umbrella/
+# -sub_library decisions (the empty table, 8 and 64 members) over the
+# same 64-object dylib corpus — a shape-parity gate, a member is one
+# 16-32 byte region command in the identity block.
+[[bench]]
+name = "umbrella"
+harness = false
+
 [lints]
 workspace = true
