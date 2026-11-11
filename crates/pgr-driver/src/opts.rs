@@ -160,6 +160,10 @@ pub struct Options {
     /// The default (`false`) keeps the pre-M18 zero reserve — every
     /// pre-M18 link stays byte-identical.
     pub stack_size_explicit: bool,
+    /// M19: `-image_base` was passed explicitly. The value is validated
+    /// against the core seam's grammar at parse time; the output-kind
+    /// conflict is `finish`'s (it sees the whole surface).
+    pub image_base_explicit: bool,
 }
 
 impl Default for Options {
@@ -201,6 +205,7 @@ impl Default for Options {
             init_offsets_flag: None,
             seg_prot_stage: Vec::new(),
             stack_size_explicit: false,
+            image_base_explicit: false,
         }
     }
 }
@@ -338,6 +343,32 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     StackSizeConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// An `-image_base` value the grammar refuses (M19): the base is
+    /// a non-zero multiple of the 16 KiB arm64 page — the same
+    /// validation the core seam pays — and the help names the grammar
+    /// (the fix, not just the verdict).
+    #[error("invalid value for -image_base: {value}")]
+    #[diagnostic(help(
+        "the image base is a non-zero multiple of the 16 KiB arm64 page (0x4000), \
+         decimal or 0x-hex — e.g. 0x80000"
+    ))]
+    ImageBaseValue {
+        /// The refused value as written.
+        value: String,
+    },
+    /// An `-image_base` surface conflict (M19): the knob moves a dylib
+    /// or bundle's preferred load address — an executable's base is
+    /// `__PAGEZERO`'s job (M15 named `-pagezero_size` for it) and the
+    /// relocatable output carries no segments. The verdict names the
+    /// shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ImageBaseConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -1073,6 +1104,20 @@ fn apply_flag(
             );
             opts.stack_size_explicit = true;
         }
+        // M19: the dylib/bundle preferred load address. The same
+        // validation the core seam pays runs here, so the refusal names
+        // the grammar; the output-kind conflict is `finish`'s (it sees
+        // the whole surface).
+        "-image_base" => {
+            let v = next_value(args, i, arg)?;
+            let n =
+                parse_number(&v).ok_or_else(|| OptsError::ImageBaseValue { value: v.clone() })?;
+            opts.config.image_base = Some(
+                pgr_core::ImageBase::from_override(n)
+                    .map_err(|_| OptsError::ImageBaseValue { value: v.clone() })?,
+            );
+            opts.image_base_explicit = true;
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -1226,6 +1271,35 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 .into(),
             fix: "drop -stack_size or link an executable (the default output)".into(),
         });
+    }
+    // M19: the image base is a dylib/bundle decision — an executable's
+    // constant-delta base is `__PAGEZERO`'s job (M15 named
+    // `-pagezero_size` for it) and the relocatable output carries no
+    // segments at all. An explicitly named knob that cannot apply is a
+    // refusal, never a silently dropped one.
+    if opts.image_base_explicit {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Execute => {
+                return Err(OptsError::ImageBaseConflict {
+                    verdict: "-image_base moves a dylib or bundle's preferred load \
+                              address, but this output is an executable"
+                        .into(),
+                    fix: "the executable's base is __PAGEZERO's job: name it with \
+                          -pagezero_size (M15) or drop -image_base"
+                        .into(),
+                });
+            }
+            Ot::Relocatable => {
+                return Err(OptsError::ImageBaseConflict {
+                    verdict: "-image_base moves a mapped image's preferred load \
+                              address, but the relocatable output carries no segments"
+                        .into(),
+                    fix: "drop -image_base or link a dylib/bundle".into(),
+                });
+            }
+            Ot::Dylib | Ot::Bundle => {}
+        }
     }
     match opts.config.filetype {
         pgr_core::layout::OutputType::Execute => {
