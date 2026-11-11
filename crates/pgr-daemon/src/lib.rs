@@ -69,9 +69,11 @@ mod tests {
         // a length-prefixed tail (M17, `-segprot`), the config's stack
         // reserve as a present-byte + u64 (M18, `-stack_size`) — and
         // now the config's dylib/bundle image base as a present-byte +
-        // u64 (M19, `-image_base`): a resident relink lays out the base
-        // the client named, never the M3 zero default.
-        assert_eq!(crate::PROTO_VERSION, 12);
+        // u64 (M19, `-image_base`) — and the config's umbrella region as
+        // a length-prefixed member list (M20, `-sub_umbrella` /
+        // `-sub_library`): a resident relink emits the region the
+        // client named, never the pre-M20 absence.
+        assert_eq!(crate::PROTO_VERSION, 13);
     }
 
     #[test]
