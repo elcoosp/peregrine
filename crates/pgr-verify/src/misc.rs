@@ -5,8 +5,8 @@
 use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report};
 use pgr_format::consts::{
-    LC_DATA_IN_CODE, LC_FUNCTION_STARTS, LC_MAIN, PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS,
-    PLATFORM_VISIONOS, PLATFORM_WATCHOS, chained_fixups_floor,
+    LC_DATA_IN_CODE, LC_FUNCTION_STARTS, LC_MAIN, PAGE_SIZE_16K, PLATFORM_IOS, PLATFORM_MACOS,
+    PLATFORM_TVOS, PLATFORM_VISIONOS, PLATFORM_WATCHOS, chained_fixups_floor,
 };
 use pgr_format::load_command::LoadCommandKind;
 
@@ -35,6 +35,22 @@ pub(crate) fn check_entry_and_version(bytes: &[u8], img: &ParsedImage<'_>, repor
                             ep.entryoff
                         ),
                         Some(ep.entryoff),
+                    ));
+                }
+                // The stack-reserve invariant (M18): the kernel maps the
+                // stack in pages, so a named reserve is a multiple of the
+                // 16 KiB arm64 page; the zero default means "dyld's own
+                // default" (every pre-M18 image carries it).
+                if ep.stacksize % PAGE_SIZE_16K != 0 {
+                    report.issues.push(Issue::error(
+                        Code::LinkeditPayload,
+                        format!(
+                            "LC_MAIN stacksize {:#x} must be a multiple of the 16 KiB arm64 \
+                             page (the kernel maps the stack in pages; 0 keeps dyld's own \
+                             default)",
+                            ep.stacksize
+                        ),
+                        Some(ep.stacksize),
                     ));
                 }
             }
