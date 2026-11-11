@@ -30,7 +30,7 @@ each flag has a fixture".
 | `MH_OBJECT` output (`-r`; sections + preserved relocation entries, open undefineds) | ✅ | M10 | `m10_relocatable::r_output_relinks_into_an_executable` (two-step self-consumption), `object_emit::*`, `object_relocs::*` |
 | `LC_DYLD_INFO_ONLY` (classic rebase/bind opcode streams; `minos < 12.0.0` and `-no_fixup_chains`) | ✅ | M6 | `m6_legacy::*` (stream decode + verifier walk `dyld_info::check_dyld_info`) |
 | `LC_LAZY_LOAD_DYLIB` (`-lazy_library`/`-lazy_framework`; the two-level ordinal space counts it like a plain load — M14) | ✅ | M14 | `m14_lazy_dylibs::*` (driver), `pgr_core::resolve::Dylib::lazy` |
-| `__init_offsets` / `-init_offsets` | ❌ | later (newer deployment targets) | — |
+| `__init_offsets` / `-init_offsets` (the initializer form an executable plans with: the M1-locked classic pointer sections, or the transform that replaces them with u32 offsets from the load address — dyld's chained-fixups-era shape; below the platform's chained-fixups floor and on `-r` the named form refuses) | ✅ | M16 | `pgr_core::init_offsets` + `m16_init_offsets::*` (core + driver), the `init_offsets` bench + the `init_offsets_link` example |
 | `LC_ENCRYPTION_INFO` | ❌ | won't support (iOS App Store path) | — |
 
 ## Driver flags
@@ -74,6 +74,7 @@ each flag has a fixture".
 | `-weak_framework <name>` / `-lazy_framework <name>` / `-lazy_library <path>` (repeatable; the framework forms search `-F` dirs like `-framework`, the library form is a path input; weak loads ride `LC_LOAD_WEAK_DYLIB` + weak binds, lazy loads ride `LC_LAZY_LOAD_DYLIB` — M14) | ✅ | M14 | `opts::tests::m14_lazy_weak_flags_shape_the_config`, `m14_lazy_dylibs::*` (driver), the `dylibs` bench + the `lazy_library_link` example |
 | `-order_file` (rank-based subset: `symbol` / `object.o:symbol`) | ✅ | M11 | `m11_order_file::*` (core + driver), `pgr_core::order` |
 | `-pagezero_size <n>` (the `__PAGEZERO` vmsize an executable plans with — the constant-delta base; decimal or `0x`-hex, a non-zero multiple of the 16 KiB arm64 page, the 4 GiB default unchanged; non-executable outputs refuse the knob — M15) | ✅ | M15 | `m15_pagezero::*` (core + driver), `pgr_core::pagezero` |
+| `-init_offsets` / `-no_init_offsets` (the initializer form: the classic `__mod_init_func` pointer sections by default — every pre-M16 link byte-identical — or the `__TEXT,__init_offsets` u32-offset transform; below the platform's chained-fixups floor and on `-r` the named form refuses with the fix — M16; the daemon wire v9 carries the form) | ✅ | M16 | `m16_init_offsets::*` (core + driver), `pgr_core::init_offsets` |
 | `-dylinker` (MH_DYLINKER outputs) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-sub_umbrella` / `-sub_library` (umbrella re-exports) | ❌ (rejected) | later | `opts::LATER_FLAGS` |
 | `-ObjC` (archive member class pull) | ❌ (rejected, actionable) | M6 (ObjC class/selector handling) | `opts::LATER_FLAGS` |
