@@ -109,8 +109,11 @@ use sha2::{Digest, Sha256};
 /// what the client named, never the zero default); **v12** appends the
 /// dylib/bundle image base to that tail (M19 — a present-byte + u64
 /// naming the `-image_base` vmaddr; a resident relink lays out the base
-/// the client named, never the M3 zero default).
-pub const PROTO_VERSION: u32 = 12;
+/// the client named, never the M3 zero default); **v13** appends the
+/// umbrella region to that tail (M20 — one length-prefixed entry per
+/// member (`kind byte | name`); a resident relink emits the region the
+/// client named, never the pre-M20 absence).
+pub const PROTO_VERSION: u32 = 13;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -629,6 +632,15 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         }
         None => put_u8(out, 0),
     }
+    // M20 (v13 wire): the umbrella region — one entry per member in
+    // flag order (kind byte + name bytes); a glob never flattens, a
+    // name never reorders (the same faithful-list convention the v7
+    // filter patterns ride).
+    put_u32(out, cfg.umbrella.count() as u32);
+    for m in &cfg.umbrella {
+        put_u8(out, m.kind().wire());
+        put_str(out, m.name());
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -770,6 +782,17 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             pgr_core::image_base::ImageBase::from_override(r.u64()?).map_err(|_| malformed())?,
         ),
     };
+    // M20 (v13 wire): the umbrella region — the same validation the
+    // flag parse pays, so an unknown kind byte, an empty or NUL-bearing
+    // name or a duplicate member is malformed, never a silently widened
+    // region.
+    let mut umbrella = pgr_core::umbrella::Umbrella::new();
+    for _ in 0..r.u32()? {
+        let kind = pgr_core::umbrella::UmbrellaKind::from_wire(r.u8()?).ok_or_else(malformed)?;
+        let member = pgr_core::umbrella::UmbrellaMember::from_flag(kind, &r.str()?)
+            .map_err(|_| malformed())?;
+        umbrella.push(member).map_err(|_| malformed())?;
+    }
     Ok(LinkConfig {
         ident,
         filetype,
@@ -819,6 +842,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         seg_prots,
         stack_size,
         image_base,
+        umbrella,
     })
 }
 
@@ -930,6 +954,32 @@ mod tests {
                 pgr_core::image_base::ImageBase::from_override(0x6_0000)
                     .expect("the base validates"),
             ),
+            // The v13 tail: a non-default umbrella region must survive
+            // the round trip verbatim, in flag order (a resident relink
+            // emits the region the client named, never the pre-M20
+            // absence).
+            umbrella: {
+                let mut umbrella = pgr_core::umbrella::Umbrella::new();
+                umbrella
+                    .push(
+                        pgr_core::umbrella::UmbrellaMember::from_flag(
+                            pgr_core::umbrella::UmbrellaKind::SubUmbrella,
+                            "libsub.dylib",
+                        )
+                        .expect("the member validates"),
+                    )
+                    .expect("one decision per member");
+                umbrella
+                    .push(
+                        pgr_core::umbrella::UmbrellaMember::from_flag(
+                            pgr_core::umbrella::UmbrellaKind::SubLibrary,
+                            "liblegacy.dylib",
+                        )
+                        .expect("the member validates"),
+                    )
+                    .expect("one decision per member");
+                umbrella
+            },
             symbol_order: None,
         }
     }
@@ -1359,6 +1409,86 @@ mod tests {
         assert_eq!(hits.len(), 1, "the base rides exactly once");
         let mut bad = body;
         bad[hits[0]..hits[0] + 8].copy_from_slice(&0x3000u64.to_le_bytes());
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_umbrella_region_round_trips() {
+        // v13 (M20): the umbrella region rides the config tail in flag
+        // order — a resident relink emits the region the client named,
+        // never the pre-M20 absence. The happy path rides
+        // `rich_config`'s round trip; this gate pins the members
+        // byte-for-byte.
+        let mut cfg = rich_config();
+        let mut region = pgr_core::umbrella::Umbrella::new();
+        region
+            .push(
+                pgr_core::umbrella::UmbrellaMember::from_flag(
+                    pgr_core::umbrella::UmbrellaKind::SubUmbrella,
+                    "libpair.dylib",
+                )
+                .expect("the member validates"),
+            )
+            .expect("one decision per member");
+        cfg.umbrella = region;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        let names: Vec<(&str, &str)> = back
+            .config
+            .umbrella
+            .iter()
+            .map(|m| (m.kind().as_str(), m.name()))
+            .collect();
+        assert_eq!(
+            names,
+            [("sub-umbrella", "libpair.dylib")],
+            "the region crosses byte-for-byte, kind and name intact"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_umbrella_member_is_malformed() {
+        // v13: an unknown kind byte is malformed, not silently widened
+        // (the default would name a member the flag grammar cannot
+        // spell).
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The member rides as (kind byte, u32 len, name bytes) exactly
+        // once; the kind byte sits right before the length field.
+        let needle = b"libsub.dylib";
+        let mut hits = Vec::new();
+        for i in 5..body.len().saturating_sub(needle.len()) {
+            if &body[i..i + needle.len()] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the member rides exactly once");
+        let mut bad = body;
+        bad[hits[0] - 5] = 2; // the kind byte: an unknown kind
         let err = LinkRequest::decode(&bad).unwrap_err();
         assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
