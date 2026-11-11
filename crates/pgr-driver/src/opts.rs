@@ -140,6 +140,14 @@ pub struct Options {
     /// that cannot apply is a refused conflict, never a silently
     /// dropped one (the `-fixup_chains_format` surface convention).
     pub pagezero_explicit: bool,
+    /// M16: `-init_offsets` / `-no_init_offsets` was passed explicitly.
+    /// `Some(true)` is the named form — validated against the platform's
+    /// chained-fixups floor in `finish` (it sees the whole surface: the
+    /// `-platform_version` target may be parsed after this flag);
+    /// `Some(false)` is always valid. The default (`None`) keeps the
+    /// M1-locked classic pointer sections — every pre-M16 link stays
+    /// byte-identical.
+    pub init_offsets_flag: Option<bool>,
 }
 
 impl Default for Options {
@@ -178,6 +186,7 @@ impl Default for Options {
             order_file: None,
             map_path: None,
             pagezero_explicit: false,
+            init_offsets_flag: None,
         }
     }
 }
@@ -248,6 +257,21 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     PageZeroConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// An `-init_offsets` surface refusal (M16): the named form cannot
+    /// apply where it was requested — below the platform's
+    /// chained-fixups floor (that dyld cannot consume
+    /// `S_INIT_FUNC_OFFSETS` at all), or on the relocatable output (the
+    /// M10 rung-1 contract preserves input sections verbatim — nothing
+    /// for the transform to own). The verdict names the shape conflict;
+    /// the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    InitOffsetsConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -392,7 +416,7 @@ pub fn parse(args: &[std::ffi::OsString]) -> Result<Options, OptsError> {
         }
         i += 1;
     }
-    finish(&opts)
+    finish(&mut opts)
 }
 
 /// The next argv element as a flag value.
@@ -937,6 +961,17 @@ fn apply_flag(
                 .map_err(|_| OptsError::PageZeroValue { value: v.clone() })?;
             opts.pagezero_explicit = true;
         }
+        // M16: the initializer form (the flag pair names it exactly like
+        // the chain word family names its encoding). The same validation
+        // the core seam pays runs in `finish` — it sees the whole
+        // surface, so the `-platform_version` target may be parsed
+        // after this flag.
+        "-init_offsets" => {
+            opts.init_offsets_flag = Some(true);
+        }
+        "-no_init_offsets" => {
+            opts.init_offsets_flag = Some(false);
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -980,7 +1015,7 @@ fn apply_flag(
 
 /// Post-conditions: an output path, at least one input, and the M3 flag
 /// combinations consistent with the output kind.
-fn finish(opts: &Options) -> Result<Options, OptsError> {
+fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     if opts.output.is_empty() {
         return Err(OptsError::Missing {
             message: "no output path (use -o <path>)".into(),
@@ -1008,6 +1043,30 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
                 fix: "drop -resident or -fixup_chains_format".into(),
             });
         }
+    }
+    // M16: the initializer form. The named form validates against the
+    // platform's chained-fixups floor (the one table
+    // `pgr_format::consts::chained_fixups_floor` gates every reader);
+    // below it the target's dyld cannot consume `S_INIT_FUNC_OFFSETS`
+    // at all — a refusal, never a silently dropped knob. The
+    // relocatable conflict is the filetype match's (it sees the whole
+    // surface, like the pagezero one).
+    if let Some(forced) = opts.init_offsets_flag {
+        opts.config.init_offsets =
+            pgr_core::InitOffsets::from_flag(Some(forced), opts.config.platform, opts.config.minos)
+                .map_err(|_| OptsError::InitOffsetsConflict {
+                    verdict: format!(
+                        "-init_offsets needs a target at or above the platform's \
+                         chained-fixups floor {} (the target's dyld cannot consume \
+                         __init_offsets)",
+                        crate::fmt_version_word(pgr_format::consts::chained_fixups_floor(
+                            opts.config.platform,
+                        ))
+                    ),
+                    fix: "raise the -platform_version deployment target or use \
+                          -no_init_offsets"
+                        .into(),
+                })?;
     }
     // M15: the image base is an executable decision — `__PAGEZERO`
     // exists on executables only (the M3 contract: `__TEXT.vmaddr ==
@@ -1087,6 +1146,15 @@ fn finish(opts: &Options) -> Result<Options, OptsError> {
                 return Err(OptsError::ChainFormatConflict {
                     verdict: "-r writes an input object: no fixups exist to shape".into(),
                     fix: "drop -fixup_chains_format".into(),
+                });
+            }
+            if opts.init_offsets_flag == Some(true) {
+                return Err(OptsError::InitOffsetsConflict {
+                    verdict: "-init_offsets transforms initializer pointers into \
+                              __init_offsets entries, but the -r output preserves input \
+                              sections verbatim (nothing for the transform to own)"
+                        .into(),
+                    fix: "drop -init_offsets or link a final image".into(),
                 });
             }
             if opts.incremental {
