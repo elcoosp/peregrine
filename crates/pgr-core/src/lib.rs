@@ -29,10 +29,11 @@
 //! [`platform::FixupEncoding`] names the fixup-encoding decision for a
 //! platform/target pair *before* the link runs, and the canonical
 //! table it reads lives beside the platform constants
-//! (`pgr_format::consts::chained_fixups_floor`) — one table, three
-//! readers: this layout, the seam, and the verifier's `fixups_floor`
-//! gate (slice 2 adds the driver query
-//! `pgr --print-fixup-encoding` on top).
+//! (`pgr_format::consts::chained_fixups_floor`) — one table, four
+//! readers since M16: this layout, the seam, the verifier's
+//! `fixups_floor` gate and the initializer-offsets decision
+//! (`pgr_core::init_offsets` — whose driver surface, unlike the M10
+//! query, names the form on the link command line itself).
 
 pub mod cache;
 pub mod deadstrip;
@@ -41,6 +42,7 @@ pub mod export_filter;
 pub mod fixups;
 pub mod icf;
 pub mod ids;
+pub mod init_offsets;
 pub mod interner;
 pub mod layout;
 pub mod link;
@@ -66,6 +68,7 @@ pub use fixups::{
     FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page, pack_page_strided,
 };
 pub use ids::{FileId, StringId};
+pub use init_offsets::{InitOffsets, InitOffsetsError};
 pub use interner::Interner;
 pub use layout::{
     CopyRun, Layout, LinkConfig, OutputSymbol, OutputType, PatchOp, Piece, PlacedSection,
