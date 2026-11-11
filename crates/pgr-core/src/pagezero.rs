@@ -1,12 +1,19 @@
-//! The image base as a nameable decision (M15): the `__PAGEZERO` vmsize
-//! stops being the layout's hard-coded 4 GiB constant (TDD §3.6 invariant
-//! 1, `pgr_format::consts::PAGEZERO_SIZE_64`) and becomes a validated
-//! value on [`crate::layout::LinkConfig`] — the seam the layout's
-//! constant-delta contract, the fixup planner (`64_OFFSET` rebase words
-//! encode `target − base`), the export trie and the verifier's segment
-//! contract all read. The driver's `-pagezero_size` flag names the
-//! decision on the command line; the daemon wire (v8) carries it so a
-//! resident relink lays out the base the client asked for.
+//! The executable's image base as a nameable decision (M15): the
+//! `__PAGEZERO` vmsize stops being the layout's hard-coded 4 GiB
+//! constant (TDD §3.6 invariant 1, `pgr_format::consts::PAGEZERO_SIZE_64`)
+//! and becomes a validated value on [`crate::layout::LinkConfig`] — the
+//! seam the layout's constant-delta contract, the fixup planner
+//! (`64_OFFSET` rebase words encode `target − base`), the export trie
+//! and the verifier's segment contract all read. The driver's
+//! `-pagezero_size` flag names the decision on the command line; the
+//! daemon wire (v8) carries it so a resident relink lays out the base
+//! the client asked for.
+//!
+//! M19 rides the same resolver: the dylib/bundle arm of
+//! [`PageZero::base_for`] reads the named `-image_base` decision
+//! ([`crate::image_base`]) instead of the M3 hard-coded zero, so the
+//! constant-delta base stays one decision with one kind-table reader
+//! across every output kind.
 //!
 //! The decision is *validated, not defaulted*: an override must be
 //! non-zero (a zero `__PAGEZERO` puts `__TEXT` at address 0 — a shape
@@ -75,14 +82,23 @@ impl PageZero {
     }
 
     /// The link's constant-delta base for this output kind: the
-    /// `__PAGEZERO` vmsize for executables, `0` for dylibs, bundles and
-    /// relocatable outputs (the M3 contract). One function, no second
-    /// reader of the kind table.
+    /// `__PAGEZERO` vmsize for executables (M15), the named
+    /// `-image_base` decision for dylibs and bundles (M19 — `0` when
+    /// none, the M3 contract), `0` for relocatable outputs. One
+    /// function, no second reader of the kind table.
     #[must_use]
-    pub const fn base_for(self, kind: OutputType) -> u64 {
+    pub const fn base_for(
+        self,
+        kind: OutputType,
+        named: Option<&crate::image_base::ImageBase>,
+    ) -> u64 {
         match kind {
             OutputType::Execute => self.vmsize,
-            OutputType::Dylib | OutputType::Bundle | OutputType::Relocatable => 0,
+            OutputType::Dylib | OutputType::Bundle => match named {
+                Some(base) => base.vmaddr(),
+                None => 0,
+            },
+            OutputType::Relocatable => 0,
         }
     }
 }
@@ -158,13 +174,13 @@ mod tests {
     #[test]
     fn the_base_is_zero_off_executables() {
         let pz = PageZero::from_override(0x4000_0000).expect("validates");
-        assert_eq!(pz.base_for(OutputType::Execute), 0x4000_0000);
+        assert_eq!(pz.base_for(OutputType::Execute, None), 0x4000_0000);
         for kind in [
             OutputType::Dylib,
             OutputType::Bundle,
             OutputType::Relocatable,
         ] {
-            assert_eq!(pz.base_for(kind), 0);
+            assert_eq!(pz.base_for(kind, None), 0);
         }
     }
 }
