@@ -1345,3 +1345,25 @@ nothing else in the plan moves; `pgr-core/benches/stack_size.rs`,
 The honest reading: parity within noise, as the shape predicts — the
 released surface writes `LC_MAIN.stacksize` and nothing else. The
 bench is the parity gate, not a win.
+
+### M19 — the dylib/bundle image base's decision cost
+
+The link across the `-image_base` decisions (the M3 zero default — the
+`__TEXT.vmaddr == fileoff` contract every pre-M19 dylib planned with —
+a 512 KiB base and a 2 GiB base) over the same corpus (64 objects, 256
+rebase slots, linked as a dylib; the base is the constant-delta address
+arithmetic every pass already rides — segment packing, the fixup
+planners' `target − base` words, the trie and the symtab read the one
+resolver; `pgr-core/benches/image_base.rs`,
+`image_base/link_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_64_objects/default_0` | 838.1 µs |
+| `link_64_objects/custom_512kib` | 852.3 µs (+1.7%, p = n.s.) |
+| `link_64_objects/custom_2gib` | 860.5 µs (+2.7%, p = n.s.) |
+
+The honest reading: parity within the run-to-run spread, as the shape
+predicts — the released surface moves the one constant-delta base the
+address math already carried. The bench is the parity gate, not a
+win.
