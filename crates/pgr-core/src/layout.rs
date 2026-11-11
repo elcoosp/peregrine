@@ -27,9 +27,9 @@ use crate::resolve::{Def, Rank, Resolution, UndefinedPolicy};
 use pgr_format::consts::{
     BIND_SPECIAL_DYLIB_FLAT_LOOKUP, INDIRECT_SYMBOL_LOCAL, MH_BINDS_TO_WEAK, MH_TWOLEVEL,
     MH_WEAK_DEFINES, N_ABS, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K,
-    PAGEZERO_SIZE_64, REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS,
-    S_CSTRING_LITERALS, S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR, S_SYMBOL_STUBS, S_ZEROFILL,
-    SECTION_TYPE_MASK, STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
+    REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS, S_CSTRING_LITERALS,
+    S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR, S_SYMBOL_STUBS, S_ZEROFILL, SECTION_TYPE_MASK,
+    STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use rayon::prelude::*;
 
@@ -68,18 +68,6 @@ impl OutputType {
             Self::Dylib => pgr_format::consts::MH_DYLIB,
             Self::Bundle => pgr_format::consts::MH_BUNDLE,
             Self::Relocatable => pgr_format::consts::MH_OBJECT,
-        }
-    }
-
-    /// The image base: `__PAGEZERO` vmsize for executables (the
-    /// constant-delta contract `vmaddr = fileoff + base`), `0` for dylibs
-    /// and bundles (the verifier's dylib contract: `__TEXT.vmaddr ==
-    /// fileoff`).
-    #[must_use]
-    pub const fn image_base(self) -> u64 {
-        match self {
-            Self::Execute => PAGEZERO_SIZE_64,
-            Self::Dylib | Self::Bundle | Self::Relocatable => 0,
         }
     }
 
@@ -266,6 +254,18 @@ pub struct LinkConfig {
     /// non-executable outputs refuse the knob (no `LC_MAIN`, no field
     /// to land on — a refusal, never a silently dropped decision).
     pub stack_size: Option<crate::stack_size::StackSize>,
+    /// M19 — the dylib/bundle preferred load address: the `__TEXT`
+    /// vmaddr a non-executable image plans with (see
+    /// [`crate::image_base`]). The default (`None`) keeps the M3
+    /// hard-coded zero — every pre-M19 dylib link is byte-identical —
+    /// and an `-image_base` override names a different one. The value
+    /// is validated at construction
+    /// ([`ImageBase::from_override`](crate::image_base::ImageBase::from_override));
+    /// executables refuse the knob (the base is `__PAGEZERO`'s job —
+    /// [`PageZero`](crate::pagezero::PageZero) owns that decision) and
+    /// the relocatable output refuses it too (no segments) — the
+    /// layout's re-check backs the driver surface's earlier refusal.
+    pub image_base: Option<crate::image_base::ImageBase>,
 }
 
 impl Default for LinkConfig {
@@ -306,6 +306,7 @@ impl Default for LinkConfig {
             init_offsets: crate::init_offsets::InitOffsets::default(),
             seg_prots: crate::segprot::SegProts::default(),
             stack_size: None,
+            image_base: None,
         }
     }
 }
@@ -1070,11 +1071,34 @@ pub fn layout(
     live: &crate::deadstrip::LiveSet,
     fold: &crate::icf::FoldPlan,
 ) -> Result<Layout, LinkError> {
-    // Constant-delta base: `__PAGEZERO` vmsize for executables, 0 for
-    // dylibs/bundles (M3). Every address math derives from this — the
-    // M15 seam names the decision (`-pagezero_size`), the default is
-    // the pre-seam constant.
-    let image_base = cfg.pagezero.base_for(cfg.filetype);
+    // M19: the image base is a dylib/bundle decision — the layout's
+    // re-check backs the driver surface's earlier refusal, so no library
+    // caller can plan the shape either: an executable's base is
+    // `__PAGEZERO`'s job (M15 named `-pagezero_size` for it) and the
+    // relocatable output carries no segments (M3).
+    if cfg.image_base.is_some() && !matches!(cfg.filetype, OutputType::Dylib | OutputType::Bundle) {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Execute => (
+                "-image_base moves a dylib or bundle's preferred load address, \
+                 but this output is an executable",
+                "the executable's base is __PAGEZERO's job: name it with \
+                 -pagezero_size (M15) or drop -image_base",
+            ),
+            _ => (
+                "-image_base moves a mapped image's preferred load address, but \
+                 the relocatable output carries no segments",
+                "drop -image_base or link a dylib/bundle",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // Constant-delta base: the `__PAGEZERO` vmsize for executables (M15),
+    // the named `-image_base` for dylibs/bundles (M19; the default is the
+    // M3 zero). Every address math derives from this — one resolver, one
+    // kind-table reader.
+    let image_base = crate::image_base::ImageBase::constant_delta(cfg);
     // M16: the initializer form. The refusals ride here (not only on the
     // driver surface) so every caller pays them: the relocatable output
     // preserves input sections verbatim (the M10 rung-1 contract — nothing
@@ -2299,11 +2323,14 @@ fn place(
 
     // ---- segment packing (§8) ----------------------------------------------
     // Constant-delta base: the configured `__PAGEZERO` vmsize for
-    // executables (M15; the default is the 4 GiB constant), 0 for
-    // dylibs/bundles (M3: `__TEXT.vmaddr == fileoff`, no __PAGEZERO).
-    let base = cfg.pagezero.base_for(cfg.filetype);
+    // executables (M15; the default is the 4 GiB constant), the named
+    // `-image_base` for dylibs/bundles (M19; the default is the M3 zero:
+    // `__TEXT.vmaddr == fileoff`).
+    let base = crate::image_base::ImageBase::constant_delta(cfg);
     let mut segments: Vec<SegmentPlan> = Vec::new();
-    if base > 0 {
+    // `__PAGEZERO` is an executable's unmapped prefix (M3) — a named
+    // dylib base never grows one.
+    if cfg.filetype.is_executable() {
         segments.push(SegmentPlan {
             name: "__PAGEZERO".into(),
             vmaddr: 0,
@@ -2768,7 +2795,7 @@ fn resolve_all(
                     atom_addr: &state.atom_addr,
                     veneer_of: &state.veneer_addr_of,
                 };
-                let image_base = cfg.pagezero.base_for(cfg.filetype);
+                let image_base = crate::image_base::ImageBase::constant_delta(cfg);
                 let mut bases = Vec::with_capacity(init_specs.len());
                 let mut acc = 0usize;
                 for spec in init_specs {
