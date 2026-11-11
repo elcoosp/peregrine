@@ -100,8 +100,14 @@ use sha2::{Digest, Sha256};
 /// client named); **v9** appends the initializer form to that tail (M16
 /// — one byte naming the classic pointer sections or the
 /// `__init_offsets` transform; a resident relink plans the form the
-/// client asked for).
-pub const PROTO_VERSION: u32 = 9;
+/// client asked for); **v10** appends the segment-protection decisions
+/// to that tail (M17 — one length-prefixed entry per named segment
+/// (`name | maxprot | initprot`); a resident relink protects the
+/// segments the client named, never the house table); **v11** appends
+/// the stack reserve to that tail (M18 — a present-byte + u64 naming
+/// the executable's `LC_MAIN.stacksize`; a resident relink reserves
+/// what the client named, never the zero default).
+pub const PROTO_VERSION: u32 = 11;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -589,6 +595,27 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // `__init_offsets` transform (1); a resident relink plans the form
     // the client asked for.
     put_u8(out, u8::from(cfg.init_offsets.is_offsets()));
+    // M17 (v10 wire): the segment-protection decisions ride the tail —
+    // a resident relink protects the segments the client named, never
+    // the house table. Every entry re-pays the core validation on
+    // decode (an unplanned name, an unknown bit, an init beyond its
+    // ceiling or a W+X mapping is malformed, never silently defaulted).
+    put_u32(out, cfg.seg_prots.len() as u32);
+    for (name, prot) in cfg.seg_prots.iter() {
+        put_str(out, name);
+        put_u32(out, prot.maxprot());
+        put_u32(out, prot.initprot());
+    }
+    // M18 (v11 wire): the stack reserve rides the tail after it — a
+    // present-byte plus the validated byte count; a resident relink
+    // reserves what the client named, never the zero default.
+    match cfg.stack_size {
+        Some(s) => {
+            put_u8(out, 1);
+            put_u64(out, s.bytes());
+        }
+        None => put_u8(out, 0),
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -702,6 +729,25 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         1 => pgr_core::InitOffsets::Offsets,
         _ => return Err(malformed()),
     };
+    // M17 (v10 wire): the segment-protection decisions — the same
+    // validation the flag parse pays, so a foreign frame is malformed,
+    // never a silently widened mapping.
+    let mut seg_prots = pgr_core::segprot::SegProts::default();
+    for _ in 0..r.u32()? {
+        let seg = pgr_core::segprot::SegName::parse(&r.str()?).map_err(|_| malformed())?;
+        let prot =
+            pgr_core::segprot::SegProt::from_bits(r.u32()?, r.u32()?).map_err(|_| malformed())?;
+        seg_prots.insert(seg, prot).map_err(|_| malformed())?;
+    }
+    // M18 (v11 wire): the stack reserve — the same validation the flag
+    // parse pays, so a zero or misaligned reserve is malformed, never a
+    // silently shrunk stack.
+    let stack_size = match r.u8()? {
+        0 => None,
+        _ => Some(
+            pgr_core::stack_size::StackSize::from_override(r.u64()?).map_err(|_| malformed())?,
+        ),
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -748,6 +794,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         symbol_order: None,
         pagezero,
         init_offsets,
+        seg_prots,
+        stack_size,
     })
 }
 
@@ -831,6 +879,27 @@ mod tests {
             // survive the round trip verbatim (a resident relink plans
             // the form the client named, never the default).
             init_offsets: pgr_core::InitOffsets::Offsets,
+            // The v10 tail: a non-default protection pair must survive
+            // the round trip verbatim (a resident relink protects the
+            // segments the client named, never the house table).
+            seg_prots: {
+                let mut seg_prots = pgr_core::segprot::SegProts::default();
+                seg_prots
+                    .insert(
+                        pgr_core::segprot::SegName::DataConst,
+                        pgr_core::segprot::SegProt::parse("rw", "r")
+                            .expect("the decision validates"),
+                    )
+                    .expect("one decision per segment");
+                seg_prots
+            },
+            // The v11 tail: the non-default reserve must survive the
+            // round trip verbatim (a resident relink reserves what the
+            // client named, never the zero default).
+            stack_size: Some(
+                pgr_core::stack_size::StackSize::from_override(0x4000_0000)
+                    .expect("the reserve validates"),
+            ),
             symbol_order: None,
         }
     }
@@ -1042,6 +1111,153 @@ mod tests {
             }
         }
         assert_eq!(hits.len(), 1, "the vmsize rides exactly once");
+        let mut bad = body;
+        bad[hits[0]..hits[0] + 8].copy_from_slice(&0x3000u64.to_le_bytes());
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_segprot_decisions_round_trip() {
+        // v10 (M17): the per-segment protection decisions ride the
+        // config tail — a resident relink plans the protections the
+        // client named, never the house table.
+        let mut cfg = rich_config();
+        for (seg, max, init) in [
+            (pgr_core::segprot::SegName::Text, "rx", "rx"),
+            (pgr_core::segprot::SegName::Data, "rw", "r"),
+        ] {
+            cfg.seg_prots
+                .insert(
+                    seg,
+                    pgr_core::segprot::SegProt::parse(max, init).expect("validates"),
+                )
+                .expect("one decision per segment");
+        }
+        let req = LinkRequest {
+            config: cfg,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        };
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        assert_eq!(back, req, "the decisions cross byte-for-byte");
+        assert_eq!(back.config.seg_prots.len(), 3);
+        assert_eq!(
+            back.config
+                .seg_prots
+                .prot_for("__DATA")
+                .map(|p| (p.maxprot(), p.initprot())),
+            Some((0x3, 0x1)),
+            "the named pair survives the wire"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_segprot_is_malformed() {
+        // v10: an unplanned segment name on the wire is malformed, not
+        // silently defaulted (the default would protect a segment the
+        // client did not name). `rich_config` already names a decision
+        // (the round-trip gate's tail), so the frame carries one entry
+        // to corrupt.
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The segment name rides as a length-prefixed string exactly
+        // once; swap it for an unplanned name of the same length.
+        let needle = b"__DATA_CONST";
+        let mut hits = Vec::new();
+        for i in 0..body.len().saturating_sub(needle.len()) {
+            if body[i..i + needle.len()] == *needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the segment name rides exactly once");
+        let mut bad = body;
+        bad[hits[0]..hits[0] + needle.len()].copy_from_slice(b"__PAGEZERO__");
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_stack_reserve_round_trips() {
+        // v11 (M18): the executable's `LC_MAIN` stack reserve rides the
+        // config tail — a resident relink reserves what the client
+        // named, never the zero default.
+        let mut cfg = rich_config();
+        cfg.stack_size = Some(
+            pgr_core::stack_size::StackSize::from_override(0x100_0000)
+                .expect("the reserve validates"),
+        );
+        let req = LinkRequest {
+            config: cfg,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        };
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        assert_eq!(back, req, "the reserve crosses byte-for-byte");
+        assert_eq!(
+            back.config
+                .stack_size
+                .map(pgr_core::stack_size::StackSize::bytes),
+            Some(0x100_0000),
+            "the named reserve survives the wire"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_stack_reserve_is_malformed() {
+        // v11: a misaligned or zero reserve on the wire is malformed,
+        // not silently defaulted (the default would shrink the stack
+        // the client asked for).
+        let mut cfg = rich_config();
+        cfg.stack_size = Some(
+            pgr_core::stack_size::StackSize::from_override(0x100_0000)
+                .expect("the reserve validates"),
+        );
+        let body = LinkRequest {
+            config: cfg,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The reserve rides as a present-byte + u64 exactly once (the
+        // distinctive value has no other carrier); corrupt those 8
+        // bytes to a misaligned value.
+        let needle = 0x100_0000u64.to_le_bytes();
+        let mut hits = Vec::new();
+        for i in 0..body.len().saturating_sub(8) {
+            if body[i..i + 8] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the reserve rides exactly once");
         let mut bad = body;
         bad[hits[0]..hits[0] + 8].copy_from_slice(&0x3000u64.to_le_bytes());
         let err = LinkRequest::decode(&bad).unwrap_err();
