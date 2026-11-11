@@ -56,8 +56,10 @@ pub mod propagate;
 pub mod resolve;
 pub mod resolve_reuse;
 pub mod revindex;
+pub mod segprot;
 pub mod slack;
 pub mod stable_imports;
+pub mod stack_size;
 pub mod thunks;
 pub mod trie;
 
@@ -85,8 +87,10 @@ pub use propagate::{PropagationScope, SectionDigest};
 pub use resolve::{Def, Rank, Resolution};
 pub use resolve_reuse::{ResolveReuseSeed, ReuseFallback, ReusePlan, install_reused, plan_reuse};
 pub use revindex::{RefSite, ReverseIndex};
+pub use segprot::{SegName, SegProt, SegProtError, SegProts};
 pub use slack::{LayoutFallback, SlackPolicy};
 pub use stable_imports::{StableImport, StableImports};
+pub use stack_size::StackSize;
 pub use trie::{Export, ExportInfo};
 
 /// A fatal link error (M1 surface: inputs, symbols, layout, encoding).
