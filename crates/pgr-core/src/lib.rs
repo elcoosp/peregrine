@@ -42,6 +42,7 @@ pub mod export_filter;
 pub mod fixups;
 pub mod icf;
 pub mod ids;
+pub mod image_base;
 pub mod init_offsets;
 pub mod interner;
 pub mod layout;
@@ -70,6 +71,7 @@ pub use fixups::{
     FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page, pack_page_strided,
 };
 pub use ids::{FileId, StringId};
+pub use image_base::ImageBase;
 pub use init_offsets::{InitOffsets, InitOffsetsError};
 pub use interner::Interner;
 pub use layout::{
