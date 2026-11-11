@@ -1306,3 +1306,42 @@ the pointer sections never bucket. The released surface costs nothing
 on the default path (the flag-less corpus plans byte-identically — the
 classic rows above are the pre-M16 numbers). The bench is the parity
 gate, not a claimed win.
+
+### M17 — the segment protections' decision cost
+
+The link across the `-segprot` decisions (the house table — the empty
+decision set, a read-only-after-rebase `__DATA_CONST` (`rw`/`r`) and a
+writable `__TEXT` ceiling (`rwx`/`rx`)) over the same corpus (64
+objects, 256 rebase slots, one bind-free executable surface; the
+protections are two field writes per planned segment — the packing
+reads the named pair and the `LC_SEGMENT_64` emit copies it;
+`pgr-core/benches/segprot.rs`, `segprot/link_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_64_objects/house_table` | 822.9 µs |
+| `link_64_objects/dataconst_ro_after_rebase` | 797.7 µs (−2.9%, p = n.s.) |
+| `link_64_objects/text_writable_ceiling` | 844.5 µs (+0.1%, p = 0.98) |
+
+The honest reading: parity, as the shape predicts — the released
+surface moves two `u32` fields per planned segment and nothing in the
+passes. The bench is the parity gate, not a win.
+
+### M18 — the stack reserve's decision cost
+
+The link across the `-stack_size` decisions (the zero default, a
+16 MiB reserve and a 1 GiB reserve) over the same corpus (64 objects,
+256 rebase slots, one bind-free executable surface; the reserve is one
+field write in the 24-byte `LC_MAIN` — the command size is unchanged,
+nothing else in the plan moves; `pgr-core/benches/stack_size.rs`,
+`stack_size/link_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_64_objects/default_zero` | 793.4 µs |
+| `link_64_objects/reserve_16mib` | 803.8 µs (+1.3%, p = n.s.) |
+| `link_64_objects/reserve_1gib` | 800.2 µs (+0.9%, p = n.s.) |
+
+The honest reading: parity within noise, as the shape predicts — the
+released surface writes `LC_MAIN.stacksize` and nothing else. The
+bench is the parity gate, not a win.
