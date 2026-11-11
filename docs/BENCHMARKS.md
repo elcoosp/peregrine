@@ -1281,3 +1281,28 @@ The honest reading: parity within noise, as the shape predicts — the
 released surface moves the constant-delta base and nothing in the
 passes (both deltas are statistically indistinguishable from zero at
 this corpus size). The bench is the parity gate, not a win.
+
+### M16 — the initializer form's decision cost
+
+The link across the initializer forms (the classic pointer sections,
+the `__init_offsets` transform) and both fixup paths (chained, classic
+opcode streams) over the same corpus (32 objects, 4 initializer
+pointers each — 128 conversions when the named form rides; the
+transform is a bucketing-time removal plus one synthetic u32 piece;
+`pgr-core/benches/init_offsets.rs`,
+`init_offsets/link_{chained,classic_streams}_32_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_chained_32_objects/classic_pointers` | 453.4 µs |
+| `link_chained_32_objects/init_offsets` | 382.5 µs (−15.6%) |
+| `link_classic_streams_32_objects/classic_pointers` | 426.5 µs |
+| `link_classic_streams_32_objects/init_offsets` | 387.3 µs (−9.2%) |
+
+The honest reading: the offsets side is slightly *faster*, as the shape
+predicts — 128 rebase words leave the fixup payload (a smaller
+`LC_DYLD_INFO_ONLY`/chained body to build and fewer slots to sort) and
+the pointer sections never bucket. The released surface costs nothing
+on the default path (the flag-less corpus plans byte-identically — the
+classic rows above are the pre-M16 numbers). The bench is the parity
+gate, not a claimed win.
