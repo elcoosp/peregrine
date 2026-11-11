@@ -63,6 +63,7 @@ pub mod stable_imports;
 pub mod stack_size;
 pub mod thunks;
 pub mod trie;
+pub mod umbrella;
 
 pub use cache::PoiCache;
 pub use dyld_info::DyldInfoPlan;
@@ -94,6 +95,7 @@ pub use slack::{LayoutFallback, SlackPolicy};
 pub use stable_imports::{StableImport, StableImports};
 pub use stack_size::StackSize;
 pub use trie::{Export, ExportInfo};
+pub use umbrella::{Umbrella, UmbrellaError, UmbrellaKind, UmbrellaMember};
 
 /// A fatal link error (M1 surface: inputs, symbols, layout, encoding).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
