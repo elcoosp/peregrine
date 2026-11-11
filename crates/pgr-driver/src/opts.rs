@@ -2,7 +2,8 @@
 //! milestone: M2 library search, M3 dylibs/bundles, M5 archives and
 //! frameworks, M6 caches, M7 `-syslibroot`, M8 `-resident`, M9
 //! `-incremental`, M10 `-r` relocatable output and the platform surface).
-//! Flags real builds use that have not landed yet (TLV, bitcode) are
+//! Flags real builds use that have not landed yet (the `MH_DYLINKER`
+//! output kind, make-undefined, TLV, bitcode) are
 //! rejected with actionable messages rather than silently ignored — a
 //! linker that pretends to understand a flag it drops is worse than one
 //! that says "not yet". `-order_file` landed at M11 (the rank-based
@@ -374,6 +375,33 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-sub_umbrella`/`-sub_library` member the core seam refuses
+    /// (M20): non-empty, NUL-free, named once. The seam's refusal rides
+    /// the help — the grammar the flag accepts, not just the verdict.
+    #[error("invalid value for -{kind}: {raw}")]
+    #[diagnostic(help("{message}"))]
+    UmbrellaValue {
+        /// The flag's kind (`sub_umbrella`/`sub_library`).
+        kind: String,
+        /// The refused name as written.
+        raw: String,
+        /// The core seam's refusal (the fix).
+        message: String,
+    },
+    /// A `-sub_umbrella`/`-sub_library` surface conflict (M20): the
+    /// umbrella region is a dylib's identity block — an executable's
+    /// identity is `LC_MAIN` + `LC_LOAD_DYLINKER`, a bundle dlopens
+    /// without a region, and the relocatable output carries no identity
+    /// commands at all. The verdict names the shape conflict; the help
+    /// is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    UmbrellaConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An argv element is not valid UTF-8 (the surface stores paths and
     /// values as `String`s — the Mach-O string tables are UTF-8 too).
     /// The message names what happened and which bytes; the old shape
@@ -463,20 +491,13 @@ const NOOP_FLAGS: [&str; 8] = [
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
 /// M14 released the weak/lazy dylib family (`-weak_framework`,
-/// `-lazy_framework`, `-lazy_library`) and M15 released `-pagezero_size`
-/// (the image-base seam) — the umbrella re-exports, `ObjC` semantics and
-/// the rest stay here with their roadmap entry.
-const LATER_FLAGS: [(&str, &str); 5] = [
+/// `-lazy_framework`, `-lazy_library`), M15 released `-pagezero_size`
+/// (the image-base seam) and M20 released the umbrella re-exports
+/// (`-sub_umbrella`, `-sub_library`) — the `MH_DYLINKER` output kind,
+/// make-undefined and `ObjC` semantics stay here with their roadmap entry.
+const LATER_FLAGS: [(&str, &str); 3] = [
     ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
     ("-U", "later milestone (make-undefined)"),
-    (
-        "-sub_library",
-        "umbrella re-exports beyond -reexport_library are a later milestone",
-    ),
-    (
-        "-sub_umbrella",
-        "umbrella re-exports beyond -reexport_library are a later milestone",
-    ),
     (
         "-ObjC",
         "ObjC/Swift semantics beyond section pass-through are a later milestone",
@@ -1118,6 +1139,33 @@ fn apply_flag(
             );
             opts.image_base_explicit = true;
         }
+        // M20: the umbrella region's members. The same validation the
+        // core seam pays runs here, so the refusal names the grammar;
+        // the output-kind conflict is `finish`'s (it sees the whole
+        // surface).
+        "-sub_umbrella" | "-sub_library" => {
+            let v = next_value(args, i, arg)?;
+            let kind = if arg == "-sub_umbrella" {
+                pgr_core::umbrella::UmbrellaKind::SubUmbrella
+            } else {
+                pgr_core::umbrella::UmbrellaKind::SubLibrary
+            };
+            let member = pgr_core::UmbrellaMember::from_flag(kind, &v).map_err(|e| {
+                OptsError::UmbrellaValue {
+                    kind: arg.trim_start_matches('-').to_string(),
+                    raw: v.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            opts.config
+                .umbrella
+                .push(member)
+                .map_err(|e| OptsError::UmbrellaValue {
+                    kind: arg.trim_start_matches('-').to_string(),
+                    raw: v.clone(),
+                    message: e.to_string(),
+                })?;
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -1299,6 +1347,43 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 });
             }
             Ot::Dylib | Ot::Bundle => {}
+        }
+    }
+    // M20: the umbrella region is a dylib's identity block — the same
+    // refusal shape as the M19 base above: an explicitly named knob
+    // that cannot apply is a refusal, never a silently dropped one.
+    if !opts.config.umbrella.is_empty() {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Execute => {
+                return Err(OptsError::UmbrellaConflict {
+                    verdict: "-sub_umbrella/-sub_library name an umbrella dylib's region, \
+                              but this output is an executable"
+                        .into(),
+                    fix: "the region rides LC_ID_DYLIB's identity block: link a dylib \
+                          (-dylib) or drop the flags"
+                        .into(),
+                });
+            }
+            Ot::Bundle => {
+                return Err(OptsError::UmbrellaConflict {
+                    verdict: "-sub_umbrella/-sub_library name an umbrella dylib's region, \
+                              but this output is a bundle"
+                        .into(),
+                    fix: "bundles dlopen without an umbrella region: link a dylib \
+                          (-dylib) or drop the flags"
+                        .into(),
+                });
+            }
+            Ot::Relocatable => {
+                return Err(OptsError::UmbrellaConflict {
+                    verdict: "-sub_umbrella/-sub_library name an umbrella dylib's region, \
+                              but the relocatable output carries no identity commands"
+                        .into(),
+                    fix: "drop the flags or link a dylib (-dylib)".into(),
+                });
+            }
+            Ot::Dylib => {}
         }
     }
     match opts.config.filetype {
