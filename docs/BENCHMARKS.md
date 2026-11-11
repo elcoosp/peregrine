@@ -1367,3 +1367,22 @@ The honest reading: parity within the run-to-run spread, as the shape
 predicts — the released surface moves the one constant-delta base the
 address math already carried. The bench is the parity gate, not a
 win.
+
+### M20 — the umbrella region's decision cost
+
+The link across the `-sub_umbrella`/`-sub_library` decisions (the
+empty table — the pre-M20 default — and two populated regions, 8 and
+64 members alternating the kinds) over the same corpus (64 objects,
+256 rebase slots, linked as a dylib; a member is one 16–32 byte
+`LC_SUB_UMBRELLA`/`LC_SUB_LIBRARY` command in the identity block —
+`pgr-core/benches/umbrella.rs`, `umbrella/link_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_64_objects/default_0` | 827.1 µs |
+| `link_64_objects/region_8` | 821.0 µs (−0.7%, p = n.s.) |
+| `link_64_objects/region_64` | 843.6 µs (+2.0%, p = 0.79, n.s.) |
+
+The honest reading: parity within the run-to-run spread, as the shape
+predicts — the released surface appends identity-block commands the
+header assembly writes once. The bench is the parity gate, not a win.
