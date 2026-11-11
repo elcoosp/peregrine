@@ -66,11 +66,12 @@ mod tests {
         // config's image base as a u64 (M15, `-pagezero_size`), the
         // config's initializer form as a tail byte (M16,
         // `-init_offsets`), the config's segment-protection decisions as
-        // a length-prefixed tail (M17, `-segprot`) — and now the
-        // config's stack reserve as a present-byte + u64 (M18,
-        // `-stack_size`): a resident relink reserves what the client
-        // named, never the zero default.
-        assert_eq!(crate::PROTO_VERSION, 11);
+        // a length-prefixed tail (M17, `-segprot`), the config's stack
+        // reserve as a present-byte + u64 (M18, `-stack_size`) — and
+        // now the config's dylib/bundle image base as a present-byte +
+        // u64 (M19, `-image_base`): a resident relink lays out the base
+        // the client named, never the M3 zero default.
+        assert_eq!(crate::PROTO_VERSION, 12);
     }
 
     #[test]
