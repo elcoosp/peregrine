@@ -20,6 +20,7 @@
 use crate::LinkError;
 use crate::fixups::{FixupKind, FixupPlan, FixupSlot};
 use crate::ids::{FileId, StringId};
+use crate::init_offsets::version_string;
 use crate::interner::Interner;
 use crate::object::{InputObject, RelocKind, RelocTarget};
 use crate::resolve::{Def, Rank, Resolution, UndefinedPolicy};
@@ -231,6 +232,17 @@ pub struct LinkConfig {
     /// bundles and relocatable outputs carry no `__PAGEZERO`
     /// ([`PageZero::base_for`](crate::pagezero::PageZero::base_for)).
     pub pagezero: crate::pagezero::PageZero,
+    /// M16 — the initializer form: the M1-locked classic pointer
+    /// sections, or the `-init_offsets` transform that replaces them
+    /// with a `__TEXT,__init_offsets` section of u32 offsets from the
+    /// image's load address (see [`crate::init_offsets`]). The default
+    /// is [`InitOffsets::Classic`](crate::init_offsets::InitOffsets::Classic)
+    /// — every pre-M16 link is byte-identical; the named form validates
+    /// against the chained-fixups floor at construction
+    /// ([`InitOffsets::from_flag`](crate::init_offsets::InitOffsets::from_flag))
+    /// and the layout re-checks both refusals (the relocatable output,
+    /// the floor) so no caller can link a shape dyld cannot consume.
+    pub init_offsets: crate::init_offsets::InitOffsets,
 }
 
 impl Default for LinkConfig {
@@ -268,6 +280,7 @@ impl Default for LinkConfig {
             chain_word_format: crate::fixups::FixupPointerFormat::Offset64,
             symbol_order: None,
             pagezero: crate::pagezero::PageZero::default(),
+            init_offsets: crate::init_offsets::InitOffsets::default(),
         }
     }
 }
@@ -368,6 +381,11 @@ pub enum SynthKind {
         /// What the original branch referenced.
         target: RelocTarget,
     },
+    /// M16: the whole `__TEXT,__init_offsets` section — one synthetic
+    /// piece whose u32 entries Pass 3 fills with the resolved initializers'
+    /// offsets from the image's load address (see [`crate::init_offsets`];
+    /// the pointer sections it replaces never reach the buckets).
+    InitOffsets,
 }
 
 /// An output section with its placed pieces.
@@ -738,13 +756,21 @@ fn scan_branch_overflow(
 fn bucket_inputs(
     objects: &[InputObject],
     res: &Resolution,
+    init_skip: &std::collections::HashSet<(u32, usize)>,
 ) -> Result<(BucketTable, Vec<Vec<usize>>, usize), LinkError> {
     let mut buckets: Vec<(String, String, u32, bool)> = Vec::new(); // (seg, name, flags, zerofill)
     let mut bucket_of: Vec<Vec<usize>> = Vec::with_capacity(objects.len());
     let mut fixup_slot_count = 0usize;
-    for obj in objects {
+    for (fi, obj) in objects.iter().enumerate() {
         let mut per_sect = Vec::with_capacity(obj.sections.len());
-        for in_sect in &obj.sections {
+        for (si, in_sect) in obj.sections.iter().enumerate() {
+            // M16: the initializer sections the offsets form consumes never
+            // bucket (and their pointers never count as fixup slots) — the
+            // synthetic `__init_offsets` piece speaks for them.
+            if init_skip.contains(&(fi as u32, si)) {
+                per_sect.push(usize::MAX);
+                continue;
+            }
             let bucket = bucket_for(in_sect, obj, &mut buckets, &mut fixup_slot_count)?;
             per_sect.push(bucket);
         }
@@ -823,6 +849,7 @@ fn prepare_buckets(
     chains_enabled: bool,
     needs_got: bool,
     needs_stubs: bool,
+    init_specs: &[crate::init_offsets::InitSection],
 ) {
     if needs_got {
         buckets.push((
@@ -842,6 +869,17 @@ fn prepare_buckets(
     }
     if chains_enabled {
         buckets.push(("__TEXT".into(), "__chain_starts".into(), S_REGULAR, false));
+    }
+    // M16: the initializer-offsets section rides beside the other
+    // synthetic contract sections (the transform consumed the pointer
+    // sections at bucketing time).
+    if !init_specs.is_empty() {
+        buckets.push((
+            "__TEXT".into(),
+            "__init_offsets".into(),
+            pgr_format::consts::S_INIT_FUNC_OFFSETS,
+            false,
+        ));
     }
     // Canonical ordering: stable sort keeps first-seen order for unknowns.
     let mut order: Vec<usize> = (0..buckets.len()).collect();
@@ -876,6 +914,7 @@ fn canonical_rank(segment: &str, name: &str) -> u64 {
         ("__TEXT", "__const") | ("__DATA", "__common") => 2,
         ("__TEXT", "__cstring") => 3,
         ("__TEXT", "__chain_starts") => 4,
+        ("__TEXT", "__init_offsets") => 5,
         _ => 100,
     };
     seg * 1000 + name
@@ -969,8 +1008,48 @@ pub fn layout(
     // M15 seam names the decision (`-pagezero_size`), the default is
     // the pre-seam constant.
     let image_base = cfg.pagezero.base_for(cfg.filetype);
+    // M16: the initializer form. The refusals ride here (not only on the
+    // driver surface) so every caller pays them: the relocatable output
+    // preserves input sections verbatim (the M10 rung-1 contract — nothing
+    // for the transform to own), and a below-floor target's dyld cannot
+    // consume `S_INIT_FUNC_OFFSETS` at all. The named form collects the
+    // pointer sections it replaces; the default collects none and the
+    // pre-M16 bytes stay bit-identical.
+    let init_specs = match cfg.init_offsets {
+        crate::init_offsets::InitOffsets::Classic => Vec::new(),
+        crate::init_offsets::InitOffsets::Offsets => {
+            if cfg.filetype == OutputType::Relocatable {
+                return Err(LinkError::Layout {
+                    message: "-init_offsets transforms initializer pointers into __init_offsets \
+                              entries, but the -r output preserves input sections verbatim \
+                              (the M10 relocatable contract); drop -init_offsets or link a \
+                              final image"
+                        .into(),
+                });
+            }
+            let floor = chained_fixups_min_minos(cfg.platform);
+            if cfg.minos < floor {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "-init_offsets needs a target at or above the platform's chained-fixups \
+                         floor {floor_version} (the target's dyld cannot consume \
+                         __init_offsets below it); raise the deployment target or use \
+                         -no_init_offsets",
+                        floor_version = version_string(floor),
+                    ),
+                });
+            }
+            crate::init_offsets::collect_sections(objects)?
+        }
+    };
+    let init_skip: std::collections::HashSet<(u32, usize)> =
+        init_specs.iter().map(|s| (s.file, s.in_sect)).collect();
+    let init_entries: usize = init_specs
+        .iter()
+        .map(|s| (objects[s.file as usize].sections[s.in_sect].size / 8) as usize)
+        .sum();
     // ---- bucketing ---------------------------------------------------------
-    let (mut buckets, mut bucket_of, fixup_slot_count) = bucket_inputs(objects, res)?;
+    let (mut buckets, mut bucket_of, fixup_slot_count) = bucket_inputs(objects, res, &init_skip)?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
     let needs = scan_needs(objects, res, interner, live)?;
     // The fixups payload exists when *any* slot is planned: input pointer
@@ -1016,6 +1095,7 @@ pub fn layout(
         chains_enabled,
         !needs.got.is_empty(),
         !needs.stubs.is_empty(),
+        &init_specs,
     );
 
     // ---- commons (name-sorted for deterministic allocation) ----------------
@@ -1049,8 +1129,9 @@ pub fn layout(
             fold,
             &veneers,
             interner,
+            init_entries,
         )?;
-        resolve_all(objects, &mut state, res, interner, cfg, fold)?;
+        resolve_all(objects, &mut state, res, interner, cfg, fold, &init_specs)?;
         // M6 veneer scan: every out-of-range branch site plans one veneer.
         let new_specs = scan_branch_overflow(objects, &state, &veneers)?;
         let mut slots: Vec<FixupSlot> = Vec::new();
@@ -1953,6 +2034,7 @@ fn place(
     fold: &crate::icf::FoldPlan,
     veneers: &[crate::thunks::VeneerSpec],
     interner: &Interner,
+    init_entries: usize,
 ) -> Result<PlacedState, LinkError> {
     let (mut pieces_of_bucket, cstring_instances) = build_bucket_pieces(
         objects,
@@ -2025,6 +2107,33 @@ fn place(
         }
     }
 
+    // ---- M16: the initializer-offsets section ------------------------------
+    // One synthetic piece; Pass 3 fills the u32 entries with the resolved
+    // initializers' offsets from the image's load address. Empty when the
+    // corpus carries no initializer pointers (the bucket only exists when
+    // the transform collected sections).
+    if let Some(bi) = buckets
+        .iter()
+        .position(|(seg, name, _, _)| seg == "__TEXT" && name == "__init_offsets")
+    {
+        pieces_of_bucket[bi].push(Piece {
+            file: FileId(u32::MAX),
+            in_sect: usize::MAX,
+            in_range: 0..0,
+            offset: 0,
+            size: (4 * init_entries) as u64,
+            align_log2: 2,
+            zerofill: false,
+            common_name: None,
+            patches: Vec::new(),
+            fixup_slots: Vec::new(),
+            synth: Some(SynthPiece {
+                kind: SynthKind::InitOffsets,
+                bytes: vec![0u8; 4 * init_entries],
+            }),
+        });
+    }
+
     // ---- M6 veneer pieces: one per planned out-of-range branch site -------
     // Inserted into the site's own bucket right after its piece, so the
     // site's redirected `B`/`BL` is always within the ±128 MiB reach.
@@ -2056,7 +2165,7 @@ fn place(
         // section's reserved size while its content still fits (§7.3
         // "layout stability" — the in-place patch tier's precondition).
         let size = match (&cfg.layout_slack, name.as_str()) {
-            (Some(_), "__got" | "__stubs" | "__chain_starts") => size,
+            (Some(_), "__got" | "__stubs" | "__chain_starts" | "__init_offsets") => size,
             (Some(policy), _) if size > 0 && !zerofill => {
                 let anchor = cfg
                     .slack_anchor
@@ -2256,6 +2365,7 @@ fn place(
                     SynthKind::Veneer { site, .. } => {
                         veneer_addr_of.insert(site, addr);
                     }
+                    SynthKind::InitOffsets => {}
                 }
             }
         }
@@ -2398,6 +2508,7 @@ fn resolve_all(
     interner: &Interner,
     cfg: &LinkConfig,
     fold: &crate::icf::FoldPlan,
+    init_specs: &[crate::init_offsets::InitSection],
 ) -> Result<(), LinkError> {
     // Definition addresses: commons already resolved; add section defs.
     // M5/D1: when the defining section split into atom pieces, the def's
@@ -2423,9 +2534,6 @@ fn resolve_all(
     // Weak-reference flag per name (bind import weak bit; any weak-referencing
     // site makes the import weak — dyld coalesces at runtime).
     let mut weak_ref: std::collections::BTreeMap<u32, bool> = std::collections::BTreeMap::new();
-    for (id, _def) in res.definitions() {
-        let _ = id;
-    }
     for obj in objects {
         for sym in &obj.symbols {
             if sym.external && sym.is_undefined() {
@@ -2546,6 +2654,94 @@ fn resolve_all(
                     imm12: (target_addr & 0xFFF) as u32,
                 });
             }
+            Some(SynthKind::InitOffsets) => {
+                // M16: fill the u32 entries — each the resolved
+                // initializer's offset from the image's load address (the
+                // `__TEXT` vmaddr), in input order (objects in command-line
+                // order, sections in order, entries in slot order). A
+                // pointer that cannot become an offset refuses here with
+                // the fix named: a bind (dyld cannot call into another
+                // image) and a target outside an executable segment are
+                // dyld's own load-time check, front-loaded into the link.
+                let space = AddrSpace {
+                    got_slot_addr: &state.got_slot_addr,
+                    stub_addr: &state.stub_addr,
+                    interner,
+                    res,
+                    cfg,
+                    resolved: &resolved,
+                    atom_addr: &state.atom_addr,
+                    veneer_of: &state.veneer_addr_of,
+                };
+                let image_base = cfg.pagezero.base_for(cfg.filetype);
+                let mut bases = Vec::with_capacity(init_specs.len());
+                let mut acc = 0usize;
+                for spec in init_specs {
+                    bases.push(acc);
+                    acc += (objects[spec.file as usize].sections[spec.in_sect].size / 8) as usize;
+                }
+                let mut entries = vec![0u32; acc];
+                for (bi, spec) in init_specs.iter().enumerate() {
+                    let obj = &objects[spec.file as usize];
+                    let in_sect = &obj.sections[spec.in_sect];
+                    let mut relocs: Vec<_> = in_sect.relocs.iter().collect();
+                    relocs.sort_by_key(|r| r.offset);
+                    for r in relocs {
+                        let name = match r.target {
+                            RelocTarget::Extern(id) => interner.name(id),
+                            RelocTarget::Section(_) => {
+                                format!("{}:{}", obj.name, in_sect.name)
+                            }
+                        };
+                        let Some(target_addr) = lookup_opt(obj, r.target, 0, &space)? else {
+                            return Err(LinkError::Layout {
+                                message: format!(
+                                    "-init_offsets cannot encode \"{name}\" as a u32 offset: \
+                                     the initializer resolves as a bind, and dyld cannot \
+                                     call into another image; define it locally or use \
+                                     -no_init_offsets"
+                                ),
+                            });
+                        };
+                        let in_text = state.sections.iter().any(|s| {
+                            s.seg_name == "__TEXT"
+                                && s.vm_addr <= target_addr
+                                && target_addr < s.vm_addr + s.size
+                        });
+                        if !in_text {
+                            return Err(LinkError::Layout {
+                                message: format!(
+                                    "-init_offsets cannot encode \"{name}\" as a u32 offset: \
+                                     the initializer at {target_addr:#x} does not land in an \
+                                     executable segment (dyld refuses __init_offsets entries \
+                                     outside __TEXT); point the pointer at a function or use \
+                                     -no_init_offsets"
+                                ),
+                            });
+                        }
+                        let off = u32::try_from(target_addr - image_base).map_err(|_| {
+                            LinkError::Layout {
+                                message: format!(
+                                    "-init_offsets cannot encode \"{name}\" as a u32 offset: \
+                                     the initializer sits {:#x} below the image's load address",
+                                    image_base - target_addr
+                                ),
+                            }
+                        })?;
+                        entries[bi + r.offset as usize / 8] = off;
+                    }
+                }
+                let synth = state.flat[fp_idx]
+                    .piece
+                    .synth
+                    .as_mut()
+                    .expect("the __init_offsets piece carries synthetic content");
+                debug_assert_eq!(synth.bytes.len(), 4 * entries.len());
+                synth.bytes.clear();
+                for off in &entries {
+                    synth.bytes.extend_from_slice(&off.to_le_bytes());
+                }
+            }
             None => {
                 if zerofill {
                     continue;
@@ -2623,6 +2819,7 @@ fn resolve_all(
         let piece = &mut s.pieces[fp.piece_idx];
         piece.patches.clone_from(&fp.piece.patches);
         piece.fixup_slots.clone_from(&fp.piece.fixup_slots);
+        piece.synth.clone_from(&fp.piece.synth);
     }
     state.def_addr = def_addr;
     Ok(())
