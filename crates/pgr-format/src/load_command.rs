@@ -8,7 +8,8 @@
 use crate::consts::{
     LC_BUILD_VERSION, LC_CODE_SIGNATURE, LC_DATA_IN_CODE, LC_DYLD_CHAINED_FIXUPS,
     LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB,
-    LC_LOAD_DYLINKER, LC_MAIN, LC_RPATH, LC_SEGMENT_64, LC_SOURCE_VERSION, LC_SYMTAB, LC_UUID,
+    LC_LOAD_DYLINKER, LC_MAIN, LC_RPATH, LC_SEGMENT_64, LC_SOURCE_VERSION, LC_SUB_LIBRARY,
+    LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID,
 };
 use crate::cursor::Cursor;
 use crate::error::FormatError;
@@ -64,6 +65,12 @@ pub enum LoadCommandKind {
     Uuid,
     /// `LC_RPATH`.
     Rpath,
+    /// `LC_SUB_UMBRELLA` (M20): the umbrella dylib names a sub-umbrella
+    /// member — the 12-byte-fixed `lc_str` shape `LC_RPATH` rides.
+    SubUmbrella,
+    /// `LC_SUB_LIBRARY` (M20): the umbrella dylib names a sub-library
+    /// member — the same shape, the region's non-framework half.
+    SubLibrary,
     /// `LC_SOURCE_VERSION`.
     SourceVersion,
     /// `linkedit_data_command` payloads: chained fixups, export trie,
@@ -99,6 +106,8 @@ impl LoadCommandKind {
             | crate::consts::LC_VERSION_MIN_WATCHOS => Self::BuildVersion,
             LC_UUID => Self::Uuid,
             LC_RPATH => Self::Rpath,
+            LC_SUB_UMBRELLA => Self::SubUmbrella,
+            LC_SUB_LIBRARY => Self::SubLibrary,
             LC_SOURCE_VERSION => Self::SourceVersion,
             LC_CODE_SIGNATURE
             | LC_DYLD_CHAINED_FIXUPS
@@ -301,6 +310,18 @@ mod tests {
             LoadCommandKind::LinkeditData(LC_CODE_SIGNATURE)
         );
         assert_eq!(LoadCommandKind::from_cmd(LC_MAIN), LoadCommandKind::Main);
+        assert_eq!(
+            LoadCommandKind::from_cmd(crate::consts::LC_SUB_UMBRELLA),
+            LoadCommandKind::SubUmbrella
+        );
+        assert_eq!(
+            LoadCommandKind::from_cmd(crate::consts::LC_SUB_LIBRARY),
+            LoadCommandKind::SubLibrary
+        );
+        assert_eq!(
+            LoadCommandKind::from_cmd(crate::consts::LC_RPATH),
+            LoadCommandKind::Rpath
+        );
         assert_eq!(
             LoadCommandKind::from_cmd(0xdead_beef),
             LoadCommandKind::Unknown(0xdead_beef)
