@@ -62,11 +62,12 @@ mod tests {
         assert!(!crate::VERSION.is_empty(), "version line built");
         // v7 (M14): the fusion halves (v3), the audited relink (v4), the
         // §7.2 tile replay (v5), the request config's chain-word-family
-        // byte (v6), the export-filter lists re-encoded as patterns —
-        // and now the config's image base rides the tail as a u64 (M15,
-        // `-pagezero_size`): a resident relink lays out the base the
-        // client named, never the default.
-        assert_eq!(crate::PROTO_VERSION, 8);
+        // byte (v6), the export-filter lists re-encoded as patterns, the
+        // config's image base as a u64 (M15, `-pagezero_size`) — and now
+        // the config's initializer form as a tail byte (M16,
+        // `-init_offsets`): a resident relink plans the form the client
+        // named, never the default.
+        assert_eq!(crate::PROTO_VERSION, 9);
     }
 
     #[test]
