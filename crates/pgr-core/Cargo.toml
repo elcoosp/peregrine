@@ -103,5 +103,13 @@ harness = false
 name = "stack_size"
 harness = false
 
+# The M19 image-base bench: the link across the -image_base decisions
+# (the M3 zero default, a 512 KiB and a 2 GiB base) over the same
+# 64-object dylib corpus — a shape-parity gate, the base is the
+# constant-delta address arithmetic every pass already rides.
+[[bench]]
+name = "image_base"
+harness = false
+
 [lints]
 workspace = true
