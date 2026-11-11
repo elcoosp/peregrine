@@ -239,12 +239,6 @@ impl CheckSet {
         self.mask & bit(check) != 0
     }
 
-    /// True when every family is selected (the whole-image pass).
-    #[must_use]
-    pub const fn is_all(self) -> bool {
-        self.mask == ALL_MASK
-    }
-
     /// The selected families' canonical names, in verify order.
     pub fn names(&self) -> impl Iterator<Item = &'static str> {
         Check::ALL
