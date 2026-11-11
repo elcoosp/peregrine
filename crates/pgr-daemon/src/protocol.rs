@@ -69,6 +69,12 @@
 //! never the default; a body naming a zero or misaligned base is
 //! malformed (the same validation the flag parse pays, so the wire can
 //! never silently move the image base a client asked for).
+//!
+//! M16 (wire v9): the tail also carries the initializer form — one byte
+//! naming the classic pointer sections (0) or the `__init_offsets`
+//! transform (1). A resident relink plans the form the client asked
+//! for; an unknown byte is malformed (a refusal, never a silently
+//! dropped knob).
 
 use pgr_core::export_filter::SymbolPattern;
 use pgr_core::fixups::FixupPointerFormat;
@@ -91,8 +97,11 @@ use sha2::{Digest, Sha256};
 /// source bytes; globs stay globs across the wire); **v8** appends the
 /// image base to the config body's tail (M15 — the validated
 /// `-pagezero_size` vmsize; a resident relink lays out the base the
-/// client named).
-pub const PROTO_VERSION: u32 = 8;
+/// client named); **v9** appends the initializer form to that tail (M16
+/// — one byte naming the classic pointer sections or the
+/// `__init_offsets` transform; a resident relink plans the form the
+/// client asked for).
+pub const PROTO_VERSION: u32 = 9;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -575,6 +584,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // rides the tail — a resident relink lays out the base the client
     // named, never the default.
     put_u64(out, cfg.pagezero.vmsize());
+    // M16 (v9 wire): the initializer form rides the tail after it — one
+    // byte naming the classic pointer sections (0) or the
+    // `__init_offsets` transform (1); a resident relink plans the form
+    // the client asked for.
+    put_u8(out, u8::from(cfg.init_offsets.is_offsets()));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -681,6 +695,13 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // silently defaulted decision.
     let pagezero =
         pgr_core::pagezero::PageZero::from_override(r.u64()?).map_err(|_| malformed())?;
+    // M16 (v9 wire): the initializer form — an unknown byte is
+    // malformed (a refusal, never a silently dropped knob).
+    let init_offsets = match r.u8()? {
+        0 => pgr_core::InitOffsets::Classic,
+        1 => pgr_core::InitOffsets::Offsets,
+        _ => return Err(malformed()),
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -726,6 +747,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         // is always order-free.
         symbol_order: None,
         pagezero,
+        init_offsets,
     })
 }
 
@@ -805,6 +827,10 @@ mod tests {
             // the client named, never the default).
             pagezero: pgr_core::pagezero::PageZero::from_override(0x7F7F_7F7F_C000)
                 .expect("the override validates"),
+            // The v9 tail: the non-default initializer form must
+            // survive the round trip verbatim (a resident relink plans
+            // the form the client named, never the default).
+            init_offsets: pgr_core::InitOffsets::Offsets,
             symbol_order: None,
         }
     }
