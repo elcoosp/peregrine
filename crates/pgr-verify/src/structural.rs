@@ -11,7 +11,7 @@ use pgr_format::consts::{
     CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_CODE_SIGNATURE, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_INFO,
     LC_DYLD_INFO_ONLY, MH_BUNDLE, MH_DYLIB, MH_DYLINKER, MH_EXECUTE, MH_FILESET, MH_KEXT_BUNDLE,
     MH_OBJECT, MH_PRELOAD, PAGE_SIZE_16K, PAGEZERO_SIZE_64, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL,
-    S_ZEROFILL, VM_PROT_EXECUTE, VM_PROT_WRITE,
+    S_ZEROFILL, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_WRITE,
 };
 use pgr_format::header::MachHeader64;
 use pgr_format::load_command::{LoadCommandIter, LoadCommandKind, ParsedCommand};
@@ -590,6 +590,21 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
     for seg in &img.segments {
         let name = seg.name().unwrap_or("<non-utf8>");
         if name == "__PAGEZERO" {
+            // The protection half of the unmapped-prefix contract (M17):
+            // `__PAGEZERO` is never mapped, so it carries no protections
+            // — a fixture that names a pair there is refused, the same
+            // way the base contract names a moved `__PAGEZERO`.
+            if seg.maxprot != VM_PROT_NONE || seg.initprot != VM_PROT_NONE {
+                report.issues.push(Issue::error(
+                    Code::SegmentContract,
+                    format!(
+                        "__PAGEZERO must not carry protections (maxprot {:#x}, initprot \
+                         {:#x}) — the unmapped prefix loads with none",
+                        seg.maxprot, seg.initprot
+                    ),
+                    None,
+                ));
+            }
             continue;
         }
         // Congruence: vmaddr ≡ fileoff (mod 16 KiB). Mutated inputs can
@@ -649,6 +664,21 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
             report.issues.push(Issue::error(
                 Code::SegmentContract,
                 format!("segment {name}: initprot has bits outside maxprot"),
+                None,
+            ));
+        }
+        // The W^X contract (M17): an initial mapping is never writable
+        // and executable — arm64 macOS kills the process at exec time.
+        // A writable+executable *ceiling* stays legal (maxprot is what
+        // mprotect may raise to, not what the kernel maps).
+        if seg.initprot & (VM_PROT_WRITE | VM_PROT_EXECUTE) == (VM_PROT_WRITE | VM_PROT_EXECUTE) {
+            report.issues.push(Issue::error(
+                Code::SegmentContract,
+                format!(
+                    "segment {name} maps writable and executable (initprot {:#x}) — \
+                     arm64 macOS refuses a W+X mapping",
+                    seg.initprot
+                ),
                 None,
             ));
         }
