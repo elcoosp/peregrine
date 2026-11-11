@@ -106,8 +106,11 @@ use sha2::{Digest, Sha256};
 /// segments the client named, never the house table); **v11** appends
 /// the stack reserve to that tail (M18 — a present-byte + u64 naming
 /// the executable's `LC_MAIN.stacksize`; a resident relink reserves
-/// what the client named, never the zero default).
-pub const PROTO_VERSION: u32 = 11;
+/// what the client named, never the zero default); **v12** appends the
+/// dylib/bundle image base to that tail (M19 — a present-byte + u64
+/// naming the `-image_base` vmaddr; a resident relink lays out the base
+/// the client named, never the M3 zero default).
+pub const PROTO_VERSION: u32 = 12;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -616,6 +619,16 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         }
         None => put_u8(out, 0),
     }
+    // M19 (v12 wire): the dylib/bundle image base rides the tail after
+    // it — a present-byte plus the validated vmaddr; a resident relink
+    // lays out the base the client named, never the M3 zero default.
+    match cfg.image_base {
+        Some(b) => {
+            put_u8(out, 1);
+            put_u64(out, b.vmaddr());
+        }
+        None => put_u8(out, 0),
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -748,6 +761,15 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             pgr_core::stack_size::StackSize::from_override(r.u64()?).map_err(|_| malformed())?,
         ),
     };
+    // M19 (v12 wire): the dylib/bundle image base — the same validation
+    // the flag parse pays, so a zero or misaligned base is malformed,
+    // never a silently zeroed address space.
+    let image_base = match r.u8()? {
+        0 => None,
+        _ => Some(
+            pgr_core::image_base::ImageBase::from_override(r.u64()?).map_err(|_| malformed())?,
+        ),
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -796,6 +818,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         init_offsets,
         seg_prots,
         stack_size,
+        image_base,
     })
 }
 
@@ -899,6 +922,13 @@ mod tests {
             stack_size: Some(
                 pgr_core::stack_size::StackSize::from_override(0x4000_0000)
                     .expect("the reserve validates"),
+            ),
+            // The v12 tail: a non-default dylib/bundle base must
+            // survive the round trip verbatim (a resident relink lays
+            // out the base the client named, never the M3 zero).
+            image_base: Some(
+                pgr_core::image_base::ImageBase::from_override(0x6_0000)
+                    .expect("the base validates"),
             ),
             symbol_order: None,
         }
@@ -1258,6 +1288,75 @@ mod tests {
             }
         }
         assert_eq!(hits.len(), 1, "the reserve rides exactly once");
+        let mut bad = body;
+        bad[hits[0]..hits[0] + 8].copy_from_slice(&0x3000u64.to_le_bytes());
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_image_base_round_trips() {
+        // v12 (M19): the dylib/bundle preferred load address rides the
+        // config tail — a resident relink lays out the base the client
+        // named, never the M3 zero default.
+        let mut cfg = rich_config();
+        cfg.image_base = Some(
+            pgr_core::image_base::ImageBase::from_override(0x80000).expect("the base validates"),
+        );
+        let req = LinkRequest {
+            config: cfg,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        };
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        assert_eq!(back, req, "the base crosses byte-for-byte");
+        assert_eq!(
+            back.config
+                .image_base
+                .map(pgr_core::image_base::ImageBase::vmaddr),
+            Some(0x80000),
+            "the named base survives the wire"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_image_base_is_malformed() {
+        // v12: a misaligned or zero base on the wire is malformed, not
+        // silently defaulted (the default would zero the address space
+        // the client asked for).
+        let mut cfg = rich_config();
+        cfg.image_base = Some(
+            pgr_core::image_base::ImageBase::from_override(0x80000).expect("the base validates"),
+        );
+        let body = LinkRequest {
+            config: cfg,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The base rides as a present-byte + u64 exactly once (the
+        // distinctive value has no other carrier); corrupt those 8
+        // bytes to a misaligned value.
+        let needle = 0x80000u64.to_le_bytes();
+        let mut hits = Vec::new();
+        for i in 0..body.len().saturating_sub(8) {
+            if body[i..i + 8] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the base rides exactly once");
         let mut bad = body;
         bad[hits[0]..hits[0] + 8].copy_from_slice(&0x3000u64.to_le_bytes());
         let err = LinkRequest::decode(&bad).unwrap_err();
