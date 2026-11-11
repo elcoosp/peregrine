@@ -25,11 +25,10 @@ use crate::pad_name;
 use pgr_format::consts::{
     ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
     ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
-    ARM64_RELOC_POINTER_TO_GOT, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED,
-    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_SECT, N_UNDF,
-    N_WEAK_DEF, N_WEAK_REF, PLATFORM_MACOS, RELOC_LENGTH_4, RELOC_LENGTH_8,
-    S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS, S_REGULAR, S_ZEROFILL, SECTION_TYPE_MASK,
-    TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
+    ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED, CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64,
+    LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PLATFORM_MACOS,
+    RELOC_LENGTH_4, RELOC_LENGTH_8, S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS, S_REGULAR,
+    S_ZEROFILL, SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::cursor::pod_read_unaligned_at;
 use pgr_format::reloc::RelocationInfo;
@@ -159,20 +158,6 @@ impl ObjectReloc {
             length_log2: RELOC_LENGTH_4,
             extern_: true,
             rtype: ARM64_RELOC_GOT_LOAD_PAGEOFF12,
-        }
-    }
-
-    /// A data pointer whose value is the symbol's GOT slot address
-    /// (`ARM64_RELOC_POINTER_TO_GOT`).
-    #[must_use]
-    pub const fn pointer_to_got(sym: u32) -> Self {
-        Self {
-            offset: 0,
-            symbolnum: sym,
-            pcrel: false,
-            length_log2: RELOC_LENGTH_8,
-            extern_: true,
-            rtype: ARM64_RELOC_POINTER_TO_GOT,
         }
     }
 
