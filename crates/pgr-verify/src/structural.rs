@@ -381,6 +381,108 @@ pub(crate) fn check_load_commands(img: &ParsedImage<'_>, report: &mut Report) {
             ));
         }
     }
+    check_umbrella_region(img, report);
+}
+
+/// The M20 umbrella-region contract: `LC_SUB_UMBRELLA`/`LC_SUB_LIBRARY`
+/// are a dylib's identity block, and each command carries one member
+/// name at the fixed `lc_str` offset. The invariants the fixture knob can
+/// break are named: a sub command off a dylib (an executable's identity
+/// is `LC_MAIN` + `LC_LOAD_DYLINKER`, a bundle dlopens without a
+/// region), an empty member name (a typo, not a member), a stray `lc_str`
+/// offset (the fixed part is 12 bytes), an undersized command, and a
+/// duplicate member (the region names a member once — the same name
+/// under both kinds is still one member).
+fn check_umbrella_region(img: &ParsedImage<'_>, report: &mut Report) {
+    const SUB_FIXED_PART: u32 = 12; // cmd + cmdsize + lc_str offset
+    let is_dylib = img.header.filetype == MH_DYLIB;
+    let mut seen: Vec<String> = Vec::new();
+    for cmd in &img.commands {
+        let opcode = match cmd.kind {
+            LoadCommandKind::SubUmbrella => pgr_format::consts::LC_SUB_UMBRELLA,
+            LoadCommandKind::SubLibrary => pgr_format::consts::LC_SUB_LIBRARY,
+            _ => continue,
+        };
+        let name = match cmd.kind {
+            LoadCommandKind::SubUmbrella => "LC_SUB_UMBRELLA",
+            _ => "LC_SUB_LIBRARY",
+        };
+        if !is_dylib {
+            report.issues.push(Issue::error(
+                Code::LinkeditPayload,
+                format!(
+                    "{name} is only valid in dylibs (the umbrella region rides LC_ID_DYLIB's \
+                     identity block); this image carries filetype {:#x}",
+                    img.header.filetype
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        if cmd.cmdsize < SUB_FIXED_PART as usize + 4 {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "{name} cmdsize {} is under the 12-byte fixed part plus one name byte",
+                    cmd.cmdsize
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        let raw = &cmd.bytes;
+        let off = u32::from_le_bytes(
+            raw[8..12]
+                .try_into()
+                .expect("the offset field rides byte 8"),
+        );
+        if off != SUB_FIXED_PART {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "{name} lc_str offset {off} must be 12 (the fixed part is cmd, cmdsize, \
+                     offset)",
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        // The name: a NUL-terminated C string inside the command, with
+        // room for the terminator.
+        let tail = &raw[SUB_FIXED_PART as usize..cmd.cmdsize];
+        let Some(end) = tail.iter().position(|&b| b == 0) else {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!("{name} member name is not NUL-terminated inside the command"),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        };
+        let member = String::from_utf8_lossy(&tail[..end]).into_owned();
+        if member.is_empty() {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "{name} member name is empty — name the member's dylib name \
+                     (e.g. -sub_umbrella MySub.framework)"
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        if seen.iter().any(|s| s == &member) {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "duplicate umbrella member {member:?}: the region names a member once \
+                     (opcode {opcode:#x})"
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        seen.push(member);
+    }
 }
 
 /// The M3 dylib/bundle contract: `LC_ID_DYLIB` presence per file type,
