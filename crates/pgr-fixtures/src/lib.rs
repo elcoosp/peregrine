@@ -275,6 +275,9 @@ pub struct ImageBuilder {
     /// M15: the `__PAGEZERO` vmsize override (`None` = the 4 GiB
     /// Mach-O arm64 constant). Executables only.
     pagezero: Option<u64>,
+    /// M19: the dylib/bundle preferred load address (the non-executable
+    /// constant-delta delta).
+    image_base: Option<u64>,
     /// M17: the per-segment protection overrides (`(name, maxprot,
     /// initprot)`; unnamed segments keep the house table). Written
     /// during assembly, so the ad-hoc signature is computed over the
@@ -310,6 +313,7 @@ impl ImageBuilder {
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
             pagezero: None,
+            image_base: None,
             seg_prots: Vec::new(),
             stack_size: None,
         }
@@ -332,6 +336,7 @@ impl ImageBuilder {
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
             pagezero: None,
+            image_base: None,
             seg_prots: Vec::new(),
             stack_size: None,
         }
@@ -401,6 +406,22 @@ impl ImageBuilder {
     /// (the broken-shape gates build it on purpose).
     pub fn set_pagezero(&mut self, vmsize: u64) {
         self.pagezero = Some(vmsize);
+    }
+
+    /// Sets the dylib/bundle preferred load address (the image base) —
+    /// the M19 `-image_base` knob. The default stays the M3 zero (the
+    /// `__TEXT.vmaddr == fileoff` contract every pre-M19 fixture built
+    /// with); an override is written during assembly (the
+    /// `vmaddr = fileoff + delta` delta, the segment command and every
+    /// rebase word ride it), so the ad-hoc signature is computed over
+    /// the final bytes and strict verification runs with the hash
+    /// recompute on.
+    ///
+    /// # Panics
+    /// Never — a misaligned override is the verifier's finding to name
+    /// (the broken-shape gates build it on purpose).
+    pub fn set_image_base(&mut self, vmaddr: u64) {
+        self.image_base = Some(vmaddr);
     }
 
     /// Overrides one segment's `(maxprot, initprot)` pair — the M17
@@ -567,7 +588,7 @@ impl ImageBuilder {
         let delta = if exec {
             self.pagezero.unwrap_or(PAGEZERO_SIZE_64)
         } else {
-            0
+            self.image_base.unwrap_or(0)
         };
         let mut placed: Vec<(String, u64, u64)> = Vec::new(); // name, fileoff, vmsize
         let mut sect_infos: Vec<SectionInfo> = Vec::new();
