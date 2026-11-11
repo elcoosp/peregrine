@@ -86,5 +86,22 @@ harness = false
 name = "init_offsets"
 harness = false
 
+# The M17 segment-protection bench: the link across the -segprot
+# decisions (the house table, a read-only-after-rebase __DATA_CONST, a
+# writable __TEXT ceiling) over the same 64-object corpus — a
+# shape-parity gate, the protections are two field writes per planned
+# segment.
+[[bench]]
+name = "segprot"
+harness = false
+
+# The M18 stack-reserve bench: the link across the -stack_size
+# decisions (the zero default, a 16 MiB and a 1 GiB reserve) over the
+# same 64-object corpus — a shape-parity gate, the reserve is one field
+# write in the 24-byte LC_MAIN.
+[[bench]]
+name = "stack_size"
+harness = false
+
 [lints]
 workspace = true
