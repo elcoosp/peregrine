@@ -63,11 +63,14 @@ mod tests {
         // v7 (M14): the fusion halves (v3), the audited relink (v4), the
         // §7.2 tile replay (v5), the request config's chain-word-family
         // byte (v6), the export-filter lists re-encoded as patterns, the
-        // config's image base as a u64 (M15, `-pagezero_size`) — and now
-        // the config's initializer form as a tail byte (M16,
-        // `-init_offsets`): a resident relink plans the form the client
-        // named, never the default.
-        assert_eq!(crate::PROTO_VERSION, 9);
+        // config's image base as a u64 (M15, `-pagezero_size`), the
+        // config's initializer form as a tail byte (M16,
+        // `-init_offsets`), the config's segment-protection decisions as
+        // a length-prefixed tail (M17, `-segprot`) — and now the
+        // config's stack reserve as a present-byte + u64 (M18,
+        // `-stack_size`): a resident relink reserves what the client
+        // named, never the zero default.
+        assert_eq!(crate::PROTO_VERSION, 11);
     }
 
     #[test]
