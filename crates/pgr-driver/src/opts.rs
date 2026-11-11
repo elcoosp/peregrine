@@ -148,6 +148,18 @@ pub struct Options {
     /// M1-locked classic pointer sections — every pre-M16 link stays
     /// byte-identical.
     pub init_offsets_flag: Option<bool>,
+    /// M17: the `-segprot` decisions staged in command order. `finish`
+    /// inserts them into the config (the core seam validates the value
+    /// and refuses a second decision for one segment) after the
+    /// relocatable conflict gate sees the whole surface — a `-segprot`
+    /// on `-r` is a refused conflict, never a silently dropped flag.
+    pub seg_prot_stage: Vec<(pgr_core::segprot::SegName, pgr_core::segprot::SegProt)>,
+    /// M18: `-stack_size` was passed explicitly. The value is validated
+    /// at parse time (the core seam pays the same validation); the
+    /// output-kind conflict is `finish`'s (it sees the whole surface).
+    /// The default (`false`) keeps the pre-M18 zero reserve — every
+    /// pre-M18 link stays byte-identical.
+    pub stack_size_explicit: bool,
 }
 
 impl Default for Options {
@@ -187,6 +199,8 @@ impl Default for Options {
             map_path: None,
             pagezero_explicit: false,
             init_offsets_flag: None,
+            seg_prot_stage: Vec::new(),
+            stack_size_explicit: false,
         }
     }
 }
@@ -277,10 +291,62 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-segprot` value the grammar refuses (M17): the protections are
+    /// subsets of `rwx` and the segment is one of the planned names —
+    /// the same validation the core seam pays. The verdict is the core
+    /// seam's refusal (it names the fix); the help restates the grammar.
+    #[error("-segprot: {detail}")]
+    #[diagnostic(help(
+        "the protections are subsets of `rwx` (e.g. `rw` or `rx`); the segment is one of \
+         __TEXT, __DATA_CONST, __DATA, __LINKEDIT"
+    ))]
+    SegProtValue {
+        /// The core seam's refusal (grammar, unknown segment, kernel rule).
+        detail: String,
+    },
+    /// A `-segprot` surface conflict (M17): the relocatable output
+    /// carries no segments (the M10 rung-1 contract — nothing for a
+    /// protection pair to land on), or one segment is named twice. The
+    /// verdict names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    SegProtConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-stack_size` value the grammar refuses (M18): the reserve is
+    /// a non-zero multiple of the 16 KiB arm64 page — the same
+    /// validation the core seam pays — and the help names the grammar
+    /// (the fix, not just the verdict).
+    #[error("invalid value for -stack_size: {value}")]
+    #[diagnostic(help(
+        "the stack size is a non-zero multiple of the 16 KiB arm64 page (0x4000), \
+         decimal or 0x-hex — e.g. 0x1000000"
+    ))]
+    StackSizeValue {
+        /// The refused value as written.
+        value: String,
+    },
+    /// A `-stack_size` surface conflict (M18): `LC_MAIN` exists on
+    /// executables only (the M3 contract: dylibs, bundles and the
+    /// relocatable output carry none) — a named reserve has no field to
+    /// land on. The verdict names the shape conflict; the help is the
+    /// fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    StackSizeConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An argv element is not valid UTF-8 (the surface stores paths and
     /// values as `String`s — the Mach-O string tables are UTF-8 too).
     /// The message names what happened and which bytes; the old shape
-    /// misreported it as an "invalid value for <arg>".
+    /// misreported it as an "invalid value for `<arg>`".
     #[error("argument is not valid UTF-8: {value}")]
     #[diagnostic(help(
         "paths and values are carried as UTF-8 (the Mach-O string tables are UTF-8); \
@@ -972,6 +1038,41 @@ fn apply_flag(
         "-no_init_offsets" => {
             opts.init_offsets_flag = Some(false);
         }
+        // M17: the segment protections (`-segprot <seg> <max> <init>` —
+        // ld64's grammar). The same validation the core seam pays runs
+        // here (the refusal names the grammar); the surface conflicts
+        // (the relocatable output, a twice-named segment) are
+        // `finish`'s — it sees the whole surface.
+        "-segprot" => {
+            let seg_raw = next_value(args, i, arg)?;
+            let max_raw = next_value(args, i, arg)?;
+            let init_raw = next_value(args, i, arg)?;
+            let seg = pgr_core::segprot::SegName::parse(&seg_raw).map_err(|e| {
+                OptsError::SegProtValue {
+                    detail: e.to_string(),
+                }
+            })?;
+            let prot = pgr_core::segprot::SegProt::parse(&max_raw, &init_raw).map_err(|e| {
+                OptsError::SegProtValue {
+                    detail: e.to_string(),
+                }
+            })?;
+            opts.seg_prot_stage.push((seg, prot));
+        }
+        // M18: the stack reserve (the executable's `LC_MAIN.stacksize`).
+        // The same validation the core seam pays runs here, so the
+        // refusal names the grammar; the output-kind conflict is
+        // `finish`'s (it sees the whole surface).
+        "-stack_size" => {
+            let v = next_value(args, i, arg)?;
+            let n =
+                parse_number(&v).ok_or_else(|| OptsError::StackSizeValue { value: v.clone() })?;
+            opts.config.stack_size = Some(
+                pgr_core::StackSize::from_override(n)
+                    .map_err(|_| OptsError::StackSizeValue { value: v.clone() })?,
+            );
+            opts.stack_size_explicit = true;
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -1085,6 +1186,45 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 }
             ),
             fix: "drop -pagezero_size or link an executable (the default output)".into(),
+        });
+    }
+    // M17: the segment protections are a segmented-output decision —
+    // `-r` preserves input sections verbatim and plans no segments (the
+    // M10 rung-1 contract), so a named pair has nothing to land on. An
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one; the staged decisions then insert into the
+    // config, where the core seam refuses a twice-named segment.
+    if !opts.seg_prot_stage.is_empty()
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::SegProtConflict {
+            verdict: "-segprot names a segment protection, but the relocatable output \
+                      carries no segments"
+                .into(),
+            fix: "drop -segprot or link a segmented output (an executable, dylib or \
+                  bundle)"
+                .into(),
+        });
+    }
+    for (seg, prot) in opts.seg_prot_stage.drain(..) {
+        if let Err(err) = opts.config.seg_prots.insert(seg, prot) {
+            return Err(OptsError::SegProtConflict {
+                verdict: err.to_string(),
+                fix: "one -segprot per segment".into(),
+            });
+        }
+    }
+    // M18: the stack reserve is an executable decision — `LC_MAIN`
+    // exists there only (the M3 contract: dylibs, bundles and the
+    // relocatable output carry none), so a named reserve has nothing to
+    // land on. An explicitly named knob that cannot apply is a refusal,
+    // never a silently dropped one.
+    if opts.stack_size_explicit && opts.config.filetype != pgr_core::layout::OutputType::Execute {
+        return Err(OptsError::StackSizeConflict {
+            verdict: "-stack_size reserves the LC_MAIN stack, but this output carries no \
+                      LC_MAIN"
+                .into(),
+            fix: "drop -stack_size or link an executable (the default output)".into(),
         });
     }
     match opts.config.filetype {
