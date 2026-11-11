@@ -30,11 +30,11 @@ use pgr_format::consts::{
     DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
     DYLD_CHAINED_PTR_START_NONE, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE,
     LC_DYLD_CHAINED_FIXUPS, LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB,
-    LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SYMTAB, LC_UUID, MH_DYLDLINK,
-    MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL,
-    N_EXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS,
-    S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE,
-    VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
+    LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SUB_LIBRARY, LC_SUB_UMBRELLA,
+    LC_SYMTAB, LC_UUID, MH_DYLDLINK, MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS,
+    MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K,
+    PAGEZERO_SIZE_64, PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO,
+    SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::fixups::{
     Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
@@ -292,6 +292,13 @@ pub struct ImageBuilder {
     /// on. The value is the knob's — a misaligned reserve is the
     /// verifier's finding to name.
     stack_size: Option<u64>,
+    /// M20: the umbrella region members in flag order — `true` rides
+    /// `LC_SUB_UMBRELLA`, `false` rides `LC_SUB_LIBRARY`. Written during
+    /// assembly, so the ad-hoc signature is computed over the final
+    /// bytes and strict verification runs with the hash recompute on.
+    /// The values are the knob's — a member off a dylib, an empty name
+    /// or a duplicate is the verifier's finding to name.
+    sub_cmds: Vec<(bool, String)>,
 }
 
 impl ImageBuilder {
@@ -316,6 +323,7 @@ impl ImageBuilder {
             image_base: None,
             seg_prots: Vec::new(),
             stack_size: None,
+            sub_cmds: Vec::new(),
         }
     }
 
@@ -339,6 +347,7 @@ impl ImageBuilder {
             image_base: None,
             seg_prots: Vec::new(),
             stack_size: None,
+            sub_cmds: Vec::new(),
         }
     }
 
@@ -449,6 +458,31 @@ impl ImageBuilder {
     /// (the broken-shape gates build it on purpose).
     pub fn set_stack_size(&mut self, bytes: u64) {
         self.stack_size = Some(bytes);
+    }
+
+    /// Names a sub-umbrella member of the umbrella region — the M20
+    /// `-sub_umbrella` knob. Members are written during assembly (the
+    /// region commands and the ad-hoc signature ride them), so strict
+    /// verification runs with the hash recompute on.
+    ///
+    /// # Panics
+    /// Never — a member the region cannot carry (a sub command off a
+    /// dylib, an empty name, a duplicate) is the verifier's finding to
+    /// name (the broken-shape gates build them on purpose).
+    pub fn add_sub_umbrella(&mut self, name: &str) {
+        self.sub_cmds.push((true, name.to_string()));
+    }
+
+    /// Names a sub-library member of the umbrella region — the M20
+    /// `-sub_library` knob. Members are written during assembly (the
+    /// region commands and the ad-hoc signature ride them), so strict
+    /// verification runs with the hash recompute on.
+    ///
+    /// # Panics
+    /// Never — a member the region cannot carry is the verifier's
+    /// finding to name (the broken-shape gates build them on purpose).
+    pub fn add_sub_library(&mut self, name: &str) {
+        self.sub_cmds.push((false, name.to_string()));
     }
 
     /// Selects the chain-word pointer format (default: `Offset64`). The
@@ -566,6 +600,10 @@ impl ImageBuilder {
         }
         for name in &self.dylibs {
             add_cmd(align_up(24 + name.len() as u64 + 1, 8) as usize);
+        }
+        for (is_umbrella, name) in &self.sub_cmds {
+            let _ = is_umbrella;
+            add_cmd(align_up(12 + name.len() as u64 + 1, 8) as usize); // LC_SUB_UMBRELLA / LC_SUB_LIBRARY
         }
         add_cmd(24); // LC_SYMTAB
         add_cmd(80); // LC_DYSYMTAB
@@ -941,6 +979,23 @@ impl ImageBuilder {
             w32(&mut buf, lc + 16, 0x0001_0000);
             w32(&mut buf, lc + 20, 0);
             buf[lc + 24..lc + 24 + n.len()].copy_from_slice(n.as_bytes());
+            lc += cmdsize;
+        }
+        // LC_SUB_UMBRELLA / LC_SUB_LIBRARY per umbrella member (M20):
+        // the identity block's region, in flag order — the 12-byte-fixed
+        // lc_str shape `LC_RPATH` rides.
+        for (is_umbrella, name) in &self.sub_cmds {
+            let opcode = if *is_umbrella {
+                LC_SUB_UMBRELLA
+            } else {
+                LC_SUB_LIBRARY
+            };
+            w32(&mut buf, lc, opcode);
+            let n = format!("{name}\0");
+            let cmdsize = align_up(12 + n.len() as u64, 8) as usize;
+            w32(&mut buf, lc + 4, cmdsize as u32);
+            w32(&mut buf, lc + 8, 12);
+            buf[lc + 12..lc + 12 + n.len()].copy_from_slice(n.as_bytes());
             lc += cmdsize;
         }
         w32(&mut buf, lc, LC_SYMTAB);
