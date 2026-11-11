@@ -99,7 +99,7 @@ fn the_default_is_the_macho_arm64_base() {
     );
     assert_eq!(pz.vmsize(), 0x1_0000_0000, "the TDD §3.6 constant");
     assert_eq!(
-        pz.base_for(OutputType::Execute),
+        pz.base_for(OutputType::Execute, None),
         0x1_0000_0000,
         "the executable base is the pagezero vmsize"
     );
@@ -109,7 +109,7 @@ fn the_default_is_the_macho_arm64_base() {
         OutputType::Relocatable,
     ] {
         assert_eq!(
-            pz.base_for(kind),
+            pz.base_for(kind, None),
             0,
             "{kind:?} carries no __PAGEZERO (M3 contract)"
         );
