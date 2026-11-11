@@ -4,6 +4,40 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [0.23.0] - 2026-11-11
+### Build
+- **core:** The image-base bench joins the bench table (1270de5)
+
+### Documentation
+- Record the M19 image-base bench numbers (65496b2)
+- The TDD trailer points at M19 (e85b5f7)
+- The compat table carries the -image_base row (d3cfda2)
+- The README carries M19 and the 0.22.0 badge (5d8346f)
+
+### Features
+- **core:** The image base is a nameable dylib decision (17f19da)
+- **core:** The constant-delta resolver reads the named base (a8f3bbc)
+- **core:** The layout plans the named dylib base and refuses the rest (c5b88cc)
+- **core:** The image-base seam joins the crate surface (6641954)
+- **driver:** The -image_base flag names the base and refuses the rest (b126b4c)
+- **daemon:** Wire v12 carries the named image base (280626a)
+- **daemon:** The version gate reads wire v12 (9559482)
+- **verify:** The base contract checks the invariant, not the constant (507a091)
+- **fixtures:** The builder names the dylib image base (27dbda3)
+- **driver:** The image-base consumer example walks both images (c894073)
+
+### Performance
+- **core:** Bench the image base's per-decision parity (3d4a35b)
+
+### Refactor
+- **core:** The relocatable gate reads the one base resolver (9306576)
+- **core:** The pagezero gates ride the extended resolver (3fb774d)
+
+### Tests
+- **core:** The image-base seam gates the plan and the refusals (2c05d21)
+- **driver:** The image-base surface gates links and the wire (b6c2af7)
+- **verify:** The base contract gates the broken shapes (458d854)
+
 ## [0.19.0] - 2026-11-10
 ### Build
 - **core:** The filter and dylib benches join the manifest (1955c34)
