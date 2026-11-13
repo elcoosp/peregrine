@@ -39,6 +39,9 @@ use std::path::Path;
 enum DylibKind {
     /// `-framework` (plain `LC_LOAD_DYLIB`).
     Load,
+    /// `-reexport_framework` (`LC_REEXPORT_DYLIB`, the M3 re-export
+    /// shape through the framework search).
+    Reexport,
     /// `-weak_framework` (`LC_LOAD_WEAK_DYLIB`, weak binds).
     Weak,
     /// `-lazy_framework` (`LC_LAZY_LOAD_DYLIB`).
@@ -804,12 +807,20 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     // M14: the weak/lazy framework kinds resolve through the same search
     // after the plain frameworks (the lists are separate in `Options`;
     // the LC order — and with it the two-level ordinals — is plain,
-    // weak, then lazy).
+    // weak, then lazy). M23: the re-export frameworks resolve through
+    // the same search after the plain frameworks and before the weak
+    // ones (the order is plain, re-export, weak, then lazy — an empty
+    // list leaves every pre-M23 link byte-identical).
     let framework_dirs = opts::effective_framework_dirs(&opts.framework_dirs, &opts.syslibroots);
     for (name, kind) in opts
         .frameworks
         .iter()
         .map(|n| (n, DylibKind::Load))
+        .chain(
+            opts.reexport_frameworks
+                .iter()
+                .map(|n| (n, DylibKind::Reexport)),
+        )
         .chain(opts.weak_frameworks.iter().map(|n| (n, DylibKind::Weak)))
         .chain(opts.lazy_frameworks.iter().map(|n| (n, DylibKind::Lazy)))
     {
@@ -832,6 +843,7 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
                     });
                 };
                 dylib.lazy = kind == DylibKind::Lazy;
+                dylib.reexport = kind == DylibKind::Reexport;
                 dylibs.push(dylib);
             }
             None => {
