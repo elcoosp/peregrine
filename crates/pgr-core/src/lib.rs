@@ -61,6 +61,7 @@ pub mod segprot;
 pub mod slack;
 pub mod stable_imports;
 pub mod stack_size;
+pub mod sub_client;
 pub mod thunks;
 pub mod trie;
 pub mod umbrella;
@@ -94,6 +95,7 @@ pub use segprot::{SegName, SegProt, SegProtError, SegProts};
 pub use slack::{LayoutFallback, SlackPolicy};
 pub use stable_imports::{StableImport, StableImports};
 pub use stack_size::StackSize;
+pub use sub_client::{SubClient, SubClientEntry, SubClientError};
 pub use trie::{Export, ExportInfo};
 pub use umbrella::{Umbrella, UmbrellaError, UmbrellaKind, UmbrellaMember};
 
