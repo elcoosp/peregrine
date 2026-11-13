@@ -209,7 +209,7 @@ fn bench_resolve(c: &mut Criterion) {
         res.install(&objects).unwrap();
         res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error)
             .unwrap();
-        let snapshot = ResolutionSnapshot::capture(&objects, &interner, &res, &[]);
+        let snapshot = ResolutionSnapshot::capture(&objects, &interner, &res, &[], &[]);
         let prev = section_digests(&objects);
 
         let (relink_interner, relink_objects) = parse(&relink);
@@ -217,7 +217,15 @@ fn bench_resolve(c: &mut Criterion) {
         // The reuse plan (shape guard + digest diff) is computed once per
         // relink — the same place the byte planner diffs its digests — so
         // it hoists out of the timed loop; the timed unit is the resolver.
-        let plan = plan_reuse(&snapshot, &prev, &relink_interner, &relink_objects, &[]).unwrap();
+        let plan = plan_reuse(
+            &snapshot,
+            &prev,
+            &relink_interner,
+            &relink_objects,
+            &[],
+            &[],
+        )
+        .unwrap();
 
         let externals: usize = relink_objects
             .iter()
@@ -255,6 +263,7 @@ fn bench_resolve(c: &mut Criterion) {
                         &snapshot,
                         &relink_interner,
                         &relink_objects,
+                        &[],
                         &[],
                         UndefinedPolicy::Error,
                     )
