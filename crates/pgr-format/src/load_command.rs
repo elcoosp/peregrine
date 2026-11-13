@@ -71,6 +71,9 @@ pub enum LoadCommandKind {
     /// `LC_SUB_LIBRARY` (M20): the umbrella dylib names a sub-library
     /// member — the same shape, the region's non-framework half.
     SubLibrary,
+    /// `LC_SUB_CLIENT` (M21): the identity-block dylib names an allowed
+    /// client — the same shape, the client-restriction half.
+    SubClient,
     /// `LC_SOURCE_VERSION`.
     SourceVersion,
     /// `linkedit_data_command` payloads: chained fixups, export trie,
@@ -108,6 +111,7 @@ impl LoadCommandKind {
             LC_RPATH => Self::Rpath,
             LC_SUB_UMBRELLA => Self::SubUmbrella,
             LC_SUB_LIBRARY => Self::SubLibrary,
+            crate::consts::LC_SUB_CLIENT => Self::SubClient,
             LC_SOURCE_VERSION => Self::SourceVersion,
             LC_CODE_SIGNATURE
             | LC_DYLD_CHAINED_FIXUPS
@@ -317,6 +321,10 @@ mod tests {
         assert_eq!(
             LoadCommandKind::from_cmd(crate::consts::LC_SUB_LIBRARY),
             LoadCommandKind::SubLibrary
+        );
+        assert_eq!(
+            LoadCommandKind::from_cmd(crate::consts::LC_SUB_CLIENT),
+            LoadCommandKind::SubClient
         );
         assert_eq!(
             LoadCommandKind::from_cmd(crate::consts::LC_RPATH),
