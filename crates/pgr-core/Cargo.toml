@@ -135,5 +135,22 @@ harness = false
 name = "dyld_env"
 harness = false
 
+# The M24 symbol-alias bench: the link across the -alias decisions
+# (the empty table, 8 and 64 aliases) over the same 64-object
+# executable corpus — a shape-parity gate, an alias is one extra
+# symtab row and one trie terminal per decision.
+[[bench]]
+name = "alias"
+harness = false
+
+# The M25 bundle-loader bench: the link across the -bundle_loader
+# decisions (the dynamic-lookup default beside a 64-export loader
+# surface) over the same 64-object bundle corpus — a shape-parity
+# gate, a loader decision is a Pass-2 set insert and one ordinal arm
+# per bind.
+[[bench]]
+name = "bundle_loader"
+harness = false
+
 [lints]
 workspace = true
