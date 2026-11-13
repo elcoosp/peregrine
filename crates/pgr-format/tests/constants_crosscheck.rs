@@ -82,6 +82,7 @@ fn load_command_opcodes_match_object() {
         LC_LOAD_UPWARD_DYLIB,
         LC_VERSION_MIN_MACOSX,
         LC_FUNCTION_STARTS,
+        LC_DYLD_ENVIRONMENT,
         LC_MAIN,
         LC_DATA_IN_CODE,
         LC_SOURCE_VERSION,
