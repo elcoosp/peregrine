@@ -292,6 +292,20 @@ pub struct LinkConfig {
     /// the M20 region) — the layout's re-check backs the driver
     /// surface's earlier refusal.
     pub sub_clients: crate::sub_client::SubClient,
+    /// M22 — the dyld-environment list: the `-dyld_env` pairs an
+    /// executable emits as the `LC_DYLD_ENVIRONMENT` commands dyld
+    /// reads from the main executable (see [`crate::dyld_env`]). The
+    /// default (the empty list) keeps every pre-M22 link
+    /// byte-identical; each pair is validated at construction
+    /// ([`DyldEnvEntry::from_flag`](crate::dyld_env::DyldEnvEntry::from_flag),
+    /// duplicate variables refuse on
+    /// [`DyldEnv::push`](crate::dyld_env::DyldEnv::push)), so a
+    /// [`DyldEnv`](crate::dyld_env::DyldEnv) in hand is always a legal
+    /// list; dylibs, bundles and the relocatable output refuse the
+    /// knob (dyld reads the command from the main executable only) —
+    /// the layout's re-check backs the driver surface's earlier
+    /// refusal.
+    pub dyld_envs: crate::dyld_env::DyldEnv,
 }
 
 impl Default for LinkConfig {
@@ -335,6 +349,7 @@ impl Default for LinkConfig {
             image_base: None,
             umbrella: crate::umbrella::Umbrella::new(),
             sub_clients: crate::sub_client::SubClient::new(),
+            dyld_envs: crate::dyld_env::DyldEnv::new(),
         }
     }
 }
@@ -1231,6 +1246,36 @@ pub fn layout(
                       LC_MAIN (the M3 contract: only executables have one); drop \
                       -stack_size or link an executable"
                 .into(),
+        });
+    }
+    // M22: the dyld environment is an executable decision — dyld reads
+    // `LC_DYLD_ENVIRONMENT` from the main executable only, so a named
+    // pair has no loader to reach on a dylib, a bundle or the
+    // relocatable output. The refusal rides here (not only on the
+    // driver surface) so every caller pays it: a silently dropped
+    // variable would change the runtime the caller asked for.
+    if !cfg.dyld_envs.is_empty() && cfg.filetype != OutputType::Execute {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Dylib => (
+                "-dyld_env exports DYLD_* variables through the loader, but this \
+                 output is a dylib",
+                "dyld reads LC_DYLD_ENVIRONMENT from the main executable only: link an \
+                 executable or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-dyld_env exports DYLD_* variables through the loader, but this \
+                 output is a bundle",
+                "dyld reads LC_DYLD_ENVIRONMENT from the main executable only: link an \
+                 executable or drop the flag",
+            ),
+            _ => (
+                "-dyld_env exports DYLD_* variables through the loader, but the \
+                 relocatable output carries no loader commands",
+                "drop the flag or link an executable",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
         });
     }
     let init_skip: std::collections::HashSet<(u32, usize)> =
@@ -3821,6 +3866,9 @@ fn build_header(
         + u32::try_from(cfg.sub_clients.count()).map_err(|_| LinkError::Internal {
             message: "sub-client count exceeds u32".into(),
         })?
+        + u32::try_from(cfg.dyld_envs.count()).map_err(|_| LinkError::Internal {
+            message: "dyld-environment count exceeds u32".into(),
+        })?
         + u32::try_from(hi.rpaths.len()).map_err(|_| LinkError::Internal {
             message: "rpath count exceeds u32".into(),
         })?
@@ -3849,6 +3897,7 @@ fn build_header(
             + hi.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
             + cfg.umbrella.region_size()
             + cfg.sub_clients.region_size()
+            + cfg.dyld_envs.region_size()
             + hi.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
             + if hi.source_version.is_some() { 16 } else { 0 },
         "sizing formula drift"
@@ -4053,6 +4102,22 @@ fn build_header(
     } else {
         entryoff_at = 0;
     }
+    // LC_DYLD_ENVIRONMENT per `-dyld_env` pair (M22): the
+    // loader-configuration commands ride right after `LC_MAIN` — the
+    // §8.2 adjacency pins what the loader is (LC_LOAD_DYLINKER), where
+    // the entry and stack live (LC_MAIN), and what the loader exports
+    // (the environment). Each command shares `LC_RPATH`'s
+    // `dylinker_command` shape: one `lc_str` pair at the 12-byte offset,
+    // flag order (the M22 seam's tests pin it).
+    for env in &cfg.dyld_envs {
+        w32(&mut buf, lc, pgr_format::consts::LC_DYLD_ENVIRONMENT);
+        let n = env.pair();
+        let cmdsize = align8(12 + n.len() + 1);
+        w32(&mut buf, lc + 4, cmdsize as u32);
+        w32(&mut buf, lc + 8, 12);
+        buf[lc + 12..lc + 12 + n.len()].copy_from_slice(n.as_bytes());
+        lc += cmdsize;
+    }
     w32(&mut buf, lc, pgr_format::consts::LC_SYMTAB);
     w32(&mut buf, lc + 4, 24);
     w32(&mut buf, lc + 8, hi.sym_off as u32);
@@ -4154,6 +4219,7 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc) -> usize 
         + cfg.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
         + cfg.umbrella.region_size()
         + cfg.sub_clients.region_size()
+        + cfg.dyld_envs.region_size()
         + cfg.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
         + usize::from(cfg.source_version.is_some()) * 16 // LC_SOURCE_VERSION
         + usize::from(is_exec) * 24 // LC_MAIN
