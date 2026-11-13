@@ -384,34 +384,43 @@ pub(crate) fn check_load_commands(img: &ParsedImage<'_>, report: &mut Report) {
     check_umbrella_region(img, report);
 }
 
-/// The M20 umbrella-region contract: `LC_SUB_UMBRELLA`/`LC_SUB_LIBRARY`
-/// are a dylib's identity block, and each command carries one member
-/// name at the fixed `lc_str` offset. The invariants the fixture knob can
-/// break are named: a sub command off a dylib (an executable's identity
-/// is `LC_MAIN` + `LC_LOAD_DYLINKER`, a bundle dlopens without a
-/// region), an empty member name (a typo, not a member), a stray `lc_str`
+/// The M20 umbrella-region contract, widened by M21 to the whole
+/// identity-block sub-command family:
+/// `LC_SUB_UMBRELLA`/`LC_SUB_LIBRARY`/`LC_SUB_CLIENT` are a dylib's
+/// identity block, and each command carries one name at the fixed
+/// `lc_str` offset. The invariants the fixture knob can break are
+/// named: a sub command off a dylib (an executable's identity is
+/// `LC_MAIN` + `LC_LOAD_DYLINKER`, a bundle dlopens without one), an
+/// empty name (a typo, not a member or a client), a stray `lc_str`
 /// offset (the fixed part is 12 bytes), an undersized command, and a
-/// duplicate member (the region names a member once — the same name
-/// under both kinds is still one member).
+/// duplicate (the region names a member once — the same name under both
+/// member kinds is still one member — and the client list names a
+/// client once; the two namespaces are independent).
 fn check_umbrella_region(img: &ParsedImage<'_>, report: &mut Report) {
     const SUB_FIXED_PART: u32 = 12; // cmd + cmdsize + lc_str offset
     let is_dylib = img.header.filetype == MH_DYLIB;
     let mut seen: Vec<String> = Vec::new();
+    let mut seen_clients: Vec<String> = Vec::new();
     for cmd in &img.commands {
-        let opcode = match cmd.kind {
-            LoadCommandKind::SubUmbrella => pgr_format::consts::LC_SUB_UMBRELLA,
-            LoadCommandKind::SubLibrary => pgr_format::consts::LC_SUB_LIBRARY,
+        let (opcode, name, is_client) = match cmd.kind {
+            LoadCommandKind::SubUmbrella => (
+                pgr_format::consts::LC_SUB_UMBRELLA,
+                "LC_SUB_UMBRELLA",
+                false,
+            ),
+            LoadCommandKind::SubLibrary => {
+                (pgr_format::consts::LC_SUB_LIBRARY, "LC_SUB_LIBRARY", false)
+            }
+            LoadCommandKind::SubClient => {
+                (pgr_format::consts::LC_SUB_CLIENT, "LC_SUB_CLIENT", true)
+            }
             _ => continue,
-        };
-        let name = match cmd.kind {
-            LoadCommandKind::SubUmbrella => "LC_SUB_UMBRELLA",
-            _ => "LC_SUB_LIBRARY",
         };
         if !is_dylib {
             report.issues.push(Issue::error(
                 Code::LinkeditPayload,
                 format!(
-                    "{name} is only valid in dylibs (the umbrella region rides LC_ID_DYLIB's \
+                    "{name} is only valid in dylibs (the sub commands ride LC_ID_DYLIB's \
                      identity block); this image carries filetype {:#x}",
                     img.header.filetype
                 ),
@@ -460,28 +469,43 @@ fn check_umbrella_region(img: &ParsedImage<'_>, report: &mut Report) {
         };
         let member = String::from_utf8_lossy(&tail[..end]).into_owned();
         if member.is_empty() {
+            let (noun, example) = if is_client {
+                ("client name", "-sub_client client.app")
+            } else {
+                ("member name", "-sub_umbrella MySub.framework")
+            };
             report.issues.push(Issue::error(
                 Code::LoadCommandMalformed,
                 format!(
-                    "{name} member name is empty — name the member's dylib name \
-                     (e.g. -sub_umbrella MySub.framework)"
+                    "{name} {noun} is empty — name the entry's install-name string \
+                     (e.g. {example})"
                 ),
                 Some(cmd.offset as u64),
             ));
             continue;
         }
-        if seen.iter().any(|s| s == &member) {
+        let family = if is_client {
+            &mut seen_clients
+        } else {
+            &mut seen
+        };
+        if family.iter().any(|s| s == &member) {
+            let noun = if is_client {
+                "sub_client"
+            } else {
+                "umbrella member"
+            };
             report.issues.push(Issue::error(
                 Code::LoadCommandMalformed,
                 format!(
-                    "duplicate umbrella member {member:?}: the region names a member once \
+                    "duplicate {noun} {member:?}: the identity block names an entry once \
                      (opcode {opcode:#x})"
                 ),
                 Some(cmd.offset as u64),
             ));
             continue;
         }
-        seen.push(member);
+        family.push(member);
     }
 }
 
