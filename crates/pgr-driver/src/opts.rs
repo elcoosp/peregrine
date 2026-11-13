@@ -78,6 +78,11 @@ pub struct Options {
     /// M14 `-lazy_framework <name>` (repeatable): the framework dylib
     /// loads as `LC_LAZY_LOAD_DYLIB` (dyld's delay-load surface).
     pub lazy_frameworks: Vec<String>,
+    /// M23 `-reexport_framework <name>` (repeatable): the framework
+    /// dylib loads as `LC_REEXPORT_DYLIB` and its exports join this
+    /// image's export trie as REEXPORT nodes (the M3 `-reexport_library`
+    /// shape, resolved through the `-F` search).
+    pub reexport_frameworks: Vec<String>,
     /// M5 `-F <dir>`: framework search directories.
     pub framework_dirs: Vec<String>,
     /// M5 `-sectcreate <seg> <sect> <file>`: section contents from a file.
@@ -189,6 +194,7 @@ impl Default for Options {
             frameworks: Vec::new(),
             weak_frameworks: Vec::new(),
             lazy_frameworks: Vec::new(),
+            reexport_frameworks: Vec::new(),
             framework_dirs: Vec::new(),
             sectcreate: Vec::new(),
             cache_dir: None,
@@ -422,6 +428,32 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     SubClientConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-dyld_env` pair the core seam refuses (M22): the
+    /// `DYLD_<var>=<value>` grammar (a `DYLD_`-prefixed non-empty
+    /// variable, one `=`, NUL-free), named once. The seam's refusal
+    /// rides the help — the grammar the flag accepts, not just the
+    /// verdict.
+    #[error("invalid value for -dyld_env: {raw}")]
+    #[diagnostic(help("{message}"))]
+    DyldEnvValue {
+        /// The refused pair as written.
+        raw: String,
+        /// The core seam's refusal (the fix).
+        message: String,
+    },
+    /// A `-dyld_env` surface conflict (M22): dyld reads
+    /// `LC_DYLD_ENVIRONMENT` from the main executable only — a dylib, a
+    /// bundle and the relocatable output carry no loader to export the
+    /// variables through. The verdict names the shape conflict; the
+    /// help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    DyldEnvConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -905,6 +937,13 @@ fn apply_flag(
             let v = next_value(args, i, arg)?;
             opts.lazy_frameworks.push(v);
         }
+        "-reexport_framework" => {
+            // M23: the framework dylib re-exports through this image's
+            // trie (LC_REEXPORT_DYLIB, the M3 shape — the framework form
+            // of `-reexport_library`).
+            let v = next_value(args, i, arg)?;
+            opts.reexport_frameworks.push(v);
+        }
         "-dylib" => match opts.config.filetype {
             // A repeated kind is idempotent; only a kind *switch* is a
             // conflict (a duplicate used to be reported as the mutual-
@@ -1210,6 +1249,25 @@ fn apply_flag(
                     message: e.to_string(),
                 })?;
         }
+        // M22: the dyld-environment pairs. The same validation the core
+        // seam pays runs here, so the refusal names the grammar; the
+        // output-kind conflict is `finish`'s (it sees the whole
+        // surface).
+        "-dyld_env" => {
+            let v = next_value(args, i, arg)?;
+            let env =
+                pgr_core::DyldEnvEntry::from_flag(&v).map_err(|e| OptsError::DyldEnvValue {
+                    raw: v.clone(),
+                    message: e.to_string(),
+                })?;
+            opts.config
+                .dyld_envs
+                .push(env)
+                .map_err(|e| OptsError::DyldEnvValue {
+                    raw: v.clone(),
+                    message: e.to_string(),
+                })?;
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -1465,6 +1523,44 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 });
             }
             Ot::Dylib => {}
+        }
+    }
+    // M22: the dyld environment is an executable decision — dyld reads
+    // `LC_DYLD_ENVIRONMENT` from the main executable only — the same
+    // refusal shape as the M18 reserve above: an explicitly named knob
+    // that cannot apply is a refusal, never a silently dropped one.
+    if !opts.config.dyld_envs.is_empty() {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Dylib => {
+                return Err(OptsError::DyldEnvConflict {
+                    verdict: "-dyld_env exports DYLD_* variables through the loader, \
+                              but this output is a dylib"
+                        .into(),
+                    fix: "dyld reads LC_DYLD_ENVIRONMENT from the main executable only: \
+                          link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Bundle => {
+                return Err(OptsError::DyldEnvConflict {
+                    verdict: "-dyld_env exports DYLD_* variables through the loader, \
+                              but this output is a bundle"
+                        .into(),
+                    fix: "dyld reads LC_DYLD_ENVIRONMENT from the main executable only: \
+                          link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Relocatable => {
+                return Err(OptsError::DyldEnvConflict {
+                    verdict: "-dyld_env exports DYLD_* variables through the loader, but \
+                              the relocatable output carries no loader commands"
+                        .into(),
+                    fix: "drop the flag or link an executable".into(),
+                });
+            }
+            Ot::Execute => {}
         }
     }
     match opts.config.filetype {
