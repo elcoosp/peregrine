@@ -127,5 +127,13 @@ harness = false
 name = "sub_client"
 harness = false
 
+# The M22 dyld-environment bench: the link across the -dyld_env
+# decisions (the empty list, 8 and 64 pairs) over the same 64-object
+# executable corpus — a shape-parity gate, a pair is one 16-32 byte
+# LC_DYLD_ENVIRONMENT command in the loader-configuration block.
+[[bench]]
+name = "dyld_env"
+harness = false
+
 [lints]
 workspace = true
