@@ -146,6 +146,15 @@ pub const LC_LOAD_UPWARD_DYLIB: u32 = 0x23 | LC_REQ_DYLD;
 pub const LC_VERSION_MIN_MACOSX: u32 = 0x24;
 /// Function start table (`LC_FUNCTION_STARTS`).
 pub const LC_FUNCTION_STARTS: u32 = 0x26;
+/// Dyld environment variables (`-dyld_env DYLD_<var>=<value>`, M22):
+/// the loader-configuration command an executable carries so dyld
+/// starts the image with the named variables set — dyld reads it from
+/// the main executable only and honors `DYLD_`-prefixed variables.
+/// Shares the `dylinker_command` struct (`LC_ID_DYLINKER`/
+/// `LC_LOAD_DYLINKER`): one `lc_str` pair at the 12-byte offset, the
+/// `LC_RPATH` shape. Plain opcode, no `LC_REQ_DYLD` bit (the
+/// object-crate crosscheck pins it).
+pub const LC_DYLD_ENVIRONMENT: u32 = 0x27;
 /// `LC_MAIN`: entry point offset into `__TEXT`.
 pub const LC_MAIN: u32 = 0x28 | LC_REQ_DYLD;
 /// Data-in-code entries (`LC_DATA_IN_CODE`).
