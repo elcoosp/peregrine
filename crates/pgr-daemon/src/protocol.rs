@@ -115,8 +115,11 @@ use sha2::{Digest, Sha256};
 /// client named, never the pre-M20 absence); **v14** appends the
 /// sub-client list to that tail (M21 — one length-prefixed entry per
 /// name; a resident relink emits the clients the linking image named,
-/// never the pre-M21 absence).
-pub const PROTO_VERSION: u32 = 14;
+/// never the pre-M21 absence); **v15** appends the dyld-environment
+/// list to that tail (M22 — one length-prefixed entry per
+/// `DYLD_<var>=<value>` pair; a resident relink exports the variables
+/// the client named, never the pre-M22 absence).
+pub const PROTO_VERSION: u32 = 15;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -653,6 +656,15 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     for c in &cfg.sub_clients {
         put_str(out, c.name());
     }
+    // M22 (v15 wire): the dyld-environment list rides the tail after
+    // the client list — one length-prefixed entry per `DYLD_<var>=<value>`
+    // pair in flag order (single-kind, so no discriminator byte, the
+    // v14 convention); a resident relink exports the variables the
+    // client named, never the pre-M22 absence.
+    put_u32(out, cfg.dyld_envs.count() as u32);
+    for e in &cfg.dyld_envs {
+        put_str(out, e.pair());
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -813,6 +825,15 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         let client = pgr_core::SubClientEntry::from_flag(&r.str()?).map_err(|_| malformed())?;
         sub_clients.push(client).map_err(|_| malformed())?;
     }
+    // M22 (v15 wire): the dyld-environment list — the same validation
+    // the flag parse pays, so a pair off the DYLD_<var>=<value> grammar
+    // or a duplicate variable is malformed, never a silently changed
+    // runtime.
+    let mut dyld_envs = pgr_core::dyld_env::DyldEnv::new();
+    for _ in 0..r.u32()? {
+        let env = pgr_core::DyldEnvEntry::from_flag(&r.str()?).map_err(|_| malformed())?;
+        dyld_envs.push(env).map_err(|_| malformed())?;
+    }
     Ok(LinkConfig {
         ident,
         filetype,
@@ -864,6 +885,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         image_base,
         umbrella,
         sub_clients,
+        dyld_envs,
     })
 }
 
@@ -1020,6 +1042,26 @@ mod tests {
                     )
                     .expect("one decision per client");
                 sub_clients
+            },
+            // The v15 tail: a non-default environment list must survive
+            // the round trip verbatim, in flag order (a resident relink
+            // exports the variables the client named, never the
+            // pre-M22 absence).
+            dyld_envs: {
+                let mut dyld_envs = pgr_core::dyld_env::DyldEnv::new();
+                dyld_envs
+                    .push(
+                        pgr_core::DyldEnvEntry::from_flag("DYLD_PRINT_LIBRARIES=1")
+                            .expect("the pair validates"),
+                    )
+                    .expect("one decision per variable");
+                dyld_envs
+                    .push(
+                        pgr_core::DyldEnvEntry::from_flag("DYLD_PRINT_RPATHS=1")
+                            .expect("the pair validates"),
+                    )
+                    .expect("one decision per variable");
+                dyld_envs
             },
             symbol_order: None,
         }
@@ -1606,6 +1648,81 @@ mod tests {
         assert_eq!(hits.len(), 1, "the client rides exactly once");
         let mut bad = body;
         bad[hits[0] - 4..hits[0]].copy_from_slice(&0u32.to_le_bytes()); // an empty name
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_dyld_env_list_round_trips() {
+        // v15 (M22): the pair list rides the config tail in flag order
+        // — a resident relink exports the variables the client named,
+        // never the pre-M22 absence. The happy path rides `rich_config`'s
+        // round trip; this gate pins the pairs byte-for-byte.
+        let mut cfg = rich_config();
+        let mut envs = pgr_core::dyld_env::DyldEnv::new();
+        envs.push(
+            pgr_core::DyldEnvEntry::from_flag("DYLD_PRINT_PATHS=/usr/lib")
+                .expect("the pair validates"),
+        )
+        .expect("one decision per variable");
+        cfg.dyld_envs = envs;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        let pairs: Vec<&str> = back
+            .config
+            .dyld_envs
+            .iter()
+            .map(pgr_core::DyldEnvEntry::pair)
+            .collect();
+        assert_eq!(
+            pairs,
+            ["DYLD_PRINT_PATHS=/usr/lib"],
+            "the pairs cross byte-for-byte, pair intact"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_dyld_env_is_malformed() {
+        // v15: a pair off the DYLD_<var>=<value> grammar is malformed,
+        // not silently exported (the default would export a variable
+        // the flag grammar cannot spell).
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The pair rides as (u32 len, pair bytes) exactly once; the
+        // length field sits right before the pair bytes.
+        let needle = b"DYLD_PRINT_LIBRARIES=1";
+        let mut hits = Vec::new();
+        for i in 4..body.len().saturating_sub(needle.len()) {
+            if &body[i..i + needle.len()] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the pair rides exactly once");
+        let mut bad = body;
+        bad[hits[0] - 4..hits[0]].copy_from_slice(&0u32.to_le_bytes()); // an empty pair
         let err = LinkRequest::decode(&bad).unwrap_err();
         assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
