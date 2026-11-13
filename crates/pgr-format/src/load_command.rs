@@ -57,6 +57,10 @@ pub enum LoadCommandKind {
     IdDylib,
     /// `LC_LOAD_DYLINKER`.
     LoadDylinker,
+    /// `LC_DYLD_ENVIRONMENT` (M22): the loader-configuration command —
+    /// one `DYLD_<var>=<value>` pair at the 12-byte-fixed `lc_str`
+    /// offset (the `dylinker_command` struct, the `LC_RPATH` shape).
+    DyldEnvironment,
     /// `LC_MAIN`.
     Main,
     /// `LC_BUILD_VERSION` (and the legacy `LC_VERSION_MIN_*` family).
@@ -102,6 +106,7 @@ impl LoadCommandKind {
             crate::consts::LC_REEXPORT_DYLIB => Self::ReexportDylib,
             LC_ID_DYLIB => Self::IdDylib,
             LC_LOAD_DYLINKER => Self::LoadDylinker,
+            crate::consts::LC_DYLD_ENVIRONMENT => Self::DyldEnvironment,
             LC_MAIN => Self::Main,
             LC_BUILD_VERSION
             | crate::consts::LC_VERSION_MIN_MACOSX
@@ -325,6 +330,10 @@ mod tests {
         assert_eq!(
             LoadCommandKind::from_cmd(crate::consts::LC_SUB_CLIENT),
             LoadCommandKind::SubClient
+        );
+        assert_eq!(
+            LoadCommandKind::from_cmd(crate::consts::LC_DYLD_ENVIRONMENT),
+            LoadCommandKind::DyldEnvironment
         );
         assert_eq!(
             LoadCommandKind::from_cmd(crate::consts::LC_RPATH),
