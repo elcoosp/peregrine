@@ -174,7 +174,7 @@ pub fn link_from_objects(
     parallel: Parallelism,
     cache: Option<&crate::cache::PoiCache>,
 ) -> Result<LinkResult, LinkError> {
-    let (objects, interner, export_ids) =
+    let (objects, interner, export_ids, loader_ids) =
         pull_and_intern(objects, archives, cfg, parallel, cache, true)?;
 
     // ---- Pass 2: resolution --------------------------------------------------
@@ -185,6 +185,10 @@ pub fn link_from_objects(
     // replay refuses. The fallback is the ladder's bottom rung — always
     // available, always correct, and invisible to the layout (the equality
     // contract is gated in `tests/m9_resolve_reuse.rs`).
+    let loader_export_names: Vec<Vec<u8>> = cfg
+        .bundle_loader
+        .as_ref()
+        .map_or_else(Vec::new, |l| l.exports().to_vec());
     let reused = cfg.resolve_reuse.as_ref().and_then(|seed| {
         match crate::resolve_reuse::plan_reuse(
             &seed.snapshot,
@@ -192,6 +196,7 @@ pub fn link_from_objects(
             &interner,
             &objects,
             &cfg.dylibs,
+            &loader_export_names,
         ) {
             Ok(plan) => {
                 match crate::resolve_reuse::install_reused(
@@ -200,6 +205,7 @@ pub fn link_from_objects(
                     &interner,
                     &objects,
                     &cfg.dylibs,
+                    &loader_export_names,
                     cfg.undefined_policy,
                 ) {
                     Ok(res) => Some(res),
@@ -232,6 +238,7 @@ pub fn link_from_objects(
         let mut full = Resolution::default();
         full.install(&objects)?;
         full.install_dylibs(&cfg.dylibs, &export_ids);
+        full.install_loader_exports(&loader_ids);
         full.require_all_resolved(&interner, &objects, cfg.undefined_policy)?;
         full
     };
@@ -239,7 +246,13 @@ pub fn link_from_objects(
     // asked for it (the `-incremental` record), so the v5 record section
     // carries it to the next relink.
     let resolve_snapshot = cfg.record_resolution.then(|| {
-        crate::resolve::ResolutionSnapshot::capture(&objects, &interner, &res, &cfg.dylibs)
+        crate::resolve::ResolutionSnapshot::capture(
+            &objects,
+            &interner,
+            &res,
+            &cfg.dylibs,
+            &loader_export_names,
+        )
     });
 
     // ---- M5/D12 liveness, then M6 ICF over the live text atoms --------------
@@ -269,7 +282,7 @@ fn pull_and_intern(
     parallel: Parallelism,
     cache: Option<&crate::cache::PoiCache>,
     intern_header_symbol: bool,
-) -> Result<(Vec<InputObject>, Interner, Vec<StringId>), LinkError> {
+) -> Result<(Vec<InputObject>, Interner, Vec<StringId>, Vec<StringId>), LinkError> {
     // ---- S7 archive liveness (M5): pull only referenced members ------------
     let pulled = pull_archive_members(&objects, archives, cfg, cache)?;
     for obj in pulled {
@@ -288,6 +301,30 @@ fn pull_and_intern(
         export_names.extend(d.exports.iter().cloned());
     }
     names.extend(export_names.iter().cloned());
+    // M25: the loader export names join the batch after the dylib
+    // exports (the image path only — the `-r` object surface opens its
+    // undefineds by design and refuses the knob), so Pass 2 can
+    // install the loader surface by id.
+    let loader_export_count = if intern_header_symbol {
+        cfg.bundle_loader.as_ref().map_or(0, |l| l.exports().len())
+    } else {
+        0
+    };
+    if intern_header_symbol {
+        if let Some(loader) = &cfg.bundle_loader {
+            for e in loader.exports() {
+                names.push(e.clone());
+            }
+        }
+    }
+    // M24: the alias names join the batch after the dylib exports (the
+    // image path only — the `-r` object surface carries no alias rows),
+    // so the layout's name lookups find them.
+    if intern_header_symbol {
+        for a in &cfg.aliases {
+            names.push(a.alias().as_bytes().to_vec());
+        }
+    }
     // `__mh_execute_header` is always interned so the layout pass can emit
     // the executable's header symbol (ld64/lld convention). The `-r` path
     // never emits one — the object emit consumes the batch without it.
@@ -308,7 +345,9 @@ fn pull_and_intern(
         cursor += take;
     }
     let export_ids: Vec<StringId> = ids[cursor..cursor + dylib_export_count].to_vec();
-    Ok((objects, interner, export_ids))
+    cursor += dylib_export_count;
+    let loader_ids: Vec<StringId> = ids[cursor..cursor + loader_export_count].to_vec();
+    Ok((objects, interner, export_ids, loader_ids))
 }
 
 /// The Pass 1–2 product a `-r` output consumes (M10 rung 1): the parsed
@@ -344,8 +383,16 @@ pub fn link_reloc(
 ) -> Result<RelocLink, LinkError> {
     let span = tracing::info_span!("link_reloc", inputs = inputs.len());
     let _entered = span.enter();
+    if cfg.bundle_loader.is_some() {
+        return Err(LinkError::Layout {
+            message: "-bundle_loader binds a bundle against its host process, but the \
+                      relocatable output opens its undefineds by design — drop \
+                      -bundle_loader or link a bundle"
+                .into(),
+        });
+    }
     let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None)?;
-    let (objects, interner, _export_ids) =
+    let (objects, interner, _export_ids, _loader_ids) =
         pull_and_intern(objects, archives, cfg, parallel, None, false)?;
     let mut res = Resolution::default();
     res.install(&objects)?;
