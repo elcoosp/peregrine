@@ -1386,3 +1386,22 @@ empty table — the pre-M20 default — and two populated regions, 8 and
 The honest reading: parity within the run-to-run spread, as the shape
 predicts — the released surface appends identity-block commands the
 header assembly writes once. The bench is the parity gate, not a win.
+
+### M21 — the client list's decision cost
+
+The link across the `-sub_client` decisions (the empty list — the
+pre-M21 default — and two populated lists, 8 and 64 clients) over the
+same corpus (64 objects, 256 rebase slots, linked as a dylib; a client
+is one 16–24 byte `LC_SUB_CLIENT` command in the identity block —
+`pgr-core/benches/sub_client.rs`, `sub_client/link_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_64_objects/default_0` | 805.8 µs |
+| `link_64_objects/clients_8` | 822.2 µs (+2.0%, p = n.s.) |
+| `link_64_objects/clients_64` | 835.3 µs (+3.6%, p = 0.77, n.s.) |
+
+The honest reading: parity within the run-to-run spread, as the shape
+predicts — the released surface appends identity-block commands the
+header assembly writes once, one per named client. The bench is the
+parity gate, not a win.
