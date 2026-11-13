@@ -112,8 +112,11 @@ use sha2::{Digest, Sha256};
 /// the client named, never the M3 zero default); **v13** appends the
 /// umbrella region to that tail (M20 — one length-prefixed entry per
 /// member (`kind byte | name`); a resident relink emits the region the
-/// client named, never the pre-M20 absence).
-pub const PROTO_VERSION: u32 = 13;
+/// client named, never the pre-M20 absence); **v14** appends the
+/// sub-client list to that tail (M21 — one length-prefixed entry per
+/// name; a resident relink emits the clients the linking image named,
+/// never the pre-M21 absence).
+pub const PROTO_VERSION: u32 = 14;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -641,6 +644,15 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         put_u8(out, m.kind().wire());
         put_str(out, m.name());
     }
+    // M21 (v14 wire): the sub-client list rides the tail after the
+    // region — one length-prefixed entry per name in flag order (the
+    // list is single-kind, so no discriminator byte); a resident relink
+    // emits the clients the linking image named, never the pre-M21
+    // absence.
+    put_u32(out, cfg.sub_clients.count() as u32);
+    for c in &cfg.sub_clients {
+        put_str(out, c.name());
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -793,6 +805,14 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             .map_err(|_| malformed())?;
         umbrella.push(member).map_err(|_| malformed())?;
     }
+    // M21 (v14 wire): the sub-client list — the same validation the
+    // flag parse pays, so an empty or NUL-bearing name or a duplicate
+    // client is malformed, never a silently widened list.
+    let mut sub_clients = pgr_core::sub_client::SubClient::new();
+    for _ in 0..r.u32()? {
+        let client = pgr_core::SubClientEntry::from_flag(&r.str()?).map_err(|_| malformed())?;
+        sub_clients.push(client).map_err(|_| malformed())?;
+    }
     Ok(LinkConfig {
         ident,
         filetype,
@@ -843,6 +863,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         stack_size,
         image_base,
         umbrella,
+        sub_clients,
     })
 }
 
@@ -979,6 +1000,26 @@ mod tests {
                     )
                     .expect("one decision per member");
                 umbrella
+            },
+            // The v14 tail: a non-default client list must survive the
+            // round trip verbatim, in flag order (a resident relink
+            // emits the clients the linking image named, never the
+            // pre-M21 absence).
+            sub_clients: {
+                let mut sub_clients = pgr_core::sub_client::SubClient::new();
+                sub_clients
+                    .push(
+                        pgr_core::SubClientEntry::from_flag("client.app")
+                            .expect("the client validates"),
+                    )
+                    .expect("one decision per client");
+                sub_clients
+                    .push(
+                        pgr_core::SubClientEntry::from_flag("/usr/bin/tool")
+                            .expect("the client validates"),
+                    )
+                    .expect("one decision per client");
+                sub_clients
             },
             symbol_order: None,
         }
@@ -1489,6 +1530,82 @@ mod tests {
         assert_eq!(hits.len(), 1, "the member rides exactly once");
         let mut bad = body;
         bad[hits[0] - 5] = 2; // the kind byte: an unknown kind
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_sub_client_list_round_trips() {
+        // v14 (M21): the client list rides the config tail in flag
+        // order — a resident relink emits the clients the linking image
+        // named, never the pre-M21 absence. The happy path rides
+        // `rich_config`'s round trip; this gate pins the names
+        // byte-for-byte.
+        let mut cfg = rich_config();
+        let mut clients = pgr_core::sub_client::SubClient::new();
+        clients
+            .push(
+                pgr_core::SubClientEntry::from_flag("com.example.app")
+                    .expect("the client validates"),
+            )
+            .expect("one decision per client");
+        cfg.sub_clients = clients;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        let names: Vec<&str> = back
+            .config
+            .sub_clients
+            .iter()
+            .map(pgr_core::SubClientEntry::name)
+            .collect();
+        assert_eq!(
+            names,
+            ["com.example.app"],
+            "the clients cross byte-for-byte, name intact"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_sub_client_is_malformed() {
+        // v14: an empty name is malformed, not silently widened (the
+        // default would name a client the flag grammar cannot spell).
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The client rides as (u32 len, name bytes) exactly once; the
+        // length field sits right before the name bytes.
+        let needle = b"client.app";
+        let mut hits = Vec::new();
+        for i in 4..body.len().saturating_sub(needle.len()) {
+            if &body[i..i + needle.len()] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the client rides exactly once");
+        let mut bad = body;
+        bad[hits[0] - 4..hits[0]].copy_from_slice(&0u32.to_le_bytes()); // an empty name
         let err = LinkRequest::decode(&bad).unwrap_err();
         assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
