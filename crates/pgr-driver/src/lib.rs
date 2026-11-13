@@ -23,6 +23,7 @@
 pub mod opts;
 pub mod synth;
 
+use pgr_core::BundleLoader;
 use pgr_core::LinkArchive;
 use pgr_core::LinkArchiveMember;
 use pgr_core::LinkInput;
@@ -395,6 +396,50 @@ pub fn tbd_to_dylib_cached(
         cache.store_dylib(&key, &pgr_core::cache::FrozenDylib::from(&dylib));
     }
     Ok(dylib)
+}
+
+/// Scans a `-bundle_loader` host executable (M25): the export surface
+/// the bundle's undefined references bind against. The host is an
+/// `MH_EXECUTE` image — its trie carries the names dyld resolves
+/// without the symbol table, and a minimal trie (an executable ships
+/// only what it must export) can understate the surface a bundle's
+/// loader binds may reach; the symtab's defined externals complete it
+/// (dyld resolves a main-executable bind through the host process's
+/// own symbol surface). One reader, two consumers: the driver's scan
+/// and the verifier's pair gate both read
+/// [`pgr_format::loader_export_surface`].
+///
+/// # Errors
+/// [`DriverError::Tbd`] on any malformed host (not Mach-O, not an
+/// executable, a broken surface) — the message names the path and the
+/// fix.
+pub fn scan_loader_executable(path: &str, bytes: &[u8]) -> Result<BundleLoader, DriverError> {
+    let header = pgr_format::MachHeader64::parse(bytes).map_err(|e| DriverError::Tbd {
+        path: path.to_string(),
+        source: e,
+    })?;
+    if header.filetype != pgr_format::consts::MH_EXECUTE {
+        return Err(DriverError::Tbd {
+            path: path.to_string(),
+            source: pgr_format::FormatError::Malformed {
+                what: format!(
+                    "not an executable (filetype {:#x}); -bundle_loader names the \
+                     MH_EXECUTE host the bundle binds against",
+                    header.filetype
+                ),
+            },
+        });
+    }
+    let exports = pgr_format::loader_export_surface(bytes).map_err(|e| DriverError::Tbd {
+        path: path.to_string(),
+        source: e,
+    })?;
+    BundleLoader::new(path, exports).map_err(|e| DriverError::Tbd {
+        path: path.to_string(),
+        source: pgr_format::FormatError::Malformed {
+            what: e.to_string(),
+        },
+    })
 }
 
 /// Resolves `-l<name>` against the given search dirs (already ld64-effective:
@@ -875,6 +920,16 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
 
     let mut config = opts.config.clone();
     config.dylibs = dylibs;
+    // M25 `-bundle_loader`: the host's export surface is scanned here
+    // (Pass 0 reads the host file once; the exports ride the config to
+    // Pass 2 and across the wire — protocol v16).
+    if let Some(path) = &opts.bundle_loader {
+        let bytes = std::fs::read(path).map_err(|source| DriverError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        config.bundle_loader = Some(scan_loader_executable(path, &bytes)?);
+    }
     config.load_symbols = opts
         .force_load
         .iter()
