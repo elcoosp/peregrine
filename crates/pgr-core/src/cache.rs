@@ -411,11 +411,11 @@ impl<'a> Reader<'a> {
     }
     fn u32(&mut self) -> Option<u32> {
         self.take(4)
-            .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+            .map(|s| u32::from_le_bytes(s.try_into().expect("`take(4)` guarantees the byte count")))
     }
     fn u64(&mut self) -> Option<u64> {
         self.take(8)
-            .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+            .map(|s| u64::from_le_bytes(s.try_into().expect("`take(8)` guarantees the byte count")))
     }
     fn bytes(&mut self) -> Option<&'a [u8]> {
         let n = self.u32()? as usize;
