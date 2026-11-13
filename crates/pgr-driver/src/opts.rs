@@ -402,6 +402,31 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-sub_client` name the core seam refuses (M21): non-empty,
+    /// NUL-free, named once. The seam's refusal rides the help — the
+    /// grammar the flag accepts, not just the verdict.
+    #[error("invalid value for -sub_client: {raw}")]
+    #[diagnostic(help("{message}"))]
+    SubClientValue {
+        /// The refused name as written.
+        raw: String,
+        /// The core seam's refusal (the fix).
+        message: String,
+    },
+    /// A `-sub_client` surface conflict (M21): the client list is a
+    /// dylib's identity block — an executable's identity is `LC_MAIN` +
+    /// `LC_LOAD_DYLINKER`, a bundle dlopens without sub commands, and
+    /// the relocatable output carries no identity commands at all. The
+    /// verdict names the shape conflict; the help is the fix — the
+    /// house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    SubClientConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An argv element is not valid UTF-8 (the surface stores paths and
     /// values as `String`s — the Mach-O string tables are UTF-8 too).
     /// The message names what happened and which bytes; the old shape
@@ -1166,6 +1191,25 @@ fn apply_flag(
                     message: e.to_string(),
                 })?;
         }
+        // M21: the client list's entries. The same validation the core
+        // seam pays runs here, so the refusal names the grammar; the
+        // output-kind conflict is `finish`'s (it sees the whole
+        // surface).
+        "-sub_client" => {
+            let v = next_value(args, i, arg)?;
+            let client =
+                pgr_core::SubClientEntry::from_flag(&v).map_err(|e| OptsError::SubClientValue {
+                    raw: v.clone(),
+                    message: e.to_string(),
+                })?;
+            opts.config
+                .sub_clients
+                .push(client)
+                .map_err(|e| OptsError::SubClientValue {
+                    raw: v.clone(),
+                    message: e.to_string(),
+                })?;
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -1381,6 +1425,43 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                               but the relocatable output carries no identity commands"
                         .into(),
                     fix: "drop the flags or link a dylib (-dylib)".into(),
+                });
+            }
+            Ot::Dylib => {}
+        }
+    }
+    // M21: the client list is a dylib's identity block — the same
+    // refusal shape as the M20 region above: an explicitly named knob
+    // that cannot apply is a refusal, never a silently dropped one.
+    if !opts.config.sub_clients.is_empty() {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Execute => {
+                return Err(OptsError::SubClientConflict {
+                    verdict: "-sub_client names an identity-block dylib's allowed clients, \
+                              but this output is an executable"
+                        .into(),
+                    fix: "the clients ride LC_ID_DYLIB's identity block: link a dylib \
+                          (-dylib) or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Bundle => {
+                return Err(OptsError::SubClientConflict {
+                    verdict: "-sub_client names an identity-block dylib's allowed clients, \
+                              but this output is a bundle"
+                        .into(),
+                    fix: "bundles dlopen without sub commands: link a dylib \
+                          (-dylib) or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Relocatable => {
+                return Err(OptsError::SubClientConflict {
+                    verdict: "-sub_client names an identity-block dylib's allowed clients, \
+                              but the relocatable output carries no identity commands"
+                        .into(),
+                    fix: "drop the flag or link a dylib (-dylib)".into(),
                 });
             }
             Ot::Dylib => {}
