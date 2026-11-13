@@ -75,7 +75,11 @@ pub(crate) fn read_frame(r: &mut impl Read) -> Result<Option<(u32, Vec<u8>)>, st
     }
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload)?;
-    let tag = u32::from_le_bytes(payload[..4].try_into().unwrap());
+    let tag = u32::from_le_bytes(
+        payload[..4]
+            .try_into()
+            .expect("the length guard bounds the payload above 4 bytes"),
+    );
     Ok(Some((tag, payload[4..].to_vec())))
 }
 
@@ -165,7 +169,11 @@ fn handle_connection(
             TAG_HELLO => {
                 let mut ok = false;
                 if body.len() == 4 {
-                    let peer = u32::from_le_bytes(body[..4].try_into().unwrap());
+                    let peer = u32::from_le_bytes(
+                        body[..4]
+                            .try_into()
+                            .expect("the `body.len() == 4` guard bounds the slice"),
+                    );
                     if peer == PROTO_VERSION {
                         ok = true;
                     }
