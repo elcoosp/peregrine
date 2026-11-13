@@ -1,1471 +1,618 @@
 # Peregrine Benchmarks — Recorded Baselines
 
-Status: **M0 through M11 gates recorded** (TDD §10.3 parser gate + TDD §12 M1
-end-to-end link baseline + architecture doc §10.3 M2 dynamic-link baseline +
-M3 export-trie gate "trie build < 10 ms for 10⁵ exports" + M4 fused-emit
-byte-identity gate and its sandbox perf half + M5 archive/dead-strip/
-cstring gates).
+**Status: M0–M25 surfaces recorded on the dev sandbox.** These numbers exist to (a) prove the
+harness works end-to-end from day one and (b) give each pass a regression anchor.
 
-These numbers are **dev-sandbox baselines**, not Apple Silicon results. They
-exist to (a) prove the benchmark harness works end-to-end from day one and
-(b) give Pass 1 (M1) a regression anchor. Nothing here is a product claim —
-the perf doc's Phase P0 replaces every one of these numbers with measured
-Apple Silicon baselines.
+> [!WARNING]
+> **Nothing here is a product claim.** Every figure is a 2-core KVM dev-sandbox baseline, not an
+> Apple Silicon result. The perf doc's Phase P0 replaces them with measured hardware baselines;
+> the G1/G2/G3 gates and every `ld-prime`/`ld64.lld` comparison stay **open until the rig exists**.
+> Correctness is never traded for speed: every benchmark link is also run through `pgr-verify`,
+> and the byte-identity gates fail the build on divergence.
 
-## Harness
+<p>
+  <a href="#results-at-a-glance">Results</a> • <a href="#gate-scoreboard">Gates</a> • <a href="#conditions--harness">Setup</a> • <a href="#pipeline-baselines">Pipeline</a> • <a href="#the-edit-loop--stages-abc">Edit loop</a> • <a href="#consumer-surfaces-m11m14">Surfaces</a> • <a href="#knob-parity-m10m25">Parity</a> • <a href="#pending-measurements">Pending</a> • <a href="#findings--corrections">Findings</a>
+</p>
 
-* Framework: Criterion (macro-free entry point so the workspace `missing_docs`
-  gate stays intact).
-* Unit: `pgr_format::summarize` — the structural parse: header walk, all load
-  commands, all sections, the full symbol table, every relocation entry, and
-  a complete chained-fixups chain walk.
-* Corpus: deterministic arm64 executables built by `pgr-fixtures` (no I/O,
-  no clocks; identical bytes every run).
-* Reproduce with:
+---
 
-```sh
-cargo bench -p pgr-format
-```
+## Results at a glance
 
-The M1 link baseline (new) uses the same harness rules: the unit is the full
-Pass 0–5 pipeline (`pgr_driver::link_to_bytes`) over deterministic
-relocatable-object corpora; the corpus carries real relocations (BRANCH26,
-ADDEND+PAGE21/PAGEOFF12 pairs, UNSIGNED pointer slots → chained rebases),
-cross-object symbol resolution and common symbols, so resolution and layout
-do honest work.
+**Wins (sandbox-recorded):**
 
-```sh
-cargo bench -p pgr-driver
-```
+| Lever                             | Result                                                                                   | Gate it answers                                                         |
+| --------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| S7 lazy archive pull              | **12.2×** vs `-all_load` (4.02 vs 49.06 ms)                                              | "adopt lazy if ≥ 20 % faster" — met with an order of magnitude to spare |
+| D12 `-dead_strip`                 | **1.9× faster** than unstripped (134 vs 255 ms)                                          | "adds ≤ 30 %" — met with _negative_ overhead                            |
+| M4 fused tile emit (Pass 4)       | **1.37×** (1.59 vs 2.18 ms), one pass over each byte                                     | byte-identity vs the preserved reference emit                           |
+| M3 export trie, 10⁵ exports       | **363 → 31.5 ms** (8–11× across sizes)                                                   | "< 10 ms or parallelized" — rig-bound, ≈ 8–12 ms extrapolated           |
+| M6 ICF `-icf=safe`                | **+12.0 %** wall, ~192 KiB duplicate text removed                                        | "≤ 25 % added wall"                                                     |
+| M6 frozen `.tbd`                  | **19.9 µs** (1.8× vs text parse)                                                         | "< 1 ms startup" — both paths far below                                 |
+| M9 incremental, one-function edit | **1.2 % of the image written** (105 536 B of 8.53 MiB; 2 of 521 tiles)                   | "bytes written ∝ change size" (~80× fewer bytes)                        |
+| M9 segment relayout               | **~13 %** written per +64 KiB growth step                                                | the ladder's middle rung patches, not falls back                        |
+| M9 shrink rung                    | **0.67 %** written (4 of 568 tiles)                                                      | unsigned `__LINKEDIT` shrink patches through                            |
+| Wire v5 tile streams              | changed tiles only (~0.2–1 % of the image); untouched relink ships **0 bytes**           | the last full-image wire crossing, gone                                 |
+| Randomized edit gate              | **10 000 steps in 11.4 s**, every step byte-identical or an honest re-recording fallback | the 10⁴ GA profile (engine level)                                       |
+| M9 resolve reuse                  | **−19 %** of Pass 2 at 64 files × 49 externals                                           | break-even past ~32 inputs                                              |
 
-## Recorded baseline (M5, archives & dead code — S7/D1/D12/D4)
+**Honest washes & prices (recorded as-is, each sandbox-bound):**
 
-The M5 milestone (architecture doc §10.3 row M5) adds the archive surface
-(ranlib-guided lazy member pull — the **S7 decision: lazy adopted**),
-symbol-boundary atomization (D1) with the `-dead_strip` mark-sweep (D12),
-`__cstring` merging (D4) and the real-world flag surface (`-filelist`,
-`-framework`/`-F`, `-sectcreate`, `-all_load`/`-force_load`). New benches:
+| Shape                          | Recorded                                    | Why the wall clock doesn't move _here_                                                   |
+| ------------------------------ | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| M6 POI cache, warm             | −2.8 %                                      | corpus is Pass 2/3-bound; the cache removes Pass 1 exactly                               |
+| M8 resident warm relink        | wash-to-slight-loss (260 vs 224 ms)         | same physics + manifest/wire overhead; POI decode ≈ fresh parse on this box              |
+| M9 tier-1 wall time            | parity-to-slight-loss                       | **ext4 has no reflink** — the clone degrades to a full copy (S8 is the APFS measurement) |
+| Wire v5 on loopback            | wash (529.6 ms, inside the 502–535 ms band) | pipeline-bound, not socket-bound; the win is bytes, paid back on remote-hosted `pgrd`    |
+| Audited fusion                 | **+19 %** per audited relink                | the price of never shipping an unaudited patch; only with `-incremental-verify`          |
+| Fusion ladder vs warm resident | ~2×                                         | the ladder re-runs Passes 2–3 (this corpus's dominant share) + plan + patch + re-sign    |
+| M9 resolve, pipeline level     | wash (2.99 vs 2.94 ms)                      | Pass 2 is a small slice of Passes 1b–3 on this corpus                                    |
 
-### Archive parse (`pgr-format/parse_archive`, new bench)
+## Gate scoreboard
 
-| Bench | Input | Median | Throughput |
-|---|---|---|---|
-| `pgr-format/parse_archive/archive_64_members` | 64-member archive (member objects + name-sorted ranlib table, ~1.4 MiB) | ~118 µs | **~11.9 GiB/s** |
+| Gate (perf doc)           | Target                                       | Sandbox evidence                                      | Status                            |
+| ------------------------- | -------------------------------------------- | ----------------------------------------------------- | --------------------------------- |
+| S7 archive strategy       | lazy ≥ 20 % faster                           | 12.2×                                                 | ✅ closed                         |
+| D12 dead-strip cost       | ≤ +30 %                                      | −47 % (1.9× faster)                                   | ✅ closed                         |
+| M4 fused byte-identity    | fused == reference                           | tests + bench-setup asserts, ten corpus shapes        | ✅ closed                         |
+| M3 trie, 10⁵ exports      | < 10 ms (or parallelized)                    | 31.5 → 27.9 ms; ≈ 8–12 ms extrapolated to P-cores     | 🔶 rig-bound                      |
+| M6 ICF cost               | ≤ +25 %                                      | +12.0 % (M7 re-measure: +14.8 %)                      | ✅ closed                         |
+| M6 `.tbd` startup         | < 1 ms                                       | 19.9 µs frozen / 35.8 µs text                         | ✅ closed                         |
+| M7 fuzzers clean          | 30 CPU-days                                  | 61 s sessions clean after fixes (ledger below)        | 🔶 rig-bound                      |
+| M9 bytes ∝ change         | patch ≪ image                                | 1.2 % / ~13 % / 0.67 % across the ladder              | ✅ closed (sandbox)               |
+| M9 randomized edits       | 10⁴ sequences                                | engine-level 10⁴ steps green in 11.4 s                | 🔶 driver-level + hardware on rig |
+| M2/M4 parallel efficiency | ≥ 70 % @ 8 P-cores, serial ≤ 15 %            | 2 threads cannot exhibit it                           | 🔶 rig-bound                      |
+| G1/G2 clean link          | ≥ 5×/8× vs `ld64.lld`, ≥ 1.5×/3× vs ld-prime | no hardware baselines exist yet                       | 🔶 rig-bound                      |
+| M6/M8 relink              | ≥ 2×/5× vs ld-prime                          | washes recorded honestly above                        | 🔶 rig-bound                      |
+| G3 incremental            | **< 100 ms @ 1 GiB**, ≥ 10× vs ld-prime      | bytes-written half proven; APFS clone unmeasured (S8) | 🔶 rig-bound                      |
 
-The Pass 0 cost of the lazy strategy: one structural walk that yields the
-member table and the `(symbol, member)` index the pull fixpoint consumes.
+## Conditions & harness
 
-### Archive liveness (`pgr-driver/link_archive`, new bench — the S7 decision rule)
+- **Machine**: 2-core Intel Xeon (KVM guest), warm cache; corpora are L2/L3-resident. Inter-run
+  spread on this box is up to ±20 % — deltas below that are noise, and the tables say so.
+- **Filesystem**: ext4, **no reflink** — every clone-and-patch wall time carries that caveat.
+- **Framework**: Criterion (macro-free entry points; the workspace `missing_docs` gate stays intact).
+  Medians; default sampling unless a row states 10/20 samples.
+- **Corpora**: deterministic arm64 images/objects from `pgr-fixtures` — no I/O, no clocks,
+  identical bytes every run. The link corpora carry real relocations (BRANCH26, ADDEND+PAGE21/
+  PAGEOFF12, UNSIGNED pointer slots), cross-object resolution and commons, so Passes 2–3 do honest work.
+- **Units**: `pgr_format::summarize` (structural parse: headers, load commands, sections, full
+  symtab, every reloc, complete chain walk) and `pgr_driver::link_to_bytes` (full Pass 0–5).
+- **Caveat on parser rates**: `summarize` walks _metadata tables_, not section payload — these are
+  metadata-walk rates, not DRAM streaming. The byte-touching parse starts well below them.
 
-Corpus: 64 members × 256 symbols × 32 KiB (≈ 2 MiB archive); `main.o`
-references member 1's symbols and each member references its predecessor,
-so the pull fixpoint loads a transitive chain — the rest of the archive is
-never needed.
-
-| Bench | Median | Notes |
-|---|---|---|
-| `pgr-driver/link_archive/archive_64_lazy` | **4.02 ms** | S7 lazy: only the pulled members are parsed and placed |
-| `pgr-driver/link_archive/archive_64_all_load` | **49.06 ms** | `-all_load` eager baseline: all 64 members parsed |
-| **Δ** | **12.2×** | the S7 adoption rule ("adopt lazy if ≥ 20% faster") is met with an order of magnitude to spare |
-
-### Dead-strip (`pgr-driver/link_dead_strip`, new bench — the D12 perf gate)
-
-Corpus: the large static corpus (32 objects × 2 048 symbols × 32 KiB) with
-`MH_SUBSECTIONS_VIA_SYMBOLS` set and a second, never-referenced symbol set
-per object (≈ 50% dead weight).
-
-| Bench | Median | Notes |
-|---|---|---|
-| `pgr-driver/link_dead_strip/large_32_objects_off` | **255 ms** | the M1–M4 shape (whole-section pieces) |
-| `pgr-driver/link_dead_strip/large_32_objects_on` | **134 ms** | `-dead_strip`: mark-sweep + atom pieces |
-| **Δ** | **1.9× faster** | the gate ("dead-strip adds ≤ 30% to the link") is met with negative overhead: half the atoms are never placed, copied or hashed |
-
-Optimization note (bench-driven, recorded because it shaped the D12 code):
-the first working mark-sweep was **3.5× slower** than the unstripped link
-(911 ms) — the live-set identity was an O(atoms) linear scan per query and
-the mark phase re-scanned every relocation per atom. Three changes closed
-it: (a) liveness queries are O(log atoms) binary searches over the shared
-atom-start table, (b) the edge graph is built in one pass per section —
-relocations are bucketed into their atoms once, never re-scanned per atom,
-(c) the atom tables are borrowed slices instead of per-call clones. The
-result is also byte-identical to the slow first draft (the live set is a
-pure function of the inputs).
-
-### `__cstring` merging (`pgr-driver/link_cstring`, new bench)
-
-| Bench | Input | Median | Notes |
-|---|---|---|---|
-| `pgr-driver/link_cstring/cstring_16_objects` | 16 objects × 512 strings (half a shared pool duplicated in every object) | **1.69 ms** | the shared pool is placed once; per-string dedup is a hash-map pass over string atoms (D4) |
-
-### M4 gates still hold with M5 on (the roadmap's M5 precondition)
-
-| Bench | M4 recorded | M5 re-measured | Verdict |
-|---|---|---|---|
-| `pgr-emit/emit` fused vs reference | 1.37× (1.59 vs 2.18 ms) | **1.39× (1.58 vs 2.20 ms)** | holds |
-| `pgr-driver/link/large_32_objects` | 172.1 ms | 172.7 ms | holds (noise band) |
-| `pgr-driver/link_dylib/large_32_objects_dylib` | 33.8 ms | 32.9 ms | holds |
-| `pgr-driver/link_outputs/dylib_8_objects` | 18.1 ms | 18.7 ms | holds |
-| `pgr-format/summarize/single_image` | ~53 GiB/s | 51.8 GiB/s | holds |
-| `pgr-core/trie` `m3_partition/100000` (10⁵ exports) | 31.5 ms | 30.7 ms | holds (legacy M2 baseline: 354.9 ms) |
-
-The M5 byte-identity gates: `m5_archive_member_is_pulled_and_the_output
-_verifies`, `m5_dead_strip_matches_the_reference_emit_and_determinism`,
-`m5_cstring_merge_dedups_across_inputs` (and the section-relative pointer
-gate), `m5_sectcreate_places_file_contents` — all compare the fused bytes
-against the preserved reference emit on the new corpus shapes and fail the
-build on divergence.
+<details><summary><b>Run the benches (every recorded command)</b></summary>
 
 ```sh
+# format
+cargo bench -p pgr-format                                  # summarize
 cargo bench -p pgr-format --bench parse -- parse_archive
+# driver: pipeline + surfaces
+cargo bench -p pgr-driver                                  # link, link_dylib, link_outputs, …
 cargo bench -p pgr-driver --bench link -- "link_archive|link_dead_strip|link_cstring"
-```
-
-## Recorded baseline (M4, the speed pass — fused tile emit)
-
-The M4 milestone (architecture doc §10.3 row M4) rewrote Pass 4 as the
-**fused tile emit** (perf doc §4.4): parallel 16 KiB tiles copy the coalesced
-runs, apply relocations, encode chain words, place the `__LINKEDIT` chunks
-and hash the 4 KiB signature pages in **one pass over each byte**, where the
-reference body made five. The pre-fusion body stays in the tree verbatim
-(`build_image`); every bench records both, and the byte-identity gate
-(fused == reference) is asserted at bench setup and in the test suite.
-
-### Pass 4 isolated (`pgr-emit/emit`, new bench)
-
-Corpus: 16 objects × 512 symbols × 32 KiB text with branch + pointer-slot
-relocations; output ≈ 0.94 MiB, signed (page hashes included in the emit).
-
-| Bench | Median | Throughput | Notes |
-|---|---|---|---|
-| `pgr-emit/emit/reference_pass4` | **2.18 ms** | 441 MiB/s | the M1–M3 body: copy+patch, chains, chain-starts, `__LINKEDIT`, then **two** full-image SHA-256 passes (UUID derivation + final hashes) |
-| `pgr-emit/emit/fused_tile_pass4` | **1.59 ms** | 605 MiB/s | M4: tiles fuse copy+patch+chains+`__LINKEDIT`+hashing; only page 0 re-hashes after the UUID lands |
-| **Δ** | **1.37×** | | on 2 threads of a 2-core KVM guest; tile parallelism + one-pass-over-bytes scale with P-core count on the P0 rig |
-
-### Full pipeline (`pgr-driver`, fused vs reference on the same corpora)
-
-| Bench | Fused (M4) | Reference (pre-fusion) | Δ |
-|---|---|---|---|
-| `pgr-driver/link/small_4_objects` | 2.34 ms | 2.45 ms | 1.05× |
-| `pgr-driver/link/large_32_objects` | 172.1 ms | 174.7 ms | 1.01× |
-| `pgr-driver/link_dylib/small_4_objects_dylib` | 1.98 ms | 2.19 ms | 1.10× |
-| `pgr-driver/link_dylib/large_32_objects_dylib` | 33.8 ms | 37.3 ms | **1.11×** |
-| `pgr-driver/link_outputs/dylib_8_objects` | 18.1 ms | 18.1 ms | ~1× |
-| `pgr-driver/link_outputs/bundle_8_objects` | 17.9 ms | 18.1 ms | ~1× |
-
-How to read the M4 numbers:
-
-1. **Pass 4 is the milestone's unit of work** and it shows the full fusion
-   win (1.37×). The *full-pipeline* rows are dominated by serial Pass 2/3
-   (resolution + layout, deliberately unchanged at M4), which is why the
-   resolution-heavy static corpus (large_32: 4 096 external references per
-   object) moves only 1% — its wall time is Pass 2/3, not emit. The
-   bind-path corpora (65 536 chained bind slots per link) lean on Pass 4
-   and gain 10–11%.
-2. **Parallelism is observable but hardware-bound**: `PGR_JOBS=1` on the
-   large static corpus measures 179.0 ms vs 172.1 ms at the default
-   (2 threads) — Pass 1 + tile emit already beat the serial schedule on
-   two cores. The G1 gate (≥ 5× vs `ld64.lld` at 16 threads, ≥ 1.5× vs
-   ld-prime, single-threaded fraction ≤ 15% except flush, RSS ≤ 2.5×
-   output) needs the P0 rig; 2 threads cannot exhibit 16-thread scaling,
-   exactly like the M0–M3 hardware-bound numbers.
-3. **Byte-identity is the gate, not a hope**: `m4_fused_driver_output_is
-   _byte_identical_to_the_reference`, `m4_fused_matches_reference_on_m2_and
-   _m3_corpora`, the ten `pgr-emit/tests/m4_fused.rs` corpus shapes, and the
-   bench-setup assertions all compare the fused bytes against the preserved
-   reference emit — equality failures fail the build.
-4. **S1 writer pool** (4 writers, 8 MiB blocks, `set_len` extent
-   preallocation, file-order `pwrite`) replaced the single-writer flush;
-   byte-exactness is gated across block boundaries. The sandbox's writes
-   land in the page cache, so a wall-clock writer number would measure the
-   host, not the pool — the writer sweep (spike S1's writer-count/block-size
-   matrix) runs on the P0 rig against real storage.
-5. **D9/D10** land as measured defaults: the shared pool (`PGR_JOBS`
-   override, else `available_parallelism` on Linux hosts — the macOS
-   P-core default joins with the P0 rig, spike S4) and the parallel
-   pre-fault of the zero-page-backed output buffer.
-
-```sh
-cargo bench -p pgr-emit --bench emit
-```
-
-## Recorded baseline (M0, commit at v0.1.0)
-
-| Bench | Input | Median | Throughput |
-|---|---|---|---|
-| `pgr-format/summarize/single_image` | ~48 KiB exec (512 syms, 1 Ki relocs, ~85 got slots) | ~0.96 µs | **~53 GiB/s** |
-| `pgr-format/summarize/corpus_24_images` | ~7.6 MiB corpus (24 execs, 4 096 syms + 8 192 relocs each) | ~181 µs | **~25.7 GiB/s** |
-
-## Recorded baseline (M1, static hello-world pipeline)
-
-| Bench | Input | Median | Notes |
-|---|---|---|---|
-| `pgr-driver/link/small_4_objects` | 4 objects, 256 defs + 256 refs each, 8 KiB text | **~2.3 ms** (M1) / ~3.4 ms (M2) | full Pass 0–5, single-threaded |
-| `pgr-driver/link/large_32_objects` | 32 objects, 2 048 defs + 2 048 refs each, 32 KiB text (~1.6 MiB inputs) | **~170 ms** (M1) / ~289 ms (M2) | ~9.5 MB/s of input; resolution graph spans all 32 objects |
-
-The M2 deltas are the cost of the dynamic-link surface added on the same
-corpora: `__mh_execute_header` + full export-trie build, undefined-symbol
-symtab entries, the indirect symbol table, and the two extra `__got`
-bucket passes — all single-threaded, all due to become tile-local in M4.
-
-## Recorded baseline (M2, dynamic executables via `.tbd`)
-
-| Bench | Input | Median | Throughput | Notes |
-|---|---|---|---|---|
-| `pgr-driver/link_dylib/small_4_objects_dylib` | 4 callers × 256 branch-through-stub relocs + one 256-export `.tbd` | **~2.0 ms** | ~88 MiB/s | full bind path: stub/GOT synthesis, first-use import table, bind chains |
-| `pgr-driver/link_dylib/large_32_objects_dylib` | 32 callers × 2 048 dylib calls (~1 MiB text) + `.tbd` | **~42 ms** | ~88 MiB/s | 65 536 chained bind slots (GOT + stubs) per link |
-
-How to read the M1 numbers:
-
-1. They are the **starting line** for M4 ("the speed pass"), not a target.
-   The M1 pipeline is deliberately single-threaded; the M4 gate (≥5× median
-   vs `ld64.lld` at 16 threads, parallel efficiency ≥ 70%) is measured
-   against this exact corpus shape.
-2. The large corpus is resolution-heavy (4 096 external references per
-   object, cross-object definition graph), which exercises Pass 2's
-   name-table and Pass 3's piece placement, not just byte copying.
-3. The M0 parser baseline (~25–53 GiB/s metadata walk) remains the Pass 1
-   anchor: M1's per-file parse starts far below it because it now *decodes*
-   symbols, relocs and pairs rather than only counting them.
-
-Machine context (honest caveat): 2-core Intel Xeon (KVM guest), warm cache;
-the corpus is L2/L3-resident, so these are *metadata-walk* rates, not DRAM
-streaming rates. `summarize` touches the metadata tables (symtab, relocs,
-fixup slots), not section payload bytes — the real Pass 1 parser will touch
-every input byte and therefore start well below these numbers.
-
-## How to read this
-
-1. The baselines are the **starting line**, not a target. M4's parallel parse
-   (LPT-scheduled per file, hash-binned interning) is gated on beating these
-   per-thread rates at the same corpora, then on parallel efficiency.
-2. Per-pass budgets from the perf doc (§9.3) will be enforced in CI as they
-   land: `--time` JSON, single-threaded fraction ≤ 15% (except flush),
-   parallel efficiency ≥ 70% on Passes 1/3/4.
-3. Nightly wall-clock benchmarks against ld-prime / `ld64.lld` / mold-macho
-   require the Apple Silicon rigs from Phase P0 (perf doc §9.1) — the CI
-   skeleton for that ships with this milestone, the hardware baselines do
-   not exist yet.
-
-## M3 perf gate status (architecture doc §10.3 row M3)
-
-The correctness gate is closed on this hardware: `m3_dylib_output_passes_
-verifier_strict`, `m3_exec_against_pgr_dylib_passes_the_pair_gate` (the
-dyld-replay pair check against the dylib's trie), `m3_bundle_output_passes_
-verifier`, `m3_reexport_library_lands_in_the_trie`, `m3_export_filters_shape_
-trie_and_symtab` and the deterministic double-link all pass, and the trie
-diff against `ld64.lld` runs through the same golden harness as M2 (skipped
-when lld is absent). The **performance half** (10 ms for 10⁵ exports) is
-met within hardware margin: 31.5 ms single-threaded on this 2-core KVM
-sandbox vs the ~3 ms/s P-core the P0 rig provides — ≈ 8–12 ms extrapolated.
-The gate formally closes on the P0 rig, exactly like the M0/M1/M2
-hardware-bound numbers.
-
-## M2 perf gate status (architecture doc §10.3 row M2)
-
-The M2 performance gate — "Pass 2 and Pass 3 meet the parallel-efficiency
-budget on the 100 MB corpus" — requires the Phase P0 Apple Silicon rig
-(perf doc §9.1: parallel efficiency ≥ 70% for Passes 1/3/4 at 8 P-cores,
-single-threaded fraction ≤ 15% except flush). This milestone ships the
-**harness and the baseline** (`link_dylib` corpora above); the gate itself
-stays open until the rig exists, exactly like the M0/M1 numbers.
-
-The bind path is already shaped for M4's tile emit: the import table is
-assigned in first-use order over address-sorted slots (spike S6 result —
-`ld64.lld` verified), so chain encoding never mutates the table and the
-per-page fixup lists (perf doc §4.3) can bucket by destination page without
-re-sorting.
-
-## Recorded baseline (M3, dylibs & bundles — export trie + output kinds)
-
-The M3 performance gate (architecture doc §10.3 row M3): **"Export trie
-build < 10 ms for 10⁵ exports (or parallelized if not)"**. The unit is
-`pgr_core::trie::build` over a 10⁵-name corpus (`_pgr_fn_*` C symbols plus an
-ObjC-style `_OBJC_CLASS_$_*` shared-prefix block — the worst case for
-tries). The bench keeps the M2 builder (`legacy_m2`, verbatim) next to the
-M3 rewrite (`m3_partition`) so the rewrite's claim is measured, not argued:
-
-| Bench | Input | Median |
-|---|---|---|
-| `export_trie_build/legacy_m2/1000` | 1 000 exports | ~2.5 ms |
-| `export_trie_build/legacy_m2/10000` | 10 000 exports | ~28.8 ms |
-| `export_trie_build/legacy_m2/100000` | 100 000 exports | **~363 ms** |
-| `export_trie_build/m3_partition/1000` | 1 000 exports | ~0.30 ms |
-| `export_trie_build/m3_partition/10000` | 10 000 exports | ~3.5 ms |
-| `export_trie_build/m3_partition/100000` | 100 000 exports | **~31.5 ms** |
-
-The M3 builder is a range-partition trie over the sorted export list
-(multikey quicksort skips the shared prefixes that make `memcmp` sorts
-expensive; every edge is created once in compressed form; the offset
-fixpoint converges from a 4-byte upper bound over packed per-node rows).
-That is **8–11× faster than the M2 builder** and turns the gate's 10⁵-export
-budget from "impossible single-threaded" into "on the order of the gate on
-reference hardware": this dev sandbox is a 2-core KVM guest with ~3× slower
-single-thread throughput than the P0 rig's P-cores, where the same build
-measures ≈ 8–12 ms. The gate closes when measured on that rig (or when the
-M4 tile pass parallelizes the build, as the gate's "or parallelized" clause
-allows).
-
-```sh
-cargo bench -p pgr-core --bench trie
-```
-
-The M3 output-kind benches (new) run the full pipeline with `-dylib` /
-`-bundle` semantics — 0 image base (no `__PAGEZERO`), `LC_ID_DYLIB`, and the
-full export trie over every defined external:
-
-| Bench | Input | Median |
-|---|---|---|
-| `pgr-driver/link_outputs/dylib_8_objects` | 8 objects × 1 024 defs (all exported) | ~19.1 ms |
-| `pgr-driver/link_outputs/bundle_8_objects` | same corpus as `MH_BUNDLE` | ~18.5 ms |
-
-## Known follow-ups
-
-* Add a bench for the *byte-touching* parse (section data copied/summed) so
-  the parser baseline is memory-bound, not metadata-bound.
-* Parameterize the corpus generator (symbols/relocs/got slots) behind CLI
-  flags of a small `xtask` so nightly runs can sweep corpus shapes.
-* Import-table canonical order (D7) can replace first-use order when the
-  M4 tile scheduler needs it — the planner isolates that decision (see
-  `pgr-core/src/fixups.rs` module docs). *Update, M4:* the tile scheduler
-  shipped without needing D7 — the import table is built in Pass 3 and the
-  chain words are read-only in Pass 4, so no cross-tile mutation exists;
-  D7 remains open for the M6 incremental work (insertion-stable ordinals).
-* M4 follow-ups for the P0 rig: writer-count/block-size sweep (S1 matrix),
-  P-core pool sizing (S4), PGO build, and the G1 parallel-efficiency gate.
-## Recorded baseline (M6, scale & ecosystem — ICF/veneers/legacy fixups/Stage A caches)
-
-The M6 milestone (architecture doc §10.3 row M6) lands the in-tree scope:
-branch veneers + the verifier branch-range checker, the `LC_DYLD_INFO_ONLY`
-legacy fallback, `-icf=safe|all` (color refinement), the Stage A POI +
-frozen-`.tbd` caches, and LTO/ObjC/Swift pass-through gates. New benches
-(`cargo bench -p pgr-driver`):
-
-### ICF (`pgr-driver/link_icf`, the "ICF ≤ 25% added wall" gate)
-
-Corpus: 32 objects × 512 identical 12-byte functions (16,384 atoms, all
-foldable; `MH_SUBSECTIONS_VIA_SYMBOLS` splitting; ~0.8 MiB of inputs).
-
-| Bench | Median | Notes |
-|---|---|---|
-| `link_icf/large_32x512_off` | **17.29 ms** | fold-off (the M5 pipeline shape) |
-| `link_icf/large_32x512_safe` | **19.37 ms** | `-icf=safe`: full fold (16,383 atoms folded, ~192 KiB of duplicate text removed) |
-| **Δ** | **+12.0%** | the ≤ 25% gate holds; the refinement's byte hashing runs on the shared pool |
-
-### Stage A POI cache (`pgr-driver/link_cache`, the §7.1 relink gate)
-
-Corpus: 16 objects × 4,096 symbols × 4 KiB text (parse-heavy: ~64K symbols,
-128K relocations; ~1.6 MiB of inputs). Cold = fresh cache directory per
-iteration (parse + store + link); warm = every input is a cache hit.
-
-| Bench | Median | Notes |
-|---|---|---|
-| `link_cache/medium_16_objects_cold` | **177.8 ms** | Pass 1 parse + store |
-| `link_cache/medium_16_objects_warm` | **172.8 ms** | Pass 1 replaced by the POI decode |
-| **Δ** | **−2.8%** | the corpus is Pass 2/3-bound (64K-symbol resolution dominates); the POI cache removes Pass 1 exactly, which bounds the wall gain on this shape. The §10.3 "relink ≥ 2× ld-prime" gate compares against ld-prime on the P0 rig |
-
-Honesty note (§7.1's own framing): the POI cache is a Pass 0/1 elimination.
-Where the wall is dominated by resolution/layout (this corpus), the gain is
-bounded by Pass 1's share; Stage B/C (resident state, incremental relink)
-address the rest.
-
-### Frozen `.tbd` (`pgr-driver/tbd`, the "`.tbd` startup cost < 1 ms" gate)
-
-Unit: parse-or-decode of one 256-export stub (`libBench.tbd`).
-
-| Bench | Median | Notes |
-|---|---|---|
-| `tbd/libbench_text_parse` | **35.8 µs** | the M2 YAML text path |
-| `tbd/libbench_frozen_load` | **19.9 µs** | the M6 frozen export-set decode (1.8×; both far below the 1 ms gate) |
-
-### M4/M5 gates re-measured with M6 in the pipeline
-
-The veneer scan (a per-iteration `Branch26` patch walk), the `FixupLc`
-command-size dispatch and the fold-empty fast path are all active in every
-link now:
-
-| Bench | M5 record | M6 re-measure | Gate |
-|---|---|---|---|
-| `pgr-driver/link/large_32_objects` | 174–176 ms | **175.7 ms** | holds |
-| `pgr-driver/link_dead_strip/large_32_objects_off` | 255 ms | **259.0 ms** | holds |
-| `pgr-driver/link_dead_strip/large_32_objects_on` | 134 ms | **136.0 ms** | 1.90× vs off |
-
-### Not benched (with reasons)
-
-* **Veneer insertion** — the triggering corpus is a >128 MiB text (~4 s of
-  SHA-256 per iteration); the feature is correctness-gated instead (the
-  branch-range checker + determinism tests) and its steady-state cost is
-  the per-iteration overflow scan already covered by the re-measured gates.
-* **Legacy `LC_DYLD_INFO_ONLY` streams** — stream encoding is O(slots)
-  with ULEB writes; at M6 scale the chained/classic split costs nothing
-  measurable (the slot list is built once either way). The verifier's
-  stream walk is gated for correctness, not speed.
-
-## Recorded baseline (M7 — production; versioned cache, build-system surface)
-
-The M7 milestone (architecture doc §10.3 row M7, in-tree scope) versions the
-cache format, adds the build-system driver surface (response files,
-`-syslibroot`, LRU-bounded caches) and the compatibility suite. New bench
-(`pgr-driver/cache_evict`) plus the full re-measure of every prior gate with
-M7 in the pipeline (`cargo bench`, default sampling, 2-core KVM sandbox):
-
-### LRU-bounded cache (`pgr-driver/cache_evict`, new bench)
-
-The size bound's cost lives only on the store path (scan + evict after each
-POI store); warm hits never store, so the steady-state relink is untouched.
-
-| Bench | Median | Notes |
-|---|---|---|
-| `cache_evict/unbounded` | **9.12 ms** | the M6 warm-cache path (4 objects × 1 024 symbols) |
-| `cache_evict/bounded_64kib` | **9.73 ms** | every store scans and evicts (cap binds) |
-| **Δ** | **+6.7% on cold stores** | warm links (all hits) measure identical to unbounded — no stores, no scans; the M7 format's `touch` recency mark is two syscalls per hit |
-
-### Versioned cache format (v2) gates re-measured
-
-| Bench | M6 (v1) record | M7 (v2) | Verdict |
-|---|---|---|---|
-| `pgr-driver/link_cache/medium_16_objects_cold` | 177.8 ms | 186.4 ms (quick-sampling run) | holds within the sandbox noise band |
-| `pgr-driver/link_cache/medium_16_objects_warm` | 172.8 ms | **173.7 ms** | holds — the two-revision key, marker check and recency touch cost nothing measurable |
-| `pgr-driver/tbd/libbench_text_parse` | 35.8 µs | 36.2 µs | holds |
-| `pgr-driver/tbd/libbench_frozen_load` | 19.9 µs | **19.8 µs** | holds (the v2 frame is 4 bytes larger; ≪ the 1 ms gate) |
-
-### Prior gates re-measured with M7 in the pipeline
-
-| Bench | M4/M5/M6 record | M7 re-measure | Gate |
-|---|---|---|---|
-| `pgr-driver/link/large_32_objects` | 172–176 ms | **175.6 ms** | holds |
-| `pgr-driver/link/small_4_objects` | 2.34 ms | 2.42 ms | holds |
-| `pgr-driver/link_dylib/large_32_objects_dylib` | 33.8–37.3 ms | 36.9 ms | holds |
-| `pgr-driver/link_outputs/dylib_8_objects` | 18.1–18.7 ms | 18.6 ms | holds |
-| `pgr-driver/link_outputs/bundle_8_objects` | 17.9–18.5 ms | 18.4 ms | holds |
-| `pgr-driver/link_archive/archive_64_lazy` | 4.02 ms | **3.99 ms** | holds (S7 lazy) |
-| `pgr-driver/link_archive/archive_64_all_load` | 49.06 ms | 50.4 ms | holds |
-| `pgr-driver/link_dead_strip/large_32_objects_off` | 255–259 ms | 263.6 ms | holds (noise band) |
-| `pgr-driver/link_dead_strip/large_32_objects_on` | 134–136 ms | **136.4 ms** | 1.93× vs off (gate: ≤ +30%) |
-| `pgr-driver/link_cstring/cstring_16_objects` | 1.69 ms (M5 record) | 1.94 ms | **no regression**: the M6 baseline re-measured on the same box today is 1.88 ms — the delta is environmental drift, not M7 code |
-| `pgr-driver/link_icf/large_32x512_off` | 17.29 ms | **16.47 ms** | holds |
-| `pgr-driver/link_icf/large_32x512_safe` | 19.37 ms | 18.92 ms | +14.8% vs off (gate: ≤ 25%) |
-| `pgr-emit/emit` fused vs reference | 1.37× (1.59 vs 2.18 ms) | **1.38× (1.59 vs 2.17 ms)** | holds |
-| `pgr-format/summarize/single_image` | ~53 GiB/s | 52.7 GiB/s | holds |
-| `pgr-format/summarize/corpus_24_images` | ~25.7 GiB/s | 24.7 GiB/s | holds |
-| `pgr-format/parse_archive/archive_64_members` | 11.9 GiB/s | **12.2 GiB/s** | holds (the M5 row's "~118 µs" was a unit slip: the corpus is ~118 KiB, i.e. ~9.9 µs at that rate — corrected here) |
-| `pgr-core/trie m3_partition/100000` (10⁵ exports) | 31.5 ms | **27.9 ms** | holds (legacy M2 baseline today: 349.6 ms) |
-
-### Fuzzing at scale (the M7 row's "fuzzers clean" gate)
-
-Short local libFuzzer sessions (61 s each, ASan, 2-core sandbox) over the
-four parser targets plus the two new ones — all clean after the fixes below:
-
-| Target | Execs (61 s) | Result |
-|---|---|---|
-| `dyld_info_streams` (new) | 1 860 070 | clean |
-| `cache_entries` (new) | 6 302 019 | clean after the `HEADER_LEN + len` overflow fix |
-| `verify_image` | 143 230 | clean after the hostile-header arithmetic battery (structural/dyld_info/pair/chain_starts/branch_range) |
-| `link_object` | 319 230 | clean after the stale `link()` signature fix and the 8 GiB `nreloc` pre-allocation bound |
-
-Each crash class carries a deterministic regression test in the tree; the
-M7 row's "fuzzers clean for 30 CPU-days" formally closes on the P0 rig.
-
-## Recorded baseline (M8 — resident + incremental foundations)
-
-The M8 milestone (architecture doc §10.4 row M8) ships the resident-server
-foundations: `pgrd` (§7.2) with the in-memory POI session, the reverse
-reference index, the insertion-stable import table, slack-aware layout and
-the reused emit buffer. New bench (`pgr-driver/resident`) plus the M8
-correctness gates (`m8_foundations.rs`, `m8_resident.rs`, `pgrd_binary.rs`).
-Recorded on the same 2-core KVM dev sandbox (`cargo bench`, default
-sampling).
-
-### Resident warm relink (`pgr-driver/resident`, new bench)
-
-Corpus: 64 objects × 2 048 symbols × 2 KiB text (the parse-heavy shape —
-the symbol tables dominate the input bytes). The resident iterations run
-the exact user path (`pgr -resident` → prepare → hash → negotiate → POI
-decode → link → fused emit → wire); the daemon reports **64/64 POI hits**
-from the second iteration on and reuses its emit buffer.
-
-| Bench | Median | Throughput | Notes |
-|---|---|---|---|
-| `resident/one_shot_64_objects` | **224.3 ms** | 37.8 MiB/s | the full pipeline (v1.0 path) |
-| `resident/resident_warm_64_objects` | **260.3 ms** | 32.6 MiB/s | POI hits 64/64, no input re-transfer, buffer reuse active |
-
-**Honest verdict: a wash-to-slight-loss on this sandbox corpus, recorded
-as-is.** The phase breakdown (release-mode probe):
-
-| Phase | Cost |
-|---|---|
-| client Pass 0 (`prepare_link`) | 4.2 ms |
-| client manifest build (hash + stage bytes) | ~8 ms (parallelized SHA-256) |
-| daemon session link (POI decode + Passes 2–5 + wire) | ~248 ms |
-
-The finding replays the M6 cache-bench physics one level up: this corpus —
-like the M6 POI-cache corpus — is **Pass 2/3-bound** (interning, resolution,
-layout, symtab/trie dominate), and the POI *decode* on this sandbox measures
-comparable to a fresh parse, so the skipped Pass 1 does not cover the
-manifest + wire overhead. What the numbers do not show (hardware-gated,
-like every Apple-Silicon row in this doc): the §10.4 M8 performance gate
-("resident relink ≥ 5× ld-prime") is decided on the P0 rig, and the
-*bytes-over-the-wire* and *page-fault* savings this design exists for are
-bounded by the fixture sizes here (8 MiB inputs, 6 MiB images). What the
-bench *does* prove functionally: the session skip is real (hit counters),
-the output is byte-identical to the one-shot link on every iteration
-(gated in `m8_resident.rs`), and the emit buffer survives across links
-(`scratch` capacity gate in the session tests).
-
-### The M8 correctness gates (all green)
-
-* `m8_foundations.rs` (13): reverse-index site lists (live + dead-filtered,
-  total-ordered), insertion-stable import ordinals across growth rounds,
-  slack padding math + fallback ladder, slack-off structural identity with
-  v1.0, pre-parsed-link layout equality, archive pull through
-  `link_from_objects`, the shared `-u` gate.
-* `m8_resident.rs` (7): resident-vs-one-shot byte identity (executable,
-  dylib and archive corpora, cold and warm), POI-hit counters across the
-  wire, one-shot fallback transparency, daemon restart, 4-way concurrent
-  clients, `-u` error parity through the fallback.
-* `pgrd_binary.rs` (4): the real `pgrd` process — strict-verifier-clean
-  resident output, SIGKILL-restart identity, link-error survival,
-  idle-exit (§7.2).
-
-```sh
 cargo bench -p pgr-driver --bench resident
-```
-
-### The M9 GA fusion rung (`pgr-driver/resident-fusion`, new bench)
-
-The fusion wire rung routes the `-resident -incremental` relink through
-the daemon's §7.3 ladder (protocol v3: record in, refreshed record +
-patch outcome out). Same 64-object parse-heavy corpus; every timed
-iteration is a real edit (object 1 alternates between the pristine and a
-byte-distinct variant, one dirty tile + re-sign each time), served by the
-daemon's warm session and patched in memory.
-
-| Bench | Median | Notes |
-|---|---|---|
-| `resident/one_shot_64_objects` | **235.3 ms** | the full pipeline (reference) |
-| `resident/resident_warm_64_objects` | **272.1 ms** | POI hits 64/64, no input re-transfer |
-| `resident-fusion/fusion_relink_64_objects` | **535.0 ms** | the §7.3 ladder in the session: relink pipeline (warm POIs) + plan + in-memory patch + re-sign + the renewed record |
-
-**Honest verdict: the ladder costs ~2× the warm resident link on this
-sandbox corpus, recorded as-is.** The delta pays for what the rung *is*:
-the relink re-runs Passes 2–3 (this corpus's dominant share, warm POIs
-only skip Pass 1 — the M8 verdict's physics again), plans the patch,
-applies it in memory and re-signs, and the previous output's bytes cross
-the wire once per changed output state (each patch changes the content
-hash, so the session's blob cache misses). What the rung buys and the
-bench proves functionally: the fusion cycle is correct end to end
-(byte-identical to the one-shot incremental cycle — gated in
-`m9_resident_fusion.rs`), the incremental state survives daemon
-fallbacks (the daemon's full link renews the record — the regression
-gate), and the relink's parse half rides the session. The
-bytes-written win ("patch ~1% of the image") lands where the patch path
-already proved it — the file-bound engine, P0-rig rows in the M9
-section above.
-
-### The §7.2 output-residency rung (`pgr-emit/wire-tiles` + re-recorded `pgr-driver/resident-fusion`)
-
-Wire v5 closes the deferral the fusion rung recorded: the session now
-*holds* every served image as resident output state (a content-addressed
-blob under the session's existing ceiling and LRU), so the warm cycle's
-previous output stops re-crossing the wire, and a patched relink's reply
-is the **changed-tile stream** (`pgr_emit::incremental::TilePatch`:
-`diff_tiles` on the daemon, `apply_tiles` + a content-hash gate on the
-client) instead of the whole image. What crosses per warm relink:
-
-| step | before (wire v3/v4) | after (wire v5) |
-|---|---|---|
-| previous output | uploaded once per changed output state | **0 bytes** (resident; re-uploaded only after a ceiling eviction) |
-| patched relink reply | the full patched image | **the changed tiles only** — e.g. 37.9 KiB of an 87 KiB corpus image (2 of 6 tiles, page 0 + the edit + the re-sign tail), ≈16.4 KiB of 8 MiB for a one-tile edit |
-| untouched relink reply | the full image, rewritten | **0 bytes**, nothing rewritten |
-
-The rung's CPU price is a memcmp-speed scan (which doubles as the wire's
-replay gate — the stream carries the patched image's SHA-256) plus a
-tile-splice replay. Recorded (2-core KVM sandbox, criterion median,
-20 samples, default sampling):
-
-| bench | time | throughput | what it runs |
-|---|---|---|---|
-| `wire-tiles/diff_one_tile_edit_8mib` | **5.64 ms** | 1.39 GiB/s | the daemon-side tile diff (scan + SHA-256) |
-| `wire-tiles/replay_one_tile_edit_8mib` | **0.75 ms** | 10.4 GiB/s | the client-side replay |
-| `wire-tiles/diff_untouched_8mib` | **5.25 ms** | 1.52 GiB/s | the pure scan, zero tiles |
-
-| (re-recorded on the rung) | time | what the step runs |
-|---|---|---|
-| `resident-fusion/fusion_relink_64_objects` | **529.6 ms** | the ladder + the tile stream (upload and download gone; the bench asserts the transport) |
-| `resident-fusion-audited/fusion_relink_audited_64_objects` | **610.6 ms** | the ladder + the tile stream + the audit |
-
-Honest verdict: on loopback unix sockets the wall clock is a **wash**
-(529.6 ms vs the 502.5–535.0 ms band the group recorded across runs —
-the relink is pipeline-bound, not socket-bound, and the 5.6 ms scan is
-~1% of it). The win is the wire and the memory bus: megabytes that used
-to cross per changed output state are now the changed tiles (~0.2–1% of
-the image), and the machine-hosted `pgrd` shape (a daemon on another
-host, a socketpair through a supervisor) is where the saved crossings
-become wall clock. The CPU price is paid on every relink; the byte
-saving is paid back on the first warm cycle.
-
-### The audited fusion rung (`pgr-driver/resident-fusion-audited`, new bench)
-
-Wire v4 serves `-incremental-verify` inside the session: the audited warm
-relink runs the ladder **plus** the audit (byte-identity against the
-reference emit — a second full fused emit of the same plan — and the
-strict verifier's page-hash recompute). The group pairs with the
-unaudited fusion group above on the same corpus and edit alternation:
-
-| (2-core KVM sandbox, criterion median, 20 samples) | time | what the step runs |
-|---|---|---|
-| `resident-fusion/fusion_relink_64_objects` | **502.5 ms** | the ladder: warm pipeline + plan + in-memory patch + re-sign |
-| `resident-fusion-audited/fusion_relink_audited_64_objects` | **597.4 ms** | the ladder **+ the audit**: the reference emit + the strict pass |
-
-Honest verdict: the audit costs **+19% per audited relink** on this
-corpus (94.8 ms — the reference emit over warm POIs plus the verifier's
-chain walk and page-hash recompute). That is the rung's price for
-never shipping an unaudited patch, paid only when `-incremental-verify`
-is on; the driver's `-resident -incremental` cycles without the flag are
-unchanged. The bench also caught the first real audit finding on the way
-in: the symbol-heavy bench corpus overflowed the verifier's
-function-starts delta accumulator — `build_func_starts` had emitted
-absolute offsets into a **delta** stream since M0 (small corpora masked
-it; 131 K function starts did not). Fixed with a regression gate in
-`m9_resident_fusion.rs`.
-
-## Recorded baseline (M9 — in-place incremental relink, tier 1)
-
-The M9 milestone (architecture doc §10.4 row M9, §7.3 Stage C tier 1)
-ships the incremental relink engine: the versioned link record
-(`pgr-emit::incremental::LinkRecord`), the span-diff patch planner, the
-clone-and-patch output path with the merged-hash CodeDirectory rebuild,
-slack anchors, and the driver loop (`-incremental`,
-`-incremental-verify`). New bench (`pgr-driver/incremental`) plus the M9
-gates (`pgr-core/tests/m9_foundations.rs`, `pgr-emit/tests/incremental.rs`,
-`m9_incremental.rs`). Recorded on the same 2-core KVM dev sandbox
-(`cargo bench`, default sampling).
-
-### Edit–relink loop (`pgr-driver/incremental`, new bench)
-
-Corpus: 32 objects × 256 KiB text — the *write-heavy* shape (the output
-pages dominate; the image is 8.53 MiB / 521 tiles of 16 KiB). The timed
-edit flips eight words of one function mid-corpus (same size — the frozen
-skeleton is the tier-1 contract). Every timed incremental iteration is a
-real edit→patch cycle (the input alternates between the pristine and
-edited object variants).
-
-| Bench | Median | Throughput | Notes |
-|---|---|---|---|
-| `full_relink_8mib` | **16.4 ms** | 496 MiB/s | the complete pipeline + fused emit + write (v1.1 path) |
-| `incremental_relink_8mib` | **17.6 ms** | 461 MiB/s | record → plan → clone-and-patch → re-sign |
-| `untouched_relink_8mib` | **13.3 ms** | 610 MiB/s | identical inputs: plan says *untouched*, the output is left alone |
-
-**Bytes written (the §7.3 gate "bytes written ∝ change size"): the mean
-patch is 105 536 bytes per edited relink — 1.2% of the image.** Of that,
-72.7 KiB is the rebuilt CodeDirectory (the signature's page-hash table is
-contractually whole), the rest is the two dirty tiles (the edited content
-tile + the UUID page). Max dirty tiles across 20 iterations: 2 of 521.
-
-**Honest verdict: wall-time parity-to-slight-loss on this sandbox,
-bytes-written win by 80×, recorded as-is.** Three physical reasons, each
-bounded by the sandbox rather than the design:
-
-1. **The clone degrades to a full copy.** On APFS, `std::fs::copy`
-   resolves to `fclonefileat` — an instant copy-on-write clone, which is
-   the §7.3 output path's foundation. This sandbox's ext4 has no reflink,
-   so the clone reads and writes all 8.53 MiB — roughly the full link's
-   own write cost, before any patch. Spike S8 (clone + dirty-page
-   `pwrite` vs full write on APFS) is exactly the measurement this bench
-   cannot make.
-2. **The span digests are SHA-256 over the input bytes.** The planner
-   hashes every copy-run tile piece and `__LINKEDIT` chunk once per
-   relink (~8.6 MiB here) — comparable to the full emit's own page
-   hashing. A faster non-crypto change-detection digest is a tuning knob,
-   deliberately not pulled at tier 1 (a hash collision would mean reused
-   stale bytes; the signature catches it at load, but the engine holds
-   itself to the no-collision standard).
-3. **The corpus is compute-bound.** Like the M6/M8 corpora, Passes 2–3
-   dominate the pipeline share; the tier-1 engine deliberately re-runs
-   them (per-symbol change propagation over the M8 reverse index is the
-   M9 GA ladder).
-
-What the bench *does* prove functionally: the dirty-tile set tracks the
-change (2 tiles for a one-function edit, 0 for an unchanged relink), the
-patched output is byte-identical to the full fused emit of the same plan
-(gated in `pgr-emit/tests/incremental.rs` and `m9_incremental.rs`, and
-re-proven per link under `-incremental-verify`), and the untouched path
-costs 19% less than the full relink even before the clone question
-arises. The §10.4 M9 hardware gate — "< 100 ms for a one-function edit at
-1 GiB output; ≥ 10× vs ld-prime relink" — is decided on the P0 rig, where
-the 1.2%-of-image patch bytes and the COW clone are the whole story.
-
-### The M9 correctness gates (all green)
-
-* `pgr-core/tests/m9_foundations.rs` (4): anchored relinks keep every
-  section's reserved size, overflow falls to the natural pad through the
-  §7.3 ladder, anchors are pure deterministic layout inputs, and the empty
-  anchor list reproduces M8-c exactly.
-* `pgr-emit/tests/incremental.rs` (9) + unit tests (16): the byte-identity
-  contract (body edit, growth within slack, dylib image-base, no-slack
-  and unsigned corpora), the no-op relink, symbol-count and
-  overflow-ladder fallbacks, the integrity gate's honest sampling (caught:
-  page 0, last page, resize; pinned: unsampled-page tampering is the
-  signature's job), and the record codec's roundtrip + corruption
-  tolerance (flip, truncate, append, foreign magic, arbitrary garbage —
-  never a panic).
-* `m9_incremental.rs` (11): the driver loop end to end — first link
-  records, edited relink patches in place and verifies strict, no-op
-  relink reports untouched, deleted/corrupt record and deleted output
-  fall back, skeleton moves fall back *and* recover incrementally on the
-  next link, `-incremental-verify` audits, `-no_incremental` stays full,
-  link errors propagate, and the option surface parses.
-
-```sh
 cargo bench -p pgr-driver --bench incremental
-```
-
-## Recorded baseline (M9 tier 2b — the change-propagation planner)
-
-The tier-2b milestone (architecture doc §7.3 step 3, roadmap row M9 GA)
-ships the per-symbol change-propagation planner: the record grows the
-parse's section-digest table (content + symbol records, v3), and the
-relink planner gains the **propagation gate** — every changed content
-span must sit inside `pgr_core::propagate::predict`'s scope (the seeds'
-own output-section extents plus the reverse-index closure of their
-dependents) or the relink falls back to the full link instead of
-patching bytes nobody predicted. New bench (`pgr-emit/propagate`)
-measures the gate's added cost over the planner's tier-1 baseline; the
-corpus is the §10.4-shaped one — 8 objects × 256 cross-object reference
-sites × 16 KiB `__text` (~274 KB image), one body edit as the seed.
-
-| `pgr-emit/propagate` (2-core KVM sandbox, criterion median) | time | throughput |
-|---|---|---|
-| `propagation_scope` — digest diff + reverse-index build + closure walk | **572.9 µs** | 456.0 MiB/s |
-| `plan_patch_with_gate` — full planner end to end (span table + diff + gate) | **1.1088 ms** | 235.6 MiB/s |
-
-Reading: the propagation gate's whole added work (digest diff, reverse
-index build, dependent closure) is ~52% of the planner's wall on this
-corpus — the planner's span table extraction (TileCtx build) dominates.
-The scope walk visits 2 048 reference sites and lands a one-section seed
-with its dependents; on real edit shapes (one changed section, a handful
-of dependents) the gate's cost is the reverse-index build, which the
-resident session (M8) can amortize across links. The GA tier (incremental
-resolve over the same index) is what turns this from a *gate* into a
-*speedup* — recorded here so the baseline exists when it lands.
-
-```sh
-cargo bench -p pgr-emit --bench propagate
-```
-
-## Recorded baseline (M9 tier 2 — the segment-relayout patch tier)
-
-The tier-2 milestone (architecture doc §7.3 "layout stability", roadmap
-row M9 GA) executes the fallback ladder's middle rung: a skeleton shift
-that the ladder classifies as `SegmentRelayout` — a section overflowing
-its slack anchor within the policy's max pad, or the `__LINKEDIT` chunk
-stream outgrowing its signature-boundary reservation — is admitted as a
-relayout patch plan instead of falling to the full link. The record grows
-the output-section content digest table (v4: SHA-256 per output section
-over its copy-run bytes, a placement-invariant concatenation), which is
-what lets the propagation gate exempt a *byte-identical* move (the
-section's derived bytes — relocations, chain words — re-emit from the plan
-and re-prove under the byte-identity contract) while genuine content churn
-inside the moved suffix still answers to the propagation scope.
-
-The bench (`pgr-driver/incremental::segment_relayout_relink_8mib`) climbs
-a monotone ladder — eight +64 KiB growth steps of object 1, each beyond
-the current anchor and each within the ladder's bound, then one reset
-link back to pristine. The ladder shape is not cosmetic: the anchored
-skeleton holds any size a section has already carried, so an alternating
-grown↔pristine cycle degenerates to tier 1 after the first round trip;
-only climbing growth re-triggers the tier. The recorded mean is therefore
-the honest 8 tier-2 : 1 tier-1 mix, and the accounting pass prints the
-per-step split.
-
-| `pgr-driver/incremental` (container sandbox, ext4 — no reflink, the clone degrades to a full copy) | time |
-|---|---|
-| `full_relink_8mib` | **17.4 ms** |
-| `incremental_relink_8mib` (tier 1, one-function edit) | 32.2 ms |
-| `incremental_add_import_8mib` (tier 1, anchored ordinals) | 22.4 ms |
-| `segment_relayout_relink_8mib` (8 tier-2 : 1 tier-1 mix) | **34.2 ms** |
-| `untouched_relink_8mib` | 12.8 ms |
-
-Bytes written (the §7.3 gate, accounting pass, 8.53 → 9.37 MiB image over
-the ladder): each +64 KiB growth step patches **1.2 MiB (69–70 of 573
-tiles, ~13% of the image)** — exactly the moved suffix (the re-padded
-section's tail, the shifted downstream sections, the grown `__LINKEDIT`
-chunks, the relocated `CodeDirectory` and the UUID page) — where the full
-relink writes every byte. The wall-clock verdict is the same honest wash
-the tier-1 bench recorded: ext4 has no reflink, so the clone is a full
-copy and the patch path cannot win wall time on this filesystem; the
-tier-2 mean lands within noise of the tier-1 mean and the APFS verdict is
-decided on the P0 rig, where clonefile is instant and the 13%-of-image
-patch is the whole story.
-
-Regression discipline: the record-time content-digest hash (parallel over
-sections) adds no measurable full-link cost (full relink 17.4 ms vs the
-pre-tier-2 17.4 ms measured back-to-back), and the tier-1 relink carries
-only the copy-or-rehash digest table (a pure-copy experiment measured
-32.0 ms vs 32.2 ms with hashing — noise). The bench file also gained two
-correctness fixes: the bytes-written accounting loop indexed input 0 (the
-extern-provider dylib) instead of the alternated object — replacing the
-dylib would have failed the link if the loop had ever run — and the
-import-churn warm-up asserted a full link on a state whose parity the
-previous bench's timed loop had already consumed (the assert could never
-pass; a reset now precedes the group).
-
-```sh
-cargo bench -p pgr-driver --bench incremental
-```
-
-## Recorded baseline (M9 GA hardening — the shrink rung + the randomized edit gate)
-
-The GA hardening milestone (architecture doc §10.4 row M9; risk register
-P4) adds two pieces to the relink ladder. The **shrink rung**: the
-tier-2 trigger's mirror — an unsigned relink (`-no_adhoc`) has no
-signature boundary to anchor the `__LINKEDIT` tail, so a
-symtab/string-pool shrink moves the chunk-stream end down and the image
-shrinks with it; the planner now admits that shape (frozen content
-skeleton, clone truncated, moved chunk tail re-emitted) instead of
-falling back to the full link. The **randomized edit gate**: the seeded
-xorshift64* edit walk ships at two levels — the engine API walk in
-`pgr-emit/tests/incremental.rs` (5 edits/sequence: body growth, import
-add, retarget, oversized growth, symtab churn, no-op) and the
-end-to-end driver walk in `pgr-driver/tests/m9_randomized.rs` (the real
-`-incremental -incremental-verify` loop over files, record sidecar and
-fallback ladder in the mix, unsigned corpus so symtab churn exercises
-the shrink rung's side). `PGR_RANDOMIZED_STEPS` sizes both walks; the
-CI subsets (80 engine steps, 24 driver steps) and the roadmap's 10⁴-step
-GA profile (2000 sequences × 5 steps) use the same deterministic seed,
-so a failure reproduces exactly.
-
-The 10⁴-step GA profile was run on the dev sandbox (release, engine-level
-walk): **10 000 steps in 11.4 s, every step byte-identical to the full
-fused emit or an honest fallback that re-records, with the
-in-place/fallback/symtab-grow/symtab-shrink dimensions all exercised**.
-The 10⁴-step *driver*-level profile and the hardware verdicts belong to
-the P0 rig (each driver step re-runs the pipeline over an ~8 MiB image;
-the sandbox profile is recorded here as evidence, not as the GA bar).
-
-| `pgr-driver/incremental_shrink` (container sandbox, ext4 — no reflink) | time |
-|---|---|
-| `linkedit_shrink_relink_8mib` (alternating shrink : regrow mix) | **23.4 ms** |
-
-Bytes written (the §7.3 gate, accounting pass): the shrink direction
-patches **56 624 bytes of an 8.46 MiB image (4 of 568 tiles, ~0.67%)**
-while the image shrinks 9 319 592 → 9 297 200 bytes — the moved
-`__LINKEDIT` chunks and the truncated tail, where the fallback full link
-would have re-emitted and re-written every byte; the regrow direction
-patches 79 016 bytes through the LINKEDIT-overflow trigger. Reading the
-23.4 ms mean honestly: the shrink corpus is **unsigned** (no page-hash
-table, no CodeDirectory rebuild) and ext4's clone is a full copy, so the
-wall clock is not comparable with the signed tier-1/tier-2 groups above —
-the bytes-written gate is the sandbox verdict, the APFS wall-clock
-verdict is decided on the P0 rig.
-
-```sh
 cargo bench -p pgr-driver --bench incremental -- linkedit_shrink
+cargo bench -p pgr-driver --bench platform
+# emit
+cargo bench -p pgr-emit --bench emit
+cargo bench -p pgr-emit --bench object
+cargo bench -p pgr-emit --bench propagate
+cargo bench -p pgr-emit --bench wire-tiles
+cargo bench -p pgr-emit --bench record_summary
+# core: trie + the knob-parity family
+cargo bench -p pgr-core --bench trie
+cargo bench -p pgr-core --bench order
+cargo bench -p pgr-core --bench map
+cargo bench -p pgr-core --bench resolve
+cargo bench -p pgr-core --bench platform
+cargo bench -p pgr-core --bench arm64e
+cargo bench -p pgr-core --bench filter
+cargo bench -p pgr-core --bench dylibs
+cargo bench -p pgr-core --bench pagezero
+cargo bench -p pgr-core --bench init_offsets
+cargo bench -p pgr-core --bench segprot
+cargo bench -p pgr-core --bench stack_size
+cargo bench -p pgr-core --bench image_base
+cargo bench -p pgr-core --bench umbrella
+cargo bench -p pgr-core --bench sub_client
+cargo bench -p pgr-core --bench dyld_env
+cargo bench -p pgr-core --bench alias
+cargo bench -p pgr-core --bench bundle_loader
+# verify
+cargo bench -p pgr-verify --bench platform
+cargo bench -p pgr-verify --bench arm64e
+cargo bench -p pgr-verify --bench checks
+cargo bench -p pgr-verify --bench baseline
+# the randomized edit gate (CI subsets: 80 engine / 24 driver steps)
 PGR_RANDOMIZED_STEPS=2000 cargo test -p pgr-emit --release --test incremental -- randomized
 ```
 
-## Recorded baseline (M9 GA — the resolve's record-side wiring, record v5)
-
-The record-side wiring rung (architecture doc §7.3 step 3) ships the
-tier-2c decision core's delivery path: the link record grows the
-**resolution snapshot section (v5)** — the candidate stream plus the
-winner matrix keyed by digest-vouched `(file, symbol)` positions — and
-the relink's Pass 2 plans through the recorded decisions
-(`pgr_core::resolve_reuse`) instead of re-deciding every external,
-refusing to the full resolve whenever the reuse shape (file list, dylib
-export surface) moves. The relink's refreshed record re-captures the
-fresh Pass-2 state, so the chain stays self-describing across cycles.
-
-Two bench groups land in `pgr-core/benches/resolve`:
-
-| (2-core KVM sandbox, criterion median, 10 samples) | time |
-|---|---|
-| `resolve_pass2/full_install` — 64 files × 49 externals | **347.7 µs** |
-| `resolve_pass2/reused_install` — same corpus, one edited file | **282.8 µs** (−19%) |
-| `resolve_pipeline/full_resolve` — full Passes 1b–3, 64 files | **2.94 ms** |
-| `resolve_pipeline/reused_resolve` — same relink through the v5 seed | **2.99 ms** (wash) |
-
-Reading the pair honestly: the resolver-level win matches the tier-2c
-gate (~19% of Pass 2 at 64 files; the decision core breaks even past
-~32 inputs and stays ~13% slower at 16), but Pass 2 is a small slice of
-Passes 1b–3 on this corpus, so the *pipeline-level* effect is a wash
-here — the same shape the M8 warm-relink bench recorded. The reuse win
-scales with symbol count (the copy is O(reused winners), the replay
-O(seeds)) while parse/layout stay put, so the payoff arrives where the
-roadmap aims it: input-heavy relinks on the P0 rig, stacked on the POI
-cache and the resident session. The record side's own cost (the v5
-capture + encode) rides the recording link's budget and is bounded by
-the parse walk it mirrors.
-
-```sh
-cargo bench -p pgr-core --bench resolve
-```
-
-## Recorded baseline (M10 rung 1 — the `-r` relocatable object emit)
-
-The relocatable rung ships `pgr_emit::build_object_image`: Passes 1–2
-stop short of the segment layout and the emit assembles the `MH_OBJECT`
-the pipeline itself consumes as an input — sections merged at their
-declared alignments, the symbol table grouped (locals, winner-backed
-globals, open undefineds) with its `LC_DYSYMTAB` subranges, and every
-relocation entry preserved and re-pointed at the output symbol table
-(`ADDEND`/`SUBTRACTOR` leaders re-emitted in decode order, site bytes
-verbatim). The corpus is the emit bench's own shape (16 objects × 512
-symbols × 32 KiB `__text`, branch + pointer relocs cross-referencing
-neighbors), so the two rungs' numbers read side by side:
-
-| (2-core KVM sandbox, criterion median, 20 samples) | time | throughput |
-|---|---|---|
-| `pgr-emit/object/build_object_image/16x512sym-32kib` | **6.57 ms** | ~1.6 GiB/s input |
-| `pgr-emit/emit/fused_tile_pass4` (same corpus) | 1.50 ms | 631 MiB/s |
-| `pgr-emit/emit/reference_pass4` (same corpus) | 2.14 ms | 442 MiB/s |
-
-Reading the ratio honestly: the object emit costs ~4× the fused image
-pass on the same bytes. It earns its shape, not a speed crown — the
-fused pass tiles `par_chunks_mut` across the pool and only *applies*
-pre-resolved patches, while the object emit rebuilds the symbol table
-(winner walk + strtab freeze), re-encodes every relocation entry against
-the output symtab and runs the section merge deterministically
-single-threaded (objects have no 16 KiB tile regime to parallelize
-across; the §4.3 determinism walk is the point). The rung's win is the
-output *class*: an input the next link consumes, skipping Pass 3, the
-fixup packer, the signature rebuild and the image write entirely. The
-two-step gate (link `-r`, then link the object) is byte-identical across
-double runs; per-file reloc-table costs scale with the entry count the
-input carries, not the image size.
-
-```sh
-cargo bench -p pgr-emit --bench object
-```
-
-## Recorded baseline (M10 rung 2 — the platform plumbing rung)
-
-The platform rung ships the five-platform `-platform_version` surface
-with a per-platform chained-fixups floor (`pgr_core::layout::
-chained_fixups_min_minos`: macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0,
-visionOS 1.0). The perf gate is a *wash by design*: the floor only
-selects the fixup **encoding** (chained payload at/above the floor, the
-classic `LC_DYLD_INFO_ONLY` opcode streams below it), so the same corpus
-linked for each platform at its floor must sit inside the noise. The
-`pgr-driver/platform_matrix/link/<platform>` bench links one
-rebase-slot corpus per platform (20 samples, 2-core KVM sandbox,
-criterion median):
-
-| platform | floor | median | throughput |
-|---|---|---|---|
-| `macos` 12.0.0 | chained | **84.6 µs** | 184.8 KiB/s |
-| `ios` 15.0.0 | chained | 84.1 µs | 185.8 KiB/s |
-| `tvos` 15.0.0 | chained | 83.0 µs | 188.3 KiB/s |
-| `watchos` 8.0.0 | chained | 82.5 µs | 189.4 KiB/s |
-| `visionos` 1.0.0 | chained | 84.4 µs | 185.1 KiB/s |
-
-The five medians span ~2.5% — the platform word is a config field the
-pipeline already carried (`LinkConfig::platform` existed since M1; the
-rung wires the driver flag, the floor table and the verifier gate around
-it), and the encoding decision is one integer comparison in Pass 3. No
-hardware gate changes: the arm64 targets keep their M4/M8/M9 profiles,
-and the floor table's fallback is byte-tested per platform
-(`m10_platform::*`).
-
-```sh
-cargo bench -p pgr-driver --bench platform
-```
-
-## Recorded baseline (M10 rung 3 — the encoding seam)
-
-Rung 3 makes the fixup-encoding decision a *consumer seam* — slice 1
-named it in the library (`pgr_core::platform::FixupEncoding::for_target`),
-slice 2 crosses the surface (`pgr --print-fixup-encoding` /
-`pgr_driver::fixup_encoding_report`, the verifier's `fixups_floor`
-gate, the canonical table beside the `PLATFORM_*` constants). Two
-bench pins ride along:
-
-- `pgr-core/platform_floor/for_target/<platform>` (slice 1): the
-  consumer seam's own decision cost — a floor compare plus its tracing
-  event, benched across the five linked platforms at a fixed deployment
-  word. Cheap by construction; the bench exists so rotation catches a
-  shape regression on a seam every before-the-link consumer pays.
-- `pgr-verify/verify_platform_floor/verify/<below_floor|at_floor>`
-  (slice 2, the crate's first bench): the strict verify pass over two
-  chained-fixup executables *born* at their build versions through the
-  builder's platform knob — one below its platform's floor (the gate
-  fires), one at the floor (clean).
-
-**No numbers are recorded for either bench yet** (the rung-3 benches
-landed with this milestone; the next gate run fills this section the
-way the rung-2 table above was filled — criterion medians on the
-2-core KVM dev sandbox). The honest expectation mirrors rung 2: the
-gate itself is one integer comparison, so the two verify shapes should
-sit inside each other's noise, and any divergence is the finding.
-
-```sh
-cargo bench -p pgr-core --bench platform
-cargo bench -p pgr-verify --bench platform
-```
-
-## Recorded baseline (M10 rung 4, slice 1 — the arm64e read side)
-
-Rung 4 opens the arm64e word family on the read side: the builder's
-pointer-format knob emits `DYLD_CHAINED_PTR_ARM64E` chains and the
-verifier walks them under the same closure contract (8-byte strides,
-VM-address unauth rebase targets, 32-bit auth runtime offsets). The
-bench pin (`pgr-verify/verify_arm64e/verify/<arm64e_auth|offset64_control>`)
-holds the strict pass on an auth-chained executable next to an honest
-same-shape 64_OFFSET control, so rotation catches a regression in
-either family and the two stay comparable by construction.
-
-**No numbers are recorded yet** (the bench lands with this slice; the
-next gate run fills this section the way the rung-3 section above was
-filled — criterion medians on the 2-core KVM dev sandbox). The honest
-expectation: the arm64e shape sits inside the control's noise band —
-the walk does the same work per slot with a wider stride — and any
-divergence is the finding.
-
-```sh
-cargo bench -p pgr-verify --bench arm64e
-```
-
-## Recorded baseline (M10 rung 4, slice 2 — the arm64e producer)
-
-Slice 2 ships the write side: Pass 3 plans either word family
-(`pgr_core::fixups::plan_fixups_with_format`), and the planner bench
-(`pgr-core/plan_fixups_word_family/<offset64|arm64e>/<1k|10k|100k>`) holds
-the same mixed rebase/bind slot corpus through both encoders — the shape
-parity the producer's contract wants visible (the family changes the
-encoding, never the fixups, so the two curves should track).
-
-**No numbers are recorded yet** (the bench lands with this slice; the
-next gate run fills this section like the slice-1 section above). The
-honest expectation: arm64e sits inside the 64_OFFSET noise band — the
-per-slot work is the same packer with a wider stride and one extra
-encoder branch — and any divergence is the finding.
-
-```sh
-cargo bench -p pgr-core --bench arm64e
-```
-
-## Recorded baseline (M10 rung 4, slice 3 — the authenticated producer)
-
-Slice 3 closes the family's named target: the same planner takes an
-authentication policy (`pgr_core::fixups::plan_fixups_with_auth`) and
-the bench grows the matching variant
-(`pgr-core/plan_fixups_word_family/arm64e_auth/<1k|10k|100k>`) — the
-same mixed rebase/bind corpus as the slice-2 rows with every slot
-signed, so the auth curve reads directly against both family curves.
-The auth rebase swaps the target shape (32-bit runtime offset instead
-of the VM address) and the auth bind moves its whole addend into the
-import entry, so the table build runs its split too.
-
-**No numbers are recorded yet** (the variant lands with this slice; the
-next gate run fills this section like the slice-2 section above). The
-honest expectation: `arm64e_auth` sits inside the `arm64e` noise band —
-the packer, the payload and the mirror are the same work, one encoder
-branch per word — and any divergence is the finding.
-
-```sh
-cargo bench -p pgr-core --bench arm64e
-```
-
-## Recorded baseline (M10 rung 4, slice 4 — the pair gate walks the family)
-
-Slice 4 makes the verifier's M3 pair gate family-blind and the bench
-grows the matching group (`pgr-verify/verify_arm64e/pair_replay/
-<arm64e_auth|offset64_control>`) — the M3 two-level bind replay over an
-arm64e executable + dylib pair (one authenticated `__got` bind) and a
-64_OFFSET control pair born through the same builder knobs, so the
-family-blind walk keeps an honest same-shape baseline next to it.
-
-**No numbers are recorded yet** (the group lands with this slice; the
-next gate run fills this section like the slice-1 section above). The
-honest expectation: `pair_replay/arm64e_auth` sits inside the
-`offset64_control` noise band — the replay is the same chain walk with
-a different word reader and a doubled stride unit, a handful of slots
-per pair — and any divergence is the finding.
-
-```sh
-cargo bench -p pgr-verify --bench arm64e
-```
-
-## Recorded baseline (M11 rung 1 — the order-file rank seam)
-
-Rung 1 ships `-order_file`: the parsed order file's ranks ride Pass 3 as
-the §8.4 stable sort, the ordered link goes atom-granular (the rank
-names symbols, so the ordered buckets split at symbol boundaries the
-same way `-dead_strip` forces them to), and every user-content bucket
-pays one stable sort on the matched entry index.
-
-```sh
-cargo bench -p pgr-core --bench order
-```
-
-| Corpus (12 objects × 256 atoms, 3 072 pieces) | time (dev sandbox) |
-|---|---|
-| `order_file/layout/no_order` | 2.51 ms |
-| `order_file/layout/ranked` (1 536 ranked entries, half the corpus) | 5.41 ms |
-
-The honest reading: the ranked shape pays the **atom split** the order
-file forces (pieces per symbol instead of per section — the same cost
-`-dead_strip` pays for the same reason) plus the rank pass and the
-per-bucket stable sort. The comparison is shape-parity, not a
-like-for-like win: the no-order layout packs 12 whole-section pieces,
-the ranked one places and ranks 3 072 atoms. The rank pass itself is
-linear in the piece count (one hash probe per piece over
-`(file, atom start)`), which is the property the next perf pass should
-hold onto.
-
-## Recorded baseline (M11 rung 2 — the `-map` link-map report)
-
-Rung 2 ships `-map <path>`: the placed image's report rendered from the
-plan's own tables (`Layout::segments`/`sections`/`symbols`) — segments,
-sections, symbol rows sorted by address then name. The builder is a
-pure function of the plan; the render is deterministic (the double-link
-map gate rides the same byte-identity contract as the image).
-
-```sh
-cargo bench -p pgr-core --bench map
-```
-
-| Corpus (12 objects × 256 symbols, 3 072 rows) | time (dev sandbox) |
-|---|---|
-| `link_map/build_render/3072` (plan → map → text, incl. the link) | 3.03 ms |
-
-The honest reading: the reporting seam costs a walk over the plan's own
-tables plus one sort per section — the numbers above include the whole
-`link()` pass, so the map's own share is the delta against the plain
-link on the same corpus (the order bench's 2.51 ms no-order shape).
-Reporting never touches the link's hot path; the bench pins that.
-
-## M12 — the selective verification surface (pgr-verify/benches/checks.rs)
-
-M12 makes the verifier's checks a selectable surface: `CheckSet::parse`
-names the families, `verify_with_checks` drives the subset, and the CLI
-takes `--checks a,b,c`. The bench pins the *shape* of that surface on one
-at-floor chained-fixup executable (the rung-3 fixture: one `LC_LOAD_DYLIB`,
-a `__got` bind + rebase slot, an entry point): the whole-image pass beside
-each single family.
-
-| Selection | time (dev sandbox) |
-|---|---|
-| `verify_checks/full` (the whole-image pass) | 20.6 µs |
-| `verify_checks/single/structure` | 0.34 µs |
-| `verify_checks/single/segments` | 0.56 µs |
-| `verify_checks/single/symbols` | 0.32 µs |
-| `verify_checks/single/linkedit` | 0.53 µs |
-| `verify_checks/single/fixups` | 0.48 µs |
-| `verify_checks/single/chain_starts` | 0.34 µs |
-| `verify_checks/single/branch_range` | 0.34 µs |
-| `verify_checks/single/dyld_info` | 0.34 µs |
-| `verify_checks/single/signature` | 20.1 µs |
-
-The honest reading: on this small fixture the signature family is the
-whole pass — the SHA-256 page-hash recompute dominates (20.1 of 20.6 µs)
-— and every other family costs half a microsecond or less. That is the
-point of the surface, not a claim about large images: a build system that
-runs `--checks segments,fixups` on every relink pays ~1 µs here where the
-full pass pays 20.6 µs, and the expensive recompute waits for the
-hand-off gate (or `--skip-hash-recompute`). The registry's `codes()`
-metadata is test-gated (`check_selection::single_check_never_reports_foreign_codes`),
-so a family can never quietly outgrow its declared domain.
-
-## M13 — the consumer report surfaces (pgr-verify/benches/baseline.rs, pgr-emit/benches/record_summary.rs)
-
-M13 makes the artifacts a build system gates on readable surfaces: rung
-1 is the verifier report's JSON interchange shape (one writer and one
-reader in the library) plus the baseline gate (`--baseline` +
-`--fail-on new|any`); rung 2 is the link record's inspector
-(`--print-record`, `pgr_emit::incremental::read_summary`). Both benches
-pin the same honesty: a gate or a query must cost far less than the
-work it summarizes, or the build system pays more for the seam than
-for the link.
-
-```sh
-cargo bench -p pgr-verify --bench baseline
-cargo bench -p pgr-emit --bench record_summary
-```
-
-Baseline gate (synthetic reports of N anchored findings; the delta is
-`BaselineDelta::between` under the two `IssueIdentity` policies; one
-real strict verify pass rides along for scale — the M12 fixture shape):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `baseline_gate/delta_offset/64` | 1.94 µs |
-| `baseline_gate/delta_code/64` | 1.56 µs |
-| `baseline_gate/delta_offset/256` | 20.2 µs |
-| `baseline_gate/delta_code/256` | 13.6 µs |
-| `baseline_gate/delta_offset/512` | 68.4 µs |
-| `baseline_gate/delta_code/512` | 47.0 µs |
-| `baseline_gate/to_json/512` (the writer) | 152.8 µs |
-| `baseline_gate/parse_json/512` (the reader) | 252.6 µs |
-| `baseline_gate/verify_for_scale` (one strict pass) | 20.6 µs |
-
-The honest reading: the delta is the cheap half of the gate — hundreds
-of findings classify in tens of microseconds, and the O(prev × next)
-match is deliberate at these counts (the bench is where the shape
-changes if reports ever grow past it). The JSON writer and reader cost
-more than the delta (they walk every message's bytes), and both stay
-well under one verify pass at parity sizes — the gate's total (verify
-+ diff) is dominated by the verify it gates, which is the point.
-
-Record inspector (one real recorded link, two objects × 64 symbols,
-signed — the read surface beside the write side it mirrors):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `record_summary/record_and_encode` (the write side) | ~125 µs |
-| `record_summary/read_record` (frame + decode) | 11.1 µs |
-| `record_summary/of_render` (the summary text) | 1.5 µs |
-
-The honest reading: reading a record costs about a tenth of making
-one, and rendering the summary is a rounding error — a build system
-can ask "what did the last incremental link record" between every
-relink without noticing. The numbers are the dev-sandbox baselines the
-other sections use; the hardware gates stay specified, not measured.
-
-## M14 — the export filter's match cost
-
-The visibility closure's per-name cost (Pass 3 pays it once per
-external name per list): the exact form is the M3 matcher (memcmp),
-the star families are the M14 backtracking walk over the same 10,240-name
-universe with four-entry lists — the same per-name scan length in every
-family, so the only variable is the matcher itself
-(`pgr-core/benches/filter.rs`, `export_filter/match_10k_names/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `match_10k_names/exact` (4 exact entries) | 54.9 µs (≈5.4 ns/name) |
-| `match_10k_names/one_star` (4 `_x_*` globs) | 171.2 µs (≈16.7 ns/name) |
-| `match_10k_names/two_star` (4 `*_x_*` globs) | 430.2 µs (≈42.0 ns/name) |
-
-The honest reading: the widened matcher costs ~3× the exact memcmp at
-one star and ~8× at two — nanoseconds per name either way, against a
-Pass-3 layout that runs in milliseconds on the same corpus, so the
-filter stays off the hot path by three orders of magnitude. A list
-long enough to matter (hundreds of globs over hundreds of thousands of
-names) is the shape that would need a prefix index first; the bench is
-where that decision lives.
-
-### M14 rung 2 — the dylib surface's kind cost
-
-The link across the load-command kinds over the same corpus (one
-binder object, 256 unsigned relocs into 16 dylibs × 16 exports; the
-kind is one header opcode per dylib — binds, the import table and the
-trie do not read it; `pgr-core/benches/dylibs.rs`,
-`dylib_surface/link_256_binds/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_256_binds/load` (16 plain `LC_LOAD_DYLIB`) | 501.7 µs |
-| `link_256_binds/weak` (16 `LC_LOAD_WEAK_DYLIB`) | 502.0 µs |
-| `link_256_binds/lazy` (16 `LC_LAZY_LOAD_DYLIB`) | 501.7 µs |
-
-The honest reading: parity, as the shape predicts — the released weak/
-lazy surface costs a header byte per dylib and nothing in the passes.
-The bench is the parity gate, not a win.
-
-### M15 — the image base's decision cost
-
-The link across the `-pagezero_size` decisions over the same corpus (64
-objects, 256 rebase slots, one bind-free executable surface; the base
-is address arithmetic on the plan — every vmaddr is
-`fileoff + base` and the `64_OFFSET` rebase words encode
-`target − base`; `pgr-core/benches/pagezero.rs`,
-`pagezero/link_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_64_objects/default_4gib` | 794.7 µs |
-| `link_64_objects/custom_1gib` | 818.6 µs (+2.2%, p = 0.36) |
-| `link_64_objects/custom_16mib` | 841.2 µs (+4.5%, p = 0.62) |
-
-The honest reading: parity within noise, as the shape predicts — the
-released surface moves the constant-delta base and nothing in the
-passes (both deltas are statistically indistinguishable from zero at
-this corpus size). The bench is the parity gate, not a win.
-
-### M16 — the initializer form's decision cost
-
-The link across the initializer forms (the classic pointer sections,
-the `__init_offsets` transform) and both fixup paths (chained, classic
-opcode streams) over the same corpus (32 objects, 4 initializer
-pointers each — 128 conversions when the named form rides; the
-transform is a bucketing-time removal plus one synthetic u32 piece;
-`pgr-core/benches/init_offsets.rs`,
-`init_offsets/link_{chained,classic_streams}_32_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_chained_32_objects/classic_pointers` | 453.4 µs |
-| `link_chained_32_objects/init_offsets` | 382.5 µs (−15.6%) |
-| `link_classic_streams_32_objects/classic_pointers` | 426.5 µs |
-| `link_classic_streams_32_objects/init_offsets` | 387.3 µs (−9.2%) |
-
-The honest reading: the offsets side is slightly *faster*, as the shape
-predicts — 128 rebase words leave the fixup payload (a smaller
-`LC_DYLD_INFO_ONLY`/chained body to build and fewer slots to sort) and
-the pointer sections never bucket. The released surface costs nothing
-on the default path (the flag-less corpus plans byte-identically — the
-classic rows above are the pre-M16 numbers). The bench is the parity
-gate, not a claimed win.
-
-### M17 — the segment protections' decision cost
-
-The link across the `-segprot` decisions (the house table — the empty
-decision set, a read-only-after-rebase `__DATA_CONST` (`rw`/`r`) and a
-writable `__TEXT` ceiling (`rwx`/`rx`)) over the same corpus (64
-objects, 256 rebase slots, one bind-free executable surface; the
-protections are two field writes per planned segment — the packing
-reads the named pair and the `LC_SEGMENT_64` emit copies it;
-`pgr-core/benches/segprot.rs`, `segprot/link_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_64_objects/house_table` | 822.9 µs |
-| `link_64_objects/dataconst_ro_after_rebase` | 797.7 µs (−2.9%, p = n.s.) |
-| `link_64_objects/text_writable_ceiling` | 844.5 µs (+0.1%, p = 0.98) |
-
-The honest reading: parity, as the shape predicts — the released
-surface moves two `u32` fields per planned segment and nothing in the
-passes. The bench is the parity gate, not a win.
-
-### M18 — the stack reserve's decision cost
-
-The link across the `-stack_size` decisions (the zero default, a
-16 MiB reserve and a 1 GiB reserve) over the same corpus (64 objects,
-256 rebase slots, one bind-free executable surface; the reserve is one
-field write in the 24-byte `LC_MAIN` — the command size is unchanged,
-nothing else in the plan moves; `pgr-core/benches/stack_size.rs`,
-`stack_size/link_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_64_objects/default_zero` | 793.4 µs |
-| `link_64_objects/reserve_16mib` | 803.8 µs (+1.3%, p = n.s.) |
-| `link_64_objects/reserve_1gib` | 800.2 µs (+0.9%, p = n.s.) |
-
-The honest reading: parity within noise, as the shape predicts — the
-released surface writes `LC_MAIN.stacksize` and nothing else. The
-bench is the parity gate, not a win.
-
-### M19 — the dylib/bundle image base's decision cost
-
-The link across the `-image_base` decisions (the M3 zero default — the
-`__TEXT.vmaddr == fileoff` contract every pre-M19 dylib planned with —
-a 512 KiB base and a 2 GiB base) over the same corpus (64 objects, 256
-rebase slots, linked as a dylib; the base is the constant-delta address
-arithmetic every pass already rides — segment packing, the fixup
-planners' `target − base` words, the trie and the symtab read the one
-resolver; `pgr-core/benches/image_base.rs`,
-`image_base/link_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_64_objects/default_0` | 838.1 µs |
-| `link_64_objects/custom_512kib` | 852.3 µs (+1.7%, p = n.s.) |
-| `link_64_objects/custom_2gib` | 860.5 µs (+2.7%, p = n.s.) |
-
-The honest reading: parity within the run-to-run spread, as the shape
-predicts — the released surface moves the one constant-delta base the
-address math already carried. The bench is the parity gate, not a
-win.
-
-### M20 — the umbrella region's decision cost
-
-The link across the `-sub_umbrella`/`-sub_library` decisions (the
-empty table — the pre-M20 default — and two populated regions, 8 and
-64 members alternating the kinds) over the same corpus (64 objects,
-256 rebase slots, linked as a dylib; a member is one 16–32 byte
-`LC_SUB_UMBRELLA`/`LC_SUB_LIBRARY` command in the identity block —
-`pgr-core/benches/umbrella.rs`, `umbrella/link_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_64_objects/default_0` | 827.1 µs |
-| `link_64_objects/region_8` | 821.0 µs (−0.7%, p = n.s.) |
-| `link_64_objects/region_64` | 843.6 µs (+2.0%, p = 0.79, n.s.) |
-
-The honest reading: parity within the run-to-run spread, as the shape
-predicts — the released surface appends identity-block commands the
-header assembly writes once. The bench is the parity gate, not a win.
-
-### M21 — the client list's decision cost
-
-The link across the `-sub_client` decisions (the empty list — the
-pre-M21 default — and two populated lists, 8 and 64 clients) over the
-same corpus (64 objects, 256 rebase slots, linked as a dylib; a client
-is one 16–24 byte `LC_SUB_CLIENT` command in the identity block —
-`pgr-core/benches/sub_client.rs`, `sub_client/link_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_64_objects/default_0` | 805.8 µs |
-| `link_64_objects/clients_8` | 822.2 µs (+2.0%, p = n.s.) |
-| `link_64_objects/clients_64` | 835.3 µs (+3.6%, p = 0.77, n.s.) |
-
-The honest reading: parity within the run-to-run spread, as the shape
-predicts — the released surface appends identity-block commands the
-header assembly writes once, one per named client. The bench is the
-parity gate, not a win.
-
-### M22 — the dyld environment's decision cost
-
-The link across the `-dyld_env` decisions (the empty list — the
-pre-M22 default — and two populated lists, 8 and 64 pairs) over the
-same corpus (64 objects, 256 rebase slots, linked as an executable; a
-pair is one 16–32 byte `LC_DYLD_ENVIRONMENT` command in the
-loader-configuration block — `pgr-core/benches/dyld_env.rs`,
-`dyld_env/link_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_64_objects/default_0` | 602.2 µs |
-| `link_64_objects/envs_8` | 599.6 µs (−0.4%, p = n.s.) |
-| `link_64_objects/envs_64` | 645.8 µs (+7.2%, p = 0.86, n.s.) |
-
-The honest reading: parity within the run-to-run spread, as the shape
-predicts — the released surface appends loader-configuration commands
-the header assembly writes once, one per named pair (the sandbox's
-±20% inter-run spread swallows the per-command cost; the criterion
-change rows run p = 0.86 against the prior run). The bench is the
-parity gate, not a win.
-
-## M24 — the symbol-alias surface (`pgr-core/benches/alias.rs`)
-
-The link across the `-alias` decisions (the empty table — the pre-M24
-default — and two populated tables, 8 and 64 aliases) over the same
-corpus (64 objects, 256 rebase slots, linked as an executable; an
-alias is one extra symtab row (16 bytes) and one export-trie terminal
-per decision — `pgr-core/benches/alias.rs`,
-`alias/link_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `link_64_objects/default_0` | 876.3 µs |
-| `link_64_objects/aliases_8` | 893.4 µs (+2.0%, n.s.) |
-| `link_64_objects/aliases_64` | 930.9 µs (+6.2%, n.s.) |
-
-The honest reading: near-parity, as the shape predicts — the released
-surface appends symtab rows and trie terminals the linkedit assembly
-writes once, one per named pair; the 64-alias row's ~6% sits inside
-the sandbox's run-to-run spread (criterion's change detection runs
-non-significant against the prior run). The bench is the parity gate,
-not a win.
-
-## M25 — the bundle-loader surface (`pgr-core/benches/bundle_loader.rs`)
-
-The link across the `-bundle_loader` decisions — the dynamic-lookup
-default (the pre-M25 shape: the bundle's externals ride
-`-undefined dynamic_lookup`) beside a 64-export loader surface
-resolving the same externals — over the same corpus (64 bundle
-objects, 256 rebase slots; a loader decision is a Pass-2 set insert
-and one ordinal arm per bind — `pgr-core/benches/bundle_loader.rs`,
-`bundle_loader/bundle_64_objects/*`):
-
-| Measurement | time (dev sandbox) |
-|---|---|
-| `bundle_64_objects/dynamic_lookup` | 751.1 µs |
-| `bundle_64_objects/loader_64` | 772.0 µs (+2.8%) |
-
-The honest reading: parity within the run-to-run spread, as the shape
-predicts — the loader surface replaces the dynamic-lookup binds with
-`0xFF` binds of the same plan cost, plus one Pass-2 set insert. The
-bench is the parity gate, not a win.
+</details>
+
+## Pipeline baselines
+
+### Parser (M0, v0.1.0)
+
+| Bench                        | Input                                               | Median   | Throughput      |
+| ---------------------------- | --------------------------------------------------- | -------- | --------------- |
+| `summarize/single_image`     | ~48 KiB exec (512 syms, 1 Ki relocs, ~85 GOT slots) | ~0.96 µs | **~53 GiB/s**   |
+| `summarize/corpus_24_images` | ~7.6 MiB (24 execs, 4 096 syms + 8 192 relocs each) | ~181 µs  | **~25.7 GiB/s** |
+
+### Static links (M1)
+
+| Bench                   | Input                                                 | Median                          | Notes                                 |
+| ----------------------- | ----------------------------------------------------- | ------------------------------- | ------------------------------------- |
+| `link/small_4_objects`  | 4 objects, 256 defs + 256 refs each, 8 KiB text       | **~2.3 ms** (M1) / ~3.4 ms (M2) | full Pass 0–5, single-threaded at M1  |
+| `link/large_32_objects` | 32 objects, 2 048 defs + 2 048 refs each, 32 KiB text | **~170 ms** (M1) / ~289 ms (M2) | resolution graph spans all 32 objects |
+
+The M2 delta is the dynamic-link surface on the same corpora: `__mh_execute_header` + full trie,
+undefined symtab entries, the indirect symbol table, two extra `__got` bucket passes — all of it
+tile-local by M4. These are the **starting line** for the speed pass, not a target.
+
+### Dynamic links (M2, `.tbd` bind path)
+
+| Bench                               | Input                                           | Median      | Throughput                           |
+| ----------------------------------- | ----------------------------------------------- | ----------- | ------------------------------------ |
+| `link_dylib/small_4_objects_dylib`  | 4 callers × 256 stub relocs + 256-export `.tbd` | **~2.0 ms** | ~88 MiB/s                            |
+| `link_dylib/large_32_objects_dylib` | 32 callers × 2 048 dylib calls + `.tbd`         | **~42 ms**  | ~88 MiB/s; 65 536 chained bind slots |
+
+The bind path was shaped for M4 from the start: import ordinals in first-use order over
+address-sorted slots (spike S6, `ld64.lld`-verified), so chain encoding never mutates the table
+and per-page fixup lists bucket without re-sorting. The parallel-efficiency gate is rig-bound.
+
+### Export trie (M3)
+
+`pgr_core::trie::build` over 10⁵ names (`_pgr_fn_*` + an ObjC-style shared-prefix block — the
+worst case for tries). The M2 builder stays in-tree verbatim (`legacy_m2`) so the rewrite's
+claim is measured, not argued:
+
+| Exports | `legacy_m2` | `m3_partition` |
+| ------- | ----------- | -------------- |
+| 1 000   | ~2.5 ms     | ~0.30 ms       |
+| 10 000  | ~28.8 ms    | ~3.5 ms        |
+| 100 000 | **~363 ms** | **~31.5 ms**   |
+
+Range-partition trie over the sorted list: multikey quicksort skips shared prefixes, every edge
+created once in compressed form, offset fixpoint from a 4-byte upper bound. **8–11× faster**;
+the < 10 ms gate closes on the P0 rig (≈ 8–12 ms extrapolated) or via the gate's
+"or parallelized" clause.
+
+### Fused tile emit (M4)
+
+Pass 4 rewritten as parallel 16 KiB tiles: copy coalesced runs → apply relocs → encode chains →
+place `__LINKEDIT` → hash 4 KiB pages, **one pass over each byte** where the reference made five.
+The pre-fusion body stays in-tree (`build_image`); fused == reference is asserted at bench setup
+and in the suite.
+
+**Pass 4 isolated** (16 objects × 512 syms × 32 KiB, ~0.94 MiB signed output):
+
+| Bench                                                                                    | Median      | Throughput                                   |
+| ---------------------------------------------------------------------------------------- | ----------- | -------------------------------------------- |
+| `emit/reference_pass4` (copy+patch, chains, LINKEDIT, **two** full-image SHA-256 passes) | 2.18 ms     | 441 MiB/s                                    |
+| `emit/fused_tile_pass4` (only page 0 re-hashes after the UUID lands)                     | **1.59 ms** | 605 MiB/s                                    |
+| **Δ**                                                                                    | **1.37×**   | on 2 threads; scales with P-cores on the rig |
+
+**Full pipeline, fused vs reference:**
+
+| Bench                               | Fused    | Reference | Δ         |
+| ----------------------------------- | -------- | --------- | --------- |
+| `link/small_4_objects`              | 2.34 ms  | 2.45 ms   | 1.05×     |
+| `link/large_32_objects`             | 172.1 ms | 174.7 ms  | 1.01×     |
+| `link_dylib/small_4_objects_dylib`  | 1.98 ms  | 2.19 ms   | 1.10×     |
+| `link_dylib/large_32_objects_dylib` | 33.8 ms  | 37.3 ms   | **1.11×** |
+| `link_outputs/dylib_8_objects`      | 18.1 ms  | 18.1 ms   | ~1×       |
+| `link_outputs/bundle_8_objects`     | 17.9 ms  | 18.1 ms   | ~1×       |
+
+How to read M4:
+
+1. **Pass 4 is the unit of work** and shows the full win. The resolution-heavy static corpus
+   (4 096 external refs/object) is Pass 2/3-bound — deliberately unchanged at M4 — so it moves
+   1 %; the bind-path corpora lean on Pass 4 and gain 10–11 %.
+2. **Parallelism is observable but hardware-bound**: `PGR_JOBS=1` measures 179.0 ms vs 172.1 ms
+   at 2 threads. G1's 16-thread scaling needs the rig.
+3. **S1 writer pool** (4 writers, 8 MiB blocks, `set_len` preallocation, file-order `pwrite`)
+   replaced the single writer; byte-exactness gated across block boundaries. Sandbox writes land
+   in the page cache, so the writer sweep runs on real storage on the rig.
+4. **D9/D10** landed as measured defaults: shared pool (`PGR_JOBS`, else `available_parallelism`
+   on Linux; the macOS P-core default joins with S4) + parallel pre-fault of the zero-page-backed
+   output buffer.
+
+### Output kinds (M3 dylibs/bundles · M10 `-r` objects)
+
+| Bench                                               | Input                                                                   | Median                         |
+| --------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------ |
+| `link_outputs/dylib_8_objects`                      | 8 objects × 1 024 defs, all exported (0 base, `LC_ID_DYLIB`, full trie) | ~19.1 ms                       |
+| `link_outputs/bundle_8_objects`                     | same corpus as `MH_BUNDLE`                                              | ~18.5 ms                       |
+| `object/build_object_image/16x512sym-32kib` (M10)   | the emit bench's own corpus as `MH_OBJECT`                              | **6.57 ms** (~1.6 GiB/s input) |
+| `emit/fused_tile_pass4` (same corpus, that session) | —                                                                       | 1.50 ms                        |
+| `emit/reference_pass4` (same corpus, that session)  | —                                                                       | 2.14 ms                        |
+
+The object emit costs ~4× the fused image pass **and earns its shape, not a speed crown**: it
+rebuilds the symtab (winner walk + strtab freeze), re-encodes every relocation against the output
+symtab, and merges sections deterministically single-threaded — objects have no 16 KiB tile
+regime. The win is the output _class_: the next link consumes it, skipping Pass 3, the fixup
+packer, the signature and the image write. Two-step self-consumption is byte-identical across
+double runs.
+
+## Size & ecosystem (M5–M6)
+
+### Archive parse (`parse_archive`)
+
+| Bench                              | Input                                               | Median      | Throughput             |
+| ---------------------------------- | --------------------------------------------------- | ----------- | ---------------------- |
+| `parse_archive/archive_64_members` | 64 members + name-sorted ranlib table, **~118 KiB** | **~9.9 µs** | ~11.9 GiB/s (M7: 12.2) |
+
+_The original M5 row said "~1.4 MiB / ~118 µs" — a unit slip, corrected in the M7 re-measure; see
+[Findings](#findings--corrections)._ One structural walk yields the member table and the
+`(symbol, member)` index the pull fixpoint consumes.
+
+### Archive liveness (the S7 decision)
+
+64 members × 256 syms × 32 KiB (~2 MiB); `main.o` → member 1 → predecessor chain, so the pull
+fixpoint loads a transitive chain and the rest is never needed.
+
+| Bench                              | Median                   |
+| ---------------------------------- | ------------------------ |
+| `link_archive/archive_64_lazy`     | **4.02 ms**              |
+| `link_archive/archive_64_all_load` | 49.06 ms                 |
+| **Δ**                              | **12.2×** — lazy adopted |
+
+### Dead-strip (the D12 gate)
+
+32 objects × 2 048 syms × 32 KiB, `MH_SUBSECTIONS_VIA_SYMBOLS`, ~50 % never-referenced weight.
+
+| Bench                                  | Median                                                          |
+| -------------------------------------- | --------------------------------------------------------------- |
+| `link_dead_strip/large_32_objects_off` | 255 ms                                                          |
+| `link_dead_strip/large_32_objects_on`  | **134 ms**                                                      |
+| **Δ**                                  | **1.9× faster** — half the atoms never placed, copied or hashed |
+
+> **Bench-driven optimization, recorded because it shaped the code**: the first working
+> mark-sweep was **3.5× slower** than the unstripped link (911 ms) — O(atoms) liveness scans and
+> per-atom relocation re-scans. Three fixes closed it: O(log atoms) binary searches over the
+> shared atom-start table, one-pass-per-section edge bucketing, borrowed slices instead of
+> per-call clones. The result is byte-identical to the slow first draft — the live set is a pure
+> function of the inputs.
+
+### `__cstring` merging (D4) & ICF (M6)
+
+| Bench                             | Input                                                        | Median                 | Notes                                              |
+| --------------------------------- | ------------------------------------------------------------ | ---------------------- | -------------------------------------------------- |
+| `link_cstring/cstring_16_objects` | 16 × 512 strings, shared pool duplicated per object          | **1.69 ms**            | pool placed once; hash-map dedup over string atoms |
+| `link_icf/large_32x512_off`       | 32 × 512 identical 12-byte functions (16 384 foldable atoms) | 17.29 ms               | fold-off                                           |
+| `link_icf/large_32x512_safe`      | same, `-icf=safe`                                            | **19.37 ms (+12.0 %)** | 16 383 folded, ~192 KiB removed; ≤ 25 % gate holds |
+
+**Not benched, with reasons**: veneer insertion (triggering corpus > 128 MiB text ≈ 4 s of SHA-256
+per iteration — correctness-gated instead, steady-state cost covered by the re-measured gates);
+legacy `LC_DYLD_INFO_ONLY` streams (O(slots) ULEB writes, nothing measurable at M6 scale — the
+verifier's walk is gated for correctness, not speed).
+
+## The edit loop — Stages A→C
+
+The perf doc's §7 thesis: the order-of-magnitude wins come from _not doing the work_. Each stage
+is independently shippable and byte-identity-gated against the one-shot link.
+
+### Stage A — caches (M6 POI + frozen `.tbd`, M7 v2 + LRU)
+
+Parse-heavy corpus: 16 objects × 4 096 syms × 4 KiB (~64 K symbols, 128 K relocs).
+
+| Bench                               | Median                              | Notes                                             |
+| ----------------------------------- | ----------------------------------- | ------------------------------------------------- |
+| `link_cache/medium_16_objects_cold` | 177.8 ms                            | parse + store                                     |
+| `link_cache/medium_16_objects_warm` | **172.8 ms (−2.8 %)**               | Pass 1 replaced by POI decode                     |
+| `tbd/libbench_text_parse`           | 35.8 µs                             | M2 YAML path                                      |
+| `tbd/libbench_frozen_load`          | **19.9 µs**                         | frozen export set (1.8×; ≪ 1 ms gate)             |
+| `cache_evict/unbounded`             | 9.12 ms                             | M6 warm path (4 × 1 024 syms)                     |
+| `cache_evict/bounded_64kib`         | 9.73 ms (**+6.7 % on cold stores**) | every store scans + evicts; warm hits never store |
+
+**Honesty note (§7.1's own framing)**: the POI cache is a Pass 0/1 elimination — where the wall
+is resolution/layout-bound, the gain is bounded by Pass 1's share. Stages B/C address the rest.
+The v2 format's two-revision key, marker check and recency touch cost nothing measurable
+(ledger below).
+
+### Stage B — resident session (M8)
+
+64 objects × 2 048 syms × 2 KiB (parse-heavy). Resident iterations run the exact user path
+(`pgr -resident` → prepare → hash → negotiate → POI decode → link → fused emit → wire);
+**64/64 POI hits** from iteration two, emit buffer reused.
+
+| Bench                               | Median       | Throughput |
+| ----------------------------------- | ------------ | ---------- |
+| `resident/one_shot_64_objects`      | 224.3 ms     | 37.8 MiB/s |
+| `resident/resident_warm_64_objects` | **260.3 ms** | 32.6 MiB/s |
+
+Phase breakdown (release probe): client Pass 0 = 4.2 ms · manifest build ≈ 8 ms (parallel
+SHA-256) · session link ≈ 248 ms. **Verdict: wash-to-slight-loss, recorded as-is** — the corpus
+is Pass 2/3-bound and POI decode ≈ fresh parse here, so skipped Pass 1 doesn't cover manifest +
+wire. What it proves functionally: the skip is real (hit counters), output byte-identical every
+iteration, buffer survives across links. The ≥ 5× gate and the page-fault/wire savings are
+rig-bound.
+
+### Stage C — incremental relink (M9, all tiers)
+
+The ladder, with the bytes-written gate as the sandbox verdict (wall times are ext4-bound;
+APFS decides them on the rig):
+
+| Tier                            | Trigger                                                                | Bytes patched                                                                        | Sandbox wall                                                |
+| ------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| **1 — engine**                  | same-size edit within the frozen skeleton                              | **105 536 B = 1.2 %** of 8.53 MiB (2/521 tiles; 72.7 KiB is the whole CodeDirectory) | 17.6 ms vs 16.4 full                                        |
+| **2b — propagation gate**       | every changed span inside `propagate::predict`'s scope, else fall back | gate cost: 572.9 µs scope walk; 1.1088 ms full planner                               | ~52 % of planner wall                                       |
+| **2 — segment relayout**        | slack overflow within bound / `__LINKEDIT` outgrowth                   | **1.2 MiB ≈ 13 %** per +64 KiB step (69–70/573 tiles — exactly the moved suffix)     | 34.2 ms (8 tier-2 : 1 tier-1 mix)                           |
+| **GA — shrink rung**            | unsigned symtab/strtab shrink, clone truncated                         | **56 624 B = 0.67 %** (4/568 tiles); regrow 79 016 B                                 | 23.4 ms (unsigned corpus — not comparable to signed groups) |
+| **2c + wiring — resolve reuse** | record v5 snapshot, shape-guarded, seed-scoped replay                  | −19 % of Pass 2 at 64 files                                                          | pipeline-level wash (2.99 vs 2.94 ms)                       |
+
+**Tier 1** (32 objects × 256 KiB text, 8.53 MiB image; the edit flips eight words mid-corpus):
+
+| Bench                                 | Median              | Throughput                                         |
+| ------------------------------------- | ------------------- | -------------------------------------------------- |
+| `incremental/full_relink_8mib`        | 16.4 ms             | 496 MiB/s                                          |
+| `incremental/incremental_relink_8mib` | 17.6 ms             | 461 MiB/s                                          |
+| `incremental/untouched_relink_8mib`   | **13.3 ms (−19 %)** | 610 MiB/s — plan says untouched, output left alone |
+
+Three physical reasons for the wall-time parity, each sandbox-bound: **(1)** ext4 has no reflink,
+so the clone reads+writes all 8.53 MiB (S8 is exactly this measurement on APFS); **(2)** span
+digests are SHA-256 over ~8.6 MiB per relink — a faster non-crypto digest is a deliberate
+non-knob at tier 1 (no-collision standard); **(3)** the corpus is Pass 2/3-bound and tier 1
+re-runs them by design.
+
+**Tier 2** (monotone ladder: eight +64 KiB growth steps then a reset — the anchored skeleton
+holds any size already carried, so only _climbing_ growth re-triggers the tier; the recorded
+mean is the honest 8:1 mix):
+
+| Bench (that session)                              | Median      |
+| ------------------------------------------------- | ----------- |
+| `full_relink_8mib`                                | 17.4 ms     |
+| `incremental_relink_8mib` (tier 1)                | 32.2 ms     |
+| `incremental_add_import_8mib` (anchored ordinals) | 22.4 ms     |
+| `segment_relayout_relink_8mib`                    | **34.2 ms** |
+| `untouched_relink_8mib`                           | 12.8 ms     |
+
+Record v4's per-section content digests exempt byte-identical moves from the propagation gate;
+the digest hash adds no measurable full-link cost (17.4 vs 17.4 back-to-back; copy-vs-rehash
+32.0 vs 32.2 ms — noise).
+
+**Randomized edit gate**: seeded xorshift64* walk (body growth, import add, retarget, oversized
+growth, symtab churn, no-op), engine-level and real `-incremental -incremental-verify` driver
+loop. **10 000 engine steps in 11.4 s, every step byte-identical or an honest re-recording
+fallback.** CI runs sized subsets (80 engine / 24 driver); the driver-level 10⁴ profile and
+hardware verdicts belong to the rig. Same seed everywhere — failures reproduce exactly.
+
+**Resolve reuse** (record v5; 64 files × 49 externals, 10 samples):
+
+| Bench                                            | Median               |
+| ------------------------------------------------ | -------------------- |
+| `resolve_pass2/full_install`                     | 347.7 µs             |
+| `resolve_pass2/reused_install` (one edited file) | **282.8 µs (−19 %)** |
+| `resolve_pipeline/full_resolve` (Passes 1b–3)    | 2.94 ms              |
+| `resolve_pipeline/reused_resolve`                | 2.99 ms (wash)       |
+
+The win scales with symbol count (copy O(reused winners), replay O(seeds)); break-even past
+~32 inputs, ~13 % slower at 16. The payoff arrives where the roadmap aims it: input-heavy
+relinks on the rig, stacked on POI + residency.
+
+### Fusion on the wire (v3 → v4 → v5)
+
+The ladder runs _inside_ the resident session. Same 64-object corpus; every timed iteration is
+a real edit (one dirty tile + re-sign), served warm and patched in memory:
+
+| Bench                                                     | Median       | What runs                                                       |
+| --------------------------------------------------------- | ------------ | --------------------------------------------------------------- |
+| `resident/one_shot_64_objects` (that session)             | 235.3 ms     | reference                                                       |
+| `resident/resident_warm_64_objects` (that session)        | 272.1 ms     | POI hits 64/64                                                  |
+| `resident-fusion/fusion_relink_64_objects` (v3 record)    | 535.0 ms     | ladder: warm pipeline + plan + patch + re-sign + renewed record |
+| `resident-fusion/fusion_relink_64_objects` (v5 re-record) | **529.6 ms** | ladder + tile stream; transport asserted                        |
+| `resident-fusion-audited/…` (v4, that session)            | 597.4 ms     | ladder **+ audit** (reference emit + strict pass)               |
+| `resident-fusion-audited/…` (v5 re-record)                | 610.6 ms     | ladder + tile stream + audit                                    |
+
+**The audit costs +19 %** (94.8 ms) — paid only under `-incremental-verify`; plain cycles
+unchanged. The ladder's ~2× over warm resident is the Pass 2/3 physics again, recorded as-is.
+
+**Wire v5 — what crosses per warm relink:**
+
+| Step            | before (v3/v4)                    | after (v5)                                                                                               |
+| --------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| previous output | uploaded per changed output state | **0 bytes** (resident; re-upload only after ceiling eviction)                                            |
+| patched reply   | the full image                    | **changed tiles only** — 37.9 KiB of an 87 KiB image (2/6 tiles); ≈16.4 KiB of 8 MiB for a one-tile edit |
+| untouched reply | full image, rewritten             | **0 bytes**, nothing rewritten                                                                           |
+
+| `wire-tiles` (20 samples)                               | Median      | Throughput |
+| ------------------------------------------------------- | ----------- | ---------- |
+| `diff_one_tile_edit_8mib` (daemon: scan + SHA-256)      | 5.64 ms     | 1.39 GiB/s |
+| `replay_one_tile_edit_8mib` (client splice + hash gate) | **0.75 ms** | 10.4 GiB/s |
+| `diff_untouched_8mib` (pure scan)                       | 5.25 ms     | 1.52 GiB/s |
+
+**Verdict: loopback wall clock is a wash** (529.6 ms inside the 502–535 ms band — the relink is
+pipeline-bound; the 5.6 ms scan is ~1 %). The win is the wire and the memory bus, paid back on
+the first warm cycle of a machine-hosted `pgrd`. The client hash-verifies its replay before the
+atomic write; the daemon still never touches the filesystem.
+
+## Consumer surfaces (M11–M14)
+
+A gate or query must cost far less than the work it summarizes.
+
+**Order file & link map (M11)** — 12 objects × 256 atoms, 3 072 pieces:
+
+| Bench                                         | Median  | Reading                                                                                                                                                                      |
+| --------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `order_file/layout/no_order`                  | 2.51 ms | 12 whole-section pieces                                                                                                                                                      |
+| `order_file/layout/ranked` (1 536 ranked)     | 5.41 ms | pays the **atom split** (3 072 pieces — same cost `-dead_strip` pays) + rank pass + stable sort; shape-parity, not like-for-like. Rank pass is linear (one hash probe/piece) |
+| `link_map/build_render/3072` (incl. the link) | 3.03 ms | map's own share ≈ delta vs the 2.51 ms plain link; reporting never touches the hot path                                                                                      |
+
+**Selective verification (M12)** — one at-floor chained fixture:
+
+| Selection   | Median      |     | Selection                                     | Median       |
+| ----------- | ----------- | --- | --------------------------------------------- | ------------ |
+| `full`      | 20.6 µs     |     | `fixups`                                      | 0.48 µs      |
+| `signature` | **20.1 µs** |     | `chain_starts` / `branch_range` / `dyld_info` | 0.34 µs each |
+| `structure` | 0.34 µs     |     | `segments`                                    | 0.56 µs      |
+| `symbols`   | 0.32 µs     |     | `linkedit`                                    | 0.53 µs      |
+
+The signature family _is_ the pass on this fixture (SHA-256 recompute: 20.1 of 20.6 µs).
+`--checks segments,fixups` per relink ≈ 1 µs; the recompute waits for the hand-off gate. Family
+domains are test-gated (`single_check_never_reports_foreign_codes`).
+
+**Baseline gate & record inspector (M13):**
+
+| Bench                                 | Median         |     | Bench                       | Median               |
+| ------------------------------------- | -------------- | --- | --------------------------- | -------------------- |
+| `delta_offset/64` / `delta_code/64`   | 1.94 / 1.56 µs |     | `to_json/512`               | 152.8 µs             |
+| `delta_offset/256` / `delta_code/256` | 20.2 / 13.6 µs |     | `parse_json/512`            | 252.6 µs             |
+| `delta_offset/512` / `delta_code/512` | 68.4 / 47.0 µs |     | `verify_for_scale`          | 20.6 µs              |
+| `record_summary/record_and_encode`    | ~125 µs        |     | `read_record` / `of_render` | **11.1 µs / 1.5 µs** |
+
+The delta is the cheap half (O(prev×next) is deliberate at these counts); JSON walks every
+message's bytes; the gate's total is dominated by the verify it gates — the point. Reading a
+record costs ~a tenth of making one.
+
+**Export-filter matcher (M14)** — 10 240 names, four-entry lists, same scan length per family:
+
+| Bench                      | Median   | Per name       |
+| -------------------------- | -------- | -------------- |
+| `match_10k_names/exact`    | 54.9 µs  | ≈5.4 ns        |
+| `match_10k_names/one_star` | 171.2 µs | ≈16.7 ns (~3×) |
+| `match_10k_names/two_star` | 430.2 µs | ≈42.0 ns (~8×) |
+
+Nanoseconds per name against a millisecond-scale Pass 3 — off the hot path by three orders of
+magnitude. Hundreds of globs over hundreds of thousands of names is the shape that would need
+a prefix index; this bench is where that decision lives.
+
+## Knob parity (M10–M25)
+
+**Shared reading for every row below**: parity within the sandbox's run-to-run spread (up to
+±20 %; criterion change-detection non-significant where a p-value is shown). Each released knob
+moves field writes, header commands or address arithmetic the passes already carried — and
+every default keeps pre-knob links **byte-identical**. These benches are parity gates, not wins.
+
+| Knob (milestone)                     | Bench                             | Default                          | Named decisions                                                                | Δ                                                                             |
+| ------------------------------------ | --------------------------------- | -------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| Dylib kind (M14)                     | `dylib_surface/link_256_binds`    | `load` 501.7 µs                  | `weak` 502.0 · `lazy` 501.7 µs                                                 | parity — one header opcode                                                    |
+| `-pagezero_size` (M15)               | `pagezero/link_64_objects`        | 4 GiB: 794.7 µs                  | 1 GiB: 818.6 (+2.2 %, p=0.36) · 16 MiB: 841.2 µs (+4.5 %, p=0.62)              | parity                                                                        |
+| `-init_offsets` (M16)                | `init_offsets/link_*_32_objects`  | chained 453.4 · classic 426.5 µs | chained **382.5 (−15.6 %)** · classic **387.3 µs (−9.2 %)**                    | _cheaper_ — 128 rebase words leave the payload, pointer sections never bucket |
+| `-segprot` (M17)                     | `segprot/link_64_objects`         | house 822.9 µs                   | `__DATA_CONST` rw/r 797.7 (−2.9 %) · `__TEXT` rwx/rx 844.5 µs (+0.1 %, p=0.98) | parity — two u32 fields/segment                                               |
+| `-stack_size` (M18)                  | `stack_size/link_64_objects`      | zero 793.4 µs                    | 16 MiB 803.8 (+1.3 %) · 1 GiB 800.2 µs (+0.9 %)                                | parity — one field in the 24-byte `LC_MAIN`                                   |
+| `-image_base` (M19)                  | `image_base/link_64_objects`      | zero 838.1 µs                    | 512 KiB 852.3 (+1.7 %) · 2 GiB 860.5 µs (+2.7 %)                               | parity — the one constant-delta base                                          |
+| `-sub_umbrella`/`-sub_library` (M20) | `umbrella/link_64_objects`        | empty 827.1 µs                   | 8 members 821.0 (−0.7 %) · 64: 843.6 µs (+2.0 %, p=0.79)                       | parity                                                                        |
+| `-sub_client` (M21)                  | `sub_client/link_64_objects`      | empty 805.8 µs                   | 8: 822.2 (+2.0 %) · 64: 835.3 µs (+3.6 %, p=0.77)                              | parity                                                                        |
+| `-dyld_env` (M22)                    | `dyld_env/link_64_objects`        | empty 602.2 µs                   | 8: 599.6 (−0.4 %) · 64: 645.8 µs (+7.2 %, p=0.86)                              | parity — spread swallows per-command cost                                     |
+| `-alias` (M24)                       | `alias/link_64_objects`           | empty 876.3 µs                   | 8: 893.4 (+2.0 %) · 64: 930.9 µs (+6.2 %)                                      | near-parity — symtab rows + trie terminals                                    |
+| `-bundle_loader` (M25)               | `bundle_loader/bundle_64_objects` | dyn-lookup 751.1 µs              | 64-export loader 772.0 µs (+2.8 %)                                             | parity — `0xFF` binds of the same plan cost                                   |
+
+**Platform word (M10 rung 2)** — one rebase-slot corpus per platform at its floor (20 samples);
+the encoding decision is one integer compare in Pass 3:
+
+| Platform     | Floor   | Median  |
+| ------------ | ------- | ------- |
+| macOS 12.0   | chained | 84.6 µs |
+| iOS 15.0     | chained | 84.1 µs |
+| tvOS 15.0    | chained | 83.0 µs |
+| watchOS 8.0  | chained | 82.5 µs |
+| visionOS 1.0 | chained | 84.4 µs |
+
+~2.5 % span — a wash by design; the floor selects the _encoding_, never the fixups
+(`m10_platform::*` byte-tests the fallback per platform). _M23's framework re-export rides the
+M3 `LC_REEXPORT_DYLIB` path; no separate bench recorded._
+
+## Pending measurements
+
+Benches landed with their milestones; the next gate run fills the numbers (criterion medians,
+same sandbox). Expectations are stated so any divergence is a finding:
+
+| Bench                                                                          | Pins                                                              | Honest expectation                                                  |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `pgr-core/platform_floor/for_target/*` (M10 r3)                                | the consumer seam's decision cost (floor compare + tracing event) | cheap by construction; rotation catches shape regressions           |
+| `pgr-verify/verify_platform_floor/verify/<below\|at_floor>` (M10 r3)           | strict pass, images _born_ at their build versions                | the two shapes inside each other's noise                            |
+| `pgr-verify/verify_arm64e/verify/<arm64e_auth\|offset64_control>` (r4 s1)      | the read walk, both families                                      | arm64e inside the control's band — same work per slot, wider stride |
+| `pgr-core/plan_fixups_word_family/<offset64\|arm64e>/<1k\|10k\|100k>` (r4 s2)  | both encoders, same slot corpus                                   | curves track — one extra encoder branch                             |
+| `…/arm64e_auth/<1k\|10k\|100k>` (r4 s3)                                        | every slot signed (PAC triple; auth-bind addend split)            | inside the `arm64e` band                                            |
+| `pgr-verify/verify_arm64e/pair_replay/<arm64e_auth\|offset64_control>` (r4 s4) | the family-blind M3 pair gate                                     | inside the control's band — different word reader, doubled stride   |
+
+## Findings & corrections
+
+The bench suite earning its keep — every item carries a regression gate in-tree:
+
+| Finding                                                                                                                               | Where                                                                               | Resolution                                                                                  |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **Unit slip**: archive-parse row said ~1.4 MiB / ~118 µs                                                                              | M5 record                                                                           | corpus is ~118 KiB → ~9.9 µs at 12.2 GiB/s; corrected in the M7 ledger                      |
+| **`build_func_starts` emitted absolute offsets into a delta stream since M0**                                                         | caught by the audited-fusion bench (131 K function starts; small corpora masked it) | fixed; regression gate in `m9_resident_fusion.rs`                                           |
+| Dead-strip first draft 3.5× slower (911 ms)                                                                                           | M5 bench                                                                            | binary-search liveness + one-pass edge bucketing + borrowed slices → 134 ms, byte-identical |
+| `cstring` 1.69 → 1.94 ms at M7                                                                                                        | environmental drift                                                                 | same-box re-measure of the M6 baseline: 1.88 ms — not M7 code                               |
+| Accounting loop indexed input 0 (the dylib) instead of the alternated object; import-churn warm-up asserted an already-consumed state | tier-2 bench file                                                                   | both fixed (reset precedes the group)                                                       |
+| `cache_entries` `HEADER_LEN + len` overflow; hostile-header arithmetic; stale `link()` signature; 8 GiB `nreloc` pre-allocation       | M7 fuzz sessions                                                                    | fixed; deterministic regression tests per crash class                                       |
+
+<details><summary><b>Regression ledger — every prior gate re-measured as milestones landed</b></summary>
+
+**M4 gates under M5:**
+
+| Bench                               | M4                   | M5                   | Verdict                           |
+| ----------------------------------- | -------------------- | -------------------- | --------------------------------- |
+| `emit` fused vs reference           | 1.37× (1.59/2.18 ms) | 1.39× (1.58/2.20 ms) | holds                             |
+| `link/large_32_objects`             | 172.1 ms             | 172.7 ms             | holds                             |
+| `link_dylib/large_32_objects_dylib` | 33.8 ms              | 32.9 ms              | holds                             |
+| `link_outputs/dylib_8_objects`      | 18.1 ms              | 18.7 ms              | holds                             |
+| `summarize/single_image`            | ~53 GiB/s            | 51.8 GiB/s           | holds                             |
+| `trie m3_partition/100000`          | 31.5 ms              | 30.7 ms              | holds (legacy that day: 354.9 ms) |
+
+**M5 gates under M6** (veneer scan, `FixupLc` dispatch, fold-empty fast path all active):
+
+| Bench                   | M5         | M6       | Verdict      |
+| ----------------------- | ---------- | -------- | ------------ |
+| `link/large_32_objects` | 174–176 ms | 175.7 ms | holds        |
+| `link_dead_strip/…_off` | 255 ms     | 259.0 ms | holds        |
+| `link_dead_strip/…_on`  | 134 ms     | 136.0 ms | 1.90× vs off |
+
+**Everything under M7** (v2 cache, response files, `-syslibroot`, LRU):
+
+| Bench                                               | Prior record             | M7                        | Verdict                                |
+| --------------------------------------------------- | ------------------------ | ------------------------- | -------------------------------------- |
+| `link_cache/…_cold`                                 | 177.8 ms                 | 186.4 ms (quick-sampling) | noise band                             |
+| `link_cache/…_warm`                                 | 172.8 ms                 | 173.7 ms                  | holds — v2 key/marker/touch free       |
+| `tbd/…_text_parse` / `…_frozen_load`                | 35.8 / 19.9 µs           | 36.2 / **19.8 µs**        | holds (v2 frame +4 B)                  |
+| `link/large_32_objects`                             | 172–176 ms               | 175.6 ms                  | holds                                  |
+| `link/small_4_objects`                              | 2.34 ms                  | 2.42 ms                   | holds                                  |
+| `link_dylib/large_32_objects_dylib`                 | 33.8–37.3 ms             | 36.9 ms                   | holds                                  |
+| `link_outputs/dylib_8_objects` / `bundle_8_objects` | 18.1–18.7 / 17.9–18.5 ms | 18.6 / 18.4 ms            | holds                                  |
+| `link_archive/…_lazy` / `…_all_load`                | 4.02 / 49.06 ms          | 3.99 / 50.4 ms            | holds                                  |
+| `link_dead_strip/…_off` / `…_on`                    | 255–259 / 134–136 ms     | 263.6 / 136.4 ms          | 1.93× vs off                           |
+| `link_cstring/cstring_16_objects`                   | 1.69 ms                  | 1.94 ms                   | drift, not code (same-box M6: 1.88 ms) |
+| `link_icf/…_off` / `…_safe`                         | 17.29 / 19.37 ms         | 16.47 / 18.92 ms          | +14.8 % (≤ 25 %)                       |
+| `emit` fused vs reference                           | 1.37×                    | 1.38× (1.59/2.17 ms)      | holds                                  |
+| `summarize/single_image` / `corpus_24_images`       | ~53 / ~25.7 GiB/s        | 52.7 / 24.7 GiB/s         | holds                                  |
+| `parse_archive/archive_64_members`                  | 11.9 GiB/s               | 12.2 GiB/s                | holds (unit slip corrected)            |
+| `trie m3_partition/100000`                          | 31.5 ms                  | **27.9 ms**               | holds (legacy that day: 349.6 ms)      |
+
+**M7 fuzz sessions** (61 s each, ASan, libFuzzer — all clean after the fixes above):
+
+| Target                    | Execs     |
+| ------------------------- | --------- |
+| `dyld_info_streams` (new) | 1 860 070 |
+| `cache_entries` (new)     | 6 302 019 |
+| `verify_image`            | 143 230   |
+| `link_object`             | 319 230   |
+
+The "30 CPU-days clean" gate formally closes on the rig.
+
+</details>
+
+<details><summary><b>Correctness-gate inventory behind the numbers</b></summary>
+
+- **M4**: `m4_fused_driver_output_is_byte_identical_to_the_reference`, `m4_fused_matches_reference_on_m2_and_m3_corpora`, ten `pgr-emit/tests/m4_fused.rs` corpus shapes, bench-setup assertions.
+- **M5**: `m5_archive_member_is_pulled_and_the_output_verifies`, `m5_dead_strip_matches_the_reference_emit_and_determinism`, `m5_cstring_merge_dedups_across_inputs` (+ section-relative pointer gate), `m5_sectcreate_places_file_contents`.
+- **M8**: `m8_foundations.rs` (13 — reverse-index site lists, insertion-stable ordinals across growth, slack math + ladder, slack-off identity, pre-parsed layout equality, archive pull, shared `-u` gate); `m8_resident.rs` (7 — byte identity exe/dylib/archive cold+warm, hit counters, fallback transparency, restart, 4-way concurrency, `-u` parity); `pgrd_binary.rs` (4 — real process: strict-clean output, SIGKILL-restart identity, error survival, idle-exit).
+- **M9**: `m9_foundations.rs` (4 — anchors, overflow ladder, purity, empty-list == M8-c); `pgr-emit/tests/incremental.rs` (9 + 16 unit — byte identity across body/growth/dylib/no-slack/unsigned, no-op, fallbacks, integrity sampling, codec corruption tolerance); `m9_incremental.rs` (11 — the driver loop end to end); `m9_resident_fusion.rs` (cycle survives daemon fallback, one-shot parity, stand-downs, the served audit, the func-starts regression).
+- **M12**: `check_selection::single_check_never_reports_foreign_codes`.
+
+</details>
+
+## How to read these numbers
+
+1. **Starting lines, not targets.** Each pass's gate is beating its own baseline on the same
+   corpora, then parallel efficiency — then the hardware comparisons.
+2. **Budgets land in CI as they ship**: `--time` JSON, serial fraction ≤ 15 % (except flush),
+   parallel efficiency ≥ 70 % on Passes 1/3/4.
+3. **Nightly wall-clock vs ld-prime / `ld64.lld` / mold-macho needs the P0 rigs** (perf doc §9.1).
+   The CI skeleton ships; the hardware baselines do not exist yet.
+
+**Known follow-ups**: a byte-touching parse bench (memory-bound, not metadata-bound) ·
+parameterized corpus generator behind an `xtask` for nightly shape sweeps · D7 canonical import
+order remains optional (M4 shipped without needing it; M8's insertion-stable ordinals cover the
+incremental requirement) · rig-bound: S1 writer matrix, S4 P-core sizing, PGO, the G1 gate.
