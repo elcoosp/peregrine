@@ -201,6 +201,7 @@ fn main() {
         &reused.interner,
         &reused.objects,
         &[],
+        &[],
     )
     .expect("the same-shape relink plans");
     let redecided: Vec<&str> = plan
@@ -241,6 +242,7 @@ fn main() {
         &seed.digests,
         &fallen.interner,
         &fallen.objects,
+        &[],
         &[],
     )
     .expect_err("the moved file list must refuse the stale seed");
