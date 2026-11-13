@@ -278,6 +278,20 @@ pub struct LinkConfig {
     /// refuse the knob (the region is a dylib's identity block) — the
     /// layout's re-check backs the driver surface's earlier refusal.
     pub umbrella: crate::umbrella::Umbrella,
+    /// M21 — the dylib client list: the `-sub_client` names a dylib
+    /// emits as the `LC_SUB_CLIENT` commands of its identity block (see
+    /// [`crate::sub_client`]). The default (the empty list) keeps every
+    /// pre-M21 link byte-identical; each name is validated at
+    /// construction
+    /// ([`SubClientEntry::from_flag`](crate::sub_client::SubClientEntry::from_flag),
+    /// duplicates refuse on
+    /// [`SubClient::push`](crate::sub_client::SubClient::push)), so a
+    /// [`SubClient`](crate::sub_client::SubClient) in hand is always a
+    /// legal list; executables, bundles and the relocatable output
+    /// refuse the knob (the clients are a dylib's identity block, like
+    /// the M20 region) — the layout's re-check backs the driver
+    /// surface's earlier refusal.
+    pub sub_clients: crate::sub_client::SubClient,
 }
 
 impl Default for LinkConfig {
@@ -320,6 +334,7 @@ impl Default for LinkConfig {
             stack_size: None,
             image_base: None,
             umbrella: crate::umbrella::Umbrella::new(),
+            sub_clients: crate::sub_client::SubClient::new(),
         }
     }
 }
@@ -1130,6 +1145,35 @@ pub fn layout(
                 "-sub_umbrella/-sub_library name an umbrella dylib's region, but \
                  the relocatable output carries no identity commands",
                 "drop the flags or link a dylib",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M21: the client list is a dylib's identity block — the same
+    // re-check shape as the M20 region above, so no library caller can
+    // plan the shape either: an executable's identity is `LC_MAIN` +
+    // `LC_LOAD_DYLINKER`, a bundle dlopens without sub commands, and
+    // the relocatable output carries no identity commands at all.
+    if !cfg.sub_clients.is_empty() && cfg.filetype != OutputType::Dylib {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Execute => (
+                "-sub_client names an identity-block dylib's allowed clients, \
+                 but this output is an executable",
+                "the clients ride LC_ID_DYLIB's identity block: link a dylib \
+                 (-dylib) or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-sub_client names an identity-block dylib's allowed clients, \
+                 but this output is a bundle",
+                "bundles dlopen without sub commands: link a dylib \
+                 (-dylib) or drop the flag",
+            ),
+            _ => (
+                "-sub_client names an identity-block dylib's allowed clients, but \
+                 the relocatable output carries no identity commands",
+                "drop the flag or link a dylib",
             ),
         };
         return Err(LinkError::Layout {
@@ -3774,6 +3818,9 @@ fn build_header(
         + u32::try_from(cfg.umbrella.count()).map_err(|_| LinkError::Internal {
             message: "umbrella member count exceeds u32".into(),
         })?
+        + u32::try_from(cfg.sub_clients.count()).map_err(|_| LinkError::Internal {
+            message: "sub-client count exceeds u32".into(),
+        })?
         + u32::try_from(hi.rpaths.len()).map_err(|_| LinkError::Internal {
             message: "rpath count exceeds u32".into(),
         })?
@@ -3801,6 +3848,7 @@ fn build_header(
             + if cfg.adhoc { 16 } else { 0 } // LC_CODE_SIGNATURE
             + hi.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
             + cfg.umbrella.region_size()
+            + cfg.sub_clients.region_size()
             + hi.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
             + if hi.source_version.is_some() { 16 } else { 0 },
         "sizing formula drift"
@@ -3927,6 +3975,28 @@ fn build_header(
         tracing::debug!(
             count = cfg.umbrella.count(),
             "the umbrella region rides the identity block"
+        );
+    }
+    // LC_SUB_CLIENT per `-sub_client` entry (M21): the identity block's
+    // client list — dyld lets a named requesting image link the dylib
+    // when its linkage is restricted. The commands land right after the
+    // umbrella members (the same ld64-canonical adjacency, before the
+    // load commands) in flag order, the deterministic order the seam's
+    // tests pin.
+    if !cfg.sub_clients.is_empty() {
+        for client in &cfg.sub_clients {
+            let name = client.name().as_bytes();
+            let cmdsize = client.cmd_size();
+            w32(&mut buf, lc, pgr_format::consts::LC_SUB_CLIENT);
+            w32(&mut buf, lc + 4, cmdsize as u32);
+            w32(&mut buf, lc + 8, 12); // name lc_str offset
+            buf[lc + 12..lc + 12 + name.len()].copy_from_slice(name);
+            buf[lc + 12 + name.len()] = 0;
+            lc += cmdsize;
+        }
+        tracing::debug!(
+            count = cfg.sub_clients.count(),
+            "the client list rides the identity block"
         );
     }
     // LC_LOAD_DYLIB / LC_LOAD_WEAK_DYLIB / LC_REEXPORT_DYLIB per input
@@ -4083,6 +4153,7 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc) -> usize 
         }
         + cfg.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
         + cfg.umbrella.region_size()
+        + cfg.sub_clients.region_size()
         + cfg.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
         + usize::from(cfg.source_version.is_some()) * 16 // LC_SOURCE_VERSION
         + usize::from(is_exec) * 24 // LC_MAIN
