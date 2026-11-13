@@ -382,6 +382,133 @@ pub(crate) fn check_load_commands(img: &ParsedImage<'_>, report: &mut Report) {
         }
     }
     check_umbrella_region(img, report);
+    check_dyld_environment(img, report);
+}
+
+/// The M22 dyld-environment contract: `LC_DYLD_ENVIRONMENT` is the
+/// loader-configuration command dyld reads from the main executable —
+/// each command carries one `DYLD_<var>=<value>` pair at the fixed
+/// `lc_str` offset (the `dylinker_command` struct, the `LC_RPATH`
+/// shape). The invariants the fixture knob can break are named: a
+/// command off an executable is inert there (dyld reads it from the
+/// main executable only — a warning), a variable dyld would ignore
+/// (not `DYLD_`-prefixed), an empty variable (past the prefix), a pair
+/// missing its `=`, a duplicate variable (dyld keeps its first
+/// encounter — the loser would be a silently dropped decision), a
+/// stray `lc_str` offset (the fixed part is 12 bytes), an undersized
+/// command, and an unterminated pair.
+fn check_dyld_environment(img: &ParsedImage<'_>, report: &mut Report) {
+    const ENV_FIXED_PART: u32 = 12; // cmd + cmdsize + lc_str offset
+    let is_object = img.header.filetype == MH_OBJECT;
+    let is_exec = img.header.filetype == MH_EXECUTE;
+    let mut seen: Vec<String> = Vec::new();
+    for cmd in &img.commands {
+        if cmd.kind != LoadCommandKind::DyldEnvironment {
+            continue;
+        }
+        if is_object {
+            report.issues.push(Issue::error(
+                Code::LinkeditPayload,
+                "LC_DYLD_ENVIRONMENT is a loader command — a relocatable object carries \
+                 no loader to reach (dyld reads it from the main executable only)",
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        if !is_exec {
+            report.issues.push(Issue::warning(
+                Code::LinkeditPayload,
+                "LC_DYLD_ENVIRONMENT rides a non-executable image — dyld reads the \
+                 command from the main executable only, so it is inert here",
+                Some(cmd.offset as u64),
+            ));
+        }
+        if cmd.cmdsize < ENV_FIXED_PART as usize + 4 {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_DYLD_ENVIRONMENT cmdsize {} is under the 12-byte fixed part plus \
+                     one pair byte",
+                    cmd.cmdsize
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        let raw = &cmd.bytes;
+        let off = u32::from_le_bytes(
+            raw[8..12]
+                .try_into()
+                .expect("the offset field rides byte 8"),
+        );
+        if off != ENV_FIXED_PART {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_DYLD_ENVIRONMENT lc_str offset {off} must be 12 (the fixed part \
+                     is cmd, cmdsize, offset)"
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        // The pair: a NUL-terminated C string inside the command, with
+        // room for the terminator.
+        let tail = &raw[ENV_FIXED_PART as usize..cmd.cmdsize];
+        let Some(end) = tail.iter().position(|&b| b == 0) else {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                "LC_DYLD_ENVIRONMENT pair is not NUL-terminated inside the command",
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        };
+        let pair = String::from_utf8_lossy(&tail[..end]).into_owned();
+        let Some((var, _value)) = pair.split_once('=') else {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_DYLD_ENVIRONMENT pair {pair:?} carries no = separator — the \
+                     grammar is DYLD_<var>=<value>"
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        };
+        let Some(name) = var.strip_prefix("DYLD_") else {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_DYLD_ENVIRONMENT variable {var:?} is not DYLD_-prefixed — dyld \
+                     honors DYLD_* variables from this command only, so the pair would \
+                     be silently dropped"
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        };
+        if name.is_empty() {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                "LC_DYLD_ENVIRONMENT variable is empty past the DYLD_ prefix — name the \
+                 variable the loader exports (e.g. DYLD_PRINT_LIBRARIES=1)",
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        if seen.iter().any(|s| s == var) {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "duplicate LC_DYLD_ENVIRONMENT variable {var:?}: dyld keeps its first \
+                     encounter, so the loser is a silently dropped decision"
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        seen.push(var.to_string());
+    }
 }
 
 /// The M20 umbrella-region contract, widened by M21 to the whole
