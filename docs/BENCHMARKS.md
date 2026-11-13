@@ -1427,3 +1427,45 @@ the header assembly writes once, one per named pair (the sandbox's
 ±20% inter-run spread swallows the per-command cost; the criterion
 change rows run p = 0.86 against the prior run). The bench is the
 parity gate, not a win.
+
+## M24 — the symbol-alias surface (`pgr-core/benches/alias.rs`)
+
+The link across the `-alias` decisions (the empty table — the pre-M24
+default — and two populated tables, 8 and 64 aliases) over the same
+corpus (64 objects, 256 rebase slots, linked as an executable; an
+alias is one extra symtab row (16 bytes) and one export-trie terminal
+per decision — `pgr-core/benches/alias.rs`,
+`alias/link_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_64_objects/default_0` | 876.3 µs |
+| `link_64_objects/aliases_8` | 893.4 µs (+2.0%, n.s.) |
+| `link_64_objects/aliases_64` | 930.9 µs (+6.2%, n.s.) |
+
+The honest reading: near-parity, as the shape predicts — the released
+surface appends symtab rows and trie terminals the linkedit assembly
+writes once, one per named pair; the 64-alias row's ~6% sits inside
+the sandbox's run-to-run spread (criterion's change detection runs
+non-significant against the prior run). The bench is the parity gate,
+not a win.
+
+## M25 — the bundle-loader surface (`pgr-core/benches/bundle_loader.rs`)
+
+The link across the `-bundle_loader` decisions — the dynamic-lookup
+default (the pre-M25 shape: the bundle's externals ride
+`-undefined dynamic_lookup`) beside a 64-export loader surface
+resolving the same externals — over the same corpus (64 bundle
+objects, 256 rebase slots; a loader decision is a Pass-2 set insert
+and one ordinal arm per bind — `pgr-core/benches/bundle_loader.rs`,
+`bundle_loader/bundle_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `bundle_64_objects/dynamic_lookup` | 751.1 µs |
+| `bundle_64_objects/loader_64` | 772.0 µs (+2.8%) |
+
+The honest reading: parity within the run-to-run spread, as the shape
+predicts — the loader surface replaces the dynamic-lookup binds with
+`0xFF` binds of the same plan cost, plus one Pass-2 set insert. The
+bench is the parity gate, not a win.
