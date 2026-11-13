@@ -1322,6 +1322,56 @@ pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &m
         }
     }
 
+    // The M24 alias surface's image contract: the defined-external
+    // subrange carries one row per name. ld64's `-alias` adds rows, and
+    // a stray or hand-built duplicate silently shadows — dyld and the
+    // debuggers read the first row, so the second is a different symbol
+    // wearing the same name. Locals and undefined externals may repeat
+    // (two files' static labels; duplicate references), only *defined*
+    // externals wear the one-name contract.
+    {
+        let mut seen: std::collections::BTreeMap<&[u8], u32> = std::collections::BTreeMap::new();
+        for i in 0..st.nsyms {
+            let off = st.symoff as usize + i as usize * 16;
+            let sym: Nlist64 = match pgr_format::cursor::pod_read_unaligned_at(bytes, off) {
+                Ok(s) => s,
+                Err(e) => {
+                    report.issues.push(issue_from(&e, Code::SymbolTable));
+                    return;
+                }
+            };
+            if sym.is_stab() || !sym.is_external() || !sym.is_section_defined() {
+                continue;
+            }
+            let str_at = st.stroff as usize + sym.n_strx as usize;
+            let str_end = st.stroff as usize + st.strsize as usize;
+            let Some(name) = bytes
+                .get(str_at..str_end)
+                .and_then(|tail| {
+                    let end = tail.iter().position(|&b| b == 0)?;
+                    Some(&tail[..end])
+                })
+                .filter(|n| !n.is_empty())
+            else {
+                continue; // the strtab bounds and NUL checks carry the findings
+            };
+            if let Some(first) = seen.get(name) {
+                report.issues.push(Issue::error(
+                    Code::SymbolTable,
+                    format!(
+                        "symbol {i}: duplicate defined-external name \"{}\" — \
+                         one symtab row per name (first row at symbol {first}); \
+                         the duplicate silently shadows",
+                        String::from_utf8_lossy(name)
+                    ),
+                    Some(off as u64),
+                ));
+            } else {
+                seen.insert(name, i);
+            }
+        }
+    }
+
     if let Some(dys) = img.dysymtab {
         // Indirect symbol bounds.
         if dys.nindirectsyms > 0 {
