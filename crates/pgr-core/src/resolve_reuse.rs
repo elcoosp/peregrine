@@ -135,6 +135,7 @@ pub fn plan_reuse(
     interner: &Interner,
     objects: &[InputObject],
     dylibs: &[Dylib],
+    loader_exports: &[Vec<u8>],
 ) -> Result<ReusePlan, ReuseFallback> {
     let span = tracing::info_span!(
         "resolve_reuse_plan",
@@ -155,12 +156,16 @@ pub fn plan_reuse(
             return Err(ReuseFallback::FileListChanged);
         }
     }
-    // 2. Dylib export surface: two-level ordinals inherit only when the
-    //    flattened export list is byte-identical.
-    let flat_exports: Vec<Vec<u8>> = dylibs
+    // 2. Dylib + loader export surface (M25: the loader surface rides
+    //    the same guard — its names shape Pass 2's decisions, so a moved
+    //    surface refuses exactly like a moved dylib list): two-level
+    //    ordinals inherit only when the flattened export list is
+    //    byte-identical.
+    let mut flat_exports: Vec<Vec<u8>> = dylibs
         .iter()
         .flat_map(|d| d.exports.iter().cloned())
         .collect();
+    flat_exports.extend(loader_exports.iter().cloned());
     if flat_exports != recorded.dylib_export_names {
         tracing::debug!(fallback = "dylib_set_changed", "the shape guard refused");
         return Err(ReuseFallback::DylibSetChanged);
@@ -255,6 +260,7 @@ pub fn install_reused(
     interner: &Interner,
     objects: &[InputObject],
     dylibs: &[Dylib],
+    loader_exports: &[Vec<u8>],
     policy: UndefinedPolicy,
 ) -> Result<Resolution, LinkError> {
     let span = tracing::info_span!(
@@ -357,14 +363,19 @@ pub fn install_reused(
             res.merge_reference(s.name.0, (obj.file, i));
         }
     }
-    // 4. The dylib surface and the undefined policy run exactly as the
-    //    full path runs them.
+    // 4. The dylib + loader surface and the undefined policy run exactly
+    //    as the full path runs them.
     let export_ids: Vec<StringId> = dylibs
         .iter()
         .flat_map(|d| d.exports.iter())
         .filter_map(|name| interner.lookup(name))
         .collect();
     res.install_dylibs(dylibs, &export_ids);
+    let loader_ids: Vec<StringId> = loader_exports
+        .iter()
+        .filter_map(|name| interner.lookup(name))
+        .collect();
+    res.install_loader_exports(&loader_ids);
     res.require_all_resolved(interner, objects, policy)?;
     Ok(res)
 }
