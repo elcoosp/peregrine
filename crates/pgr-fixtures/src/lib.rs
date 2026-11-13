@@ -29,12 +29,13 @@ use pgr_format::consts::{
     CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE, CSSLOT_CODEDIRECTORY, DYLD_CHAINED_IMPORT,
     DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
     DYLD_CHAINED_PTR_START_NONE, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE,
-    LC_DYLD_CHAINED_FIXUPS, LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB,
-    LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SUB_CLIENT, LC_SUB_LIBRARY,
-    LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_DYLDLINK, MH_DYLIB, MH_EXECUTE, MH_MAGIC_64,
-    MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT, N_SECT, N_UNDF, N_WEAK_REF,
-    PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO,
-    SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
+    LC_DYLD_CHAINED_FIXUPS, LC_DYLD_ENVIRONMENT, LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB,
+    LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64,
+    LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_DYLDLINK, MH_DYLIB,
+    MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT,
+    N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS,
+    S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE,
+    VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::fixups::{
     Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
@@ -306,6 +307,13 @@ pub struct ImageBuilder {
     /// knob's — a client command off a dylib, an empty name or a
     /// duplicate is the verifier's finding to name.
     sub_clients: Vec<String>,
+    /// M22: the dyld-environment pairs in flag order — each rides
+    /// `LC_DYLD_ENVIRONMENT`. Written during assembly, so the ad-hoc
+    /// signature is computed over the final bytes and strict
+    /// verification runs with the hash recompute on. The values are the
+    /// knob's — a command off an executable, a non-`DYLD_` variable or
+    /// a duplicate is the verifier's finding to name.
+    dyld_envs: Vec<String>,
 }
 
 impl ImageBuilder {
@@ -332,6 +340,7 @@ impl ImageBuilder {
             stack_size: None,
             sub_cmds: Vec::new(),
             sub_clients: Vec::new(),
+            dyld_envs: Vec::new(),
         }
     }
 
@@ -357,6 +366,7 @@ impl ImageBuilder {
             stack_size: None,
             sub_cmds: Vec::new(),
             sub_clients: Vec::new(),
+            dyld_envs: Vec::new(),
         }
     }
 
@@ -507,6 +517,20 @@ impl ImageBuilder {
         self.sub_clients.push(name.to_string());
     }
 
+    /// Exports one dyld-environment pair — the M22 `-dyld_env` knob.
+    /// Pairs are written during assembly (the environment commands and
+    /// the ad-hoc signature ride them), so strict verification runs
+    /// with the hash recompute on.
+    ///
+    /// # Panics
+    /// Never — a command the loader cannot honor (off an executable, a
+    /// non-`DYLD_` variable, an empty variable, a duplicate) is the
+    /// verifier's finding to name (the broken-shape gates build them
+    /// on purpose).
+    pub fn add_dyld_env(&mut self, pair: &str) {
+        self.dyld_envs.push(pair.to_string());
+    }
+
     /// Selects the chain-word pointer format (default: `Offset64`). The
     /// M10 rung-4 knob: `Arm64e` encodes the `DYLD_CHAINED_PTR_ARM64E`
     /// family — unauth rebase words carry VM-address targets
@@ -629,6 +653,9 @@ impl ImageBuilder {
         }
         for name in &self.sub_clients {
             add_cmd(align_up(12 + name.len() as u64 + 1, 8) as usize); // LC_SUB_CLIENT
+        }
+        for pair in &self.dyld_envs {
+            add_cmd(align_up(12 + pair.len() as u64 + 1, 8) as usize); // LC_DYLD_ENVIRONMENT
         }
         add_cmd(24); // LC_SYMTAB
         add_cmd(80); // LC_DYSYMTAB
@@ -992,6 +1019,19 @@ impl ImageBuilder {
             w32(&mut buf, lc + 16, 0x0001_0000);
             w32(&mut buf, lc + 20, 0);
             buf[lc + 24..lc + 24 + n.len()].copy_from_slice(n.as_bytes());
+            lc += cmdsize;
+        }
+        // LC_DYLD_ENVIRONMENT per pair (M22): the loader-configuration
+        // commands, in flag order — the 12-byte-fixed lc_str shape
+        // `LC_RPATH` rides. Written unconditionally so the broken-shape
+        // gates can build the inert off-executable placement.
+        for pair in &self.dyld_envs {
+            w32(&mut buf, lc, LC_DYLD_ENVIRONMENT);
+            let n = format!("{pair}\0");
+            let cmdsize = align_up(12 + n.len() as u64, 8) as usize;
+            w32(&mut buf, lc + 4, cmdsize as u32);
+            w32(&mut buf, lc + 8, 12);
+            buf[lc + 12..lc + 12 + n.len()].copy_from_slice(n.as_bytes());
             lc += cmdsize;
         }
         for name in &self.dylibs {
