@@ -35,10 +35,25 @@ release automation.
 - **driver:** The -reexport_framework flag names the re-exports (M23)
 - **driver:** The re-export frameworks resolve through the -F search (M23)
 - **driver:** The reexport-framework consumer example walks the story (M23)
+- **core:** The symbol-alias seam joins the crate surface (M24)
+- **core:** The layout plans the alias table and refuses the rest (M24)
+- **driver:** The -alias flag names the aliases and refuses the rest (M24)
+- **daemon:** Wire v16 carries the named pairs (M24)
+- **verify:** The symtab contract gates the duplicate external name (M24)
+- **driver:** The alias consumer example walks the story (M24)
+- **format:** The loader export surface is one shared reader (M25)
+- **core:** The bundle-loader seam joins the crate surface (M25)
+- **core:** Pass 2 installs the loader surface and the binds ride 0xFF (M25)
+- **driver:** The -bundle_loader flag names the host and refuses the rest (M25)
+- **verify:** The bundle-loader pair gate replays the 0xFF binds (M25)
+- **fixtures:** The builder builds bundle images (M25)
+- **driver:** The bundle-loader consumer example walks the story (M25)
 
 ### Performance
 - **core:** Bench the client list's per-decision parity (M21)
 - **core:** The dyld-env bench joins the bench table and records parity (M22)
+- **core:** The alias bench joins the bench table and records parity (M24)
+- **core:** The bundle-loader bench joins the bench table and records parity (M25)
 
 ### Tests
 - **core:** The client seam gates the plan and the refusals (M21)
