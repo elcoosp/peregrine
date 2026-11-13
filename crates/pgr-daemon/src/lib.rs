@@ -72,8 +72,11 @@ mod tests {
         // u64 (M19, `-image_base`) — and the config's umbrella region as
         // a length-prefixed member list (M20, `-sub_umbrella` /
         // `-sub_library`): a resident relink emits the region the
-        // client named, never the pre-M20 absence.
-        assert_eq!(crate::PROTO_VERSION, 13);
+        // client named, never the pre-M20 absence — and the config's
+        // sub-client list as a length-prefixed name list (M21,
+        // `-sub_client`): a resident relink emits the clients the
+        // linking image named, never the pre-M21 absence.
+        assert_eq!(crate::PROTO_VERSION, 14);
     }
 
     #[test]
