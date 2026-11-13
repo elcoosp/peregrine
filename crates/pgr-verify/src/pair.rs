@@ -15,7 +15,9 @@
 //! dispatch the dynamic walk uses.
 
 use crate::{Code, Issue, Options, Report, Severity, verify};
-use pgr_format::consts::{DYLD_CHAINED_PTR_ARM64E, MH_DYLIB, MH_EXECUTE};
+use pgr_format::consts::{
+    BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE, DYLD_CHAINED_PTR_ARM64E, MH_BUNDLE, MH_DYLIB, MH_EXECUTE,
+};
 use pgr_format::fixups::{
     ChainWord64, ChainWordArm64e, chain_stride, parse_header, parse_imports, parse_starts_in_image,
     parse_starts_in_segment,
@@ -350,4 +352,199 @@ fn parse_header_payload(
 ) -> Result<pgr_format::fixups::ChainedFixupsHeader, ()> {
     let payload = lc.data(bytes).map_err(|_| ())?;
     parse_header(payload).map_err(|_| ())
+}
+
+/// The bundle + host pair verification result: both images' own reports
+/// plus the cross-image findings (the [`PairReport`] shape's loader
+/// twin — `bundle` and `loader` carry their own reports, `pair_issues`
+/// the cross-image gate).
+#[derive(Debug, Default)]
+pub struct LoaderReport {
+    /// The bundle's own verification report.
+    pub bundle: Report,
+    /// The host executable's own verification report.
+    pub loader: Report,
+    /// Cross-image issues (the `0xFF` bind replay against the host's
+    /// export trie).
+    pub pair_issues: Vec<Issue>,
+}
+
+impl LoaderReport {
+    /// True when both images verify clean and no pair issue was found
+    /// (warnings count under `strict_warnings`).
+    #[must_use]
+    pub fn is_ok(&self, opts: &Options) -> bool {
+        self.bundle.is_ok(opts) && self.loader.is_ok(opts) && self.pair_issues.is_empty()
+    }
+}
+
+/// Verifies a bundle and the host executable it binds against
+/// (`-bundle_loader`, M25), then cross-checks the main-executable
+/// ordinal contract between them:
+///
+/// 1. both images verify individually (full reports included),
+/// 2. every chained-fixup bind whose two-level ordinal names the main
+///    executable (`BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE`, `0xFF`) must
+///    resolve to a name the host's export trie carries — replayed
+///    family-blind, both chain word families (the same dispatch the
+///    dylib pair gate pays),
+/// 3. ordinary dylib ordinals are not the gate's business (the dylib
+///    pair replay owns them; a bundle may bind dylibs and its host).
+///
+/// # Panics
+/// Never — all parsing failures surface as report issues.
+#[must_use]
+pub fn verify_bundle_loader(
+    bundle_bytes: &[u8],
+    loader_bytes: &[u8],
+    opts: &Options,
+) -> LoaderReport {
+    let mut out = LoaderReport {
+        bundle: verify(bundle_bytes, opts),
+        loader: verify(loader_bytes, opts),
+        pair_issues: Vec::new(),
+    };
+
+    // Filetype sanity (parse-level failures already reported above).
+    let bundle_type = pgr_format::MachHeader64::parse(bundle_bytes).map_or(0, |h| h.filetype);
+    let loader_type = pgr_format::MachHeader64::parse(loader_bytes).map_or(0, |h| h.filetype);
+    if bundle_type != MH_BUNDLE {
+        out.pair_issues.push(Issue::error(
+            Code::HeaderInvalid,
+            format!("the bundle-loader gate expects an MH_BUNDLE bundle, got {bundle_type:#x}"),
+            None,
+        ));
+        return out;
+    }
+    if loader_type != MH_EXECUTE {
+        out.pair_issues.push(Issue::error(
+            Code::HeaderInvalid,
+            format!("the bundle-loader gate expects an MH_EXECUTE host, got {loader_type:#x}"),
+            None,
+        ));
+        return out;
+    }
+
+    let Ok(bundle_img) = crate::structural::parse_image(bundle_bytes) else {
+        return out;
+    };
+
+    // The host's exported surface (M25): the same reader the driver's
+    // scan pays — the trie plus the symtab's defined externals (a
+    // minimal trie can understate the surface a loader bind may reach;
+    // parse failures are already in the loader's own report).
+    let exports: std::collections::BTreeSet<String> =
+        pgr_format::loader_export_surface(loader_bytes)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| String::from_utf8_lossy(&n).into_owned())
+            .collect();
+
+    // Replay the bundle's binds: every slot bound with the
+    // main-executable ordinal must name an export of the host (the R4
+    // mitigation, one ordinal over).
+    let Some(fixups_lc) = &bundle_img.fixups else {
+        // No fixups: nothing binds out of the bundle (pure static or
+        // -no_fixup_chains image); the pair still links name-wise.
+        return out;
+    };
+    let (Ok(payload), Ok(hdr)) = (
+        fixups_lc.data(bundle_bytes),
+        parse_header_payload(fixups_lc, bundle_bytes),
+    ) else {
+        return out;
+    };
+    let Ok(starts) = parse_starts_in_image(payload, hdr.starts_offset as usize) else {
+        return out;
+    };
+    let Ok(imports) = parse_imports(payload, &hdr) else {
+        return out;
+    };
+    let import_name = |ordinal_idx: usize| -> Option<String> {
+        let imp = imports.get(ordinal_idx)?;
+        let start = hdr.symbols_offset as usize + imp.name_offset as usize;
+        let rest = payload.get(start..)?;
+        let end = rest.iter().position(|&b| b == 0)?;
+        Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+    };
+
+    let segments: Vec<&pgr_format::SegmentCommand64> = bundle_img.segments.iter().collect();
+    for (seg_index, &off) in starts.seg_info_offset.iter().enumerate() {
+        if off == 0 {
+            continue;
+        }
+        let Some(&mach_seg) = segments.get(seg_index) else {
+            continue;
+        };
+        let Ok(seg) = parse_starts_in_segment(payload, hdr.starts_offset as usize + off as usize)
+        else {
+            continue;
+        };
+        let Some(stride) = chain_stride(seg.pointer_format) else {
+            continue;
+        };
+        tracing::debug!(
+            pointer_format = seg.pointer_format,
+            stride,
+            pages = seg.page_count,
+            segment = seg_index,
+            "bundle-loader bind replay contract"
+        );
+        for page in 0..seg.page_count {
+            let Ok(heads) = pgr_format::fixups::page_chain_starts(
+                payload,
+                hdr.starts_offset as usize + off as usize,
+                &seg,
+                page,
+            ) else {
+                continue;
+            };
+            for head in heads {
+                if head == pgr_format::consts::DYLD_CHAINED_PTR_START_NONE {
+                    continue;
+                }
+                let mut slot_off = u64::from(head);
+                loop {
+                    if slot_off + 8 > u64::from(seg.page_size) || slot_off + 8 > mach_seg.vmsize {
+                        break;
+                    }
+                    let slot_file = mach_seg
+                        .fileoff
+                        .saturating_add(u64::from(page).saturating_mul(u64::from(seg.page_size)))
+                        .saturating_add(slot_off);
+                    let Some(word_bytes) =
+                        bundle_bytes.get(slot_file as usize..slot_file as usize + 8)
+                    else {
+                        break;
+                    };
+                    let (is_bind, bind_ord, strides) =
+                        decode_bind_replay(seg.pointer_format, word_bytes);
+                    if is_bind {
+                        if let Some(name) = import_name(bind_ord) {
+                            let lib_ordinal = imports
+                                .get(bind_ord)
+                                .map_or(usize::MAX, |imp| usize::from(imp.lib_ordinal));
+                            if lib_ordinal == usize::from(BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE)
+                                && !exports.contains(&name)
+                            {
+                                out.pair_issues.push(Issue::error(
+                                    Code::FixupsImport,
+                                    format!(
+                                        "two-level bind of \"{name}\" names the main \
+                                         executable but the bundle loader does not export it"
+                                    ),
+                                    Some(slot_file),
+                                ));
+                            }
+                        }
+                    }
+                    if strides == 0 {
+                        break;
+                    }
+                    slot_off += strides * stride;
+                }
+            }
+        }
+    }
+    out
 }
