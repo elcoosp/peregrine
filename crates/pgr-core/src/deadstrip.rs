@@ -220,6 +220,15 @@ pub fn compute(
                 root_name(id);
             }
         }
+        // M24: an alias names the definition in the image's export
+        // surface — the definition is a root even when nothing else
+        // references it (the ld64 shape: the aliased name keeps
+        // resolving, so the body must ship).
+        for alias in &cfg.aliases {
+            if let Some(id) = interner.lookup(alias.definition().as_bytes()) {
+                root_name(id);
+            }
+        }
     }
     // `__mod_init_func` / `S_ATTR_NO_DEAD_STRIP` sections stay whole.
     for (fi, obj) in objects.iter().enumerate() {
