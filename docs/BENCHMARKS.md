@@ -1405,3 +1405,25 @@ The honest reading: parity within the run-to-run spread, as the shape
 predicts — the released surface appends identity-block commands the
 header assembly writes once, one per named client. The bench is the
 parity gate, not a win.
+
+### M22 — the dyld environment's decision cost
+
+The link across the `-dyld_env` decisions (the empty list — the
+pre-M22 default — and two populated lists, 8 and 64 pairs) over the
+same corpus (64 objects, 256 rebase slots, linked as an executable; a
+pair is one 16–32 byte `LC_DYLD_ENVIRONMENT` command in the
+loader-configuration block — `pgr-core/benches/dyld_env.rs`,
+`dyld_env/link_64_objects/*`):
+
+| Measurement | time (dev sandbox) |
+|---|---|
+| `link_64_objects/default_0` | 602.2 µs |
+| `link_64_objects/envs_8` | 599.6 µs (−0.4%, p = n.s.) |
+| `link_64_objects/envs_64` | 645.8 µs (+7.2%, p = 0.86, n.s.) |
+
+The honest reading: parity within the run-to-run spread, as the shape
+predicts — the released surface appends loader-configuration commands
+the header assembly writes once, one per named pair (the sandbox's
+±20% inter-run spread swallows the per-command cost; the criterion
+change rows run p = 0.86 against the prior run). The bench is the
+parity gate, not a win.
