@@ -127,6 +127,10 @@ pub struct Resolution {
     dylib_exports: BTreeMap<u32, u16>,
     /// Names left to dyld (`-undefined dynamic_lookup`).
     dynamic_lookups: BTreeSet<u32>,
+    /// Names the bundle's `-bundle_loader` host exports (M25): the
+    /// references that resolve against the host process at load time,
+    /// binding with the main-executable ordinal (`0xFF`).
+    loader_exports: BTreeSet<u32>,
 }
 
 impl Resolution {
@@ -261,6 +265,23 @@ impl Resolution {
         }
     }
 
+    /// Installs the bundle loader's export surface (M25): the names a
+    /// bundle's undefined references may resolve against, binding with
+    /// the main-executable ordinal. The export ids are the interned ids
+    /// of the flattened export names, in scan order —
+    /// [`crate::link()`] appends them to the interner batch after the
+    /// dylib exports.
+    pub fn install_loader_exports(&mut self, export_ids: &[StringId]) {
+        self.loader_exports.extend(export_ids.iter().map(|id| id.0));
+    }
+
+    /// True when the name resolves against the `-bundle_loader` host
+    /// (M25): a bind that rides the main-executable ordinal.
+    #[must_use]
+    pub fn is_loader_export(&self, id: StringId) -> bool {
+        self.loader_exports.contains(&id.0)
+    }
+
     /// Installs the dylib list (Pass 2 step 1b) and resolves two-level
     /// ordinals for every referenced name a dylib exports.
     ///
@@ -298,7 +319,10 @@ impl Resolution {
         self.dynamic_lookups.clear();
         let mut missing: Vec<String> = Vec::new();
         for (key, refs) in &self.references {
-            if self.defs.contains_key(key) || self.dylib_exports.contains_key(key) {
+            if self.defs.contains_key(key)
+                || self.dylib_exports.contains_key(key)
+                || self.loader_exports.contains(key)
+            {
                 continue;
             }
             let (file, sym) = refs.first().copied().unwrap_or((FileId(0), 0));
@@ -391,6 +415,7 @@ impl Resolution {
         self.defs == other.defs
             && self.references == other.references
             && self.dylib_exports == other.dylib_exports
+            && self.loader_exports == other.loader_exports
             && self.dynamic_lookups == other.dynamic_lookups
     }
 
@@ -606,6 +631,7 @@ impl ResolutionSnapshot {
         interner: &Interner,
         res: &Resolution,
         dylibs: &[Dylib],
+        loader_exports: &[Vec<u8>],
     ) -> Self {
         let file_names = objects
             .iter()
@@ -649,6 +675,7 @@ impl ResolutionSnapshot {
             dylib_export_names: dylibs
                 .iter()
                 .flat_map(|d| d.exports.iter().cloned())
+                .chain(loader_exports.iter().cloned())
                 .collect(),
         }
     }
