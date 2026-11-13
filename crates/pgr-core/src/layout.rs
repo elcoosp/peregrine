@@ -25,11 +25,12 @@ use crate::interner::Interner;
 use crate::object::{InputObject, RelocKind, RelocTarget};
 use crate::resolve::{Def, Rank, Resolution, UndefinedPolicy};
 use pgr_format::consts::{
-    BIND_SPECIAL_DYLIB_FLAT_LOOKUP, INDIRECT_SYMBOL_LOCAL, MH_BINDS_TO_WEAK, MH_TWOLEVEL,
-    MH_WEAK_DEFINES, N_ABS, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K,
-    REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS, S_CSTRING_LITERALS,
-    S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR, S_SYMBOL_STUBS, S_ZEROFILL, SECTION_TYPE_MASK,
-    STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
+    BIND_SPECIAL_DYLIB_FLAT_LOOKUP, BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE, INDIRECT_SYMBOL_LOCAL,
+    MH_BINDS_TO_WEAK, MH_TWOLEVEL, MH_WEAK_DEFINES, N_ABS, N_EXT, N_PEXT, N_SECT, N_UNDF,
+    N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K, REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS,
+    S_ATTR_SOME_INSTRUCTIONS, S_CSTRING_LITERALS, S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR,
+    S_SYMBOL_STUBS, S_ZEROFILL, SECTION_TYPE_MASK, STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ,
+    VM_PROT_WRITE,
 };
 use rayon::prelude::*;
 
@@ -306,6 +307,36 @@ pub struct LinkConfig {
     /// the layout's re-check backs the driver surface's earlier
     /// refusal.
     pub dyld_envs: crate::dyld_env::DyldEnv,
+    /// M24 — the symbol-alias table: the `-alias <alias_name>
+    /// <definition_name>` pairs an image exports as additional symtab
+    /// rows and trie nodes, each pointing at the same definition as the
+    /// named symbol (see [`crate::alias`]). The default (the empty
+    /// table) keeps every pre-M24 link byte-identical; each pair is
+    /// validated at construction
+    /// ([`Alias::from_parts`](crate::alias::Alias::from_parts),
+    /// duplicate alias names refuse on
+    /// [`AliasTable::push`](crate::alias::AliasTable::push)), so an
+    /// [`AliasTable`](crate::alias::AliasTable) in hand is always a
+    /// legal list; the relocatable output refuses the knob (the object
+    /// surface carries the input symtab verbatim) and the layout
+    /// re-checks the two image-shaped refusals (an alias of a name no
+    /// input defines; an alias name already defined — one symtab row
+    /// per external name).
+    pub aliases: crate::alias::AliasTable,
+    /// M25 — the bundle's host: the `-bundle_loader <path>` executable a
+    /// bundle binds its undefined references against (see
+    /// [`crate::bundle_loader`]). The binds ride the main-executable
+    /// ordinal (`BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE`, `0xFF`) — no
+    /// `LC_LOAD_DYLIB` command is emitted (the host is the image's own
+    /// process, not a dylib it loads). The default (`None`) keeps every
+    /// pre-M25 link byte-identical; the surface is validated at
+    /// construction
+    /// ([`BundleLoader::new`](crate::bundle_loader::BundleLoader::new)),
+    /// so a [`BundleLoader`](crate::bundle_loader::BundleLoader) in hand
+    /// is always a legal surface; only a bundle binds against a host —
+    /// executables, dylibs and the relocatable output refuse the knob —
+    /// the layout's re-check backs the driver surface's earlier refusal.
+    pub bundle_loader: Option<crate::bundle_loader::BundleLoader>,
 }
 
 impl Default for LinkConfig {
@@ -350,6 +381,8 @@ impl Default for LinkConfig {
             umbrella: crate::umbrella::Umbrella::new(),
             sub_clients: crate::sub_client::SubClient::new(),
             dyld_envs: crate::dyld_env::DyldEnv::new(),
+            aliases: crate::alias::AliasTable::new(),
+            bundle_loader: None,
         }
     }
 }
@@ -726,7 +759,10 @@ fn scan_needs(
                     }
                     continue;
                 }
-                if res.dylib_ordinal(id).is_none() && !res.is_dynamic_lookup(id) {
+                if res.dylib_ordinal(id).is_none()
+                    && !res.is_dynamic_lookup(id)
+                    && !res.is_loader_export(id)
+                {
                     // Unresolvable at all: reported by require_all_resolved
                     // already; nothing to synthesize.
                     continue;
@@ -1278,6 +1314,47 @@ pub fn layout(
             message: format!("{verdict} — {fix}"),
         });
     }
+    // M24: an alias is an image-surface decision — the relocatable
+    // output carries the input symtab verbatim, so a named pair has no
+    // symtab row to grow. The refusal rides here (not only on the
+    // driver surface) so every caller pays it: a silently dropped
+    // alias would hide the name the caller asked to export.
+    if !cfg.aliases.is_empty() && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-alias exports additional names through the image symtab, but the \
+                      relocatable output carries the input symtab verbatim — drop -alias \
+                      or link an image (executable, dylib, bundle)"
+                .into(),
+        });
+    }
+    // M25: only a bundle binds against a host — an executable is the
+    // host of its own bundles, a dylib binds its own dylibs, and the
+    // relocatable output opens its undefineds by design. The refusal
+    // rides here (not only on the driver surface) so every caller pays
+    // it: a silently dropped loader would turn the named binds into
+    // link errors or flat lookups.
+    if cfg.bundle_loader.is_some() && cfg.filetype != OutputType::Bundle {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Execute => (
+                "-bundle_loader binds a bundle against its host process, but this \
+                 output is an executable",
+                "drop -bundle_loader (an executable is the host) or link a bundle",
+            ),
+            OutputType::Dylib => (
+                "-bundle_loader binds a bundle against its host process, but this \
+                 output is a dylib",
+                "drop -bundle_loader or link a bundle",
+            ),
+            _ => (
+                "-bundle_loader binds a bundle against its host process, but the \
+                 relocatable output opens its undefineds by design",
+                "drop -bundle_loader or link a bundle",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
     let init_skip: std::collections::HashSet<(u32, usize)> =
         init_specs.iter().map(|s| (s.file, s.in_sect)).collect();
     let init_entries: usize = init_specs
@@ -1529,6 +1606,86 @@ pub fn layout(
                 external: true,
             });
         }
+    }
+
+    // M24 symbol aliases: one defined-external row per `-alias` pair at
+    // the definition's section/value/n_desc (the trie walk below picks
+    // them up like any other definition — both names resolve to one
+    // body). The refusals ride here so every caller pays them: an alias
+    // of a name no input defines would silently drop the export, and an
+    // alias name already carried by the symtab or the import table
+    // would break the one-row-per-external-name contract (dyld and the
+    // debuggers read the first row — the second is a different symbol
+    // wearing the same name). An earlier alias is itself a definition —
+    // ld64's alias-of-alias shape — so the target map grows with every
+    // named alias.
+    if !cfg.aliases.is_empty() {
+        let mut defined: std::collections::HashMap<u32, (u8, u16, u64)> = symbols
+            .iter()
+            .filter(|s| s.external && s.n_type & pgr_format::consts::N_TYPE == N_SECT)
+            .map(|s| (s.name.0, (s.n_sect, s.n_desc, s.value)))
+            .collect();
+        let imported: std::collections::HashSet<u32> = fixups
+            .import_names
+            .split(|&b| b == 0)
+            .filter(|n| !n.is_empty())
+            .filter_map(|n| interner.lookup(n).map(|id| id.0))
+            .collect();
+        let mut alias_rows: Vec<OutputSymbol> = Vec::with_capacity(cfg.aliases.count());
+        for alias in &cfg.aliases {
+            let alias_name = alias.alias().as_bytes();
+            // The export filter owns the surface (M3/M14): a name the
+            // filter hides rides the symtab as `N_PEXT` for a real
+            // definition — an alias row has no definition to hide, so
+            // the filter-hidden alias simply does not land (the same
+            // convention the `__mh_execute_header` row rides).
+            if !visible(alias_name) {
+                continue;
+            }
+            let Some(alias_id) = interner.lookup(alias_name) else {
+                return Err(LinkError::Internal {
+                    message: format!(
+                        "alias name {} missing from the interner batch",
+                        alias.alias()
+                    ),
+                });
+            };
+            let Some(target) = interner
+                .lookup(alias.definition().as_bytes())
+                .and_then(|id| defined.get(&id.0).copied())
+            else {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "-alias {}: the definition {} is not defined by any input — \
+                         check the spelling (the alias must name an in-image definition, \
+                         not a dylib export)",
+                        alias.alias(),
+                        alias.definition()
+                    ),
+                });
+            };
+            if defined.contains_key(&alias_id.0) || imported.contains(&alias_id.0) {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "-alias {}: the name is already carried by the image's symbol \
+                         surface — one symtab row per external name; pick a name no \
+                         input defines or references",
+                        alias.alias()
+                    ),
+                });
+            }
+            let (n_sect, n_desc, value) = target;
+            defined.insert(alias_id.0, (n_sect, n_desc, value));
+            alias_rows.push(OutputSymbol {
+                name: alias_id,
+                n_type: N_EXT | N_SECT,
+                n_sect,
+                n_desc,
+                value,
+                external: true,
+            });
+        }
+        symbols.extend(alias_rows);
     }
 
     // Undefined externals (dylib exports + dynamic lookups), in import
@@ -2835,6 +2992,8 @@ fn resolve_all(
                         u8::try_from(ord).map_err(|_| LinkError::Internal {
                             message: "dylib ordinal beyond 255".into(),
                         })?
+                    } else if res.is_loader_export(name) {
+                        BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE as u8
                     } else {
                         BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8
                     };
@@ -3114,6 +3273,11 @@ fn bind_lib_ordinal(id: StringId, space: &AddrSpace<'_>) -> Result<u8, LinkError
         return u8::try_from(ord).map_err(|_| LinkError::Internal {
             message: "dylib ordinal beyond 255".into(),
         });
+    }
+    // M25: the bundle's host — the bind rides the main-executable
+    // ordinal dyld resolves against the process at load time.
+    if space.res.is_loader_export(id) {
+        return Ok(BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE as u8);
     }
     Ok(BIND_SPECIAL_DYLIB_FLAT_LOOKUP as u8)
 }
