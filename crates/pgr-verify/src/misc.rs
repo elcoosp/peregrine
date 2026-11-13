@@ -5,7 +5,7 @@
 use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report};
 use pgr_format::consts::{
-    LC_DATA_IN_CODE, LC_FUNCTION_STARTS, LC_MAIN, PAGE_SIZE_16K, PLATFORM_IOS, PLATFORM_MACOS,
+    LC_DATA_IN_CODE, LC_FUNCTION_STARTS, PAGE_SIZE_16K, PLATFORM_IOS, PLATFORM_MACOS,
     PLATFORM_TVOS, PLATFORM_VISIONOS, PLATFORM_WATCHOS, chained_fixups_floor,
 };
 use pgr_format::load_command::LoadCommandKind;
@@ -17,7 +17,7 @@ fn fmt_packed_version(v: u32) -> String {
 }
 
 /// Entry point, dylinker and build-version checks.
-pub(crate) fn check_entry_and_version(bytes: &[u8], img: &ParsedImage<'_>, report: &mut Report) {
+pub(crate) fn check_entry_and_version(img: &ParsedImage<'_>, report: &mut Report) {
     let exec = img.header.filetype == pgr_format::consts::MH_EXECUTE;
     if exec {
         match img.main {
@@ -158,7 +158,6 @@ pub(crate) fn check_entry_and_version(bytes: &[u8], img: &ParsedImage<'_>, repor
             ));
         }
     }
-    let _ = bytes;
 }
 
 /// Function-starts, data-in-code, export-trie and UUID checks.
@@ -250,7 +249,6 @@ pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, repor
             None,
         ));
     }
-    let _ = LC_MAIN;
 }
 
 /// ULEB128 delta stream must be monotonic and stay inside `__TEXT`.
