@@ -917,8 +917,8 @@ pub fn plan_fixups_with_auth(
         for ps in &seg.page_start {
             if *ps == DYLD_CHAINED_PTR_START_MULTI {
                 let mut toff = 0usize;
-                for t in 0..marker_seen {
-                    toff += seg.overflow[t].len();
+                for table in &seg.overflow[..marker_seen] {
+                    toff += table.len();
                 }
                 let marker = DYLD_CHAINED_PTR_START_MULTI
                     | u16::try_from(page_start_end + toff).map_err(|_| LinkError::Layout {
