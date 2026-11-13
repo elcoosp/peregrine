@@ -78,8 +78,11 @@ mod tests {
         // linking image named, never the pre-M21 absence — and the
         // config's dyld-environment list as a length-prefixed pair list
         // (M22, `-dyld_env`): a resident relink exports the variables
-        // the client named, never the pre-M22 absence.
-        assert_eq!(crate::PROTO_VERSION, 15);
+        // the client named, never the pre-M22 absence — and the
+        // config's symbol-alias list as a length-prefixed pair list
+        // (M24, `-alias`): a resident relink exports the names the
+        // client asked for, never the pre-M24 absence.
+        assert_eq!(crate::PROTO_VERSION, 16);
     }
 
     #[test]
