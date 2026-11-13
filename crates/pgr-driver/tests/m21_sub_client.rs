@@ -1,0 +1,217 @@
+//! M21 — the `-sub_client <name>` driver surface: the flag parses
+//! repeatable onto the validated core table, refuses where the output
+//! kind cannot carry the clients (the sub commands are a dylib's
+//! identity block), and a client-restricted dylib links end-to-end and
+//! verifies strict (the clients ride the emitted image after the M20
+//! region).
+
+use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
+use pgr_verify::{Options as VerifyOptions, verify};
+use std::path::{Path, PathBuf};
+
+fn scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("pgr_m21_client_{}_{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the scratch dir builds");
+    dir
+}
+
+/// A single-object corpus (`_main`, `_umb_fn`) written to `dir`.
+fn corpus(dir: &Path) -> Vec<PathBuf> {
+    let mut b = ObjectBuilder::new("umb.o").set_subsections_via_symbols(true);
+    let text = b.add_section(ObjectSection::text(
+        "__text",
+        [0xC0u8, 0x03, 0x5F, 0xD6].repeat(3),
+        vec![],
+    ));
+    for (i, sym) in ["_main", "_umb_init", "_umb_read"].iter().enumerate() {
+        b.add_symbol(ObjectSymbol::Defined {
+            name: (*sym).into(),
+            section_index: text,
+            value: (i * 4) as u64,
+            weak: false,
+        });
+    }
+    let path = dir.join("umb.o");
+    std::fs::write(&path, b.build().expect("the fixture object builds")).unwrap();
+    vec![path]
+}
+
+/// Links the corpus under `kind` argv shapes; returns the image bytes.
+fn link(dir: &Path, out: &str, kind: &[&str], extra: &[&str]) -> Vec<u8> {
+    let objs = corpus(dir);
+    let out_path = dir.join(out);
+    let mut argv: Vec<String> = vec!["-o".into(), out_path.display().to_string()];
+    argv.extend(kind.iter().map(std::string::ToString::to_string));
+    for obj in &objs {
+        argv.push(obj.display().to_string());
+    }
+    argv.extend(extra.iter().map(std::string::ToString::to_string));
+    let argv: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
+    let o = pgr_driver::opts::parse(&argv).expect("the argv parses");
+    pgr_driver::run(&o).expect("the link runs");
+    std::fs::read(&out_path).unwrap()
+}
+
+fn strict() -> VerifyOptions {
+    VerifyOptions {
+        strict_warnings: true,
+        skip_hash_recompute: false,
+    }
+}
+
+fn parse(extra: &[&str]) -> Result<pgr_driver::opts::Options, pgr_driver::opts::OptsError> {
+    let argv: Vec<std::ffi::OsString> = extra.iter().map(std::ffi::OsString::from).collect();
+    pgr_driver::opts::parse(&argv)
+}
+
+// ---- the surface -------------------------------------------------------------
+
+#[test]
+fn the_flag_parses_repeatable_onto_the_table() {
+    let o = parse(&[
+        "-o",
+        "out",
+        "-dylib",
+        "-install_name",
+        "@rpath/libumb.dylib",
+        "-sub_client",
+        "client.app",
+        "-sub_client",
+        "/usr/bin/tool",
+        "umb.o",
+    ])
+    .expect("the argv parses");
+    let names: Vec<&str> = o
+        .config
+        .sub_clients
+        .iter()
+        .map(pgr_core::sub_client::SubClientEntry::name)
+        .collect();
+    assert_eq!(
+        names,
+        ["client.app", "/usr/bin/tool"],
+        "the flags land in command order"
+    );
+}
+
+#[test]
+fn an_invalid_name_refuses_at_parse() {
+    let err = parse(&["-o", "out", "-dylib", "-sub_client", "", "umb.o"])
+        .expect_err("an empty client name refuses");
+    // The fix rides the miette help (the house convention): render the
+    // report, not just the verdict line.
+    let report = miette::Report::new(err);
+    assert!(
+        format!("{report:?}").contains("non-empty"),
+        "the refusal names the fix: {report:?}"
+    );
+    let err = parse(&["-o", "out", "-dylib", "-sub_client", "a\0b", "umb.o"])
+        .expect_err("a NUL-bearing client name refuses");
+    let report = miette::Report::new(err);
+    assert!(
+        format!("{report:?}").contains("NUL"),
+        "the refusal names the fix: {report:?}"
+    );
+}
+
+#[test]
+fn the_kind_conflicts_refuse_with_the_fix() {
+    for (kind, label) in [
+        (vec!["-o", "out"], "executable"),
+        (vec!["-o", "out", "-bundle"], "bundle"),
+        (vec!["-o", "out", "-r"], "relocatable"),
+    ] {
+        let mut argv = kind.clone();
+        argv.extend(["-sub_client", "client.app", "umb.o"]);
+        let err = parse(&argv).expect_err("the knob refuses off a dylib");
+        let report = miette::Report::new(err);
+        assert!(
+            format!("{report:?}").contains(label),
+            "the refusal names the output kind ({label}): {report:?}"
+        );
+        assert!(
+            format!("{report:?}").contains("dylib"),
+            "the refusal names where the knob lands: {report:?}"
+        );
+    }
+}
+
+// ---- end to end --------------------------------------------------------------
+
+#[test]
+fn a_restricted_dylib_links_and_verifies_strict() {
+    let dir = scratch("e2e");
+    let image = link(
+        &dir,
+        "libumb.dylib",
+        &["-dylib", "-install_name", "@rpath/libumb.dylib"],
+        &["-sub_umbrella", "libsub.dylib", "-sub_client", "client.app"],
+    );
+    let report = verify(&image, &strict());
+    assert!(
+        report.is_ok(&strict()),
+        "the restricted dylib verifies strict: {:?}",
+        report.issues
+    );
+    // The image carries the region and the client command, in that
+    // order, with the named strings.
+    let header = pgr_format::MachHeader64::parse(&image).expect("the header parses");
+    let mut it = pgr_format::LoadCommandIter::new(
+        &image,
+        pgr_format::MachHeader64::SIZE,
+        header.ncmds,
+        header.sizeofcmds,
+    )
+    .expect("the load commands walk");
+    let mut seen = Vec::new();
+    while let Some(cmd) = it.next_command().expect("the chain walks") {
+        if matches!(
+            cmd.kind,
+            pgr_format::LoadCommandKind::SubUmbrella
+                | pgr_format::LoadCommandKind::SubLibrary
+                | pgr_format::LoadCommandKind::SubClient
+        ) {
+            let off = u32::from_le_bytes(cmd.bytes[8..12].try_into().expect("lc_str")) as usize;
+            let name = String::from_utf8_lossy(&cmd.bytes[off..]).to_string();
+            let name = name.trim_end_matches('\0').to_string();
+            seen.push((cmd.hdr().0, name));
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            (
+                pgr_format::consts::LC_SUB_UMBRELLA,
+                "libsub.dylib".to_string()
+            ),
+            (pgr_format::consts::LC_SUB_CLIENT, "client.app".to_string()),
+        ],
+        "the region and the clients ride the identity block in order"
+    );
+}
+
+#[test]
+fn a_default_dylib_carries_no_client_commands() {
+    let dir = scratch("default");
+    let image = link(
+        &dir,
+        "libplain.dylib",
+        &["-dylib", "-install_name", "@rpath/libplain.dylib"],
+        &[],
+    );
+    let header = pgr_format::MachHeader64::parse(&image).expect("the header parses");
+    let mut it = pgr_format::LoadCommandIter::new(
+        &image,
+        pgr_format::MachHeader64::SIZE,
+        header.ncmds,
+        header.sizeofcmds,
+    )
+    .expect("the load commands walk");
+    while let Some(cmd) = it.next_command().expect("the chain walks") {
+        assert!(
+            cmd.kind != pgr_format::LoadCommandKind::SubClient,
+            "the pre-M21 shape carries no client commands"
+        );
+    }
+}
