@@ -119,7 +119,7 @@ use sha2::{Digest, Sha256};
 /// list to that tail (M22 — one length-prefixed entry per
 /// `DYLD_<var>=<value>` pair; a resident relink exports the variables
 /// the client named, never the pre-M22 absence).
-pub const PROTO_VERSION: u32 = 15;
+pub const PROTO_VERSION: u32 = 16;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -236,11 +236,19 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn u32(&mut self) -> Result<u32, DecodeError> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        Ok(u32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .expect("`take(4)` guarantees the byte count"),
+        ))
     }
 
     pub(crate) fn u64(&mut self) -> Result<u64, DecodeError> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        Ok(u64::from_le_bytes(
+            self.take(8)?
+                .try_into()
+                .expect("`take(8)` guarantees the byte count"),
+        ))
     }
 
     pub(crate) fn bytes(&mut self) -> Result<&'a [u8], DecodeError> {
@@ -260,7 +268,10 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn hash(&mut self) -> Result<[u8; 32], DecodeError> {
-        Ok(self.take(32)?.try_into().unwrap())
+        Ok(self
+            .take(32)?
+            .try_into()
+            .expect("`take(32)` guarantees the byte count"))
     }
 
     pub(crate) fn done(&mut self) -> Result<(), DecodeError> {
@@ -665,6 +676,31 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     for e in &cfg.dyld_envs {
         put_str(out, e.pair());
     }
+    // M24 (v16 wire): the symbol-alias list rides the tail after the
+    // environment — one length-prefixed pair per `-alias` decision in
+    // flag order (the new name, then the definition it points at); a
+    // resident relink exports the names the client asked for, never
+    // the pre-M24 absence.
+    put_u32(out, cfg.aliases.count() as u32);
+    for a in &cfg.aliases {
+        put_str(out, a.alias());
+        put_str(out, a.definition());
+    }
+    // M25 (v16 wire): the bundle loader rides the tail after the
+    // aliases — a present byte, then the host's path and its export
+    // surface (one length-prefixed name per export, scan order); a
+    // resident relink binds against the host the client named, never
+    // the pre-M25 absence.
+    if let Some(loader) = &cfg.bundle_loader {
+        put_u8(out, 1);
+        put_str(out, loader.name());
+        put_u32(out, loader.exports().len() as u32);
+        for e in loader.exports() {
+            put_str(out, &String::from_utf8_lossy(e));
+        }
+    } else {
+        put_u8(out, 0);
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -834,6 +870,30 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         let env = pgr_core::DyldEnvEntry::from_flag(&r.str()?).map_err(|_| malformed())?;
         dyld_envs.push(env).map_err(|_| malformed())?;
     }
+    // M24 (v16 wire): the symbol-alias list — the same validation the
+    // flag parse pays, so a pair off the `-alias <alias_name>
+    // <definition_name>` grammar or a duplicate name is malformed,
+    // never a silently changed export surface.
+    let mut aliases = pgr_core::alias::AliasTable::new();
+    for _ in 0..r.u32()? {
+        let alias = r.str()?;
+        let definition = r.str()?;
+        let a = pgr_core::Alias::from_parts(&alias, &definition).map_err(|_| malformed())?;
+        aliases.push(a).map_err(|_| malformed())?;
+    }
+    // M25 (v16 wire): the bundle loader — the same validation the
+    // driver's scan pays, so an empty name or a duplicate export is
+    // malformed, never a silently changed host surface.
+    let bundle_loader = if r.u8()? != 0 {
+        let name = r.str()?;
+        let mut exports: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..r.u32()? {
+            exports.push(r.str()?.into_bytes());
+        }
+        Some(pgr_core::BundleLoader::new(&name, exports).map_err(|_| malformed())?)
+    } else {
+        None
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -886,6 +946,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         umbrella,
         sub_clients,
         dyld_envs,
+        aliases,
+        bundle_loader,
     })
 }
 
@@ -1062,6 +1124,36 @@ mod tests {
                     )
                     .expect("one decision per variable");
                 dyld_envs
+            },
+            // The v16 tail: a non-default bundle loader must survive
+            // the round trip verbatim (a resident relink binds against
+            // the host the client named, never the pre-M25 absence).
+            bundle_loader: Some(
+                pgr_core::BundleLoader::new(
+                    "/usr/lib/host",
+                    vec![b"_host_fn".to_vec(), b"_host_data".to_vec()],
+                )
+                .expect("the loader validates"),
+            ),
+            // The v16 tail: a non-default alias list must survive the
+            // round trip verbatim, in flag order (a resident relink
+            // exports the names the client asked for, never the
+            // pre-M24 absence).
+            aliases: {
+                let mut aliases = pgr_core::alias::AliasTable::new();
+                aliases
+                    .push(
+                        pgr_core::Alias::from_parts("_shim_a", "_greet")
+                            .expect("the pair validates"),
+                    )
+                    .expect("one decision per name");
+                aliases
+                    .push(
+                        pgr_core::Alias::from_parts("_shim_b", "_greet_loud")
+                            .expect("the pair validates"),
+                    )
+                    .expect("one decision per name");
+                aliases
             },
             symbol_order: None,
         }
