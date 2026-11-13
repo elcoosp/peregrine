@@ -21,14 +21,33 @@ release automation.
 - **driver:** The sub-client consumer example walks both images (M21)
 - The M20 umbrella work rides unreleased too (wire v13, the region seam,
   the verifier's region contract, the `umbrella_link` example)
+- **format:** The dyld-environment opcode joins the constants and the
+  crosscheck (M22)
+- **format:** The load-command walk classifies the environment command (M22)
+- **core:** The dyld-environment seam joins the crate surface (M22)
+- **core:** The layout plans the pair list and refuses the rest (M22)
+- **driver:** The -dyld_env flag names the pairs and refuses the rest (M22)
+- **daemon:** Wire v15 carries the named pairs (M22)
+- **daemon:** The version gate reads wire v15 (M22)
+- **verify:** The environment contract gates the broken shapes (M22)
+- **fixtures:** The builder exports the dyld pairs (M22)
+- **driver:** The dyld-env consumer example walks both images (M22)
+- **driver:** The -reexport_framework flag names the re-exports (M23)
+- **driver:** The re-export frameworks resolve through the -F search (M23)
+- **driver:** The reexport-framework consumer example walks the story (M23)
 
 ### Performance
 - **core:** Bench the client list's per-decision parity (M21)
+- **core:** The dyld-env bench joins the bench table and records parity (M22)
 
 ### Tests
 - **core:** The client seam gates the plan and the refusals (M21)
 - **driver:** The client surface gates links and the wire (M21)
 - **verify:** The client contract gates the broken shapes (M21)
+- **core:** The env seam gates the plan and the refusals (M22)
+- **driver:** The env surface gates links and the wire (M22)
+- **verify:** The env contract gates the broken shapes (M22)
+- **driver:** The reexport-framework gates ride the search and the trie (M23)
 
 ## [0.23.0] - 2026-11-11
 ### Build
