@@ -40,6 +40,12 @@ pub struct Options {
     pub inputs: Vec<String>,
     /// The link configuration handed to Pass 3.
     pub config: LinkConfig,
+    /// `-bundle_loader <path>` (M25): the host executable a bundle
+    /// binds its undefined references against. The path is scanned at
+    /// link time (Pass 0 reads the host's export trie — the surface the
+    /// linker itself emits) and lands on the config as the validated
+    /// [`pgr_core::bundle_loader::BundleLoader`].
+    pub bundle_loader: Option<String>,
     /// Minimum page size accepted for `-segalign` on arm64 (16 KiB default).
     pub segalign: u64,
     /// `-headerpad` (advisory at M1: commands never grow after the link).
@@ -175,6 +181,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            bundle_loader: None,
             output: String::new(),
             inputs: Vec::new(),
             config: LinkConfig::default(),
@@ -454,6 +461,43 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     DyldEnvConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// An `-alias` pair the core seam refuses (M24): the
+    /// `-alias <alias_name> <definition_name>` grammar (two non-empty,
+    /// NUL-free, distinct names), named once. The seam's refusal rides
+    /// the help — the grammar the flag accepts, not just the verdict.
+    #[error("invalid value for -alias: {raw}")]
+    #[diagnostic(help("{message}"))]
+    AliasValue {
+        /// The refused pair as written.
+        raw: String,
+        /// The core seam's refusal (the fix).
+        message: String,
+    },
+    /// A `-bundle_loader` surface conflict (M25): only a bundle binds
+    /// against a host — an executable is the host of its own bundles, a
+    /// dylib binds its own dylibs, and the relocatable output opens its
+    /// undefineds by design. The verdict names the shape conflict; the
+    /// help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    BundleLoaderConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// An `-alias` surface conflict (M24): the relocatable output
+    /// carries the input symtab verbatim — an alias is an image-surface
+    /// decision with no symtab row to grow. The verdict names the shape
+    /// conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    AliasConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -1268,6 +1312,34 @@ fn apply_flag(
                     message: e.to_string(),
                 })?;
         }
+        // M24: the symbol aliases. The same validation the core seam
+        // pays runs here, so the refusal names the grammar; the output
+        // kind conflict is `finish`'s (it sees the whole surface).
+        "-alias" => {
+            let alias = next_value(args, i, arg)?;
+            let definition = next_value(args, i, arg)?;
+            let a = pgr_core::Alias::from_parts(&alias, &definition).map_err(|e| {
+                OptsError::AliasValue {
+                    raw: format!("{alias} {definition}"),
+                    message: e.to_string(),
+                }
+            })?;
+            opts.config
+                .aliases
+                .push(a)
+                .map_err(|e| OptsError::AliasValue {
+                    raw: format!("{alias} {definition}"),
+                    message: e.to_string(),
+                })?;
+        }
+        // M25: the bundle's host. The path is scanned at link time (the
+        // host's export trie is the surface the linker itself emits);
+        // the output-kind conflict is `finish`'s (it sees the whole
+        // surface).
+        "-bundle_loader" => {
+            let v = next_value(args, i, arg)?;
+            opts.bundle_loader = Some(v);
+        }
         "-l" | "-L" | "-u" => {
             let v = next_value(args, i, arg)?;
             match arg {
@@ -1524,6 +1596,49 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             }
             Ot::Dylib => {}
         }
+    }
+    // M25: only a bundle binds against a host — the same refusal shape
+    // as the M22/M24 conflicts above: an explicitly named knob that
+    // cannot apply is a refusal, never a silently dropped one.
+    if opts.bundle_loader.is_some() && opts.config.filetype != pgr_core::layout::OutputType::Bundle
+    {
+        let (verdict, fix) = match opts.config.filetype {
+            pgr_core::layout::OutputType::Execute => (
+                "-bundle_loader binds a bundle against its host process, but this \
+                 output is an executable",
+                "drop -bundle_loader (an executable is the host) or link a bundle",
+            ),
+            pgr_core::layout::OutputType::Dylib => (
+                "-bundle_loader binds a bundle against its host process, but this \
+                 output is a dylib",
+                "drop -bundle_loader or link a bundle",
+            ),
+            pgr_core::layout::OutputType::Relocatable => (
+                "-bundle_loader binds a bundle against its host process, but the \
+                 relocatable output opens its undefineds by design",
+                "drop -bundle_loader or link a bundle",
+            ),
+            pgr_core::layout::OutputType::Bundle => unreachable!("guarded above"),
+        };
+        return Err(OptsError::BundleLoaderConflict {
+            verdict: verdict.into(),
+            fix: fix.into(),
+        });
+    }
+    // M24: an alias is an image-surface decision — the relocatable
+    // output carries the input symtab verbatim, so a named pair has no
+    // symtab row to grow — the same refusal shape as the M22
+    // environment above: an explicitly named knob that cannot apply is
+    // a refusal, never a silently dropped one.
+    if !opts.config.aliases.is_empty()
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::AliasConflict {
+            verdict: "-alias exports additional names through the image symtab, but the \
+                      relocatable output carries the input symtab verbatim"
+                .into(),
+            fix: "drop -alias or link an image (executable, dylib, bundle)".into(),
+        });
     }
     // M22: the dyld environment is an executable decision — dyld reads
     // `LC_DYLD_ENVIRONMENT` from the main executable only — the same
