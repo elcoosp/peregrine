@@ -73,7 +73,7 @@ fn reused_resolve(
     interner: &Interner,
     dylibs: &[Dylib],
 ) -> Result<Resolution, pgr_core::LinkError> {
-    let plan = plan_reuse(recorded, prev, interner, objects, dylibs)
+    let plan = plan_reuse(recorded, prev, interner, objects, dylibs, &[])
         .map_err(|f| panic!("unexpected reuse fallback: {f}"))?;
     install_reused(
         &plan,
@@ -81,6 +81,7 @@ fn reused_resolve(
         interner,
         objects,
         dylibs,
+        &[],
         UndefinedPolicy::Error,
     )
 }
@@ -93,7 +94,7 @@ fn baseline(
 ) -> (ResolutionSnapshot, Vec<SectionDigest>) {
     let (interner, objects) = parse(builders, dylibs);
     let res = full_resolve(&objects, &interner, dylibs).unwrap();
-    let snapshot = ResolutionSnapshot::capture(&objects, &interner, &res, dylibs);
+    let snapshot = ResolutionSnapshot::capture(&objects, &interner, &res, dylibs, &[]);
     (snapshot, section_digests(&objects))
 }
 
@@ -198,7 +199,7 @@ fn unchanged_relink_reuses_every_winner_and_matches_the_full_resolve() {
         full.equivalent(&reused),
         "unchanged relink must reproduce the full resolve"
     );
-    let plan = plan_reuse(&snapshot, &prev, &interner, &objects, &[]).unwrap();
+    let plan = plan_reuse(&snapshot, &prev, &interner, &objects, &[], &[]).unwrap();
     assert!(plan.seeds.is_empty(), "an unchanged parse seeds nothing");
     assert!(
         plan.redecide.is_empty(),
@@ -225,7 +226,7 @@ fn body_edit_redecides_only_the_seeded_sections_names_and_matches_full() {
         "a body edit must land on the full resolve's decisions"
     );
 
-    let plan = plan_reuse(&snapshot, &prev, &interner, &objects, &[]).unwrap();
+    let plan = plan_reuse(&snapshot, &prev, &interner, &objects, &[], &[]).unwrap();
     assert_eq!(
         plan.seeds,
         vec![(0u32, 0usize), (0, 1)],
@@ -318,7 +319,7 @@ fn changed_input_file_list_falls_back_to_the_full_resolve() {
 
     let relink_specs = vec![alpha(false, false), beta(0, false, false), gamma(true)];
     let (interner, objects) = parse(&relink_specs, &[]);
-    let fallback = plan_reuse(&snapshot, &prev, &interner, &objects, &[]).unwrap_err();
+    let fallback = plan_reuse(&snapshot, &prev, &interner, &objects, &[], &[]).unwrap_err();
     assert!(
         matches!(fallback, ReuseFallback::FileListChanged),
         "a third input moves the file identity the snapshot vouches for"
@@ -341,7 +342,7 @@ fn changed_dylib_export_set_falls_back_to_the_full_resolve() {
 
     let grown = vec![lib_system(&[b"_greet".as_slice(), b"_strlen".as_slice()])];
     let (interner, objects) = parse(&baseline_specs, &grown);
-    let fallback = plan_reuse(&snapshot, &prev, &interner, &objects, &grown).unwrap_err();
+    let fallback = plan_reuse(&snapshot, &prev, &interner, &objects, &grown, &[]).unwrap_err();
     assert!(
         matches!(fallback, ReuseFallback::DylibSetChanged),
         "an export-set change moves the two-level ordinal map"
@@ -378,7 +379,7 @@ fn randomized_edit_walk_keeps_the_reused_resolution_equal_to_the_full_one() {
             full.equivalent(&reused),
             "step {step} (dice {dice}): reused resolution diverged from the full resolve"
         );
-        snapshot = ResolutionSnapshot::capture(&objects, &interner, &full, &[]);
+        snapshot = ResolutionSnapshot::capture(&objects, &interner, &full, &[], &[]);
         prev = section_digests(&objects);
     }
 }
