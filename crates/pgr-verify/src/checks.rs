@@ -380,7 +380,7 @@ impl ImageCheck for LinkeditCheck {
         &[Code::LinkeditPayload, Code::FixupsFloor]
     }
     fn run(&self, ctx: &mut CheckContext<'_>) {
-        misc::check_entry_and_version(ctx.bytes, ctx.parsed, ctx.report);
+        misc::check_entry_and_version(ctx.parsed, ctx.report);
         misc::check_linkedit_payloads(ctx.bytes, ctx.parsed, ctx.report);
     }
 }
