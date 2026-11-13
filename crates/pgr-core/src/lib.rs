@@ -37,6 +37,7 @@
 
 pub mod cache;
 pub mod deadstrip;
+pub mod dyld_env;
 pub mod dyld_info;
 pub mod export_filter;
 pub mod fixups;
@@ -67,6 +68,7 @@ pub mod trie;
 pub mod umbrella;
 
 pub use cache::PoiCache;
+pub use dyld_env::{DyldEnv, DyldEnvEntry, DyldEnvError};
 pub use dyld_info::DyldInfoPlan;
 pub use export_filter::{SymbolMatcher, SymbolPattern, SymbolPatternError, is_export_visible};
 pub use fixups::{
