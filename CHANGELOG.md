@@ -4,6 +4,32 @@ All notable changes to Peregrine are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
+## [Unreleased]
+### Documentation
+- The M20 umbrella rows the 0.23.0 sweep missed (the region's README, TDD,
+  compat and bench commits postdate that section)
+
+### Features
+- **format:** The sub-client opcode joins the constants (M21)
+- **core:** The sub-client seam joins the crate surface (M21)
+- **core:** The layout plans the client list and refuses the rest (M21)
+- **driver:** The -sub_client flag names the clients and refuses the rest (M21)
+- **daemon:** Wire v14 carries the named clients (M21)
+- **daemon:** The version gate reads wire v14 (M21)
+- **verify:** The identity-block contract checks the client namespace (M21)
+- **fixtures:** The builder names the sub clients (M21)
+- **driver:** The sub-client consumer example walks both images (M21)
+- The M20 umbrella work rides unreleased too (wire v13, the region seam,
+  the verifier's region contract, the `umbrella_link` example)
+
+### Performance
+- **core:** Bench the client list's per-decision parity (M21)
+
+### Tests
+- **core:** The client seam gates the plan and the refusals (M21)
+- **driver:** The client surface gates links and the wire (M21)
+- **verify:** The client contract gates the broken shapes (M21)
+
 ## [0.23.0] - 2026-11-11
 ### Build
 - **core:** The image-base bench joins the bench table (1270de5)
