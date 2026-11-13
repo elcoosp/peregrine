@@ -109,6 +109,13 @@ pub const LC_SUB_UMBRELLA: u32 = 0x13;
 /// M20) — the same region shape, the framework-umbrella's non-framework
 /// half.
 pub const LC_SUB_LIBRARY: u32 = 0x15;
+/// An identity-block dylib names an allowed client (`-sub_client`,
+/// M21): dyld lets the named requesting image link the dylib when its
+/// linkage is restricted. The sub-command block runs
+/// `LC_SUB_FRAMEWORK` (0x12), `LC_SUB_UMBRELLA` (0x13), `LC_SUB_CLIENT`
+/// (0x14), `LC_SUB_LIBRARY` (0x15) — plain opcodes, no `LC_REQ_DYLD`
+/// bit (the object-crate crosscheck pins it).
+pub const LC_SUB_CLIENT: u32 = 0x14;
 /// Link against a weak dylib (`-weak_library`).
 pub const LC_LOAD_WEAK_DYLIB: u32 = 0x18 | LC_REQ_DYLD;
 /// Segment, 64-bit.
