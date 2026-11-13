@@ -31,9 +31,9 @@ use pgr_format::consts::{
     DYLD_CHAINED_PTR_START_NONE, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE,
     LC_DYLD_CHAINED_FIXUPS, LC_DYLD_ENVIRONMENT, LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB,
     LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64,
-    LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_DYLDLINK, MH_DYLIB,
-    MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT,
-    N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS,
+    LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_BUNDLE, MH_DYLDLINK,
+    MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL,
+    N_EXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS,
     S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE,
     VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
 };
@@ -50,6 +50,8 @@ pub enum ImageKind {
     Exec,
     /// Dylib (`MH_DYLIB`) with an `LC_ID_DYLIB` install name.
     Dylib,
+    /// Bundle (`MH_BUNDLE`; the dlopen surface, M25 pair-gate shape).
+    Bundle,
 }
 
 /// A relocation entry to attach to a section (bench realism; final linked
@@ -344,6 +346,33 @@ impl ImageBuilder {
         }
     }
 
+    /// Starts a bundle fixture (`MH_BUNDLE`; M25's pair-gate shape —
+    /// the same `__TEXT`-first build as a dylib, no `LC_ID_DYLIB`).
+    #[must_use]
+    pub fn bundle(ident: &str) -> Self {
+        Self {
+            kind: ImageKind::Bundle,
+            install_name: String::new(),
+            segments: Vec::new(),
+            dylibs: Vec::new(),
+            symbols: Vec::new(),
+            got: Vec::new(),
+            entryoff: 0,
+            ident: ident.to_string(),
+            imports_format: ImportsFormat::Plain,
+            keep_relocs: false,
+            build_version: None,
+            pointer_format: PointerFormatKind::Offset64,
+            pagezero: None,
+            image_base: None,
+            seg_prots: Vec::new(),
+            stack_size: None,
+            sub_cmds: Vec::new(),
+            sub_clients: Vec::new(),
+            dyld_envs: Vec::new(),
+        }
+    }
+
     /// Starts a dylib fixture with the given install name.
     #[must_use]
     pub fn dylib(install_name: &str, ident: &str) -> Self {
@@ -568,6 +597,7 @@ impl ImageBuilder {
     /// [`BuildError`], not a panic.
     pub fn build(&self) -> Result<Image, BuildError> {
         let exec = self.kind == ImageKind::Exec;
+        let bundle = self.kind == ImageKind::Bundle;
         if self.segments.is_empty() || self.segments[0].name != "__TEXT" {
             return Err(BuildError("first segment must be __TEXT".into()));
         }
@@ -641,7 +671,7 @@ impl ImageBuilder {
         if exec {
             add_cmd(align_up(12 + "/usr/lib/dyld\0".len() as u64, 8) as usize); // dylinker
             add_cmd(24); // LC_MAIN
-        } else {
+        } else if !bundle {
             add_cmd(align_up(24 + self.install_name.len() as u64 + 1, 8) as usize); // LC_ID_DYLIB
         }
         for name in &self.dylibs {
@@ -879,6 +909,10 @@ impl ImageBuilder {
         let mut buf = vec![0u8; file_len as usize];
         let flags = if exec {
             MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE
+        } else if bundle {
+            // A bundle carries no re-export surface (dlopen-able, no
+            // LC_ID_DYLIB).
+            MH_DYLDLINK | MH_TWOLEVEL
         } else {
             // The minimal builder never re-exports: set the marker dyld
             // and the verifier expect on a re-export-free dylib.
@@ -887,7 +921,13 @@ impl ImageBuilder {
         buf[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
         buf[4..8].copy_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
         buf[8..12].copy_from_slice(&CPU_SUBTYPE_ARM64_ALL.to_le_bytes());
-        let filetype = if exec { MH_EXECUTE } else { MH_DYLIB };
+        let filetype = if exec {
+            MH_EXECUTE
+        } else if bundle {
+            MH_BUNDLE
+        } else {
+            MH_DYLIB
+        };
         buf[12..16].copy_from_slice(&filetype.to_le_bytes());
         buf[16..20].copy_from_slice(&ncmds.to_le_bytes());
         buf[20..24].copy_from_slice(&(sizeofcmds as u32).to_le_bytes());
@@ -1009,7 +1049,7 @@ impl ImageBuilder {
             // default stays the pre-M18 zero).
             w64(&mut buf, lc + 16, self.stack_size.unwrap_or(0));
             lc += 24;
-        } else {
+        } else if !bundle {
             w32(&mut buf, lc, LC_ID_DYLIB);
             let n = format!("{}\0", self.install_name);
             let cmdsize = align_up(24 + n.len() as u64, 8) as usize;
