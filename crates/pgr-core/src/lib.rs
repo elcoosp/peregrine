@@ -35,6 +35,8 @@
 //! (`pgr_core::init_offsets` — whose driver surface, unlike the M10
 //! query, names the form on the link command line itself).
 
+pub mod alias;
+pub mod bundle_loader;
 pub mod cache;
 pub mod deadstrip;
 pub mod dyld_env;
@@ -67,6 +69,8 @@ pub mod thunks;
 pub mod trie;
 pub mod umbrella;
 
+pub use alias::{Alias, AliasError, AliasTable};
+pub use bundle_loader::{BundleLoader, BundleLoaderError};
 pub use cache::PoiCache;
 pub use dyld_env::{DyldEnv, DyldEnvEntry, DyldEnvError};
 pub use dyld_info::DyldInfoPlan;
