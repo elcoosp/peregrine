@@ -47,6 +47,61 @@ pub use reloc::RelocationInfo;
 pub use segment::{Section64, SegmentCommand64};
 pub use signature::{CodeDirectory, SuperBlob};
 pub use symtab::{DysymtabCommand, Nlist64, SymtabCommand};
+pub use trie::exports as trie_exports;
+
+/// The export surface a `-bundle_loader` host presents (M25): the
+/// names the bundle's undefined references may bind against. The host
+/// is an `MH_EXECUTE` image — its trie carries the names dyld resolves
+/// without the symbol table, and a minimal trie (an executable ships
+/// only what it must export) can understate the surface a bundle's
+/// loader binds may reach; the symtab's defined externals complete it
+/// (dyld resolves a main-executable bind through the host process's
+/// own symbol surface). Deduplicated in trie-walk order, then symtab
+/// order — both deterministic (§4.3).
+///
+/// # Errors
+/// [`FormatError`] on any malformed host (a broken load-command walk,
+/// symtab or trie).
+pub fn loader_export_surface(bytes: &[u8]) -> Result<Vec<Vec<u8>>, FormatError> {
+    let header = MachHeader64::parse(bytes)?;
+    let mut it = LoadCommandIter::new(bytes, MachHeader64::SIZE, header.ncmds, header.sizeofcmds)?;
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let push = |name: &[u8], out: &mut Vec<Vec<u8>>| {
+        if !name.is_empty() && !out.iter().any(|e| e == name) {
+            out.push(name.to_vec());
+        }
+    };
+    let mut symtab: Option<SymtabCommand> = None;
+    while let Some(cmd) = it.next_command()? {
+        if let LoadCommandKind::LinkeditData(crate::consts::LC_DYLD_EXPORTS_TRIE) = cmd.kind {
+            let lc = crate::LinkeditDataCommand::parse(cmd.bytes)?;
+            for e in trie::exports(lc.data(bytes)?)? {
+                push(&e.name, &mut out);
+            }
+        } else if cmd.kind == LoadCommandKind::Symtab {
+            symtab = SymtabCommand::parse(cmd.bytes, 0).ok();
+        }
+    }
+    if let Some(st) = symtab {
+        for i in 0..st.nsyms {
+            let off = st.symoff as usize + i as usize * 16;
+            let sym: Nlist64 = crate::cursor::pod_read_unaligned_at(bytes, off)?;
+            // Defined externals only: undefineds name imports, stabs
+            // are debug rows, locals stay private.
+            if sym.is_stab() || !sym.is_external() || !sym.is_section_defined() {
+                continue;
+            }
+            let str_at = st.stroff as usize + sym.n_strx as usize;
+            let str_end = st.stroff as usize + st.strsize as usize;
+            if let Some(tail) = bytes.get(str_at..str_end)
+                && let Some(end) = tail.iter().position(|&b| b == 0)
+            {
+                push(&tail[..end], &mut out);
+            }
+        }
+    }
+    Ok(out)
+}
 pub use tbd::{Tbd, TbdSymbol, parse_tbd};
 pub use trie::{TrieExport, exports as exports_trie};
 
