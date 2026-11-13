@@ -119,5 +119,13 @@ harness = false
 name = "umbrella"
 harness = false
 
+# The M21 sub-client bench: the link across the -sub_client decisions
+# (the empty list, 8 and 64 clients) over the same 64-object dylib
+# corpus — a shape-parity gate, a client is one 16-24 byte LC_SUB_CLIENT
+# command in the identity block.
+[[bench]]
+name = "sub_client"
+harness = false
+
 [lints]
 workspace = true
