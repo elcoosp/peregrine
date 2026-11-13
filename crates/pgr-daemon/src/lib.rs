@@ -75,8 +75,11 @@ mod tests {
         // client named, never the pre-M20 absence — and the config's
         // sub-client list as a length-prefixed name list (M21,
         // `-sub_client`): a resident relink emits the clients the
-        // linking image named, never the pre-M21 absence.
-        assert_eq!(crate::PROTO_VERSION, 14);
+        // linking image named, never the pre-M21 absence — and the
+        // config's dyld-environment list as a length-prefixed pair list
+        // (M22, `-dyld_env`): a resident relink exports the variables
+        // the client named, never the pre-M22 absence.
+        assert_eq!(crate::PROTO_VERSION, 15);
     }
 
     #[test]
