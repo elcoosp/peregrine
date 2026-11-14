@@ -1160,6 +1160,56 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                         Some(s.addr),
                     ));
                 }
+                // M28: the section-congruence contract — a section's
+                // address is congruent to its own declared alignment
+                // (`addr % (1 << align) == 0`), the invariant the
+                // packing engine plans (a `-sectalign` floor rides the
+                // same math) and a hand-built image can break. The
+                // The exponent is capped at 14 first: an absurd
+                // exponent is the finding above, never a second
+                // redundant one (the robustness mutation space stays
+                // one finding per section, not two).
+                if s.align <= 14 && s.name().is_ok_and(|n| !n.is_empty()) {
+                    let alignment = 1u64 << s.align;
+                    if s.addr % alignment != 0 {
+                        report.issues.push(Issue::error(
+                            Code::SectionBounds,
+                            format!(
+                                "section {sname}: address {:#x} is not congruent to its \
+                                 alignment 2^{} ({alignment:#x})",
+                                s.addr, s.align
+                            ),
+                            Some(s.addr),
+                        ));
+                    }
+                }
+                // M29: the header-region contract — a *file-backed*
+                // section's file range starts *after* the header and
+                // its load commands (32 + `sizeofcmds`, both readable
+                // from the image bytes): the region `install_name_tool`
+                // grows install names in, and the region a padded
+                // `-headerpad` reservation grows honestly. A section
+                // inside it stomps the commands the loader parses.
+                // Zero-fill sections ride outside the guard: their
+                // `offset` is advisory (the layout records 0 — no file
+                // bytes follow the claim).
+                let header_region_end = MachHeader64::SIZE + img.header.sizeofcmds as usize;
+                if !zerofill
+                    && !object
+                    && s.name().is_ok_and(|n| !n.is_empty())
+                    && u64::from(s.offset) < header_region_end as u64
+                {
+                    report.issues.push(Issue::error(
+                        Code::SectionBounds,
+                        format!(
+                            "section {sname}: file range starts inside the header region \
+                             (offset {:#x} < {header_region_end:#x}) — the load commands the \
+                             loader parses live there",
+                            s.offset
+                        ),
+                        Some(s.addr),
+                    ));
+                }
                 if s.reserved3 != 0 {
                     report.issues.push(Issue::warning(
                         Code::Suspicious,
