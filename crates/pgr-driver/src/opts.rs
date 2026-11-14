@@ -685,12 +685,12 @@ pub enum OptsError {
 /// verbatim, exactly ld64's on-disk effect) and the deduplicate toggle
 /// (cstring/code dedup stays on — the arm64 default). M30 promoted
 /// `-no_data_in_code` off this list (the data-in-code carriage reads
-/// the decision) and M31 promoted `-no_function_starts` (the
-/// function-starts suppression reads it).
-const NOOP_FLAGS: [&str; 6] = [
+/// the decision), M31 promoted `-no_function_starts` (the
+/// function-starts suppression reads it), M32 promoted `-no_uuid`
+/// (the UUID suppression reads it) and M33 promoted
+/// `-keep_private_externs` (the private-extern decision reads it).
+const NOOP_FLAGS: [&str; 4] = [
     "-no_adhoc_extensions",
-    "-keep_private_externs",
-    "-no_uuid",
     "-demangle",
     "-no_demangle",
     "-no_deduplicate",
@@ -1483,6 +1483,22 @@ fn apply_flag(
         // knob with no output-kind conflict.
         "-no_function_starts" => {
             opts.config.function_starts = false;
+        }
+        // M32: the UUID suppression. The flag rode the surface as an
+        // accepted no-op since M1; the header assembly reads the
+        // decision — the output's `LC_UUID` command drops (no uuid
+        // field for the emit two-pass derivation to patch). A boolean
+        // knob with no output-kind conflict.
+        "-no_uuid" => {
+            opts.config.uuid = false;
+        }
+        // M33: the private-extern decision. The flag rode the surface
+        // as an accepted no-op since M1; the symtab build reads it —
+        // an input `N_PEXT` definition stays external (`N_EXT | N_SECT
+        // | N_PEXT`, exported) instead of converting into a local. A
+        // boolean knob with no output-kind conflict.
+        "-keep_private_externs" => {
+            opts.config.keep_private_externs = true;
         }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
