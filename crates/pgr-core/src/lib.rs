@@ -71,6 +71,7 @@ pub mod sub_client;
 pub mod thunks;
 pub mod trie;
 pub mod umbrella;
+pub mod unwind;
 
 pub use alias::{Alias, AliasError, AliasTable};
 pub use bundle_loader::{BundleLoader, BundleLoaderError};
@@ -110,6 +111,7 @@ pub use stack_size::StackSize;
 pub use sub_client::{SubClient, SubClientEntry, SubClientError};
 pub use trie::{Export, ExportInfo};
 pub use umbrella::{Umbrella, UmbrellaError, UmbrellaKind, UmbrellaMember};
+pub use unwind::{SynthesisError, UnwindEntry, UnwindInfo, synthesize, synthesized_size};
 
 /// A fatal link error (M1 surface: inputs, symbols, layout, encoding).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
