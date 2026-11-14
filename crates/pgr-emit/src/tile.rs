@@ -365,6 +365,15 @@ impl<'a> TileCtx<'a> {
                 &layout.func_starts,
             ));
         }
+        if le.data_in_code_size > 0 {
+            // M30: the data-in-code chunk rides the span diff like every
+            // other __LINKEDIT chunk.
+            blob_spans.push(span(
+                le.data_in_code_off,
+                layout.data_in_code.len() as u64,
+                &layout.data_in_code,
+            ));
+        }
         blob_spans.push(span(le.sym_off, symtab.len() as u64, symtab));
         blob_spans.push(span(le.str_off, layout.strtab.len() as u64, &layout.strtab));
         if le.indirect_size > 0 {
