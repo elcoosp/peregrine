@@ -337,6 +337,32 @@ pub struct LinkConfig {
     /// executables, dylibs and the relocatable output refuse the knob —
     /// the layout's re-check backs the driver surface's earlier refusal.
     pub bundle_loader: Option<crate::bundle_loader::BundleLoader>,
+    /// M26 — the loader path: the `-dylinker <path>` executable an
+    /// executable's `LC_LOAD_DYLINKER` names instead of the hard-coded
+    /// `/usr/lib/dyld` (see [`crate::dylinker`]). The kernel execs
+    /// whatever the command names, so the decision is validated at
+    /// construction
+    /// ([`Dylinker::from_flag`](crate::dylinker::Dylinker::from_flag):
+    /// non-empty, NUL-free, absolute — the loader path resolves from
+    /// the process root at exec time). The default (`None`) keeps
+    /// every pre-M26 link byte-identical — naming `/usr/lib/dyld`
+    /// explicitly plans the same bytes — and only an executable
+    /// carries the command (the §8.2 loader-configuration adjacency;
+    /// the same contract M22's environment commands ride): a dylib, a
+    /// bundle and the relocatable output refuse the knob — the
+    /// layout's re-check backs the driver surface's earlier refusal.
+    pub dylinker: Option<crate::dylinker::Dylinker>,
+    /// M27 — the PIE decision: `-no_pie` drops the `MH_PIE` flag the
+    /// header assembly sets on every executable (ld64's knob for a
+    /// fixed-address load). The default (`false`) keeps every pre-M27
+    /// link byte-identical — the bit is loader-level, not
+    /// fixup-level, so the classic opcode path plans the same word —
+    /// and only an executable carries the flag (a dylib or a bundle
+    /// is loaded by the kernel itself, and the relocatable output
+    /// carries no loader semantics at all): the non-executable
+    /// outputs refuse the knob — the layout's re-check backs the
+    /// driver surface's earlier refusal.
+    pub no_pie: bool,
 }
 
 impl Default for LinkConfig {
@@ -383,6 +409,8 @@ impl Default for LinkConfig {
             dyld_envs: crate::dyld_env::DyldEnv::new(),
             aliases: crate::alias::AliasTable::new(),
             bundle_loader: None,
+            dylinker: None,
+            no_pie: false,
         }
     }
 }
@@ -1307,6 +1335,69 @@ pub fn layout(
             _ => (
                 "-dyld_env exports DYLD_* variables through the loader, but the \
                  relocatable output carries no loader commands",
+                "drop the flag or link an executable",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M26: the loader path is an executable decision —
+    // `LC_LOAD_DYLINKER` is the main-executable command (the §8.2
+    // loader-configuration adjacency, the contract M22's environment
+    // commands ride), so a named loader has no command to land on for
+    // a dylib, a bundle or the relocatable output. The refusal rides
+    // here (not only on the driver surface) so every caller pays it: a
+    // silently dropped path would exec the loader the caller did not
+    // ask for.
+    if cfg.dylinker.is_some() && cfg.filetype != OutputType::Execute {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Dylib => (
+                "-dylinker names the loader LC_LOAD_DYLINKER execs, but this \
+                 output is a dylib",
+                "the kernel loads a dylib itself — only the main executable carries \
+                 LC_LOAD_DYLINKER: link an executable or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-dylinker names the loader LC_LOAD_DYLINKER execs, but this \
+                 output is a bundle",
+                "the kernel loads a bundle itself — only the main executable carries \
+                 LC_LOAD_DYLINKER: link an executable or drop the flag",
+            ),
+            _ => (
+                "-dylinker names the loader LC_LOAD_DYLINKER execs, but the \
+                 relocatable output carries no loader commands",
+                "drop the flag or link an executable",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M27: the PIE decision is an executable decision — `MH_PIE` is
+    // the executable-only bit (a dylib or a bundle is loaded by the
+    // kernel itself, the relocatable output carries no loader
+    // semantics), so a named `-no_pie` has no flag to clear elsewhere.
+    // The refusal rides here (not only on the driver surface) so every
+    // caller pays it: a silently dropped knob would claim a fixed
+    // address space the caller did not ask for.
+    if cfg.no_pie && cfg.filetype != OutputType::Execute {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Dylib => (
+                "-no_pie clears the executable's MH_PIE flag, but this output \
+                 is a dylib",
+                "the kernel loads a dylib itself — MH_PIE is an executable-only \
+                 bit: link an executable or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-no_pie clears the executable's MH_PIE flag, but this output \
+                 is a bundle",
+                "the kernel loads a bundle itself — MH_PIE is an executable-only \
+                 bit: link an executable or drop the flag",
+            ),
+            _ => (
+                "-no_pie clears the executable's MH_PIE flag, but the relocatable \
+                 output carries no loader semantics",
                 "drop the flag or link an executable",
             ),
         };
@@ -3981,7 +4072,11 @@ fn build_header(
     hi: &HeaderInputs,
 ) -> Result<(Vec<u8>, u64, u64), LinkError> {
     let is_exec = hi.filetype.is_executable();
-    let dylinker_len = align8(12 + "/usr/lib/dyld\0".len());
+    // M26: the loader path the command names — the hard-coded default
+    // when the knob is unset (byte-identical), the validated decision
+    // when it names one.
+    let loader_path = cfg.dylinker.as_ref().map_or("/usr/lib/dyld", |d| d.path());
+    let dylinker_len = align8(12 + loader_path.len() + 1);
     let emit_dylinker = is_exec && cfg.dynamic_linker;
     let fixup_lc = if hi.fixup_size > 0 {
         FixupLc::Chained
@@ -4083,7 +4178,7 @@ fn build_header(
     if hi.n_undef == 0 {
         flags |= pgr_format::consts::MH_NOUNDEFS;
     }
-    if is_exec {
+    if is_exec && !cfg.no_pie {
         flags |= pgr_format::consts::MH_PIE;
     }
     if hi.filetype == OutputType::Dylib && !hi.has_reexports {
@@ -4152,7 +4247,8 @@ fn build_header(
         w32(&mut buf, lc, pgr_format::consts::LC_LOAD_DYLINKER);
         w32(&mut buf, lc + 4, dylinker_len as u32);
         w32(&mut buf, lc + 8, 12);
-        buf[lc + 12..lc + 12 + "/usr/lib/dyld\0".len()].copy_from_slice(b"/usr/lib/dyld\0");
+        buf[lc + 12..lc + 12 + loader_path.len()].copy_from_slice(loader_path.as_bytes());
+        buf[lc + 12 + loader_path.len()] = 0;
         lc += dylinker_len;
     }
     // LC_ID_DYLIB (dylibs): the install name the two-level namespace keys on.
@@ -4364,8 +4460,9 @@ fn pad16(name: &[u8]) -> [u8; 16] {
 fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc) -> usize {
     let is_exec = cfg.filetype.is_executable();
     let emit_dylinker = is_exec && cfg.dynamic_linker;
+    let loader_path = cfg.dylinker.as_ref().map_or("/usr/lib/dyld", |d| d.path());
     let dylinker_len = if emit_dylinker {
-        align8(12 + "/usr/lib/dyld\0".len())
+        align8(12 + loader_path.len() + 1)
     } else {
         0
     };
