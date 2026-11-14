@@ -148,8 +148,12 @@ use sha2::{Digest, Sha256};
 /// default); **v24** appends the private-extern keep (M33 — one byte
 /// naming whether the image holds input `N_PEXT` definitions external;
 /// a resident relink carries the private-extern decision the client
-/// asked for, never the pre-M33 conversion default).
-pub const PROTO_VERSION: u32 = 24;
+/// asked for, never the pre-M33 conversion default); **v25** appends
+/// the compact-unwind suppression (M36 — one byte naming whether the
+/// image drops the `__unwind_info` section; a resident relink carries
+/// the suppression decision the client asked for, never the pre-M36
+/// carry default).
+pub const PROTO_VERSION: u32 = 25;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -789,6 +793,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // private-extern decision the client asked for, never the pre-M33
     // conversion default.
     put_u8(out, u8::from(cfg.keep_private_externs));
+    // M36 (v25 wire): the compact-unwind suppression rides the tail
+    // after the private-extern keep — one byte; a resident relink
+    // carries the suppression decision the client asked for, never the
+    // pre-M36 carry default.
+    put_u8(out, u8::from(!cfg.compact_unwind));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1035,6 +1044,10 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // validation beyond the bool (the conversion is the default; the
     // input `N_PEXT` bit names where the decision fires).
     let keep_private_externs = r.u8()? != 0;
+    // M36 (v25 wire): the compact-unwind suppression — one byte, no
+    // validation beyond the bool (the absence is the decision; the
+    // parse validates the table the carriage would have carried).
+    let no_compact_unwind = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1097,6 +1110,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         function_starts: !no_function_starts,
         uuid: !no_uuid,
         keep_private_externs,
+        compact_unwind: !no_compact_unwind,
     })
 }
 
@@ -1362,6 +1376,11 @@ mod tests {
             // carries the private-extern decision the client asked
             // for, never the pre-M33 conversion default).
             keep_private_externs: true,
+            // The v25 tail: the compact-unwind suppression rides the
+            // default here — the rich config's non-default knobs are
+            // the ones that shape bytes, and the suppression is the
+            // knob the round-trip test flips.
+            compact_unwind: true,
             symbol_order: None,
         }
     }
@@ -2309,6 +2328,36 @@ mod tests {
         assert!(
             back.config.keep_private_externs,
             "the keep crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_no_compact_unwind_decision_round_trips() {
+        // v25: a non-default compact-unwind suppression must survive
+        // the round trip verbatim (a resident relink carries the
+        // suppression decision the client asked for, never the pre-M36
+        // carry default).
+        let mut cfg = rich_config();
+        assert!(cfg.compact_unwind, "rich_config carries the default");
+        cfg.compact_unwind = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert!(
+            !back.config.compact_unwind,
+            "the suppression crosses byte-for-byte"
         );
     }
 
