@@ -8,8 +8,33 @@ release automation.
 ### Documentation
 - The M20 umbrella rows the 0.23.0 sweep missed (the region's README, TDD,
   compat and bench commits postdate that section)
+- The M26–M29 rows backfilled from their milestone commits (the README's
+  status and examples carry M26 through M29, the compat table's
+  driver-flag rows, the TDD trailer's design entries, the bench
+  inventory's recording pass)
 
 ### Features
+- **driver:** The -sectalign and -headerpad flags shape the config (M28, M29)
+- **driver:** The -dylinker and -no_pie flags shape the config (M26, M27)
+- **core:** The packing loop plans the named decisions (M28)
+- **core:** The header-pad decision joins the core surface (M29)
+- **core:** The layout plans the loader path and the PIE decision (M26, M27)
+- **core:** The sect-align and header-pad surfaces re-export their decisions (M28, M29)
+- **daemon:** Wire v17 carries the loader and v18 the PIE byte (M26, M27)
+- **daemon:** Wire v19 carries the floors and v20 the floor (M28, M29)
+- **verify:** The loader-path and congruence/header-region contracts land (M26–M29)
+- **fixtures:** The builder names the loader, the PIE bit and the header reservation (M26–M29)
+- **format:** The data-in-code stream reader joins the commands (M30)
+- **fixtures:** The object builder names the data-in-code entries (M30)
+- **fixtures:** The image builder emits the data-in-code payload (M30)
+- **core:** The parse carries the input data-in-code streams (M30)
+- **core:** The layout plans the data-in-code carriage (M30)
+- **driver:** The -no_data_in_code flag names the suppression (M30)
+- **daemon:** Wire v21 carries the data-in-code suppression (M30)
+- **verify:** The data-in-code contract gates the broken shapes (M30)
+- **core:** The function-starts suppression joins the crate surface (M31)
+- **driver:** The -no_function_starts flag names the suppression (M31)
+- **daemon:** Wire v22 carries the function-starts suppression (M31)
 - **format:** The sub-client opcode joins the constants (M21)
 - **core:** The sub-client seam joins the crate surface (M21)
 - **core:** The layout plans the client list and refuses the rest (M21)
@@ -50,12 +75,25 @@ release automation.
 - **driver:** The bundle-loader consumer example walks the story (M25)
 
 ### Performance
+- **core:** The data-in-code bench joins the bench table (M30)
+- **core:** The function-starts bench joins the bench table (M31)
+- **core:** Bench the data-in-code carriage's shape parity (M30)
+- **core:** Bench the function-starts suppression's shape parity (M31)
+- **core:** The dylinker, pie, sect-align and header-pad benches join the bench table (M26–M29)
 - **core:** Bench the client list's per-decision parity (M21)
 - **core:** The dyld-env bench joins the bench table and records parity (M22)
 - **core:** The alias bench joins the bench table and records parity (M24)
 - **core:** The bundle-loader bench joins the bench table and records parity (M25)
 
 ### Tests
+- **core:** The data-in-code gates ride the carriage and the refusals (M30)
+- **driver:** The data-in-code surface gates links and the wire (M30)
+- **verify:** The data-in-code contract gates the broken shapes (M30)
+- **core:** The function-starts gates ride the suppression (M31)
+- **driver:** The function-starts surface gates links (M31)
+- **core:** The loader and PIE seams gate the plan and the refusals (M26, M27)
+- **core:** The sect-align floors gate the plan and the refusals (M28)
+- **core:** The header pad gates the reservation and the refusals (M29)
 - **core:** The client seam gates the plan and the refusals (M21)
 - **driver:** The client surface gates links and the wire (M21)
 - **verify:** The client contract gates the broken shapes (M21)
