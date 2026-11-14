@@ -186,33 +186,18 @@ pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, repor
                     continue;
                 };
                 if let Ok(data) = lc.data(bytes) {
-                    if data.len() % 8 != 0 {
-                        report.issues.push(Issue::error(
+                    // M30: the stream decodes through the format
+                    // reader — a malformed payload (not a multiple of
+                    // the 8-byte entry) is a typed refusal, never the
+                    // zero-entry default the hand walk used to mask
+                    // (the weak-error shape this replaces).
+                    match pgr_format::read_data_in_code(data) {
+                        Err(e) => report.issues.push(Issue::error(
                             Code::LinkeditPayload,
-                            "LC_DATA_IN_CODE payload is not a multiple of 8 bytes",
+                            format!("LC_DATA_IN_CODE payload is malformed: {e}"),
                             Some(u64::from(lc.dataoff)),
-                        ));
-                    }
-                    for i in 0..data.len() / 8 {
-                        let entry: pgr_format::DataInCodeEntry =
-                            pgr_format::cursor::pod_read_unaligned_at(
-                                bytes,
-                                lc.dataoff as usize + i * 8,
-                            )
-                            .unwrap_or(pgr_format::DataInCodeEntry {
-                                offset: 0,
-                                length: 0,
-                                kind: 0,
-                            });
-                        if u64::from(entry.offset).saturating_add(u64::from(entry.length))
-                            > text_vmsize
-                        {
-                            report.issues.push(Issue::warning(
-                                Code::LinkeditPayload,
-                                format!("data-in-code entry {i} beyond __TEXT"),
-                                Some(u64::from(lc.dataoff)),
-                            ));
-                        }
+                        )),
+                        Ok(entries) => check_data_in_code(&entries, text_vmsize, report),
                     }
                 }
             }
@@ -248,6 +233,56 @@ pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, repor
             "no LC_UUID (Peregrine derives one from the page hashes)",
             None,
         ));
+    }
+}
+
+/// The data-in-code stream's contract (M30): the entries the debugger
+/// walks must arrive **sorted** by offset and **non-overlapping** (the
+/// LINKEDIT order a real linker emits — an unsorted or overlapping
+/// stream re-reads as garbage ranges), and every range stays inside
+/// `__TEXT` (the M0 shape check).
+fn check_data_in_code(
+    entries: &[pgr_format::DataInCodeEntry],
+    text_vmsize: u64,
+    report: &mut Report,
+) {
+    for (i, entry) in entries.iter().enumerate() {
+        if u64::from(entry.offset).saturating_add(u64::from(entry.length)) > text_vmsize {
+            report.issues.push(Issue::warning(
+                Code::LinkeditPayload,
+                format!("data-in-code entry {i} beyond __TEXT"),
+                None,
+            ));
+        }
+        if i > 0 {
+            let prev = entries[i - 1];
+            if entry.offset < prev.offset {
+                report.issues.push(Issue::error(
+                    Code::LinkeditPayload,
+                    format!(
+                        "data-in-code entry {i} (offset {:#x}) precedes entry {} (offset \
+                         {:#x}) — the stream must be sorted by offset",
+                        entry.offset,
+                        i - 1,
+                        prev.offset
+                    ),
+                    None,
+                ));
+            } else if u64::from(prev.offset) + u64::from(prev.length) > u64::from(entry.offset) {
+                report.issues.push(Issue::error(
+                    Code::LinkeditPayload,
+                    format!(
+                        "data-in-code entry {} ({:#x}..{:#x}) overlaps entry {i} ({:#x}..) \
+                         — the ranges must be disjoint",
+                        i - 1,
+                        prev.offset,
+                        u64::from(prev.offset) + u64::from(prev.length),
+                        entry.offset
+                    ),
+                    None,
+                ));
+            }
+        }
     }
 }
 
