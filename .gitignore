@@ -11,3 +11,4 @@ ship.sh
 ship.toml
 .github/pr-body.md
 .github/commit-plan.tsv
+docs/launch.md
