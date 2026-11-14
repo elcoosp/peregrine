@@ -5,6 +5,51 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M36)
+
+- **M36** — the compact-unwind suppression (`-no_compact_unwind`): the output
+  `__TEXT,__unwind_info` section drops on the named decision (`LinkConfig::compact_unwind`,
+  the default `true` keeping every pre-M36 link byte-identical) — no synthetic piece, no
+  section slot, the pre-M34 bytes exactly and byte-identical to the entry-free link (the
+  file-size delta rides the 16 KiB segment congruence). The suppression is a Pass-3
+  decision — never a parse blindfold: the parse still validates the table, and a broken
+  table refuses with the knob set; the relocatable path never engages the carriage (no
+  output-kind conflict); an incremental knob flip lands on the relayout rung's correct
+  image and the record renews so the cycle never stalls; the daemon wire v25 carries the
+  decision; the `no_compact_unwind` bench and the `no_compact_unwind_link` consumer example
+  ride along.
+
+### Added (M35)
+
+- **M35** — compact-unwind compressed second-level pages: the density rung past the M34
+  regular pages. A translated row rides the compressed second-level family
+  (`UNWIND_SECOND_LEVEL_COMPRESSED`) exactly when it qualifies — its output offset fits the
+  compressed entry's 24-bit field and its final encoding word (the personality index folded
+  in) sits in the section-level common encodings array — and consecutive same-family rows
+  share a page (a page never mixes families). The common array gathers the distinct final
+  words in first-use order over the offset-qualifying stream, capped at the compressed
+  entry's 8-bit index space (`pgr_core::unwind::MAX_COMMON_ENCODINGS` = 256); the
+  compressed page's own page-local encodings array rides empty (the two-tier decode
+  libunwind runs answers at tier one, and the verifier walks both tiers). The planning seam
+  grows with the rung: `pgr_core::unwind::plan_shape` names the shape a table plans into
+  (array counts, page count, compressed pages) and `synthesized_size_shape` sizes it with
+  the builder's one formula; `synthesized_size` stays exact for the tables that plan the
+  pre-M35 shape (no row qualifies). A 4096-row table over one encoding plans half the M34
+  bytes. The verifier's `unwind` family walks the compressed pages (bounds behind the
+  12-byte page header, the two-tier index resolution, sorted offsets, `__TEXT` bounds, the
+  common rows' own mode/personality contract) and the `unwind_compressed` bench plus the
+  `compact_unwind_compressed_link` consumer example ride along.
+
+### Changed (M35)
+
+- The `__unwind_info` section shape for tables whose rows qualify: qualifying rows ride
+  compressed second-level pages through the common encodings array (the header's
+  `commonEncodingsArrayCount` is nonzero now), shrinking the section up to 50 % for
+  single-encoding tables; tables whose rows all sit past the 16 MiB `__TEXT` mark or past
+  the encoding cap plan the pre-M35 bytes verbatim. `UnwindInfo` gained
+  `compressed_page_count`. The M34 regular-page shape remains the fallback family the
+  verifier walks beside the compressed one.
+
 ### Added (M34)
 
 - **M34** — compact-unwind synthesis: the input `__LD,__compact_unwind` tables the Pass-1
