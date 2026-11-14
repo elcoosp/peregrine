@@ -44,6 +44,7 @@ pub mod dyld_info;
 pub mod dylinker;
 pub mod export_filter;
 pub mod fixups;
+pub mod header_pad;
 pub mod icf;
 pub mod ids;
 pub mod image_base;
@@ -61,6 +62,7 @@ pub mod propagate;
 pub mod resolve;
 pub mod resolve_reuse;
 pub mod revindex;
+pub mod sect_align;
 pub mod segprot;
 pub mod slack;
 pub mod stable_imports;
@@ -80,6 +82,7 @@ pub use export_filter::{SymbolMatcher, SymbolPattern, SymbolPatternError, is_exp
 pub use fixups::{
     FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page, pack_page_strided,
 };
+pub use header_pad::HeaderPad;
 pub use ids::{FileId, StringId};
 pub use image_base::ImageBase;
 pub use init_offsets::{InitOffsets, InitOffsetsError};
@@ -99,6 +102,7 @@ pub use propagate::{PropagationScope, SectionDigest};
 pub use resolve::{Def, Rank, Resolution};
 pub use resolve_reuse::{ResolveReuseSeed, ReuseFallback, ReusePlan, install_reused, plan_reuse};
 pub use revindex::{RefSite, ReverseIndex};
+pub use sect_align::{SectAlign, SectAlignError, SectAlignTable};
 pub use segprot::{SegName, SegProt, SegProtError, SegProts};
 pub use slack::{LayoutFallback, SlackPolicy};
 pub use stable_imports::{StableImport, StableImports};
