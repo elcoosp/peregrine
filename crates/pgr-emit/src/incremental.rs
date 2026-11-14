@@ -2415,8 +2415,11 @@ fn patch_file<S: PatchSink>(
     // Phase B: the UUID derives from the zeroed table (§9), lands on page
     // 0 (gated by the skeleton), and page 0's entry becomes the final form.
     // Unsigned images (`code_limit == 0`) have neither table nor UUID —
-    // the header stays exactly as the full emit writes it.
-    if code_limit > 0 {
+    // the header stays exactly as the full emit writes it. M32: the
+    // uuid-free suppression leaves the header exactly as the full emit
+    // wrote it too (the plan offset names the absent sentinel), so the
+    // patch consults the sentinel, never a second decision copy.
+    if code_limit > 0 && layout.linkedit.uuid_at != 0 {
         let uuid = signature::derive_uuid(&merged.concat());
         for (t, tile) in &mut scratches {
             if *t == 0 {
