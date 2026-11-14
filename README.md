@@ -204,7 +204,7 @@ Not-yet-supported surface (`-ObjC`, TLV, LTO execution) is **rejected with a cle
 | Order & report | `-order_file` (ld64-style rank sort), `-map` (rendered from the emit plan — report and bytes cannot disagree) |
 | Size | `-dead_strip`, `-icf=safe\|all\|none`, cross-input `__cstring` merging, lazy archive member pull |
 | Fixups & signing | `-fixup_chains`/`-no_fixup_chains`, `-fixup_chains_format offset64\|arm64e` (incl. authenticated PAC words), `-adhoc`/`-no_adhoc` |
-| Linkedit metadata | `-no_function_starts` (suppress `LC_FUNCTION_STARTS`), `-no_data_in_code` (suppress the carried data-in-code stream) |
+| Linkedit metadata | `-no_function_starts` (suppress `LC_FUNCTION_STARTS`), `-no_data_in_code` (suppress the carried data-in-code stream), `-no_compact_unwind` (suppress the synthesized `__unwind_info` section — the parse still validates the table) |
 | Dyld environment | `-dyld_env DYLD_<var>=<value>` (main executable only) |
 | Fast paths | `-cache`/`-no_cache`/`-cache_max`, `-resident`/`-resident_socket`, `-incremental`/`-no_incremental`/`-incremental-verify` |
 | Queries | `--print-record`, `--print-fixup-encoding`; `pgr-verify --strict --json --checks --list-checks --baseline --fail-on` |
@@ -293,13 +293,14 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 | **M30–M31** | Linkedit metadata: data-in-code carriage (the input `LC_DATA_IN_CODE` streams ride the atom map onto the output — the design doc's named slot, no longer dropped), `-no_data_in_code` (the suppression), `-no_function_starts` (the second advisory no-op promoted — the command drops on the named decision) |
 | **M32–M33** | The last two advisory no-ops promoted: `-no_uuid` (the derived-UUID suppression — the command drops, the emit patch paths consult the plan offset's absent sentinel), `-keep_private_externs` (the private-extern decision — the input `N_PEXT` bit the tree dropped at parse now converts into the locals range by default or stays external and exported under the named keep) |
 | **M34** | Compact-unwind synthesis: the input `__LD,__compact_unwind` tables the Pass-1 sweep kept dropping (the `S_ATTR_DEBUG` section the `__LD` skip hid) ride the atom map onto the output `__TEXT,__unwind_info` — the section dyld's unwinder and every backtrace reader walks (header arrays, personality rows in first-use order, the sorted index, regular second-level pages, the LSDA rows); dead-stripped functions drop their rows, ICF-folded duplicates land once on the canonical copy, the personality/LSDA references root their targets under `-dead_strip`; an entry-free corpus plans the pre-M34 bytes (`pgr_core::unwind::synthesize` is the public seam a build system can plan with before any link runs) |
+| **M35** | Compact-unwind compressed second-level pages: the density rung past the M34 regular pages — a row rides the compressed family exactly when its offset fits the 24-bit field and its final encoding word sits in the section-level common encodings array (the distinct words in first-use order, capped at the 8-bit index space), consecutive same-family rows share a page, and the compressed page's page-local encodings array rides empty (the two-tier decode libunwind runs answers at tier one); qualifying rows halve the second-level entry width (a 4096-row single-encoding table plans 50 % of the M34 bytes), `pgr_core::unwind::plan_shape`/`synthesized_size_shape` plan the exact shape before any link runs, and the verifier's `unwind` family walks both page families |
+| **M36** | The compact-unwind suppression: `-no_compact_unwind` drops the output `__TEXT,__unwind_info` section on the named decision (the pre-M34 bytes exactly, byte-identical to the entry-free link; the file-size delta rides the 16 KiB segment congruence) — the parse still validates the table (the knob is a Pass-3 decision, never a parse blindfold), an incremental knob flip lands on the relayout rung's correct image and the record renews so the cycle never stalls, and the daemon wire v25 carries the decision the resident relink asked for |
 
 Every knob ships the same way: a validated decision in the library, verifier gates for the
-shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v24)
+shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v25)
 
 **Still on the roadmap:** the Apple Silicon hardware gates · LTO object execution ·
-compact-unwind compressed second-level pages (the density rung past the M34 regular
-pages) · TLV · ObjC/Swift semantics beyond section pass-through.
+TLV · ObjC/Swift semantics beyond section pass-through.
 
 <details><summary><b>Consumer examples (one per milestone surface)</b></summary>
 
@@ -312,7 +313,8 @@ Each ships in its crate's `examples/` with a matching bench — run with
 `segprot_link` · `stack_size_link` · `icf_link` · `dead_strip_link` · `image_base_link` ·
 `umbrella_link` · `sub_client_link` · `dyld_env_link` · `reexport_framework_link` ·
 `alias_link` · `bundle_loader_link` · `dylinker_link` · `no_pie_link` ·
-`sectalign_link` · `headerpad_link` · `data_in_code_link` · `function_starts_link` · `no_uuid_link` · `keep_private_externs_link` · `compact_unwind_link`
+`sectalign_link` · `headerpad_link` · `data_in_code_link` · `function_starts_link` · `no_uuid_link` · `keep_private_externs_link` · `compact_unwind_link` ·
+`compact_unwind_compressed_link` · `no_compact_unwind_link` · `library_link` · `link_map` · `order_file_link`
 
 </details>
 
