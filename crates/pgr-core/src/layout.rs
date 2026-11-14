@@ -363,6 +363,32 @@ pub struct LinkConfig {
     /// outputs refuse the knob — the layout's re-check backs the
     /// driver surface's earlier refusal.
     pub no_pie: bool,
+    /// M28 — the section-alignment floors: the `-sectalign <seg> <sect>
+    /// <align>` decisions the packing engine reads when it aligns each
+    /// output section (see [`crate::sect_align`]). The decision is a
+    /// *floor*, not a replacement — the planned alignment is the max of
+    /// the input's and the named one — and the default (an empty table)
+    /// keeps every pre-M28 link byte-identical. The grammar is
+    /// validated at construction
+    /// ([`SectAlign::from_flag`](crate::sect_align::SectAlign::from_flag):
+    /// a section-bearing segment, a name that survives the 16-byte
+    /// `section_64` field, a power of two up to the 0x4000 page), and
+    /// the relocatable output refuses the knob outright — its sections
+    /// are the input's, carried verbatim (`link_reloc`'s re-check backs
+    /// the driver surface's earlier refusal).
+    pub sect_aligns: crate::sect_align::SectAlignTable,
+    /// M29 — the header-region floor: the `-headerpad <n>` minimum the
+    /// header and its load commands occupy before the first `__TEXT`
+    /// section (see [`crate::header_pad`]). The flag rode the driver
+    /// surface as an advisory no-op since M1; M29 promotes it to the
+    /// packing loop's decision — the reserved region grows to at least
+    /// the named floor, the space `install_name_tool` grows install
+    /// names in. The default (`None`) keeps every pre-M29 link
+    /// byte-identical — a floor at or below the natural size plans the
+    /// same bytes — and the relocatable output refuses the knob (its
+    /// sections are the input's, carried verbatim; `link_reloc`'s
+    /// re-check backs the driver surface's earlier refusal).
+    pub header_pad: Option<crate::header_pad::HeaderPad>,
 }
 
 impl Default for LinkConfig {
@@ -411,6 +437,8 @@ impl Default for LinkConfig {
             bundle_loader: None,
             dylinker: None,
             no_pie: false,
+            sect_aligns: crate::sect_align::SectAlignTable::default(),
+            header_pad: None,
         }
     }
 }
@@ -1372,6 +1400,35 @@ pub fn layout(
         };
         return Err(LinkError::Layout {
             message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M29: the header-region floor is a packing decision — the
+    // relocatable output plans no segments and carries its input
+    // sections verbatim, so a named floor has nothing to land on. The
+    // refusal rides here (not only on the driver surface and
+    // `link_reloc`) so every caller pays it: a silently dropped knob
+    // would claim a reserved region the output never carries.
+    if cfg.header_pad.is_some() && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-headerpad reserves the header region the load commands occupy, \
+                      but the relocatable output plans no segments and carries its \
+                      input sections verbatim — drop -headerpad or link a segmented \
+                      output"
+                .into(),
+        });
+    }
+    // M28: the section-alignment floors are a packing-engine decision —
+    // the relocatable output plans no segments and carries its input
+    // sections verbatim, so a named floor has nothing to land on. The
+    // refusal rides here (not only on the driver surface and
+    // `link_reloc`) so every caller pays it: a silently dropped knob
+    // would claim an alignment the output never carries.
+    if !cfg.sect_aligns.is_empty() && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-sectalign names a packing-engine alignment floor, but the \
+                      relocatable output plans no segments and carries its input \
+                      sections verbatim — drop -sectalign or link a segmented output"
+                .into(),
         });
     }
     // M27: the PIE decision is an executable decision — `MH_PIE` is
@@ -2748,7 +2805,17 @@ fn place(
         // contract (`vmaddr = fileoff + base`); zero-fill sections advance
         // VM only (§8.1 rule 5).
         let mut cursor = if seg_name == "__TEXT" {
-            align_up_u64(header_len as u64, 8)
+            // M29: the named header-region floor (`-headerpad`) grows
+            // the reserved region to at least the named space — the
+            // region `install_name_tool` grows install names in. The
+            // max is the floor semantics, so a floor at or below the
+            // natural size plans the pre-M29 bytes.
+            align_up_u64(
+                cfg.header_pad.as_ref().map_or(header_len as u64, |p| {
+                    p.floor_bytes().max(header_len as u64)
+                }),
+                8,
+            )
         } else {
             seg_fileoff
         };
@@ -2758,6 +2825,14 @@ fn place(
             if s.seg_name != seg_name || s.size == 0 {
                 continue;
             }
+            // M28: the named alignment floor (`-sectalign`) raises the
+            // section's alignment when it exceeds the input's — the max
+            // is the floor semantics, so a floor at or below the
+            // planned alignment plans the pre-M28 bytes. The raised
+            // exponent rides the placed section, so the header's
+            // `section_64.align` mirrors the decision.
+            let floor = cfg.sect_aligns.floor_for(seg_name, &s.name).unwrap_or(0);
+            s.align_log2 = s.align_log2.max(floor);
             cursor = align_up_u64(cursor, 1u64 << s.align_log2);
             s.vm_addr = cursor + base;
             if s.zerofill {
