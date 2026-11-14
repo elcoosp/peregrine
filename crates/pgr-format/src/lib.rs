@@ -38,7 +38,7 @@ pub use dyld_info::{BindEntry, BindOrdinal, DyldInfoCommand, RebaseEntry};
 pub use archive::{Archive, ArchiveIndexEntry, ArchiveMember, is_archive, parse_archive};
 pub use commands::{
     BuildToolVersion, BuildVersionCommand, DataInCodeEntry, DylibCommand, DylinkerCommand,
-    EntryPointCommand, LinkeditDataCommand, SourceVersionCommand, UuidCommand,
+    EntryPointCommand, LinkeditDataCommand, SourceVersionCommand, UuidCommand, read_data_in_code,
 };
 pub use error::FormatError;
 pub use header::MachHeader64;
