@@ -389,6 +389,30 @@ pub struct LinkConfig {
     /// sections are the input's, carried verbatim; `link_reloc`'s
     /// re-check backs the driver surface's earlier refusal).
     pub header_pad: Option<crate::header_pad::HeaderPad>,
+    /// M30 — the data-in-code carriage: the `LC_DATA_IN_CODE` streams
+    /// the inputs carry (the debugger's data-inside-code ranges) ride
+    /// the atom map onto the output `__LINKEDIT` (the TDD §8.2 order's
+    /// "function starts → data-in-code" slot, right after
+    /// `LC_FUNCTION_STARTS`). The default (`true`) carries the
+    /// metadata whenever an input names it — an entry-free corpus
+    /// plans the pre-M30 bytes exactly — and `-no_data_in_code` (a
+    /// driver-surface no-op since M1) is the suppression decision: no
+    /// command, no `__LINKEDIT` slot. There is no output-kind
+    /// conflict — every segmented output (executable, dylib, bundle)
+    /// can carry the stream; the relocatable path stops at Pass 2
+    /// (the decision simply never fires there).
+    pub data_in_code: bool,
+    /// M31 — the function-starts suppression: `-no_function_starts`
+    /// drops the output's `LC_FUNCTION_STARTS` command (no
+    /// `__LINKEDIT` slot, no ULEB stream, `sizeofcmds` 16 bytes
+    /// narrower). The flag rode the driver surface as an accepted
+    /// no-op since M1; the default (`true`) keeps every pre-M31 link
+    /// byte-identical — the command rides even when its stream is
+    /// empty (the always-carried shape the verifier validates only
+    /// when present). There is no output-kind conflict: every
+    /// segmented output can suppress, and the relocatable object's
+    /// header carries no function-starts command at all.
+    pub function_starts: bool,
 }
 
 impl Default for LinkConfig {
@@ -439,6 +463,8 @@ impl Default for LinkConfig {
             no_pie: false,
             sect_aligns: crate::sect_align::SectAlignTable::default(),
             header_pad: None,
+            data_in_code: true,
+            function_starts: true,
         }
     }
 }
@@ -606,6 +632,10 @@ pub struct LinkeditPlan {
     pub func_starts_off: u64,
     /// Function-starts size.
     pub func_starts_size: usize,
+    /// Data-in-code file offset (M30; 0 when absent).
+    pub data_in_code_off: u64,
+    /// Data-in-code size in bytes (0 when absent).
+    pub data_in_code_size: usize,
     /// Symbol table file offset.
     pub sym_off: u64,
     /// Symbol table size.
@@ -694,6 +724,11 @@ pub struct Layout {
     pub trie: Vec<u8>,
     /// Function-starts ULEB delta stream.
     pub func_starts: Vec<u8>,
+    /// Data-in-code entries (M30): the input `LC_DATA_IN_CODE` streams
+    /// translated onto the output `__TEXT`-relative offsets, encoded
+    /// (8 bytes per entry). Empty when no input carries the metadata
+    /// or the decision suppresses it.
+    pub data_in_code: Vec<u8>,
     /// String table bytes.
     pub strtab: Vec<u8>,
     /// Per-symbol `n_strx` (parallel to `symbols`).
@@ -1584,6 +1619,11 @@ pub fn layout(
     let mut converged: Option<PlacedState> = None;
     let mut final_plan: Option<FixupPlan> = None;
     let mut final_dyld_info: Option<crate::dyld_info::DyldInfoPlan> = None;
+    // M30: the data-in-code command's presence is a function of the
+    // decision and the inputs alone (the stream itself translates
+    // after placement) — computed once, shared by `place`'s sizing and
+    // `build_header`'s assembly so the two never disagree.
+    let emit_dice = cfg.data_in_code && objects.iter().any(|o| !o.data_in_code.is_empty());
     for _ in 0..16 {
         let mut state = place(
             cfg,
@@ -1599,6 +1639,7 @@ pub fn layout(
             &veneers,
             interner,
             init_entries,
+            emit_dice,
         )?;
         resolve_all(objects, &mut state, res, interner, cfg, fold, &init_specs)?;
         // M6 veneer scan: every out-of-range branch site plans one veneer.
@@ -1911,7 +1952,14 @@ pub fn layout(
     let str_offsets: Vec<u32> = symbols.iter().map(|sym| str_by_id[&sym.name.0]).collect();
 
     // ---- function starts ---------------------------------------------------------
-    let func_starts = build_func_starts(&state.sections, &symbols);
+    let func_starts = build_func_starts(cfg, &state.sections, &symbols);
+
+    // ---- data-in-code carriage (M30) --------------------------------------------
+    // The inputs' `LC_DATA_IN_CODE` streams translated onto the output
+    // `__TEXT`-relative offsets — the same atom map the symbols ride —
+    // and encoded for the `__LINKEDIT` slot that follows function
+    // starts (the TDD §8.2 order).
+    let data_in_code = build_data_in_code(cfg, objects, &state);
 
     // ---- indirect symbol table (M2): __got slots then __stubs slots ------
     // Entries name the symtab entry each pointer slot stands for (TDD
@@ -2059,6 +2107,11 @@ pub fn layout(
     } else {
         take(func_starts.len(), 4, &mut cur)
     };
+    let dice_off = if data_in_code.is_empty() {
+        0
+    } else {
+        take(data_in_code.len(), 4, &mut cur)
+    };
     let sym_off = take(symbols.len() * 16, 8, &mut cur);
     let str_off = take(strtab.len(), 8, &mut cur);
     let indirect_off = take(indirect_syms.len() * 4, 4, &mut cur);
@@ -2120,6 +2173,9 @@ pub fn layout(
         trie_len: trie.len(),
         func_off,
         func_len: func_starts.len(),
+        emit_dice,
+        dice_off,
+        dice_len: data_in_code.len(),
         sig_off,
         sig_size,
         entryoff,
@@ -2176,6 +2232,8 @@ pub fn layout(
             trie_size: trie.len(),
             func_starts_off: func_off,
             func_starts_size: func_starts.len(),
+            data_in_code_off: dice_off,
+            data_in_code_size: data_in_code.len(),
             sym_off,
             sym_size: symbols.len() * 16,
             str_off,
@@ -2199,6 +2257,7 @@ pub fn layout(
         symbols,
         trie,
         func_starts,
+        data_in_code,
         strtab,
         str_offsets,
         indirect_syms,
@@ -2584,6 +2643,7 @@ fn place(
     veneers: &[crate::thunks::VeneerSpec],
     interner: &Interner,
     init_entries: usize,
+    emit_dice: bool,
 ) -> Result<PlacedState, LinkError> {
     let (mut pieces_of_bucket, cstring_instances) = build_bucket_pieces(
         objects,
@@ -2746,7 +2806,7 @@ fn place(
     // Shared with `build_header` (one formula, one source of truth).
     let nsections = sections.iter().filter(|s| s.size > 0).count();
     // The fixups LC follows the payload presence (not the mirror section).
-    let sizeofcmds = command_size(cfg, nsections, fixup_lc);
+    let sizeofcmds = command_size(cfg, nsections, fixup_lc, emit_dice);
     let header_len = 32 + sizeofcmds;
     if header_len as u64 > PAGE_SIZE_16K {
         return Err(LinkError::Layout {
@@ -4001,7 +4061,16 @@ fn build_symtab(
 }
 
 /// Function-starts ULEB delta stream over `__TEXT,__text` symbols.
-fn build_func_starts(sections: &[PlacedSection], symbols: &[OutputSymbol]) -> Vec<u8> {
+/// M31: the suppression decision skips the stream entirely — no
+/// `__LINKEDIT` slot rides either.
+fn build_func_starts(
+    cfg: &LinkConfig,
+    sections: &[PlacedSection],
+    symbols: &[OutputSymbol],
+) -> Vec<u8> {
+    if !cfg.function_starts {
+        return Vec::new();
+    }
     let Some(t) = sections
         .iter()
         .position(|s| s.seg_name == "__TEXT" && s.name == "__text")
@@ -4028,6 +4097,95 @@ fn build_func_starts(sections: &[PlacedSection], symbols: &[OutputSymbol]) -> Ve
     for v in starts {
         out.extend_from_slice(&uleb(v - prev));
         prev = v;
+    }
+    out
+}
+
+/// Data-in-code carriage (M30): the inputs' `LC_DATA_IN_CODE` streams
+/// translated onto the output `__TEXT`-relative offset space and
+/// encoded (8 bytes per entry). The containment surface is the *placed
+/// piece list* — the strongest form of the same rule the symbols ride:
+/// an entry survives iff the bytes it annotates actually shipped. A
+/// dead-stripped function's entry has no placed span and drops; an
+/// ICF-folded duplicate's bytes are gone (the canonical copy carries
+/// its own entry) and drops; the surviving stream sorts by output
+/// offset (the LINKEDIT order the verifier's contract reads). Empty
+/// when the decision suppresses the carriage or no input names data.
+fn build_data_in_code(cfg: &LinkConfig, objects: &[InputObject], state: &PlacedState) -> Vec<u8> {
+    if !cfg.data_in_code {
+        return Vec::new();
+    }
+    let text_vmaddr = state
+        .segments
+        .iter()
+        .find(|s| s.name == "__TEXT")
+        .map_or(0, |s| s.vmaddr);
+    // The placed spans of every input `__text`: (file, section-relative
+    // start, size, output vaddr), sorted per file so each entry's
+    // containment is one binary search.
+    let mut spans: Vec<(u32, u64, u64, u64)> = Vec::new();
+    for fp in &state.flat {
+        if fp.piece.in_range.is_empty() || fp.piece.size == 0 {
+            continue;
+        }
+        let Some(obj) = objects.get(fp.piece.file.0 as usize) else {
+            continue;
+        };
+        let Some(sect) = obj.sections.get(fp.piece.in_sect) else {
+            continue;
+        };
+        if sect.segment != "__TEXT" || sect.name != "__text" {
+            continue;
+        }
+        let start = fp.piece.in_range.start.saturating_sub(sect.data.start);
+        spans.push((fp.piece.file.0, start, fp.piece.size, fp.addr));
+    }
+    spans.sort_unstable();
+    let mut entries: Vec<(u32, u16, u16)> = Vec::new();
+    for obj in objects {
+        if obj.data_in_code.is_empty() {
+            continue;
+        }
+        let spans_of_file = spans.partition_point(|s| s.0 < obj.file.0);
+        let spans_end = spans.partition_point(|s| s.0 <= obj.file.0);
+        let file_spans = &spans[spans_of_file..spans_end];
+        for e in &obj.data_in_code {
+            let value = u64::from(e.offset);
+            let end = value + u64::from(e.length);
+            // Strict containment in one placed span: the entry
+            // annotates bytes the output carries, never padding or a
+            // stripped neighbor's range.
+            let idx = file_spans
+                .partition_point(|s| s.1 <= value)
+                .saturating_sub(1);
+            let Some(&(f, start, size, vaddr)) = file_spans.get(idx) else {
+                continue;
+            };
+            if f != obj.file.0 || value < start || end > start + size {
+                continue;
+            }
+            let out = vaddr + (value - start);
+            entries.push((
+                u32::try_from(out.saturating_sub(text_vmaddr)).unwrap_or(u32::MAX),
+                e.length,
+                e.kind,
+            ));
+        }
+    }
+    entries.sort_unstable();
+    entries.dedup();
+    // The house observability convention: the contract line is inert
+    // until a subscriber installs (the binaries do under their debug
+    // envs).
+    tracing::debug!(
+        entries = entries.len(),
+        "the data-in-code stream rides the placed pieces onto the output"
+    );
+    let mut out = Vec::with_capacity(entries.len() * 8);
+    for (offset, length, kind) in entries {
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&kind.to_le_bytes());
     }
     out
 }
@@ -4099,6 +4257,14 @@ struct HeaderInputs {
     /// `LC_FUNCTION_STARTS`.
     func_off: u64,
     func_len: usize,
+    /// `LC_DATA_IN_CODE` (M30): the presence decision (shared with
+    /// `place`'s sizing — one predicate, two readers) and the slot the
+    /// translated stream took (0/0 when the stream is empty — the
+    /// command rides presence, like the always-carried
+    /// `LC_FUNCTION_STARTS`).
+    emit_dice: bool,
+    dice_off: u64,
+    dice_len: usize,
     /// `LC_CODE_SIGNATURE` (0 size = absent).
     sig_off: u64,
     sig_size: u64,
@@ -4188,7 +4354,8 @@ fn build_header(
         + 1 // LC_DYSYMTAB
         + u32::from(!matches!(fixup_lc, FixupLc::None))
         + 1 // LC_DYLD_EXPORTS_TRIE
-        + 1 // LC_FUNCTION_STARTS
+        + u32::from(cfg.function_starts) // LC_FUNCTION_STARTS (M31)
+        + u32::from(hi.emit_dice) // LC_DATA_IN_CODE (M30)
         + 1 // LC_UUID
         + u32::from(cfg.adhoc)
         + u32::try_from(hi.dylibs.len()).map_err(|_| LinkError::Internal {
@@ -4208,7 +4375,7 @@ fn build_header(
         })?
         + u32::from(hi.source_version.is_some());
     let nsections: usize = sections.iter().filter(|s| s.size > 0).count();
-    let sizeofcmds = command_size(cfg, nsections, fixup_lc);
+    let sizeofcmds = command_size(cfg, nsections, fixup_lc, hi.emit_dice);
     debug_assert_eq!(
         32 + sizeofcmds,
         32 + 72 * segments.len()
@@ -4225,7 +4392,8 @@ fn build_header(
             + 80 // LC_DYSYMTAB
             + fixup_lc.size()
             + 16 // LC_DYLD_EXPORTS_TRIE
-            + 16 // LC_FUNCTION_STARTS
+            + usize::from(cfg.function_starts) * 16 // LC_FUNCTION_STARTS (M31)
+            + if hi.emit_dice { 16 } else { 0 } // LC_DATA_IN_CODE (M30)
             + 24 // LC_UUID
             + if cfg.adhoc { 16 } else { 0 } // LC_CODE_SIGNATURE
             + hi.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
@@ -4502,11 +4670,22 @@ fn build_header(
     w32(&mut buf, lc + 8, hi.trie_off as u32);
     w32(&mut buf, lc + 12, hi.trie_len as u32);
     lc += 16;
-    w32(&mut buf, lc, pgr_format::consts::LC_FUNCTION_STARTS);
-    w32(&mut buf, lc + 4, 16);
-    w32(&mut buf, lc + 8, hi.func_off as u32);
-    w32(&mut buf, lc + 12, hi.func_len as u32);
-    lc += 16;
+    if cfg.function_starts {
+        w32(&mut buf, lc, pgr_format::consts::LC_FUNCTION_STARTS);
+        w32(&mut buf, lc + 4, 16);
+        w32(&mut buf, lc + 8, hi.func_off as u32);
+        w32(&mut buf, lc + 12, hi.func_len as u32);
+        lc += 16;
+    }
+    if hi.emit_dice {
+        // M30: the data-in-code command rides right after function
+        // starts — the TDD §8.2 `__LINKEDIT` order.
+        w32(&mut buf, lc, pgr_format::consts::LC_DATA_IN_CODE);
+        w32(&mut buf, lc + 4, 16);
+        w32(&mut buf, lc + 8, hi.dice_off as u32);
+        w32(&mut buf, lc + 12, hi.dice_len as u32);
+        lc += 16;
+    }
     let uuid_at = lc + 8;
     w32(&mut buf, lc, pgr_format::consts::LC_UUID);
     w32(&mut buf, lc + 4, 24);
@@ -4532,7 +4711,7 @@ fn pad16(name: &[u8]) -> [u8; 16] {
 
 /// The exact `sizeofcmds` — the single source of truth shared by `place`
 /// (section start math) and `build_header`.
-fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc) -> usize {
+fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice: bool) -> usize {
     let is_exec = cfg.filetype.is_executable();
     let emit_dylinker = is_exec && cfg.dynamic_linker;
     let loader_path = cfg.dylinker.as_ref().map_or("/usr/lib/dyld", |d| d.path());
@@ -4564,7 +4743,8 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc) -> usize 
         + usize::from(fixup_lc == FixupLc::Chained) * 16 // LC_DYLD_CHAINED_FIXUPS
         + usize::from(fixup_lc == FixupLc::DyldInfo) * 48 // LC_DYLD_INFO_ONLY
         + 16 // LC_DYLD_EXPORTS_TRIE
-        + 16 // LC_FUNCTION_STARTS
+        + usize::from(cfg.function_starts) * 16 // LC_FUNCTION_STARTS (M31)
+        + usize::from(emit_dice) * 16 // LC_DATA_IN_CODE (M30)
         + 24 // LC_UUID
         + usize::from(cfg.adhoc) * 16 // LC_CODE_SIGNATURE
 }
