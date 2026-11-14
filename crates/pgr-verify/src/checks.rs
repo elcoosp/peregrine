@@ -117,6 +117,10 @@ pub enum Check {
     /// The `__TEXT,__chain_starts` static mirror against the payload
     /// (executables).
     ChainStarts,
+    /// The `__TEXT,__unwind_info` synthesis contract (M34): the section
+    /// dyld's unwinder walks — header arrays, index, second-level
+    /// pages, LSDA rows — against the `__TEXT` the image maps.
+    Unwind,
     /// The `B`/`BL` branch-range decode pass (the veneer gate).
     BranchRange,
     /// The classic `LC_DYLD_INFO(_ONLY)` rebase/bind opcode streams.
@@ -128,13 +132,14 @@ pub enum Check {
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 9] = [
+    pub const ALL: [Check; 10] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
         Check::Linkedit,
         Check::Fixups,
         Check::ChainStarts,
+        Check::Unwind,
         Check::BranchRange,
         Check::DyldInfo,
         Check::Signature,
@@ -150,6 +155,7 @@ impl Check {
             Check::Linkedit => "linkedit",
             Check::Fixups => "fixups",
             Check::ChainStarts => "chain_starts",
+            Check::Unwind => "unwind",
             Check::BranchRange => "branch_range",
             Check::DyldInfo => "dyld_info",
             Check::Signature => "signature",
@@ -165,9 +171,10 @@ impl Check {
             Check::Linkedit => 3,
             Check::Fixups => 4,
             Check::ChainStarts => 5,
-            Check::BranchRange => 6,
-            Check::DyldInfo => 7,
-            Check::Signature => 8,
+            Check::Unwind => 6,
+            Check::BranchRange => 7,
+            Check::DyldInfo => 8,
+            Check::Signature => 9,
         }
     }
 }
@@ -303,6 +310,7 @@ struct StructureCheck;
 struct SegmentsCheck;
 struct SymbolsCheck;
 struct LinkeditCheck;
+struct UnwindCheck;
 struct FixupsCheck;
 struct ChainStartsCheck;
 struct BranchRangeCheck;
@@ -414,6 +422,21 @@ impl ImageCheck for FixupsCheck {
     }
 }
 
+impl ImageCheck for UnwindCheck {
+    fn check(&self) -> Check {
+        Check::Unwind
+    }
+    fn summary(&self) -> &'static str {
+        "__unwind_info synthesis contract: header arrays, index, second-level pages, LSDA rows"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::UnwindInfo]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        crate::unwind::check_unwind_info(ctx.bytes, ctx.parsed, ctx.report);
+    }
+}
+
 impl ImageCheck for ChainStartsCheck {
     fn check(&self) -> Check {
         Check::ChainStarts
@@ -502,13 +525,14 @@ impl ImageCheck for SignatureCheck {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 9] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 10] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
     &LinkeditCheck,
     &FixupsCheck,
     &ChainStartsCheck,
+    &UnwindCheck,
     &BranchRangeCheck,
     &DyldInfoCheck,
     &SignatureCheck,
