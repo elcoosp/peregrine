@@ -133,8 +133,16 @@ use sha2::{Digest, Sha256};
 /// sections the client named, never the pre-M28 input-only shape);
 /// **v20** appends the header-region floor (M29 — a present byte, then
 /// the `-headerpad` floor as a u64; a resident relink reserves the
-/// region the client named, never the pre-M29 natural size alone).
-pub const PROTO_VERSION: u32 = 20;
+/// region the client named, never the pre-M29 natural size alone);
+/// **v21** appends the data-in-code suppression (M30 — one byte naming
+/// whether the image drops the `LC_DATA_IN_CODE` command; a resident
+/// relink carries the stream decision the client asked for, never the
+/// pre-M30 carry-when-named default); **v22** appends the
+/// function-starts suppression (M31 — one byte naming whether the
+/// image drops the `LC_FUNCTION_STARTS` command; a resident relink
+/// carries the linkedit-metadata decision the client asked for, never
+/// the pre-M31 always-carried default).
+pub const PROTO_VERSION: u32 = 22;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -753,6 +761,17 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     } else {
         put_u8(out, 0);
     }
+    // M30 (v21 wire): the data-in-code suppression rides the tail after
+    // the header-region floor — one byte naming whether the image drops
+    // the `LC_DATA_IN_CODE` command; a resident relink carries the
+    // stream decision the client asked for, never the pre-M30
+    // carry-when-named default.
+    put_u8(out, u8::from(!cfg.data_in_code));
+    // M31 (v22 wire): the function-starts suppression rides the tail
+    // after the data-in-code suppression — one byte; a resident relink
+    // carries the linkedit-metadata decision the client asked for,
+    // never the pre-M31 always-carried default.
+    put_u8(out, u8::from(!cfg.function_starts));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -983,6 +1002,14 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     } else {
         Some(pgr_core::header_pad::HeaderPad::from_override(r.u64()?).map_err(|_| malformed())?)
     };
+    // M30 (v21 wire): the data-in-code suppression — one byte, no
+    // validation beyond the bool (there is no output-kind conflict;
+    // the carriage simply never fires on the relocatable path).
+    let no_data_in_code = r.u8()? != 0;
+    // M31 (v22 wire): the function-starts suppression — one byte, no
+    // validation beyond the bool (the verifier validates the payload
+    // only when the command is present).
+    let no_function_starts = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1041,6 +1068,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         no_pie,
         sect_aligns,
         header_pad,
+        data_in_code: !no_data_in_code,
+        function_starts: !no_function_starts,
     })
 }
 
@@ -1286,6 +1315,16 @@ mod tests {
                 pgr_core::header_pad::HeaderPad::from_override(0x2000)
                     .expect("the floor validates"),
             ),
+            // The v21 tail: a non-default data-in-code suppression must
+            // survive the round trip verbatim (a resident relink
+            // carries the stream decision the client asked for, never
+            // the pre-M30 carry-when-named default).
+            data_in_code: false,
+            // The v22 tail: a non-default function-starts suppression
+            // must survive the round trip verbatim (a resident relink
+            // carries the linkedit-metadata decision the client asked
+            // for, never the pre-M31 always-carried default).
+            function_starts: false,
             symbol_order: None,
         }
     }
@@ -1621,6 +1660,13 @@ mod tests {
             pgr_core::stack_size::StackSize::from_override(0x100_0000)
                 .expect("the reserve validates"),
         );
+        // The v21/v22 suppression bytes stay the default here — the
+        // needle's uniqueness is this test's precondition, not its
+        // subject (a non-default suppression byte after the header-pad
+        // floor's high zeros re-forms the needle against the empty
+        // request tail).
+        cfg.data_in_code = true;
+        cfg.function_starts = true;
         let body = LinkRequest {
             config: cfg,
             force_load: Vec::new(),
@@ -1642,6 +1688,11 @@ mod tests {
             if body[i..i + 8] == needle {
                 hits.push(i);
             }
+        }
+        eprintln!("BODY around 650..700: {:02x?}", &body[650..700]);
+        eprintln!("BODY len {}", body.len());
+        for h in &hits {
+            eprintln!("HIT at {} bytes {:02x?}", h, &body[*h..*h + 12]);
         }
         assert_eq!(hits.len(), 1, "the reserve rides exactly once");
         let mut bad = body;
@@ -2106,6 +2157,64 @@ mod tests {
                 .map(pgr_core::header_pad::HeaderPad::floor_bytes),
             Some(0x2000),
             "the floor crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_data_in_code_decision_round_trips() {
+        // v21: a non-default data-in-code suppression must survive the
+        // round trip verbatim (a resident relink carries the stream
+        // decision the client asked for, never the pre-M30
+        // carry-when-named default).
+        let cfg = rich_config();
+        assert!(!cfg.data_in_code, "rich_config carries the v21 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert!(
+            !back.config.data_in_code,
+            "the suppression crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_function_starts_decision_round_trips() {
+        // v22: a non-default function-starts suppression must survive
+        // the round trip verbatim (a resident relink carries the
+        // linkedit-metadata decision the client asked for, never the
+        // pre-M31 always-carried default).
+        let cfg = rich_config();
+        assert!(!cfg.function_starts, "rich_config carries the v22 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert!(
+            !back.config.function_starts,
+            "the suppression crosses byte-for-byte"
         );
     }
 
