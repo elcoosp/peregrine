@@ -81,8 +81,16 @@ mod tests {
         // the client named, never the pre-M22 absence — and the
         // config's symbol-alias list as a length-prefixed pair list
         // (M24, `-alias`): a resident relink exports the names the
-        // client asked for, never the pre-M24 absence.
-        assert_eq!(crate::PROTO_VERSION, 16);
+        // client asked for, never the pre-M24 absence — and the
+        // config's bundle-loader surface as a present-byte + name +
+        // export list (M25, `-bundle_loader`): a resident relink binds
+        // against the host the client named — and the config's loader
+        // path as a present-byte + path (M26, `-dylinker`): a resident
+        // relink execs the loader the client named, never the pre-M26
+        // default — and the config's PIE decision as a tail byte (M27,
+        // `-no_pie`): a resident relink carries the flag word the
+        // client asked for, never the PIE-always default.
+        assert_eq!(crate::PROTO_VERSION, 18);
     }
 
     #[test]
