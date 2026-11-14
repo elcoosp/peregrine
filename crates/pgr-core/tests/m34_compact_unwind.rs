@@ -14,8 +14,9 @@
 //!
 //! Gate matrix:
 //! * the carriage — an entry-carrying corpus links into an image whose
-//!   `__TEXT,__unwind_info` decodes to one regular-page entry per live
-//!   function, offset = placed vaddr − `__TEXT` vmaddr;
+//!   `__TEXT,__unwind_info` decodes to one second-level entry per live
+//!   function (since M35 the qualifying rows ride the compressed
+//!   family), offset = placed vaddr − `__TEXT` vmaddr;
 //! * the drops — a dead-stripped function's entry is gone, an
 //!   ICF-folded duplicate's entry lands once on the canonical copy;
 //! * the default — an entry-free corpus plans the pre-M34 bytes (no
@@ -146,9 +147,11 @@ fn text_base(layout: &pgr_core::layout::Layout) -> u32 {
     u32::try_from(text.vm_addr - text_vmaddr).expect("the base fits u32")
 }
 
-/// The byte offset of regular-page entry `i` inside a synthesized
-/// `__unwind_info` section (the layout the verifier walks: header, the
-/// arrays, the index, the page header, its entries).
+/// The byte offset of second-level entry `i` inside a synthesized
+/// `__unwind_info` section (the layout the verifier walks: header,
+/// the arrays, the index, the page header, its entries — since M35
+/// the qualifying rows ride the compressed family, so the rows are
+/// the 4-byte `(encodingIndex << 24) | functionOffset` words).
 fn entry_offset(section: &[u8], i: usize) -> usize {
     let index_off =
         u32::from_le_bytes([section[20], section[21], section[22], section[23]]) as usize;
@@ -159,10 +162,10 @@ fn entry_offset(section: &[u8], i: usize) -> usize {
         section[index_off + 7],
     ]) as usize;
     let entry_page = u16::from_le_bytes([section[page_off + 4], section[page_off + 5]]) as usize;
-    page_off + entry_page + i * 8
+    page_off + entry_page + i * 4
 }
 
-/// The regular-page entry count of a synthesized section.
+/// The second-level entry count of a synthesized section.
 fn entry_count(section: &[u8]) -> usize {
     let index_off =
         u32::from_le_bytes([section[20], section[21], section[22], section[23]]) as usize;
@@ -175,7 +178,8 @@ fn entry_count(section: &[u8]) -> usize {
     u16::from_le_bytes([section[page_off + 6], section[page_off + 7]]) as usize
 }
 
-/// The `functionOffset` of regular-page entry `i`.
+/// The `functionOffset` of second-level entry `i` (the low 24 bits of
+/// the compressed word).
 fn entry_function_offset(section: &[u8], i: usize) -> u32 {
     let at = entry_offset(section, i);
     u32::from_le_bytes([
@@ -183,7 +187,7 @@ fn entry_function_offset(section: &[u8], i: usize) -> u32 {
         section[at + 1],
         section[at + 2],
         section[at + 3],
-    ])
+    ]) & 0x00FF_FFFF
 }
 
 // ---- the carriage ------------------------------------------------------------
