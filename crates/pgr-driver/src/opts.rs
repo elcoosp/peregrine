@@ -176,6 +176,17 @@ pub struct Options {
     /// against the core seam's grammar at parse time; the output-kind
     /// conflict is `finish`'s (it sees the whole surface).
     pub image_base_explicit: bool,
+    /// M28: the `-sectalign` decisions staged in command order. `finish`
+    /// inserts them into the config (the core seam validates the value
+    /// and refuses a twice-named (segment, section)) after the
+    /// relocatable conflict gate sees the whole surface — a `-sectalign`
+    /// on `-r` is a refused conflict, never a silently dropped flag.
+    pub sect_align_stage: Vec<pgr_core::sect_align::SectAlign>,
+    /// M29: `-headerpad` was passed explicitly. The value is validated
+    /// against the core seam's grammar at `finish` (zero names the
+    /// absence of the knob, an unaligned value breaks the load-command
+    /// alignment); the output-kind conflict is `finish`'s too.
+    pub headerpad_explicit: bool,
 }
 
 impl Default for Options {
@@ -220,6 +231,8 @@ impl Default for Options {
             seg_prot_stage: Vec::new(),
             stack_size_explicit: false,
             image_base_explicit: false,
+            sect_align_stage: Vec::new(),
+            headerpad_explicit: false,
         }
     }
 }
@@ -331,6 +344,60 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     SegProtConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-sectalign` decision the core seam refuses (M28): the
+    /// grammar (a section-bearing segment, a name that survives the
+    /// 16-byte `section_64` field, a power of two up to the 0x4000
+    /// page). The verdict is the core seam's refusal (it names the
+    /// fix); the help restates the grammar.
+    #[error("-sectalign: {detail}")]
+    #[diagnostic(help(
+        "the alignment is decimal or 0x-hex and a power of two up to 0x4000; the \
+         segment is one of __TEXT, __DATA_CONST, __DATA and the section name fits \
+         the 16-byte section_64 field"
+    ))]
+    SectAlignValue {
+        /// The core seam's refusal (grammar, unknown segment, ceiling).
+        detail: String,
+    },
+    /// A `-sectalign` surface conflict (M28): the relocatable output
+    /// plans no segments and carries its input sections verbatim —
+    /// nothing for a floor to land on — or one (segment, section) pair
+    /// is named twice. The verdict names the shape conflict; the help
+    /// is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    SectAlignConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-headerpad` value the grammar refuses (M29): the floor is
+    /// non-zero (zero names the absence of the knob), a multiple of 8
+    /// (the load-command alignment) and within the 16 KiB first page.
+    /// The core seam's refusal rides the help — the grammar the flag
+    /// accepts, not just the verdict.
+    #[error("invalid value for -headerpad: {value}")]
+    #[diagnostic(help("{message}"))]
+    HeaderPadValue {
+        /// The refused value as written.
+        value: String,
+        /// The core seam's refusal (the fix).
+        message: String,
+    },
+    /// A `-headerpad` surface conflict (M29): the relocatable output
+    /// plans no segments and carries its input sections verbatim —
+    /// nothing for a reserved header region to land on. The verdict
+    /// names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    HeaderPadConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -906,6 +973,11 @@ fn apply_flag(
                 flag: arg.into(),
                 value: v,
             })?;
+            // M29: the flag no longer rides as an advisory no-op — the
+            // explicit marker lets `finish` refuse a `-headerpad 0`
+            // (the absence of the knob, not a decision) and gate the
+            // relocatable conflict on the whole surface.
+            opts.headerpad_explicit = true;
         }
         "-segalign" => {
             let v = next_value(args, i, arg)?;
@@ -1257,6 +1329,29 @@ fn apply_flag(
             })?;
             opts.seg_prot_stage.push((seg, prot));
         }
+        // M28: the section-alignment floor (the packing engine's
+        // `-sectalign <seg> <sect> <align>` decision). The same
+        // validation the core seam pays runs here, so the refusal names
+        // the grammar; the relocatable conflict is `finish`'s (it sees
+        // the whole surface). The value is decimal or `0x`-hex (the
+        // `-stack_size` grammar) — a bare integer is decimal, so ld64's
+        // bare-hex spelling refuses instead of silently re-reading.
+        "-sectalign" => {
+            let seg_raw = next_value(args, i, arg)?;
+            let sect_raw = next_value(args, i, arg)?;
+            let value_raw = next_value(args, i, arg)?;
+            let value = parse_number(&value_raw).ok_or_else(|| OptsError::SectAlignValue {
+                detail: format!(
+                    "{value_raw} is not a number — the alignment is decimal or \
+                         0x-hex (e.g. 4096 or 0x1000)"
+                ),
+            })?;
+            let decision = pgr_core::sect_align::SectAlign::from_flag(&seg_raw, &sect_raw, value)
+                .map_err(|e| OptsError::SectAlignValue {
+                detail: e.to_string(),
+            })?;
+            opts.sect_align_stage.push(decision);
+        }
         // M18: the stack reserve (the executable's `LC_MAIN.stacksize`).
         // The same validation the core seam pays runs here, so the
         // refusal names the grammar; the output-kind conflict is
@@ -1538,6 +1633,60 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 fix: "one -segprot per segment".into(),
             });
         }
+    }
+    // M28: the section-alignment floors are a packing-engine decision —
+    // `-r` preserves input sections verbatim and plans no segments (the
+    // M10 rung-1 contract), so a named floor has nothing to land on. An
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one; the staged decisions then insert into the
+    // config, where the core seam refuses a twice-named pair.
+    if !opts.sect_align_stage.is_empty()
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::SectAlignConflict {
+            verdict: "-sectalign names a packing-engine alignment floor, but the \
+                      relocatable output plans no segments and carries its input \
+                      sections verbatim"
+                .into(),
+            fix: "drop -sectalign or link a segmented output (an executable, dylib or \
+                  bundle)"
+                .into(),
+        });
+    }
+    for decision in opts.sect_align_stage.drain(..) {
+        if let Err(err) = opts.config.sect_aligns.push(decision) {
+            return Err(OptsError::SectAlignConflict {
+                verdict: err.to_string(),
+                fix: "one -sectalign per (segment, section)".into(),
+            });
+        }
+    }
+    // M29: the header-region floor is a segmented-output decision —
+    // `-r` preserves input sections verbatim and plans no segments (the
+    // M10 rung-1 contract), so a named floor has nothing to land on.
+    // An explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one; the flag the surface carried as an advisory
+    // no-op since M1 now names the decision the packing loop reads.
+    if opts.headerpad_explicit {
+        if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+            return Err(OptsError::HeaderPadConflict {
+                verdict: "-headerpad reserves the header region the load commands \
+                          occupy, but the relocatable output plans no segments and \
+                          carries its input sections verbatim"
+                    .into(),
+                fix: "drop -headerpad or link a segmented output (an executable, dylib \
+                      or bundle)"
+                    .into(),
+            });
+        }
+        opts.config.header_pad = Some(
+            pgr_core::header_pad::HeaderPad::from_override(opts.headerpad).map_err(|e| {
+                OptsError::HeaderPadValue {
+                    value: format!("{:#x}", opts.headerpad),
+                    message: e.to_string(),
+                }
+            })?,
+        );
     }
     // M18: the stack reserve is an executable decision — `LC_MAIN`
     // exists there only (the M3 contract: dylibs, bundles and the
