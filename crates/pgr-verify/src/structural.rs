@@ -1577,5 +1577,32 @@ pub(crate) fn check_symbol_table(bytes: &[u8], img: &ParsedImage<'_>, report: &m
                 ));
             }
         }
+        // M33: the extdef subrange is the range dyld reads for defined
+        // externals — every row it claims must carry `N_EXT`. A row
+        // whose `N_TYPE` carries no `N_EXT` inside the range (the
+        // converted-private shape belongs in the locals range) is the
+        // dysymtab lie the fixture knob builds on purpose.
+        let extdef_end = dys.iextdefsym.saturating_add(dys.nextdefsym).min(st.nsyms);
+        for i in dys.iextdefsym..extdef_end {
+            let off = st.symoff as usize + i as usize * 16;
+            let sym: Nlist64 = match pgr_format::cursor::pod_read_unaligned_at(bytes, off) {
+                Ok(s) => s,
+                Err(e) => {
+                    report.issues.push(issue_from(&e, Code::SymbolTable));
+                    return;
+                }
+            };
+            if sym.n_type & pgr_format::consts::N_EXT == 0 {
+                report.issues.push(Issue::error(
+                    Code::SymbolTable,
+                    format!(
+                        "symbol {i}: the extdef subrange claims a row whose N_TYPE carries no \
+                         N_EXT — the range dyld reads must agree with the rows (the \
+                         converted-private shape belongs in the locals range)"
+                    ),
+                    Some(off as u64),
+                ));
+            }
+        }
     }
 }
