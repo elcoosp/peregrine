@@ -26,9 +26,9 @@ use pgr_format::consts::{
     ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
     ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
     ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED, CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64,
-    LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PLATFORM_MACOS,
-    RELOC_LENGTH_4, RELOC_LENGTH_8, S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS, S_REGULAR,
-    S_ZEROFILL, SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
+    LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF,
+    PLATFORM_MACOS, RELOC_LENGTH_4, RELOC_LENGTH_8, S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS,
+    S_REGULAR, S_ZEROFILL, SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::cursor::pod_read_unaligned_at;
 use pgr_format::reloc::RelocationInfo;
@@ -321,6 +321,17 @@ pub enum ObjectSymbol {
         /// `N_WEAK_DEF` semantics.
         weak: bool,
     },
+    /// Private external definition (`N_SECT | N_EXT | N_PEXT` — the
+    /// compilers' `.private_extern`, the input bit the M33 decision
+    /// reads).
+    DefinedPrivate {
+        /// Symbol name.
+        name: String,
+        /// 0-based index into the builder's section list.
+        section_index: usize,
+        /// Section-relative address.
+        value: u64,
+    },
     /// Undefined external reference.
     Undefined {
         /// Symbol name.
@@ -524,28 +535,36 @@ impl ObjectBuilder {
             }
         }
         for (decl_i, sym) in self.symbols.iter().enumerate() {
-            if let ObjectSymbol::Defined {
-                name,
-                section_index,
-                value,
-                weak,
-            } = sym
-            {
-                let mut n_desc = if *weak { N_WEAK_DEF } else { 0 };
-                if self.alt_entries.contains(&decl_i) {
-                    n_desc |= pgr_format::consts::N_ALT_ENTRY;
-                }
-                let blob_addr = placed.get(*section_index).map_or(0, |(addr, _)| *addr);
-                push_sym(
-                    &mut strtab,
-                    &mut entries,
+            let (name, section_index, value, weak, n_type) = match sym {
+                ObjectSymbol::Defined {
                     name,
-                    N_EXT | N_SECT,
-                    (*section_index + 1) as u8,
-                    n_desc,
-                    blob_addr + *value,
-                );
+                    section_index,
+                    value,
+                    weak,
+                } => (name, *section_index, *value, *weak, N_EXT | N_SECT),
+                // M33: the private-extern input bit — the compilers'
+                // `.private_extern` the layout's decision reads.
+                ObjectSymbol::DefinedPrivate {
+                    name,
+                    section_index,
+                    value,
+                } => (name, *section_index, *value, false, N_EXT | N_SECT | N_PEXT),
+                _ => continue,
+            };
+            let mut n_desc = if weak { N_WEAK_DEF } else { 0 };
+            if self.alt_entries.contains(&decl_i) {
+                n_desc |= pgr_format::consts::N_ALT_ENTRY;
             }
+            let blob_addr = placed.get(section_index).map_or(0, |(addr, _)| *addr);
+            push_sym(
+                &mut strtab,
+                &mut entries,
+                name,
+                n_type,
+                (section_index + 1) as u8,
+                n_desc,
+                blob_addr + value,
+            );
         }
         for sym in &self.symbols {
             match sym {
