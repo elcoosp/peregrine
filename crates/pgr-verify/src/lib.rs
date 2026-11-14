@@ -54,6 +54,7 @@ pub mod pair;
 pub mod report_json;
 pub mod signature;
 pub mod structural;
+pub mod unwind;
 
 pub use baseline::{BaselineDelta, CodeIdentity, IssueIdentity, IssueKey, OffsetIdentity};
 pub use checks::{Check, CheckContext, CheckSet, CheckSetError, ImageCheck, image_checks};
@@ -124,6 +125,10 @@ pub enum Code {
     /// deployment target sits below the platform's chained-fixups floor
     /// (M10 rung 3) — the target's dyld cannot walk the chains.
     FixupsFloor,
+    /// The `__TEXT,__unwind_info` section is malformed or names offsets
+    /// the image does not carry (M34) — the section dyld's unwinder
+    /// walks must be internally consistent and annotate `__TEXT`.
+    UnwindInfo,
     /// Suspicious but non-fatal condition.
     Suspicious,
 }
@@ -132,7 +137,7 @@ impl Code {
     /// Every issue code, in declaration order (the `report_json` reader
     /// matches canonical names against this table; tooling can enumerate
     /// the surface the way `Check::ALL` enumerates the families).
-    pub const ALL: [Code; 19] = [
+    pub const ALL: [Code; 20] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -151,6 +156,7 @@ impl Code {
         Code::BranchRange,
         Code::DyldInfoStreams,
         Code::FixupsFloor,
+        Code::UnwindInfo,
         Code::Suspicious,
     ];
 
@@ -176,6 +182,7 @@ impl Code {
             Code::BranchRange => "branch_range",
             Code::DyldInfoStreams => "dyld_info_streams",
             Code::FixupsFloor => "fixups_floor",
+            Code::UnwindInfo => "unwind_info",
             Code::Suspicious => "suspicious",
         }
     }
