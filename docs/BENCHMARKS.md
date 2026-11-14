@@ -507,7 +507,7 @@ one string swap in an existing command, one bit in one header word, one packing-
 alignment raise, and one reservation floor whose default plans the pre-knob bytes. Their
 medians land in this table with the next recording pass on the dev sandbox (the same
 convention the hardware gates carry: numbers only from the rig that measured the rest —
-a dev-sandbox re-measure under a different host would not be comparable). The M30–M31 rows ride the same shape (`data_in_code`, `func_starts` — commands in the inventory above): the carriage is one Pass-1 decode, one containment check and 8 `__LINKEDIT` bytes per entry, and the suppression is one dropped command — parity is the honest expectation, the bench pins it. Their medians land in this table with the next recording pass.
+a dev-sandbox re-measure under a different host would not be comparable). The M30–M31 rows ride the same shape (`data_in_code`, `func_starts` — commands in the inventory above): the carriage is one Pass-1 decode, one containment check and 8 `__LINKEDIT` bytes per entry, and the suppression is one dropped command — parity is the honest expectation, the bench pins it. Their medians land in this table with the next recording pass. The M32–M33 rows (`uuid`, `keep_pext` — commands in the inventory above) ride the same shape: the suppression/keep is one dropped command or one symtab-range split over the same corpus — parity is the honest expectation, the bench pins it.
 
 **Platform word (M10 rung 2)** — one rebase-slot corpus per platform at its floor (20 samples);
 the encoding decision is one integer compare in Pass 3:
