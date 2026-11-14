@@ -391,6 +391,33 @@ pub fn link_reloc(
                 .into(),
         });
     }
+    // M28: the section-alignment floors are a packing-engine decision —
+    // the relocatable output plans no segments and carries its input
+    // sections verbatim, so a named floor has nothing to land on. The
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either.
+    if !cfg.sect_aligns.is_empty() {
+        return Err(LinkError::Layout {
+            message: "-sectalign names a packing-engine alignment floor, but the \
+                      relocatable output plans no segments and carries its input \
+                      sections verbatim — drop -sectalign or link a segmented output"
+                .into(),
+        });
+    }
+    // M29: the header-region floor is a packing decision — the
+    // relocatable output plans no segments and carries its input
+    // sections verbatim, so a named floor has nothing to land on. The
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either.
+    if cfg.header_pad.is_some() {
+        return Err(LinkError::Layout {
+            message: "-headerpad reserves the header region the load commands occupy, \
+                      but the relocatable output plans no segments and carries its \
+                      input sections verbatim — drop -headerpad or link a segmented \
+                      output"
+                .into(),
+        });
+    }
     let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None)?;
     let (objects, interner, _export_ids, _loader_ids) =
         pull_and_intern(objects, archives, cfg, parallel, None, false)?;
