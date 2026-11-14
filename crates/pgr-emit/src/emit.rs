@@ -204,6 +204,16 @@ fn write_linkedit(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
             "function starts",
         )?;
     }
+    if le.data_in_code_size > 0 {
+        // M30: the data-in-code chunk rides right after function
+        // starts — the TDD §8.2 `__LINKEDIT` order.
+        put_chunk(
+            buf,
+            le.data_in_code_off,
+            &layout.data_in_code,
+            "data-in-code",
+        )?;
+    }
     put_chunk(buf, le.sym_off, &symtab_bytes(layout), "symbol table")?;
     put_chunk(buf, le.str_off, &layout.strtab, "string table")?;
     if le.indirect_size > 0 {
