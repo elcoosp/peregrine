@@ -120,8 +120,11 @@ pub(crate) const MAGIC: &[u8; 8] = b"PGRINC1\0";
 /// wiring): the relink's Pass 2 plans through the recorded decisions
 /// (`pgr_core::resolve_reuse`) instead of re-deciding every external, and
 /// falls back to the full resolve whenever the shape guard refuses;
-/// v1–v4 records decode to `None` and re-record.
-pub const FORMAT_VERSION: u32 = 5;
+/// v1–v4 records decode to `None` and re-record. **v6** adds the
+/// data-in-code chunk to the recorded `__LINKEDIT` plan (M30 — the
+/// carriage's slot rides the plan like every other chunk); v1–v5
+/// records decode to `None` and re-record.
+pub const FORMAT_VERSION: u32 = 6;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -866,6 +869,8 @@ impl LinkRecord {
         e(&mut p, self.linkedit.trie_size as u64);
         e(&mut p, self.linkedit.func_starts_off);
         e(&mut p, self.linkedit.func_starts_size as u64);
+        e(&mut p, self.linkedit.data_in_code_off);
+        e(&mut p, self.linkedit.data_in_code_size as u64);
         e(&mut p, self.linkedit.sym_off);
         e(&mut p, self.linkedit.sym_size as u64);
         e(&mut p, self.linkedit.str_off);
@@ -1008,6 +1013,8 @@ impl LinkRecord {
             trie_size: usize::try_from(d.u64()?).ok()?,
             func_starts_off: d.u64()?,
             func_starts_size: usize::try_from(d.u64()?).ok()?,
+            data_in_code_off: d.u64()?,
+            data_in_code_size: usize::try_from(d.u64()?).ok()?,
             sym_off: d.u64()?,
             sym_size: usize::try_from(d.u64()?).ok()?,
             str_off: d.u64()?,
