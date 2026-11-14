@@ -252,6 +252,9 @@ pub(crate) struct ObjectParts {
     pub symbol_names: Vec<Vec<u8>>,
     /// D1 atom ranges per section.
     pub atoms: Vec<Vec<core::ops::Range<u64>>>,
+    /// M30 — the cached parse's `LC_DATA_IN_CODE` entries (the same
+    /// `__text`-section-relative stream the fresh parse carries).
+    pub data_in_code: Vec<pgr_format::DataInCodeEntry>,
     /// `MH_SUBSECTIONS_VIA_SYMBOLS`.
     pub subsections_via_symbols: bool,
     /// True for archive members.
@@ -289,6 +292,13 @@ pub struct InputObject {
     /// sorted). Empty when [`Self::compute_atoms`] was not run or the header
     /// flag is absent.
     pub atoms: Vec<Vec<core::ops::Range<u64>>>,
+    /// M30 — the object's `LC_DATA_IN_CODE` entries: the data ranges the
+    /// debugger reads inside `__text`, **`__text`-section-relative** (the
+    /// input convention; the layout translates them onto the output
+    /// `__TEXT`-relative stream). Validated at parse — a stream the
+    /// object cannot vouch for refuses with the typed error, never
+    /// rides silently.
+    pub data_in_code: Vec<pgr_format::DataInCodeEntry>,
 }
 
 /// One parallel-decode worker result (the symbol table slice).
@@ -310,6 +320,7 @@ impl InputObject {
             archive_name: p.archive_name,
             subsections_via_symbols: p.subsections_via_symbols,
             atoms: p.atoms,
+            data_in_code: p.data_in_code,
         }
     }
 
@@ -341,6 +352,7 @@ impl InputObject {
         // ---- sweep 1: sections + symtab command ----------------------------
         let mut sections: Vec<InputSection> = Vec::new();
         let mut symtab = None;
+        let mut dice: Vec<pgr_format::DataInCodeEntry> = Vec::new();
         let mut it =
             LoadCommandIter::new(&bytes, MachHeader64::SIZE, header.ncmds, header.sizeofcmds)
                 .map_err(|e| fail(format!("load command walk failed: {e}")))?;
@@ -365,7 +377,48 @@ impl InputObject {
                             .map_err(|e| fail(format!("LC_SYMTAB: {e}")))?,
                     );
                 }
+                // M30: the data-in-code stream the object carries —
+                // decoded through the format reader (the payload-width
+                // refusal rides that gate) and validated against the
+                // section table once the walk completes.
+                LoadCommandKind::LinkeditData(pgr_format::consts::LC_DATA_IN_CODE) => {
+                    let lc = pgr_format::LinkeditDataCommand::parse(cmd.bytes)
+                        .map_err(|e| fail(format!("LC_DATA_IN_CODE: {e}")))?;
+                    let payload = lc
+                        .data(&bytes)
+                        .map_err(|e| fail(format!("LC_DATA_IN_CODE payload: {e}")))?;
+                    dice = pgr_format::read_data_in_code(payload)
+                        .map_err(|e| fail(format!("data-in-code: {e}")))?;
+                }
                 _ => {}
+            }
+        }
+
+        // ---- data-in-code validation (M30) ---------------------------------
+        // The entries annotate `__text`: without the section there is
+        // nothing to annotate, and a range past the section's bytes
+        // annotates data the object does not carry. Both refuse with
+        // the fix — the stream never rides silently.
+        if !dice.is_empty() {
+            let text = sections
+                .iter()
+                .find(|s| s.segment == "__TEXT" && s.name == "__text");
+            let Some(text) = text else {
+                return Err(fail(
+                    "data-in-code entries annotate __text, but the object carries no __text \
+                     section — drop the LC_DATA_IN_CODE stream or link an object with code"
+                        .into(),
+                ));
+            };
+            for (i, e) in dice.iter().enumerate() {
+                if u64::from(e.offset) + u64::from(e.length) > text.size {
+                    return Err(fail(format!(
+                        "data-in-code entry {i} (offset {:#x}, {} bytes) is beyond the \
+                         __text section ({:#x} bytes) — the stream must annotate bytes \
+                         the object carries",
+                        e.offset, e.length, text.size
+                    )));
+                }
             }
         }
 
@@ -396,6 +449,7 @@ impl InputObject {
             subsections_via_symbols: header.flags & pgr_format::consts::MH_SUBSECTIONS_VIA_SYMBOLS
                 != 0,
             atoms: Vec::new(),
+            data_in_code: dice,
         };
         Ok(obj)
     }
