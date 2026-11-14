@@ -361,6 +361,13 @@ pub struct ObjectBuilder {
     /// Declaration indices marked `N_ALT_ENTRY` (they merge into the
     /// preceding atom instead of starting one).
     alt_entries: std::collections::BTreeSet<usize>,
+    /// `LC_DATA_IN_CODE` entries (M30): data ranges inside `__text`,
+    /// **`__text`-section-relative** (the input-object convention the
+    /// linker translates from — the output image's entries are
+    /// `__TEXT`-segment-relative). The builder emits what it is told;
+    /// the linker's parse validation refuses the shapes that cannot
+    /// translate (beyond `__text`, entries without a `__text`).
+    data_in_code: Vec<pgr_format::DataInCodeEntry>,
 }
 
 impl ObjectBuilder {
@@ -374,6 +381,7 @@ impl ObjectBuilder {
             build_version: true,
             subsections: false,
             alt_entries: std::collections::BTreeSet::new(),
+            data_in_code: Vec::new(),
         }
     }
 
@@ -417,6 +425,16 @@ impl ObjectBuilder {
         self
     }
 
+    /// Names the object's `LC_DATA_IN_CODE` entries (M30): data ranges
+    /// inside `__text`, `__text`-section-relative (the convention the
+    /// linker's carriage translates from). Emits what it is told — the
+    /// linker's parse validation is the gate.
+    #[must_use]
+    pub fn set_data_in_code(mut self, entries: Vec<pgr_format::DataInCodeEntry>) -> Self {
+        self.data_in_code = entries;
+        self
+    }
+
     /// The builder's object name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -448,6 +466,11 @@ impl ObjectBuilder {
         let mut sizeofcmds = 72 + 80 * self.sections.len() + 24;
         if self.build_version {
             sizeofcmds += 32;
+            ncmds += 1;
+        }
+        if !self.data_in_code.is_empty() {
+            // M30: the data-in-code carriage — one linkedit-data command.
+            sizeofcmds += 16;
             ncmds += 1;
         }
         let header_len = 32 + sizeofcmds;
@@ -559,7 +582,16 @@ impl ObjectBuilder {
         }
         let nsyms = entries.len() as u32;
         let stroff = symoff + u64::from(nsyms) * 16;
-        let file_len = stroff + strtab.len() as u64;
+        // M30: the data-in-code payload rides the file tail (after the
+        // string table), 4-aligned like every linkedit-data stream.
+        let mut dice_bytes = Vec::with_capacity(self.data_in_code.len() * 8);
+        for e in &self.data_in_code {
+            dice_bytes.extend_from_slice(&e.offset.to_le_bytes());
+            dice_bytes.extend_from_slice(&e.length.to_le_bytes());
+            dice_bytes.extend_from_slice(&e.kind.to_le_bytes());
+        }
+        let dice_off = align_up(stroff + strtab.len() as u64, 4);
+        let file_len = dice_off + dice_bytes.len() as u64;
 
         // ---- assemble ------------------------------------------------------
         let mut buf = vec![0u8; file_len as usize];
@@ -640,6 +672,15 @@ impl ObjectBuilder {
         w32(&mut buf, lc + 16, stroff as u32);
         w32(&mut buf, lc + 20, strtab.len() as u32);
         lc += 24;
+        if !self.data_in_code.is_empty() {
+            // M30: the data-in-code command (the entry stream's file
+            // position rides the payload tail below).
+            w32(&mut buf, lc, pgr_format::consts::LC_DATA_IN_CODE);
+            w32(&mut buf, lc + 4, 16);
+            w32(&mut buf, lc + 8, dice_off as u32);
+            w32(&mut buf, lc + 12, dice_bytes.len() as u32);
+            lc += 16;
+        }
         debug_assert_eq!(lc, header_len, "load command assembly must match sizing");
 
         // ---- section data --------------------------------------------------
@@ -685,6 +726,10 @@ impl ObjectBuilder {
         }
         let st = stroff as usize;
         buf[st..st + strtab.len()].copy_from_slice(&strtab);
+        if !dice_bytes.is_empty() {
+            let at = dice_off as usize;
+            buf[at..at + dice_bytes.len()].copy_from_slice(&dice_bytes);
+        }
 
         Ok(buf)
     }
