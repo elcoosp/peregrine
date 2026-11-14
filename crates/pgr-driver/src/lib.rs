@@ -1691,9 +1691,17 @@ pub fn usage() -> String {
     s.push_str("                               or arm64e (M10 rung 4); shapes the\n");
     s.push_str("                               chained-fixup words, not the fixups\n");
     s.push_str("  -adhoc | -no_adhoc           ad-hoc code signature (default on)\n");
-    s.push_str("  -headerpad <n>               reserve header space (advisory)\n");
+    s.push_str("  -headerpad <n>               reserve header space (M29): the region\n");
+    s.push_str("                               the header and its load commands\n");
+    s.push_str("                               occupy grows to the named floor (a\n");
+    s.push_str("                               non-zero multiple of 8 up to 0x4000);\n");
+    s.push_str("                               refused with -r\n");
     s.push_str("  -segalign <n>                0x1000 or 0x4000 (default 0x4000)\n");
     s.push_str("  -sectcreate <seg> <sect> <file>   place file bytes in a section\n");
+    s.push_str("  -sectalign <seg> <sect> <n>  raise a named section's alignment\n");
+    s.push_str("                               (M28): the floor is the max of the\n");
+    s.push_str("                               input's and the named power of two\n");
+    s.push_str("                               (up to 0x4000); refused with -r\n");
     s.push_str("  -map <path>                  write the link map (segments,\n");
     s.push_str("                               sections, symbols — the placed\n");
     s.push_str("                               image's report; refused with -r,\n");
