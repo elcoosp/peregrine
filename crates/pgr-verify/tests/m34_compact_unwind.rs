@@ -11,10 +11,11 @@
 //!   layout) verifies strict;
 //! * the broken shapes gate — a truncated header, a wrong version, an
 //!   out-of-bounds array, an unsorted index, a missing terminator, an
-//!   unsupported page kind (the M35 compressed pages are refused until
-//!   they walk), an unsorted or out-of-bounds entry stream, an
-//!   encoding whose arm64 mode nibble no arm64 unwinder defines, a
-//!   personality index naming no slot, an unsorted LSDA array;
+//!   unsupported page kind, an unsorted or out-of-bounds entry
+//!   stream, an encoding whose arm64 mode nibble no arm64 unwinder
+//!   defines, a personality index naming no slot, an unsorted LSDA
+//!   array (the compressed second-level family walks since M35 — its
+//!   gates ride `m35_unwind_compressed.rs`);
 //! * the absence — an image without the section stays clean (the
 //!   entry-free corpus is the default, never a finding);
 //! * the selection — `unwind` joins the `--checks` surface (the M12
@@ -275,9 +276,10 @@ fn an_unsorted_index_is_an_error() {
 }
 
 #[test]
-fn a_compressed_page_kind_is_refused_until_it_walks() {
-    // Hand-build a one-page section whose page kind is 3 (the M35
-    // compressed shape the verifier does not walk yet).
+fn an_unknown_page_kind_is_an_error() {
+    // Hand-build a one-page section whose page kind is 9 — neither
+    // the regular family (2) nor the compressed family (3) dyld's
+    // unwinder walks.
     let entries = [(0u32, FRAME_ENCODING)];
     let personalities: [u32; 0] = [];
     let mut section = honest_unwind_info(&entries, &personalities, &[]);
@@ -293,7 +295,7 @@ fn a_compressed_page_kind_is_refused_until_it_walks() {
         section[index_off + 6],
         section[index_off + 7],
     ]) as usize;
-    section[page_off..page_off + 4].copy_from_slice(&3u32.to_le_bytes());
+    section[page_off..page_off + 4].copy_from_slice(&9u32.to_le_bytes());
     let img = exec_with_unwind(section)
         .build()
         .expect("the fixture builds");
@@ -301,8 +303,8 @@ fn a_compressed_page_kind_is_refused_until_it_walks() {
     assert!(
         report.issues.iter().any(|i| i.code == Code::UnwindInfo
             && i.severity == Severity::Error
-            && i.message.contains("compressed")),
-        "the compressed page kind refuses typed: {:?}",
+            && i.message.contains("kind")),
+        "the unknown page kind refuses typed: {:?}",
         report.issues
     );
 }
