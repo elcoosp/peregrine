@@ -235,7 +235,7 @@ const _: () = assert!(core::mem::size_of::<SourceVersionCommand>() == 16);
 
 /// The 8-byte `data_in_code_entry`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DataInCodeEntry {
     /// Offset from the start of `__TEXT`.
     pub offset: u32,
@@ -246,6 +246,30 @@ pub struct DataInCodeEntry {
 }
 
 const _: () = assert!(core::mem::size_of::<DataInCodeEntry>() == 8);
+
+/// Decodes a `LC_DATA_IN_CODE` payload stream: one 8-byte
+/// [`DataInCodeEntry`] per 8 payload bytes, in stream order. The one
+/// structural rule the format itself carries is the entry width — a
+/// payload that is not a multiple of 8 is a malformed stream, refused
+/// with the typed error (never silently truncated or defaulted).
+///
+/// # Errors
+/// [`FormatError::Invalid`] when the payload is not a multiple of the
+/// 8-byte entry (a truncated tail would re-read as a zero entry).
+pub fn read_data_in_code(data: &[u8]) -> Result<Vec<DataInCodeEntry>, FormatError> {
+    if data.len() % 8 != 0 {
+        return Err(FormatError::Invalid {
+            offset: 0,
+            what: "data-in-code payload is not a multiple of the 8-byte entry",
+            value: data.len() as u64,
+        });
+    }
+    let mut out = Vec::with_capacity(data.len() / 8);
+    for i in 0..data.len() / 8 {
+        out.push(pod_read_unaligned_at::<DataInCodeEntry>(data, i * 8)?);
+    }
+    Ok(out)
+}
 
 /// Reads an `lc_str`-addressed NUL-terminated string from a command's bytes:
 /// `offset` counts from the command start and the string must lie within
@@ -269,8 +293,41 @@ fn read_lc_str(offset: u32, cmdsize: usize, cmd_bytes: &[u8]) -> Result<&[u8], F
 mod tests {
     use super::{
         BuildVersionCommand, DylibCommand, DylinkerCommand, EntryPointCommand, LinkeditDataCommand,
-        UuidCommand,
+        UuidCommand, read_data_in_code,
     };
+
+    #[test]
+    fn data_in_code_stream_decodes_entries_in_order() {
+        let entries = [
+            super::DataInCodeEntry {
+                offset: 8,
+                length: 4,
+                kind: 2,
+            },
+            super::DataInCodeEntry {
+                offset: 16,
+                length: 2,
+                kind: 1,
+            },
+        ];
+        let mut bytes = Vec::new();
+        for e in &entries {
+            bytes.extend_from_slice(bytemuck::bytes_of(e));
+        }
+        assert_eq!(read_data_in_code(&bytes).unwrap(), entries);
+        assert_eq!(read_data_in_code(&[]).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_truncated_tail_refuses_typed() {
+        // 7 bytes: not a multiple of the 8-byte entry — refused, never
+        // silently truncated to a zero entry.
+        let err = read_data_in_code(&[0u8; 7]).unwrap_err();
+        assert!(
+            err.to_string().contains("multiple of the 8-byte entry"),
+            "{err}"
+        );
+    }
 
     fn dylib_bytes() -> Vec<u8> {
         let mut v = Vec::new();
