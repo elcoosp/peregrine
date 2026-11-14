@@ -559,3 +559,50 @@ pub const PAGE_SIZE_16K: u64 = 0x4000;
 pub const PAGEZERO_SIZE_64: u64 = 0x1_0000_0000;
 /// Code-signature hashing page size in bytes (4 KiB, see `CS_PAGE_SIZE`).
 pub const SIGNATURE_HASH_PAGE: u64 = 4096;
+
+// ---------------------------------------------------------------------------
+// Compact-unwind constants (M34; Apple `mach-o/compact_unwind_encoding.h`,
+// the header libunwind and dyld share — the constant names mirror it so a
+// reader can check the bit layout against the original)
+// ---------------------------------------------------------------------------
+
+/// The `__LD` segment the object-side compact-unwind table rides
+/// (`S_ATTR_DEBUG`; older linkers ignore the section, the carrying
+/// linker removes it — it never reaches a final image as a section).
+pub const SEG_COMPACT_UNWIND: &[u8] = b"__LD";
+/// The object-side compact-unwind table's section name: one 32-byte
+/// entry per function (pointer-sized range start, 32-bit length and
+/// encoding, pointer-sized personality and LSDA — arm64 pointers are
+/// 8 bytes).
+pub const SECT_COMPACT_UNWIND: &[u8] = b"__compact_unwind";
+/// The output `__unwind_info` section name (the `__TEXT` section dyld's
+/// unwinder and every backtrace reader walks).
+pub const SECT_UNWIND_INFO: &[u8] = b"__unwind_info";
+/// `unwind_info_section_header.version` (`UNWIND_SECTION_VERSION`).
+pub const UNWIND_SECTION_VERSION: u32 = 1;
+/// `unwind_info_regular_second_level_page_header.kind`
+/// (`UNWIND_SECOND_LEVEL_REGULAR`).
+pub const UNWIND_SECOND_LEVEL_REGULAR: u32 = 2;
+/// `unwind_info_compressed_second_level_page_header.kind`
+/// (`UNWIND_SECOND_LEVEL_COMPRESSED`) — the M35 page shape, refused by
+/// the M34 verifier until it walks.
+pub const UNWIND_SECOND_LEVEL_COMPRESSED: u32 = 3;
+/// arm64 encoding mode mask (`UNWIND_ARM64_MODE_MASK`).
+pub const UNWIND_ARM64_MODE_MASK: u32 = 0x0F00_0000;
+/// arm64 frameless mode (`UNWIND_ARM64_MODE_FRAMELESS`); the frame size
+/// rides `UNWIND_ARM64_FRAMELESS_STACK_SIZE_MASK` (0x00FFF000, /16).
+pub const UNWIND_ARM64_MODE_FRAMELESS: u32 = 0x0200_0000;
+/// arm64 DWARF mode (`UNWIND_ARM64_MODE_DWARF`); the eh-frame offset
+/// rides `UNWIND_ARM64_DWARF_SECTION_OFFSET` (0x00FFFFFF).
+pub const UNWIND_ARM64_MODE_DWARF: u32 = 0x0300_0000;
+/// arm64 frame mode (`UNWIND_ARM64_MODE_FRAME`); the saved-register
+/// pairs ride the low bits (`UNWIND_ARM64_FRAME_X19_X20_PAIR` 0x1 …).
+pub const UNWIND_ARM64_MODE_FRAME: u32 = 0x0400_0000;
+/// arm64 frame mode with authenticated LR (ptrauth; newer headers).
+pub const UNWIND_ARM64_MODE_FRAME_PAUTH_LR: u32 = 0x0500_0000;
+/// Personality-function index field (`UNWIND_PERSONALITY_MASK`): bits
+/// 28–29, one-based (0 = none), indexing the output personality array.
+pub const UNWIND_PERSONALITY_MASK: u32 = 0x3000_0000;
+/// Compressed-page entry function-offset field
+/// (`UNWIND_INFO_COMPRESSED_ENTRY_FUNC_OFFSET`).
+pub const UNWIND_INFO_COMPRESSED_ENTRY_FUNC_OFFSET_MASK: u32 = 0x00FF_FFFF;
