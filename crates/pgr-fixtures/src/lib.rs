@@ -33,7 +33,7 @@ use pgr_format::consts::{
     LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN,
     LC_SEGMENT_64, LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_BUNDLE,
     MH_DYLDLINK, MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE,
-    MH_TWOLEVEL, N_EXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64,
+    MH_TWOLEVEL, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64,
     PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD,
     VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
 };
@@ -106,6 +106,25 @@ pub enum SymbolSpec {
     /// External definition, anchored to the start of the section with the
     /// given global index (index across all segments' sections).
     Defined {
+        /// Symbol name (mangled form, `_` prefix included).
+        name: String,
+        /// Global section index the symbol anchors to.
+        section_index: usize,
+    },
+    /// Kept private external (M33): the row stays in the extdef
+    /// subrange with `N_PEXT` set — the form `-keep_private_externs`
+    /// emits, an honest defined external.
+    DefinedPrivate {
+        /// Symbol name (mangled form, `_` prefix included).
+        name: String,
+        /// Global section index the symbol anchors to.
+        section_index: usize,
+    },
+    /// The dysymtab lie, built on purpose (M33's fixture control): the
+    /// row rides the extdef subrange but its `N_TYPE` carries no
+    /// `N_EXT` — the range dyld reads claims a defined external the
+    /// row is not.
+    MisplacedPrivate {
         /// Symbol name (mangled form, `_` prefix included).
         name: String,
         /// Global section index the symbol anchors to.
@@ -228,8 +247,9 @@ pub struct LayoutMap {
     pub entryoff: u64,
     /// File offset where the code signature starts (`codeLimit`).
     pub sig_off: u64,
-    /// The 16 UUID bytes embedded in `LC_UUID`.
-    pub uuid: [u8; 16],
+    /// The 16 UUID bytes embedded in `LC_UUID` (`None` under the M32
+    /// suppression — the header carries no `LC_UUID` command).
+    pub uuid: Option<[u8; 16]>,
     /// `__TEXT` vmsize (used as `execSegLimit`).
     pub text_vmsize: u64,
     /// Import table format used (`DYLD_CHAINED_IMPORT*`).
@@ -340,6 +360,10 @@ pub struct ImageBuilder {
     /// out-of-bounds stream is the verifier's finding to name (the
     /// broken-shape gates build them on purpose).
     data_in_code: Vec<pgr_format::DataInCodeEntry>,
+    /// M32: the UUID suppression — the fixture header carries no
+    /// `LC_UUID` command at all (the absence the verifier's decision
+    /// contract reads, built on purpose).
+    no_uuid: bool,
 }
 
 impl ImageBuilder {
@@ -371,6 +395,7 @@ impl ImageBuilder {
             loader_path: None,
             pie: true,
             data_in_code: Vec::new(),
+            no_uuid: false,
         }
     }
 
@@ -402,6 +427,7 @@ impl ImageBuilder {
             loader_path: None,
             pie: true,
             data_in_code: Vec::new(),
+            no_uuid: false,
         }
     }
 
@@ -432,6 +458,7 @@ impl ImageBuilder {
             loader_path: None,
             pie: true,
             data_in_code: Vec::new(),
+            no_uuid: false,
         }
     }
 
@@ -447,6 +474,13 @@ impl ImageBuilder {
     /// fixture controls, built on purpose.
     pub fn add_data_in_code(&mut self, entries: Vec<pgr_format::DataInCodeEntry>) {
         self.data_in_code = entries;
+    }
+
+    /// Names the M32 UUID suppression off: the fixture header carries
+    /// no `LC_UUID` command (the absence the verifier's decision
+    /// contract reads — a decision, not a defect).
+    pub fn set_no_uuid(&mut self) {
+        self.no_uuid = true;
     }
 
     /// Registers a dependent dylib (`LC_LOAD_DYLIB`), returning its 1-based
@@ -774,7 +808,9 @@ impl ImageBuilder {
         if !self.data_in_code.is_empty() {
             add_cmd(16); // LC_DATA_IN_CODE (M30)
         }
-        add_cmd(24); // LC_UUID
+        if !self.no_uuid {
+            add_cmd(24); // LC_UUID (M32: the suppression drops the command)
+        }
         add_cmd(16); // LC_CODE_SIGNATURE
         let header_len = 32 + sizeofcmds;
         if header_len as u64 > PAGE_SIZE_16K {
@@ -840,7 +876,25 @@ impl ImageBuilder {
         let mut symbol_indices_out = vec![0u32; self.symbols.len()];
         let mut n_defs = 0usize;
         for (i, sym) in self.symbols.iter().enumerate() {
+            // M33: the kept private external rides the extdef range with
+            // `N_PEXT` set; the misplaced control rides it without
+            // `N_EXT` — the range dyld reads claims a row the bit says
+            // is not a defined external.
+            let n_type = match sym {
+                SymbolSpec::Defined { .. } => N_EXT | N_SECT,
+                SymbolSpec::DefinedPrivate { .. } => N_EXT | N_SECT | N_PEXT,
+                SymbolSpec::MisplacedPrivate { .. } => N_SECT | N_PEXT,
+                SymbolSpec::Undefined { .. } => continue,
+            };
             if let SymbolSpec::Defined {
+                name,
+                section_index,
+            }
+            | SymbolSpec::DefinedPrivate {
+                name,
+                section_index,
+            }
+            | SymbolSpec::MisplacedPrivate {
                 name,
                 section_index,
             } = sym
@@ -852,7 +906,7 @@ impl ImageBuilder {
                     .get(*section_index)
                     .map(|s| s.addr)
                     .ok_or_else(|| BuildError("symbol section index out of range".into()))?;
-                symtab_entries.push((strx, N_EXT | N_SECT, (*section_index + 1) as u8, 0, value));
+                symtab_entries.push((strx, n_type, (*section_index + 1) as u8, 0, value));
                 symbol_indices_out[i] = n_defs as u32;
                 n_defs += 1;
             }
@@ -1255,10 +1309,18 @@ impl ImageBuilder {
             w32(&mut buf, lc + 12, dice_bytes.len() as u32);
             lc += 16;
         }
-        let uuid_at = lc + 8;
-        w32(&mut buf, lc, LC_UUID);
-        w32(&mut buf, lc + 4, 24);
-        lc += 24;
+        // M32: the uuid command and its field are the always-carried
+        // default; the suppression drops both, and the offset names the
+        // absent sentinel (0 — the __LINKEDIT offset convention).
+        let uuid_at;
+        if self.no_uuid {
+            uuid_at = 0;
+        } else {
+            w32(&mut buf, lc, LC_UUID);
+            w32(&mut buf, lc + 4, 24);
+            uuid_at = lc + 8;
+            lc += 24;
+        }
         w32(&mut buf, lc, LC_CODE_SIGNATURE);
         w32(&mut buf, lc + 4, 16);
         w32(&mut buf, lc + 8, sig_off as u32);
@@ -1336,16 +1398,22 @@ impl ImageBuilder {
         }
 
         // ---- UUID two-pass, then signature ------------------------------
-        let h1 = page_hashes(&mut buf, uuid_at, nblocks, sig_off, true);
-        let uuid = {
-            let mut h = Sha256::new();
-            h.update(&h1);
-            let mut u = [0u8; 16];
-            u.copy_from_slice(&h.finalize()[..16]);
-            u
+        // M32: the suppression leaves the header uuid-free — the hashes
+        // hash the bytes as they are (there is no uuid slot to zero).
+        let hashes = if uuid_at != 0 {
+            let h1 = page_hashes(&mut buf, uuid_at, nblocks, sig_off, true);
+            let uuid = {
+                let mut h = Sha256::new();
+                h.update(&h1);
+                let mut u = [0u8; 16];
+                u.copy_from_slice(&h.finalize()[..16]);
+                u
+            };
+            buf[uuid_at..uuid_at + 16].copy_from_slice(&uuid);
+            page_hashes(&mut buf, uuid_at, nblocks, sig_off, false)
+        } else {
+            page_hashes(&mut buf, 0, nblocks, sig_off, false)
         };
-        buf[uuid_at..uuid_at + 16].copy_from_slice(&uuid);
-        let hashes = page_hashes(&mut buf, uuid_at, nblocks, sig_off, false);
         let sig = build_superblob(
             &self.ident,
             sig_off,
@@ -1358,6 +1426,17 @@ impl ImageBuilder {
         );
         debug_assert_eq!(sig.len(), blob_len, "signature sizing must be exact");
         buf[sig_off as usize..sig_off as usize + sig.len()].copy_from_slice(&sig);
+
+        // The uuid bytes read back before `buf` moves into the image.
+        let uuid = if uuid_at != 0 {
+            Some(
+                buf[uuid_at..uuid_at + 16]
+                    .try_into()
+                    .expect("16 uuid bytes"),
+            )
+        } else {
+            None
+        };
 
         Ok(Image {
             bytes: buf,
