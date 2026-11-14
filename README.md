@@ -287,10 +287,12 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 | **M15–M19** | Image knobs: `-pagezero_size`, `-init_offsets`, `-segprot`, `-stack_size`, `-image_base` |
 | **M20–M22** | Dylib identity: `-sub_umbrella`/`-sub_library`, `-sub_client`, `-dyld_env` |
 | **M23–M25** | `-reexport_framework`, `-alias` (one body, two names), `-bundle_loader` |
+| **M26–M27** | Header assembly: `-dylinker` (the loader path), `-no_pie` (the flag word) |
+| **M28–M29** | Packing decisions: `-sectalign` (per-section alignment floors), `-headerpad` (the reserved header region — the advisory no-op promoted) |
 
 Every knob ships the same way: a validated decision in the library, verifier gates for the
 shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage
-(protocol v16) — and a byte-identical default.
+(protocol v20) — and a byte-identical default.
 
 **Still on the roadmap:** the Apple Silicon hardware gates · LTO object execution ·
 compact-unwind synthesis · TLV · ObjC/Swift semantics beyond section pass-through.
@@ -305,7 +307,8 @@ Each ships in its crate's `examples/` with a matching bench — run with
 `glob_export_filter` · `lazy_library_link` · `pagezero_link` · `init_offsets_link` ·
 `segprot_link` · `stack_size_link` · `icf_link` · `dead_strip_link` · `image_base_link` ·
 `umbrella_link` · `sub_client_link` · `dyld_env_link` · `reexport_framework_link` ·
-`alias_link` · `bundle_loader_link`
+`alias_link` · `bundle_loader_link` · `dylinker_link` · `no_pie_link` ·
+`sectalign_link` · `headerpad_link`
 
 </details>
 
