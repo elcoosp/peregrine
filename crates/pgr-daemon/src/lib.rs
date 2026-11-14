@@ -89,8 +89,15 @@ mod tests {
         // relink execs the loader the client named, never the pre-M26
         // default — and the config's PIE decision as a tail byte (M27,
         // `-no_pie`): a resident relink carries the flag word the
-        // client asked for, never the PIE-always default.
-        assert_eq!(crate::PROTO_VERSION, 18);
+        // client asked for, never the PIE-always default — and the
+        // config's section-alignment floors as a length-prefixed
+        // (segment, section, exponent) triple list (M28, `-sectalign`):
+        // a resident relink aligns the sections the client named, never
+        // the pre-M28 input-only shape — and the config's header-region
+        // floor as a present byte + u64 (M29, `-headerpad`): a resident
+        // relink reserves the region the client named, never the
+        // pre-M29 natural size alone.
+        assert_eq!(crate::PROTO_VERSION, 20);
     }
 
     #[test]
