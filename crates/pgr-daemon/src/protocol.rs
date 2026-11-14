@@ -141,8 +141,15 @@ use sha2::{Digest, Sha256};
 /// function-starts suppression (M31 — one byte naming whether the
 /// image drops the `LC_FUNCTION_STARTS` command; a resident relink
 /// carries the linkedit-metadata decision the client asked for, never
-/// the pre-M31 always-carried default).
-pub const PROTO_VERSION: u32 = 22;
+/// the pre-M31 always-carried default); **v23** appends the UUID
+/// suppression (M32 — one byte naming whether the image drops the
+/// `LC_UUID` command; a resident relink carries the derived-UUID
+/// decision the client asked for, never the pre-M32 always-carried
+/// default); **v24** appends the private-extern keep (M33 — one byte
+/// naming whether the image holds input `N_PEXT` definitions external;
+/// a resident relink carries the private-extern decision the client
+/// asked for, never the pre-M33 conversion default).
+pub const PROTO_VERSION: u32 = 24;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -772,6 +779,16 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // carries the linkedit-metadata decision the client asked for,
     // never the pre-M31 always-carried default.
     put_u8(out, u8::from(!cfg.function_starts));
+    // M32 (v23 wire): the UUID suppression rides the tail after the
+    // function-starts suppression — one byte; a resident relink
+    // carries the derived-UUID decision the client asked for, never
+    // the pre-M32 always-carried default.
+    put_u8(out, u8::from(!cfg.uuid));
+    // M33 (v24 wire): the private-extern keep rides the tail after the
+    // UUID suppression — one byte; a resident relink carries the
+    // private-extern decision the client asked for, never the pre-M33
+    // conversion default.
+    put_u8(out, u8::from(cfg.keep_private_externs));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1010,6 +1027,14 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // validation beyond the bool (the verifier validates the payload
     // only when the command is present).
     let no_function_starts = r.u8()? != 0;
+    // M32 (v23 wire): the UUID suppression — one byte, no validation
+    // beyond the bool (the absence is the decision; the carried
+    // payload is opaque).
+    let no_uuid = r.u8()? != 0;
+    // M33 (v24 wire): the private-extern keep — one byte, no
+    // validation beyond the bool (the conversion is the default; the
+    // input `N_PEXT` bit names where the decision fires).
+    let keep_private_externs = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1070,6 +1095,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         header_pad,
         data_in_code: !no_data_in_code,
         function_starts: !no_function_starts,
+        uuid: !no_uuid,
+        keep_private_externs,
     })
 }
 
@@ -1325,6 +1352,16 @@ mod tests {
             // carries the linkedit-metadata decision the client asked
             // for, never the pre-M31 always-carried default).
             function_starts: false,
+            // The v23 tail: a non-default UUID suppression must survive
+            // the round trip verbatim (a resident relink carries the
+            // derived-UUID decision the client asked for, never the
+            // pre-M32 always-carried default).
+            uuid: false,
+            // The v24 tail: a non-default private-extern keep must
+            // survive the round trip verbatim (a resident relink
+            // carries the private-extern decision the client asked
+            // for, never the pre-M33 conversion default).
+            keep_private_externs: true,
             symbol_order: None,
         }
     }
@@ -1660,13 +1697,15 @@ mod tests {
             pgr_core::stack_size::StackSize::from_override(0x100_0000)
                 .expect("the reserve validates"),
         );
-        // The v21/v22 suppression bytes stay the default here — the
+        // The v21–v24 decision bytes stay the default here — the
         // needle's uniqueness is this test's precondition, not its
         // subject (a non-default suppression byte after the header-pad
         // floor's high zeros re-forms the needle against the empty
         // request tail).
         cfg.data_in_code = true;
         cfg.function_starts = true;
+        cfg.uuid = true;
+        cfg.keep_private_externs = false;
         let body = LinkRequest {
             config: cfg,
             force_load: Vec::new(),
@@ -2215,6 +2254,61 @@ mod tests {
         assert!(
             !back.config.function_starts,
             "the suppression crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_uuid_decision_round_trips() {
+        // v23: a non-default UUID suppression must survive the round
+        // trip verbatim (a resident relink carries the derived-UUID
+        // decision the client asked for, never the pre-M32
+        // always-carried default).
+        let cfg = rich_config();
+        assert!(!cfg.uuid, "rich_config carries the v23 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert!(!back.config.uuid, "the suppression crosses byte-for-byte");
+    }
+
+    #[test]
+    fn the_keep_private_externs_decision_round_trips() {
+        // v24: a non-default private-extern keep must survive the
+        // round trip verbatim (a resident relink carries the
+        // private-extern decision the client asked for, never the
+        // pre-M33 conversion default).
+        let cfg = rich_config();
+        assert!(cfg.keep_private_externs, "rich_config carries the v24 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert!(
+            back.config.keep_private_externs,
+            "the keep crosses byte-for-byte"
         );
     }
 
