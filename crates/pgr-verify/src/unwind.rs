@@ -1,12 +1,15 @@
-//! The `__unwind_info` contract (M34): the `__TEXT,__unwind_info`
+//! The `__unwind_info` contract (M34, M35): the `__TEXT,__unwind_info`
 //! section dyld's exception unwinder and every backtrace reader walks
 //! must be internally consistent — header arrays in bounds and in
 //! order, the index sorted with one terminator, every second-level
-//! page decoding through a shape the verifier walks (the regular
-//! family; the compressed family is the M35 rung, refused until it
-//! walks), every entry naming a 4-aligned offset inside the `__TEXT`
-//! the image carries, and every encoding naming an arm64 mode nibble
-//! plus a personality index the array answers to.
+//! page decoding through a shape the verifier walks (both families:
+//! the regular pages' full encoding words and the compressed pages'
+//! two-tier index decode — the section-level common encodings array
+//! first, then the page-local array the page header names), every
+//! entry naming a 4-aligned offset inside the `__TEXT` the image
+//! carries, and every encoding word — an entry's or a common row's —
+//! naming an arm64 mode nibble plus a personality index the array
+//! answers to.
 //!
 //! The section's absence is the default (the entry-free corpus plans
 //! no section — never a finding), and an empty section (size 0) is the
@@ -16,7 +19,9 @@ use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report};
 use pgr_format::consts::{
     UNWIND_ARM64_MODE_DWARF, UNWIND_ARM64_MODE_FRAME, UNWIND_ARM64_MODE_FRAME_PAUTH_LR,
-    UNWIND_ARM64_MODE_FRAMELESS, UNWIND_ARM64_MODE_MASK, UNWIND_PERSONALITY_MASK,
+    UNWIND_ARM64_MODE_FRAMELESS, UNWIND_ARM64_MODE_MASK,
+    UNWIND_INFO_COMPRESSED_ENTRY_ENCODING_INDEX_SHIFT,
+    UNWIND_INFO_COMPRESSED_ENTRY_FUNC_OFFSET_MASK, UNWIND_PERSONALITY_MASK,
     UNWIND_SECOND_LEVEL_COMPRESSED, UNWIND_SECOND_LEVEL_REGULAR, UNWIND_SECTION_VERSION,
 };
 
@@ -26,10 +31,15 @@ const HEADER_SIZE: usize = 28;
 const INDEX_ENTRY_SIZE: usize = 12;
 /// The regular page header's byte width (`kind` u32 + two `u16`s).
 const REGULAR_PAGE_HEADER_SIZE: usize = 8;
-/// The compressed page header's byte width (adds two more `u16`s).
+/// The compressed page header's byte width (kind u32 + four `u16`s:
+/// the entry array's offset/count, then the page-local encodings
+/// array's offset/count).
 const COMPRESSED_PAGE_HEADER_SIZE: usize = 12;
 /// The regular second-level entry's byte width.
 const REGULAR_ENTRY_SIZE: usize = 8;
+/// The compressed second-level entry's byte width (`(encodingIndex
+/// << 24) | functionOffset`).
+const COMPRESSED_ENTRY_SIZE: usize = 4;
 /// The LSDA index entry's byte width (two `u32` words).
 const LSDA_ENTRY_SIZE: usize = 8;
 /// The arm64 mode nibbles the unwinder defines.
@@ -140,6 +150,35 @@ pub(crate) fn check_unwind_info(bytes: &[u8], img: &ParsedImage<'_>, report: &mu
                 format!(
                     "__unwind_info personality {i} names {p:#x} — beyond the __TEXT the \
                      image maps ({text_vmsize:#x})"
+                ),
+                off,
+            ));
+        }
+    }
+
+    // ---- the common encodings array -----------------------------------------------
+    // The array's rows are the encoding words the compressed entries
+    // index through (M35): the same contract the regular entries'
+    // words carry — an arm64 mode nibble and a personality index the
+    // personality array answers to. The regular-family shape carries
+    // the array empty (the M34 layout), so the gate is vacuous there.
+    for i in 0..common_count {
+        let w = rd32(common_off + i * 4).unwrap_or(0);
+        if !ARM64_MODES.contains(&(w & UNWIND_ARM64_MODE_MASK)) {
+            report.issues.push(err(
+                format!(
+                    "__unwind_info common encoding {i} carries encoding {w:#010x} — the mode \
+                     nibble names no arm64 unwind mode"
+                ),
+                off,
+            ));
+        }
+        let index = (w & UNWIND_PERSONALITY_MASK) >> 28;
+        if index as usize > pers_count {
+            report.issues.push(err(
+                format!(
+                    "__unwind_info common encoding {i} names personality index {index} — the \
+                     array carries {pers_count} rows"
                 ),
                 off,
             ));
@@ -320,21 +359,124 @@ pub(crate) fn check_unwind_info(bytes: &[u8], img: &ParsedImage<'_>, report: &mu
                 }
             }
             UNWIND_SECOND_LEVEL_COMPRESSED => {
-                // The M35 rung: the compressed page family is refused
-                // typed until the verifier walks it (a compressed page
-                // this reader cannot decode is a page it must not
-                // pretend to have checked).
+                // The compressed family (M35): 4-byte entries packing
+                // `(encodingIndex << 24) | functionOffset` — the
+                // index resolving through the section-level common
+                // array first, then the page-local array the page
+                // header names (libunwind's two-tier decode).
                 let entry_at = rd16(page_base + 4).unwrap_or(0) as usize;
                 let entry_count = rd16(page_base + 6).unwrap_or(0) as usize;
-                let _ = (entry_at, entry_count, COMPRESSED_PAGE_HEADER_SIZE);
-                report.issues.push(err(
-                    format!(
-                        "__unwind_info page {i} is a compressed second-level page — this \
-                         verifier walks the regular family only (the M35 rung carries the \
-                         compressed walk)"
-                    ),
-                    off,
-                ));
+                let encodings_at = rd16(page_base + 8).unwrap_or(0) as usize;
+                let encodings_count = rd16(page_base + 10).unwrap_or(0) as usize;
+                // Both arrays sit inside the page: an offset behind
+                // the 12-byte header reads the header's own fields as
+                // rows, a count past the section reads the next
+                // section's bytes.
+                if entry_at < COMPRESSED_PAGE_HEADER_SIZE
+                    || page_base + entry_at + entry_count * COMPRESSED_ENTRY_SIZE > size
+                {
+                    report.issues.push(err(
+                        format!(
+                            "__unwind_info compressed page {i} carries {entry_count} entries at \
+                             {entry_at:#x} — out of bounds or behind the page header"
+                        ),
+                        off,
+                    ));
+                    return;
+                }
+                if encodings_at < COMPRESSED_PAGE_HEADER_SIZE
+                    || page_base + encodings_at + encodings_count * 4 > size
+                {
+                    report.issues.push(err(
+                        format!(
+                            "__unwind_info compressed page {i} names its encodings array at \
+                             {encodings_at:#x} × {encodings_count} — out of bounds or behind \
+                             the page header"
+                        ),
+                        off,
+                    ));
+                    return;
+                }
+                let mut prev = None;
+                for e in 0..entry_count {
+                    let at = page_base + entry_at + e * COMPRESSED_ENTRY_SIZE;
+                    let word = rd32(at).unwrap_or(0);
+                    let f = word & UNWIND_INFO_COMPRESSED_ENTRY_FUNC_OFFSET_MASK;
+                    let index = (word >> UNWIND_INFO_COMPRESSED_ENTRY_ENCODING_INDEX_SHIFT) & 0xFF;
+                    if let Some(p) = prev
+                        && f < p
+                    {
+                        report.issues.push(err(
+                            format!(
+                                "__unwind_info page {i}'s entries must be sorted by function \
+                                 offset (entry {e} names {f:#x} behind {p:#x})"
+                            ),
+                            off,
+                        ));
+                        return;
+                    }
+                    if f < function {
+                        report.issues.push(err(
+                            format!(
+                                "__unwind_info page {i}'s entry {e} names {f:#x} — behind the \
+                                 page's index base {function:#x}"
+                            ),
+                            off,
+                        ));
+                        return;
+                    }
+                    if u64::from(f) >= text_vmsize {
+                        report.issues.push(err(
+                            format!(
+                                "__unwind_info page {i}'s entry {e} names {f:#x} — beyond the \
+                                 __TEXT the image maps ({text_vmsize:#x})"
+                            ),
+                            off,
+                        ));
+                    }
+                    // The two-tier decode: tier one (the common
+                    // array), tier two (the page-local rows). An index
+                    // resolving through neither is a word no reader
+                    // can name.
+                    if index as usize >= common_count + encodings_count {
+                        report.issues.push(err(
+                            format!(
+                                "__unwind_info page {i}'s entry {e} names encoding index \
+                                 {index} — the common array carries {common_count} rows and \
+                                 the page's own array {encodings_count}"
+                            ),
+                            off,
+                        ));
+                        return;
+                    }
+                    if index as usize >= common_count {
+                        let row =
+                            rd32(page_base + encodings_at + (index as usize - common_count) * 4)
+                                .unwrap_or(0);
+                        if !ARM64_MODES.contains(&(row & UNWIND_ARM64_MODE_MASK)) {
+                            report.issues.push(err(
+                                format!(
+                                    "__unwind_info page {i}'s entry {e} resolves encoding \
+                                     {row:#010x} through the page-local array — the mode \
+                                     nibble names no arm64 unwind mode"
+                                ),
+                                off,
+                            ));
+                        }
+                        let pidx = (row & UNWIND_PERSONALITY_MASK) >> 28;
+                        if pidx as usize > pers_count {
+                            report.issues.push(err(
+                                format!(
+                                    "__unwind_info page {i}'s entry {e} resolves a word \
+                                     naming personality index {pidx} — the array carries \
+                                     {pers_count} rows"
+                                ),
+                                off,
+                            ));
+                        }
+                    }
+                    prev = Some(f);
+                }
             }
             other => {
                 report.issues.push(err(
