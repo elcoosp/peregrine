@@ -466,6 +466,44 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-dylinker` path the core seam refuses (M26): non-empty,
+    /// NUL-free and absolute (the kernel resolves the loader path from
+    /// the process root at exec time). The seam's refusal rides the
+    /// help — the grammar the flag accepts, not just the verdict.
+    #[error("invalid value for -dylinker: {raw}")]
+    #[diagnostic(help("{message}"))]
+    DylinkerValue {
+        /// The refused path as written.
+        raw: String,
+        /// The core seam's refusal (the fix).
+        message: String,
+    },
+    /// A `-dylinker` surface conflict (M26): `LC_LOAD_DYLINKER` is the
+    /// main-executable command (the §8.2 loader-configuration
+    /// adjacency) — a dylib, a bundle and the relocatable output carry
+    /// no loader command for the path to land on. The verdict names the
+    /// shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    DylinkerConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-no_pie` surface conflict (M27): `MH_PIE` is an
+    /// executable-only bit — the kernel loads a dylib or a bundle
+    /// itself, and the relocatable output carries no loader semantics
+    /// at all. The verdict names the shape conflict; the help is the
+    /// fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    NoPieConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-alias` pair the core seam refuses (M24): the
     /// `-alias <alias_name> <definition_name>` grammar (two non-empty,
     /// NUL-free, distinct names), named once. The seam's refusal rides
@@ -1312,6 +1350,26 @@ fn apply_flag(
                     message: e.to_string(),
                 })?;
         }
+        // M26: the loader path. The same validation the core seam pays
+        // runs here, so the refusal names the grammar; the output-kind
+        // conflict is `finish`'s (it sees the whole surface). One
+        // decision per link — the later flag replaces the earlier (the
+        // `Option` the seam rides).
+        "-dylinker" => {
+            let v = next_value(args, i, arg)?;
+            let loader =
+                pgr_core::Dylinker::from_flag(&v).map_err(|e| OptsError::DylinkerValue {
+                    raw: v.clone(),
+                    message: e.to_string(),
+                })?;
+            opts.config.dylinker = Some(loader);
+        }
+        // M27: the PIE decision. A boolean knob — the default (unset)
+        // keeps the executable's `MH_PIE`; the output-kind conflict is
+        // `finish`'s (it sees the whole surface).
+        "-no_pie" => {
+            opts.config.no_pie = true;
+        }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
         // kind conflict is `finish`'s (it sees the whole surface).
@@ -1673,6 +1731,66 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                               the relocatable output carries no loader commands"
                         .into(),
                     fix: "drop the flag or link an executable".into(),
+                });
+            }
+            Ot::Execute => {}
+        }
+    }
+    // M26: the loader path is an executable decision —
+    // `LC_LOAD_DYLINKER` is the main-executable command (the §8.2
+    // loader-configuration adjacency), the same refusal shape as the
+    // M22 environment above: an explicitly named knob that cannot
+    // apply is a refusal, never a silently dropped one.
+    if opts.config.dylinker.is_some() {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Dylib => {
+                return Err(OptsError::DylinkerConflict {
+                    verdict: "-dylinker names the loader LC_LOAD_DYLINKER execs, \
+                              but this output is a dylib"
+                        .into(),
+                    fix: "the kernel loads a dylib itself — only the main executable \
+                          carries LC_LOAD_DYLINKER: link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Bundle => {
+                return Err(OptsError::DylinkerConflict {
+                    verdict: "-dylinker names the loader LC_LOAD_DYLINKER execs, \
+                              but this output is a bundle"
+                        .into(),
+                    fix: "the kernel loads a bundle itself — only the main executable \
+                          carries LC_LOAD_DYLINKER: link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Relocatable => {
+                return Err(OptsError::DylinkerConflict {
+                    verdict: "-dylinker names the loader LC_LOAD_DYLINKER execs, but \
+                              the relocatable output carries no loader commands"
+                        .into(),
+                    fix: "drop the flag or link an executable".into(),
+                });
+            }
+            Ot::Execute => {}
+        }
+    }
+    // M27: the PIE decision is an executable decision — `MH_PIE` is
+    // the executable-only bit (the kernel loads a dylib or a bundle
+    // itself), the same refusal shape as the M18 reserve above: an
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one.
+    if opts.config.no_pie {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Dylib | Ot::Bundle | Ot::Relocatable => {
+                return Err(OptsError::NoPieConflict {
+                    verdict: "-no_pie clears the executable's MH_PIE flag, but this \
+                              output is not an executable"
+                        .into(),
+                    fix: "MH_PIE is an executable-only bit — the kernel loads a dylib \
+                          or a bundle itself: link an executable or drop the flag"
+                        .into(),
                 });
             }
             Ot::Execute => {}
