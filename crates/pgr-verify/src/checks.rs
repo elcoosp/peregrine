@@ -108,7 +108,8 @@ pub enum Check {
     /// Symbol/indirect tables and the `MH_OBJECT` relocation contract.
     Symbols,
     /// Entry point, build version (incl. the chained-fixups floor),
-    /// function starts, data-in-code, export-trie bounds and UUID.
+    /// function starts, data-in-code and export-trie bounds (the UUID
+    /// absence is the M32 suppression decision — nothing to gate).
     Linkedit,
     /// The `LC_DYLD_CHAINED_FIXUPS` payload and the full chain-walk
     /// simulation.
