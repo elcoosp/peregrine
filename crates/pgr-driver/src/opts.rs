@@ -683,13 +683,14 @@ pub enum OptsError {
 /// Flags accepted with no effect at M1 (their features do not exist yet).
 /// M7 adds the build-system no-ops: demangling (symtab names are stored
 /// verbatim, exactly ld64's on-disk effect) and the deduplicate toggle
-/// (cstring/code dedup stays on — the arm64 default).
-const NOOP_FLAGS: [&str; 8] = [
+/// (cstring/code dedup stays on — the arm64 default). M30 promoted
+/// `-no_data_in_code` off this list (the data-in-code carriage reads
+/// the decision) and M31 promoted `-no_function_starts` (the
+/// function-starts suppression reads it).
+const NOOP_FLAGS: [&str; 6] = [
     "-no_adhoc_extensions",
     "-keep_private_externs",
     "-no_uuid",
-    "-no_function_starts",
-    "-no_data_in_code",
     "-demangle",
     "-no_demangle",
     "-no_deduplicate",
@@ -1464,6 +1465,24 @@ fn apply_flag(
         // `finish`'s (it sees the whole surface).
         "-no_pie" => {
             opts.config.no_pie = true;
+        }
+        // M30: the data-in-code suppression. The flag rode the surface
+        // as an accepted no-op since M1; the carriage reads the
+        // decision — the output's `LC_DATA_IN_CODE` command drops (no
+        // `__LINKEDIT` slot rides either). A boolean knob, like the
+        // M27 PIE decision; there is no output-kind conflict (every
+        // segmented output can carry the stream, the suppression just
+        // names it off).
+        "-no_data_in_code" => {
+            opts.config.data_in_code = false;
+        }
+        // M31: the function-starts suppression. The flag rode the
+        // surface as an accepted no-op since M1; the header assembly
+        // reads the decision — the output's `LC_FUNCTION_STARTS`
+        // command drops (no `__LINKEDIT` slot, no stream). A boolean
+        // knob with no output-kind conflict.
+        "-no_function_starts" => {
+            opts.config.function_starts = false;
         }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
