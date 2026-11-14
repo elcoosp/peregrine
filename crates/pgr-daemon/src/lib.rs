@@ -96,8 +96,15 @@ mod tests {
         // the pre-M28 input-only shape — and the config's header-region
         // floor as a present byte + u64 (M29, `-headerpad`): a resident
         // relink reserves the region the client named, never the
-        // pre-M29 natural size alone.
-        assert_eq!(crate::PROTO_VERSION, 20);
+        // pre-M29 natural size alone — and the config's data-in-code
+        // suppression as a tail byte (M30, `-no_data_in_code`): a
+        // resident relink carries the stream decision the client asked
+        // for, never the pre-M30 carry-when-named default — and the
+        // config's function-starts suppression as a tail byte (M31,
+        // `-no_function_starts`): a resident relink carries the
+        // linkedit-metadata decision the client asked for, never the
+        // pre-M31 always-carried default.
+        assert_eq!(crate::PROTO_VERSION, 22);
     }
 
     #[test]
