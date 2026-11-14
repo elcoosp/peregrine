@@ -5,6 +5,11 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M32–M33)
+
+- **M32** — the UUID suppression (`-no_uuid`): the third advisory no-op promoted — the output's `LC_UUID` command drops on the named decision (24 bytes narrower, no uuid field for the emit two-pass derivation to patch); the emit patch paths consult the plan offset's absent sentinel (`0`, the `__LINKEDIT` offset convention); the verifier's absence warning names the decision, never a defect; daemon wire v23 carries the decision; the `uuid` bench and the `no_uuid_link` consumer example ride along.
+- **M33** — the private-extern decision (`-keep_private_externs`): the input `N_PEXT` bit the tree dropped at parse is carried now — the default converts a private-extern definition into the locals range (`N_SECT | N_PEXT`, the filter-hidden shape, absent from the trie) and the named keep holds it external (`N_EXT | N_SECT | N_PEXT`, exported); the POI cache codec carries the bit (v4; stale entries self-heal); the verifier's symtab contract gates the extdef-range agreement; daemon wire v24 carries the decision; the `keep_pext` bench and the `keep_private_externs_link` consumer example ride along.
+
 ### Documentation
 - The M20 umbrella rows the 0.23.0 sweep missed (the region's README, TDD,
   compat and bench commits postdate that section)
