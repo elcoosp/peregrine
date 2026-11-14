@@ -204,5 +204,21 @@ harness = false
 name = "func_starts"
 harness = false
 
+# The M32 UUID bench: the link across the suppression decision (the
+# default beside the named suppression over the same corpus) — the
+# default is a shape-parity gate (the pre-M32 bytes), the suppression
+# prices the header-assembly simplification.
+[[bench]]
+name = "uuid"
+harness = false
+
+# The M33 private-extern bench: the link across the keep decision (the
+# conversion default beside the named keep over the same pext corpus)
+# — the pext-free corpus is the shape-parity gate, the pext corpus
+# prices the symtab split.
+[[bench]]
+name = "keep_pext"
+harness = false
+
 [lints]
 workspace = true
