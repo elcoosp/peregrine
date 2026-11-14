@@ -118,9 +118,13 @@ fn an_overlapping_stream_is_an_error() {
 
 #[test]
 fn an_entry_beyond_text_warns() {
-    // The M0 shape check stays: an entry past `__TEXT` is a warning
-    // (strict warnings fail the gate).
-    let img = exec_builder(entries([96]))
+    // The M0 shape check stays: an entry past the mapped `__TEXT` is a
+    // warning (strict warnings fail the gate). The fixture pads every
+    // segment to the 16 KiB page, so "past `__TEXT`" is past the
+    // 0x4000 boundary — an entry inside the padding annotates bytes
+    // the image maps, and the check reads the segment the offsets
+    // name.
+    let img = exec_builder(entries([0x4000]))
         .build()
         .expect("the fixture builds");
     let report = verify(&img.bytes, &opts());
