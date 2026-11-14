@@ -186,5 +186,23 @@ harness = false
 name = "header_pad"
 harness = false
 
+# The M30 data-in-code bench: the link across the carriage's shapes
+# (the entry-free corpus, the carried 8-entries-per-object stream and
+# the named suppression over the same corpus) — the default is a
+# shape-parity gate (an entry-free corpus plans the pre-M30 bytes),
+# the carried stream prices the Pass-1 decode, the atom-map
+# containment and the __LINKEDIT slot.
+[[bench]]
+name = "data_in_code"
+harness = false
+
+# The M31 function-starts bench: the link across the suppression
+# decision (the default beside the named suppression over the same
+# corpus) — the default is a shape-parity gate (the pre-M31 bytes),
+# the suppression prices the header-assembly simplification.
+[[bench]]
+name = "func_starts"
+harness = false
+
 [lints]
 workspace = true
