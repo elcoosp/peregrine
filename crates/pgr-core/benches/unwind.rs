@@ -5,10 +5,12 @@
 //! benches share, plus the synthesis seam's own cost across table
 //! sizes (the pure function a build system can plan with). An entry
 //! is one Pass-1 decode, one atom-map containment check and one
-//! regular-page row, so the honest expectation is parity — the bench
-//! pins "the released surface never regresses into the link's hot
-//! path" (the same shape gate the M30–M33 benches ride), and pins the
-//! synthesis at the cost its O(n log n) sort + one pass names.
+//! second-level row (the M35 rung rides the compressed family — its
+//! own bench lives in `unwind_compressed.rs`), so the honest
+//! expectation is parity — the bench pins "the released surface never
+//! regresses into the link's hot path" (the same shape gate the
+//! M30–M33 benches ride), and pins the synthesis at the cost its
+//! O(n log n) sort + one pass names.
 //!
 //! Baseline note (docs/BENCHMARKS.md): recorded as a shape-parity gate
 //! on the dev sandbox.
