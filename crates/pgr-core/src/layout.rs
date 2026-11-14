@@ -599,6 +599,12 @@ pub enum SynthKind {
     /// offsets from the image's load address (see [`crate::init_offsets`];
     /// the pointer sections it replaces never reach the buckets).
     InitOffsets,
+    /// M34: the whole `__TEXT,__unwind_info` section — one synthetic
+    /// piece Pass 3 fills with the translated compact-unwind rows'
+    /// synthesis (see [`crate::unwind`]; the input
+    /// `__LD,__compact_unwind` table the rows come from never reaches
+    /// the buckets — the `__LD` segment rides the debug-ish skip).
+    UnwindInfo,
 }
 
 /// An output section with its placed pieces.
@@ -1113,15 +1119,23 @@ fn bucket_for(
 /// Appends the synthesized `__chain_starts` bucket (when chains are on) and
 /// the M2 GOT/stub buckets (when synthesis is needed), then applies the
 /// canonical ordering.
+/// The synthetic-bucket decisions `prepare_buckets` reads (one struct,
+/// not a bool ladder).
+#[derive(Debug, Clone, Copy)]
+struct SynthBuckets {
+    chains: bool,
+    got: bool,
+    stubs: bool,
+    unwind: bool,
+}
+
 fn prepare_buckets(
     buckets: &mut BucketTable,
     bucket_of: &mut [Vec<usize>],
-    chains_enabled: bool,
-    needs_got: bool,
-    needs_stubs: bool,
+    synth: SynthBuckets,
     init_specs: &[crate::init_offsets::InitSection],
 ) {
-    if needs_got {
+    if synth.got {
         buckets.push((
             "__DATA_CONST".into(),
             "__got".into(),
@@ -1129,7 +1143,7 @@ fn prepare_buckets(
             false,
         ));
     }
-    if needs_stubs {
+    if synth.stubs {
         buckets.push((
             "__TEXT".into(),
             "__stubs".into(),
@@ -1137,7 +1151,7 @@ fn prepare_buckets(
             false,
         ));
     }
-    if chains_enabled {
+    if synth.chains {
         buckets.push(("__TEXT".into(), "__chain_starts".into(), S_REGULAR, false));
     }
     // M16: the initializer-offsets section rides beside the other
@@ -1150,6 +1164,12 @@ fn prepare_buckets(
             pgr_format::consts::S_INIT_FUNC_OFFSETS,
             false,
         ));
+    }
+    // M34: the compact-unwind synthesis section rides beside them (the
+    // bucket only exists when the corpus carries table rows — the
+    // entry-free corpus plans the pre-M34 bytes).
+    if synth.unwind {
+        buckets.push(("__TEXT".into(), "__unwind_info".into(), S_REGULAR, false));
     }
     // Canonical ordering: stable sort keeps first-seen order for unknowns.
     let mut order: Vec<usize> = (0..buckets.len()).collect();
@@ -1185,6 +1205,7 @@ fn canonical_rank(segment: &str, name: &str) -> u64 {
         ("__TEXT", "__cstring") => 3,
         ("__TEXT", "__chain_starts") => 4,
         ("__TEXT", "__init_offsets") => 5,
+        ("__TEXT", "__unwind_info") => 6,
         _ => 100,
     };
     seg * 1000 + name
@@ -1625,12 +1646,24 @@ pub fn layout(
     } else {
         FixupLc::None
     };
+    // M34: the compact-unwind carriage rides when any input carries
+    // the `__LD,__compact_unwind` table (an entry-free corpus plans the
+    // pre-M34 bytes). The section's exact size converges in the
+    // placement fixed point — the same loop the `__chain_starts` size
+    // rides — because the surviving-row set and the personality dedup
+    // are a function of the strip and the fold the placements already
+    // speak.
+    let emit_unwind = objects.iter().any(|o| !o.compact_unwind.is_empty());
+    let mut unwind_size = 0usize;
     prepare_buckets(
         &mut buckets,
         &mut bucket_of,
-        chains_enabled,
-        !needs.got.is_empty(),
-        !needs.stubs.is_empty(),
+        SynthBuckets {
+            chains: chains_enabled,
+            got: !needs.got.is_empty(),
+            stubs: !needs.stubs.is_empty(),
+            unwind: emit_unwind,
+        },
         &init_specs,
     );
 
@@ -1672,6 +1705,7 @@ pub fn layout(
             interner,
             init_entries,
             emit_dice,
+            unwind_size,
         )?;
         resolve_all(objects, &mut state, res, interner, cfg, fold, &init_specs)?;
         // M6 veneer scan: every out-of-range branch site plans one veneer.
@@ -1746,8 +1780,12 @@ pub fn layout(
         } else {
             0
         };
-        if actual == chain_starts_size && new_specs.is_empty() {
-            // Converged: patch the section size (it equals the assumption).
+        // M34: the unwind section's actual size — the synthesis `Pass 3`
+        // just filled the piece with — against the reserved assumption.
+        let actual_unwind = unwind_piece_len(&state);
+        if actual == chain_starts_size && actual_unwind == unwind_size && new_specs.is_empty() {
+            // Converged: patch the section sizes (they equal the
+            // assumptions).
             if let Some(cs) = state
                 .sections
                 .iter_mut()
@@ -1755,11 +1793,22 @@ pub fn layout(
             {
                 cs.size = actual as u64;
             }
+            if let Some(cs) = state
+                .sections
+                .iter_mut()
+                .find(|s| s.name == "__unwind_info")
+            {
+                cs.size = actual_unwind as u64;
+                if let Some(p) = cs.pieces.first_mut() {
+                    p.size = actual_unwind as u64;
+                }
+            }
             final_plan = Some(plan);
             converged = Some(state);
             break;
         }
         chain_starts_size = actual;
+        unwind_size = actual_unwind;
         veneers.extend(new_specs);
     }
     let mut state = converged.ok_or(LinkError::Internal {
@@ -2677,6 +2726,7 @@ fn place(
     interner: &Interner,
     init_entries: usize,
     emit_dice: bool,
+    unwind_size: usize,
 ) -> Result<PlacedState, LinkError> {
     let (mut pieces_of_bucket, cstring_instances) = build_bucket_pieces(
         objects,
@@ -2776,6 +2826,33 @@ fn place(
         });
     }
 
+    // ---- M34: the compact-unwind synthesis section --------------------------
+    // One synthetic piece; Pass 3 fills the `__unwind_info` bytes with
+    // the translated rows (the live functions' placements). Empty when
+    // the corpus carries no table rows (the bucket only exists then —
+    // the entry-free corpus plans the pre-M34 bytes).
+    if let Some(bi) = buckets
+        .iter()
+        .position(|(seg, name, _, _)| seg == "__TEXT" && name == "__unwind_info")
+    {
+        pieces_of_bucket[bi].push(Piece {
+            file: FileId(u32::MAX),
+            in_sect: usize::MAX,
+            in_range: 0..0,
+            offset: 0,
+            size: unwind_size as u64,
+            align_log2: 2,
+            zerofill: false,
+            common_name: None,
+            patches: Vec::new(),
+            fixup_slots: Vec::new(),
+            synth: Some(SynthPiece {
+                kind: SynthKind::UnwindInfo,
+                bytes: vec![0u8; unwind_size],
+            }),
+        });
+    }
+
     // ---- M6 veneer pieces: one per planned out-of-range branch site -------
     // Inserted into the site's own bucket right after its piece, so the
     // site's redirected `B`/`BL` is always within the ±128 MiB reach.
@@ -2807,7 +2884,10 @@ fn place(
         // section's reserved size while its content still fits (§7.3
         // "layout stability" — the in-place patch tier's precondition).
         let size = match (&cfg.layout_slack, name.as_str()) {
-            (Some(_), "__got" | "__stubs" | "__chain_starts" | "__init_offsets") => size,
+            (
+                Some(_),
+                "__got" | "__stubs" | "__chain_starts" | "__init_offsets" | "__unwind_info",
+            ) => size,
             (Some(policy), _) if size > 0 && !zerofill => {
                 let anchor = cfg
                     .slack_anchor
@@ -3034,7 +3114,10 @@ fn place(
                     SynthKind::Veneer { site, .. } => {
                         veneer_addr_of.insert(site, addr);
                     }
-                    SynthKind::InitOffsets => {}
+                    // The `__init_offsets` and `__unwind_info` bytes
+                    // fill in `Pass 3` (the placements they read are
+                    // final here).
+                    SynthKind::InitOffsets | SynthKind::UnwindInfo => {}
                 }
             }
         }
@@ -3324,6 +3407,23 @@ fn resolve_all(
                     in_offset: 4,
                     imm12: (target_addr & 0xFFF) as u32,
                 });
+            }
+            Some(SynthKind::UnwindInfo) => {
+                // M34: the rows translate through the placements (the
+                // strip and the fold already spoke) and synthesize into
+                // the section bytes the piece carries. The reserved
+                // slot converges onto this size in the placement fixed
+                // point — the loop breaks only when the two agree.
+                let entries = build_unwind_entries(objects, state)?;
+                let info = crate::unwind::synthesize(&entries).map_err(|e| LinkError::Layout {
+                    message: format!("the compact-unwind table cannot synthesize: {e}"),
+                })?;
+                let synth = state.flat[fp_idx]
+                    .piece
+                    .synth
+                    .as_mut()
+                    .expect("the __unwind_info piece carries synthetic content");
+                synth.bytes = info.bytes;
             }
             Some(SynthKind::InitOffsets) => {
                 // M16: fill the u32 entries — each the resolved
@@ -4258,6 +4358,152 @@ fn build_data_in_code(cfg: &LinkConfig, objects: &[InputObject], state: &PlacedS
     out
 }
 
+/// The `__unwind_info` piece's filled length (the synthesis `Pass 3`
+/// wrote; 0 when the section does not ride).
+fn unwind_piece_len(state: &PlacedState) -> usize {
+    state
+        .flat
+        .iter()
+        .find(|fp| {
+            fp.piece
+                .synth
+                .as_ref()
+                .is_some_and(|s| matches!(s.kind, SynthKind::UnwindInfo))
+        })
+        .and_then(|fp| fp.piece.synth.as_ref())
+        .map_or(0, |s| s.bytes.len())
+}
+
+/// Translates the input tables onto the output `__TEXT`-relative rows
+/// through the placed piece list (the same oracle the M30 dice
+/// carriage reads): a live function's `__text` piece carries its
+/// output vaddr, a dead-stripped or ICF-folded-away function carries
+/// no piece and its row drops with it, a rooted personality/LSDA
+/// reference always finds its piece. A missing personality/LSDA span
+/// is a resolution bug (the strip roots the referenced functions) — an
+/// internal refusal, never a silently dropped row.
+fn build_unwind_entries(
+    objects: &[InputObject],
+    state: &PlacedState,
+) -> Result<Vec<crate::unwind::UnwindEntry>, LinkError> {
+    let text_vmaddr = state
+        .segments
+        .iter()
+        .find(|s| s.name == "__TEXT")
+        .map_or(0, |s| s.vmaddr);
+    // The placed spans of every `__TEXT`-segment piece: (file, input
+    // section, section-relative start, size, output vaddr), sorted so
+    // each lookup is one binary search.
+    let mut spans: Vec<(u32, usize, u64, u64, u64)> = Vec::new();
+    for fp in &state.flat {
+        if fp.piece.in_range.is_empty() || fp.piece.size == 0 || fp.piece.synth.is_some() {
+            continue;
+        }
+        let Some(obj) = objects.get(fp.piece.file.0 as usize) else {
+            continue;
+        };
+        let Some(sect) = obj.sections.get(fp.piece.in_sect) else {
+            continue;
+        };
+        if sect.segment != "__TEXT" {
+            continue;
+        }
+        let start = fp.piece.in_range.start.saturating_sub(sect.data.start);
+        spans.push((
+            fp.piece.file.0,
+            fp.piece.in_sect,
+            start,
+            fp.piece.size,
+            fp.addr,
+        ));
+    }
+    spans.sort_unstable();
+    let span_of = |file: u32, sect: usize, offset: u64| -> Option<u64> {
+        let idx = spans
+            .partition_point(|s| (s.0, s.1, s.2) <= (file, sect, offset))
+            .checked_sub(1)?;
+        let (f, si, start, size, vaddr) = spans[idx];
+        if f == file && si == sect && offset >= start && offset < start + size {
+            Some(vaddr + (offset - start))
+        } else {
+            None
+        }
+    };
+    let mut out = Vec::new();
+    for obj in objects {
+        if obj.compact_unwind.is_empty() {
+            continue;
+        }
+        let Some((ti, _)) = obj
+            .sections
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.segment == "__TEXT" && s.name == "__text")
+        else {
+            continue; // the parse refuses rows without __text
+        };
+        for e in &obj.compact_unwind {
+            // The rows' addresses normalize to their carrying section's
+            // base at parse (the one subtraction the symbol values
+            // take); the LSDA stays blob-relative and finds its
+            // covering section here.
+            let Some(function) = span_of(obj.file.0, ti, e.range_start) else {
+                continue; // dead-stripped or folded-away: the row drops
+            };
+            let Some(personality) = (if e.personality == 0 {
+                Some(0)
+            } else {
+                span_of(obj.file.0, ti, e.personality)
+            }) else {
+                return Err(LinkError::Internal {
+                    message: "compact-unwind personality reference missing from placement".into(),
+                });
+            };
+            let Some(lsda) = (if e.lsda == 0 {
+                Some(0)
+            } else {
+                obj.sections
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| {
+                        s.segment == "__TEXT"
+                            && s.size > 0
+                            && s.addr <= e.lsda
+                            && e.lsda < s.addr + s.size
+                    })
+                    .and_then(|(si, s)| span_of(obj.file.0, si, e.lsda - s.addr))
+            }) else {
+                return Err(LinkError::Internal {
+                    message: "compact-unwind LSDA reference missing from placement".into(),
+                });
+            };
+            let to_off = |vaddr: u64| -> Result<u32, LinkError> {
+                u32::try_from(vaddr.saturating_sub(text_vmaddr)).map_err(|_| LinkError::Internal {
+                    message: "compact-unwind offset beyond the u32 __TEXT span".into(),
+                })
+            };
+            out.push(crate::unwind::UnwindEntry {
+                function_offset: to_off(function)?,
+                range_length: e.range_length,
+                encoding: e.encoding,
+                personality_offset: to_off(personality)?,
+                lsda_offset: to_off(lsda)?,
+            });
+        }
+    }
+    out.sort_by_key(|e| e.function_offset);
+    out.dedup_by_key(|e| e.function_offset);
+    Ok(out)
+}
+
+/// The `__unwind_info` piece's filled length (the synthesis `Pass 3`
+/// wrote; 0 when the section does not ride).
+/// Translates the input tables onto the output `__TEXT`-relative rows
+/// (the placed-piece list speaks: dead functions dropped their atoms,
+/// folded duplicates dropped their rows, and a live row resolves
+/// through the fold-aware address lookup exactly like the symbols
+/// do). A personality or LSDA reference that resolves to nothing is a
+/// resolution bug (the strip roots the referenced functions) — an
 /// ULEB128 encoding.
 #[must_use]
 pub fn uleb(mut v: u64) -> Vec<u8> {
