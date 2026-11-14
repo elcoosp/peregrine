@@ -383,6 +383,7 @@ pub(crate) fn check_load_commands(img: &ParsedImage<'_>, report: &mut Report) {
     }
     check_umbrella_region(img, report);
     check_dyld_environment(img, report);
+    check_load_dylinker(img, report);
 }
 
 /// The M22 dyld-environment contract: `LC_DYLD_ENVIRONMENT` is the
@@ -508,6 +509,120 @@ fn check_dyld_environment(img: &ParsedImage<'_>, report: &mut Report) {
             continue;
         }
         seen.push(var.to_string());
+    }
+}
+
+/// The M26 loader-path contract: `LC_LOAD_DYLINKER` is the command the
+/// kernel execs as the image's dynamic loader, so a configured
+/// executable verifies strict exactly like the `/usr/lib/dyld` default.
+/// The invariants the fixture knob can break are named: a command off
+/// an executable (a relocatable object carries no loader — an error; a
+/// dylib or a bundle is loaded by the kernel itself, so the command is
+/// inert there — a warning), a second loader command on one image (the
+/// kernel execs one loader — the loser would be a silently dropped
+/// decision), an empty name (no loader), a relative path (the kernel
+/// resolves the loader path from the process root at exec time — exec
+/// would refuse before dyld ever runs), a stray `lc_str` offset (the
+/// fixed part is 12 bytes), an undersized command, and an unterminated
+/// name.
+fn check_load_dylinker(img: &ParsedImage<'_>, report: &mut Report) {
+    const LOADER_FIXED_PART: u32 = 12; // cmd + cmdsize + lc_str offset
+    let is_object = img.header.filetype == MH_OBJECT;
+    let is_exec = img.header.filetype == MH_EXECUTE;
+    let mut seen = 0usize;
+    for cmd in &img.commands {
+        if cmd.kind != LoadCommandKind::LoadDylinker {
+            continue;
+        }
+        if is_object {
+            report.issues.push(Issue::error(
+                Code::LinkeditPayload,
+                "LC_LOAD_DYLINKER is a loader command — a relocatable object carries \
+                 no loader to exec (the kernel reads it from the main executable only)",
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        if !is_exec {
+            report.issues.push(Issue::warning(
+                Code::LinkeditPayload,
+                "LC_LOAD_DYLINKER rides a non-executable image — the kernel loads a \
+                 dylib or a bundle itself, so the command is inert here",
+                Some(cmd.offset as u64),
+            ));
+        }
+        seen += 1;
+        if seen > 1 {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "duplicate LC_LOAD_DYLINKER: the kernel execs one loader, so the \
+                     second command is a silently dropped decision ({seen} commands seen)"
+                ),
+                Some(cmd.offset as u64),
+            ));
+        }
+        if cmd.cmdsize < LOADER_FIXED_PART as usize + 2 {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_LOAD_DYLINKER cmdsize {} is under the 12-byte fixed part plus \
+                     a path and its terminator",
+                    cmd.cmdsize
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        let raw = &cmd.bytes;
+        let off = u32::from_le_bytes(
+            raw[8..12]
+                .try_into()
+                .expect("the offset field rides byte 8"),
+        );
+        if off != LOADER_FIXED_PART {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_LOAD_DYLINKER lc_str offset {off} must be 12 (the fixed part \
+                     is cmd, cmdsize, offset)"
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        // The path: a NUL-terminated C string inside the command, with
+        // room for the terminator.
+        let tail = &raw[LOADER_FIXED_PART as usize..cmd.cmdsize];
+        let Some(end) = tail.iter().position(|&b| b == 0) else {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                "LC_LOAD_DYLINKER path is not NUL-terminated inside the command",
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        };
+        let path = String::from_utf8_lossy(&tail[..end]).into_owned();
+        if path.is_empty() {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                "LC_LOAD_DYLINKER names no loader — the command would exec nothing; \
+                 name an absolute path (e.g. /usr/lib/dyld)",
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        if !path.starts_with('/') {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_LOAD_DYLINKER path {path:?} is not absolute — the kernel \
+                     resolves the loader path from the process root at exec time, so \
+                     exec would refuse before dyld ever runs"
+                ),
+                Some(cmd.offset as u64),
+            ));
+        }
     }
 }
 
