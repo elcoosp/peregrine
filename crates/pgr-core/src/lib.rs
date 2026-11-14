@@ -111,7 +111,10 @@ pub use stack_size::StackSize;
 pub use sub_client::{SubClient, SubClientEntry, SubClientError};
 pub use trie::{Export, ExportInfo};
 pub use umbrella::{Umbrella, UmbrellaError, UmbrellaKind, UmbrellaMember};
-pub use unwind::{SynthesisError, UnwindEntry, UnwindInfo, synthesize, synthesized_size};
+pub use unwind::{
+    MAX_COMMON_ENCODINGS, SynthesisError, UnwindEntry, UnwindInfo, UnwindShape, plan_shape,
+    synthesize, synthesized_size, synthesized_size_shape,
+};
 
 /// A fatal link error (M1 surface: inputs, symbols, layout, encoding).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
