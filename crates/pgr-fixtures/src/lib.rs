@@ -316,6 +316,19 @@ pub struct ImageBuilder {
     /// knob's — a command off an executable, a non-`DYLD_` variable or
     /// a duplicate is the verifier's finding to name.
     dyld_envs: Vec<String>,
+    /// M26: the `LC_LOAD_DYLINKER` path the executable fixture names
+    /// (the `-dylinker` knob). The default stays the hard-coded
+    /// `/usr/lib/dyld` every pre-M26 fixture built with; an override is
+    /// written during assembly, so the ad-hoc signature is computed
+    /// over the final bytes. The value is the knob's — a relative path
+    /// is the verifier's finding to name (the broken-shape gates build
+    /// it on purpose).
+    loader_path: Option<String>,
+    /// M27: the executable fixture's `MH_PIE` bit. The default stays
+    /// set (every pre-M27 fixture built PIE); dropping it is the
+    /// `-no_pie` knob's image shape — the strict verifier accepts both
+    /// (the flag is a decision, not a defect).
+    pie: bool,
 }
 
 impl ImageBuilder {
@@ -343,6 +356,8 @@ impl ImageBuilder {
             sub_cmds: Vec::new(),
             sub_clients: Vec::new(),
             dyld_envs: Vec::new(),
+            loader_path: None,
+            pie: true,
         }
     }
 
@@ -370,6 +385,8 @@ impl ImageBuilder {
             sub_cmds: Vec::new(),
             sub_clients: Vec::new(),
             dyld_envs: Vec::new(),
+            loader_path: None,
+            pie: true,
         }
     }
 
@@ -396,6 +413,8 @@ impl ImageBuilder {
             sub_cmds: Vec::new(),
             sub_clients: Vec::new(),
             dyld_envs: Vec::new(),
+            loader_path: None,
+            pie: true,
         }
     }
 
@@ -463,6 +482,28 @@ impl ImageBuilder {
     /// (the broken-shape gates build it on purpose).
     pub fn set_pagezero(&mut self, vmsize: u64) {
         self.pagezero = Some(vmsize);
+    }
+
+    /// Sets the executable's `LC_LOAD_DYLINKER` path (the M26
+    /// `-dylinker` knob). The default stays the hard-coded
+    /// `/usr/lib/dyld` every pre-M26 fixture built with; an override is
+    /// written during assembly (the command size rides the named
+    /// path's length), so the ad-hoc signature is computed over the
+    /// final bytes and strict verification runs with the hash
+    /// recompute on. The value is the knob's — a relative path is the
+    /// verifier's finding to name (the broken-shape gates build it on
+    /// purpose).
+    pub fn set_loader_path(&mut self, path: &str) {
+        self.loader_path = Some(path.to_string());
+    }
+
+    /// Sets the executable's `MH_PIE` header bit (the M27 `-no_pie`
+    /// knob). The default stays set — every pre-M27 fixture built PIE;
+    /// a dropped bit is the decision's image shape, and the strict
+    /// verifier accepts both (the strict-hash recompute rides the
+    /// assembled bytes either way).
+    pub fn set_pie(&mut self, pie: bool) {
+        self.pie = pie;
     }
 
     /// Sets the dylib/bundle preferred load address (the image base) —
@@ -669,7 +710,8 @@ impl ImageBuilder {
         add_cmd(72); // __LINKEDIT
         add_cmd(32); // LC_BUILD_VERSION + 1 tool entry
         if exec {
-            add_cmd(align_up(12 + "/usr/lib/dyld\0".len() as u64, 8) as usize); // dylinker
+            let loader = self.loader_path.as_deref().unwrap_or("/usr/lib/dyld");
+            add_cmd(align_up(12 + loader.len() as u64 + 1, 8) as usize); // dylinker
             add_cmd(24); // LC_MAIN
         } else if !bundle {
             add_cmd(align_up(24 + self.install_name.len() as u64 + 1, 8) as usize); // LC_ID_DYLIB
@@ -908,7 +950,7 @@ impl ImageBuilder {
         // ---- assemble header + load commands ----------------------------
         let mut buf = vec![0u8; file_len as usize];
         let flags = if exec {
-            MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE
+            MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | if self.pie { MH_PIE } else { 0 }
         } else if bundle {
             // A bundle carries no re-export surface (dlopen-able, no
             // LC_ID_DYLIB).
@@ -1033,15 +1075,14 @@ impl ImageBuilder {
         w32(&mut buf, lc + 28, 0x000f_0200);
         lc += 32;
         if exec {
+            let loader = self.loader_path.as_deref().unwrap_or("/usr/lib/dyld");
+            let loader_size = align_up(12 + loader.len() as u64 + 1, 8) as u32;
             w32(&mut buf, lc, LC_LOAD_DYLINKER);
-            w32(
-                &mut buf,
-                lc + 4,
-                align_up(12 + "/usr/lib/dyld\0".len() as u64, 8) as u32,
-            );
+            w32(&mut buf, lc + 4, loader_size);
             w32(&mut buf, lc + 8, 12);
-            buf[lc + 12..lc + 12 + "/usr/lib/dyld\0".len()].copy_from_slice(b"/usr/lib/dyld\0");
-            lc += align_up(12 + "/usr/lib/dyld\0".len() as u64, 8) as usize;
+            buf[lc + 12..lc + 12 + loader.len()].copy_from_slice(loader.as_bytes());
+            buf[lc + 12 + loader.len()] = 0;
+            lc += loader_size as usize;
             w32(&mut buf, lc, LC_MAIN);
             w32(&mut buf, lc + 4, 24);
             w64(&mut buf, lc + 8, self.entryoff);
