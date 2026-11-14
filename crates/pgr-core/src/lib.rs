@@ -41,6 +41,7 @@ pub mod cache;
 pub mod deadstrip;
 pub mod dyld_env;
 pub mod dyld_info;
+pub mod dylinker;
 pub mod export_filter;
 pub mod fixups;
 pub mod icf;
@@ -74,6 +75,7 @@ pub use bundle_loader::{BundleLoader, BundleLoaderError};
 pub use cache::PoiCache;
 pub use dyld_env::{DyldEnv, DyldEnvEntry, DyldEnvError};
 pub use dyld_info::DyldInfoPlan;
+pub use dylinker::{Dylinker, DylinkerError};
 pub use export_filter::{SymbolMatcher, SymbolPattern, SymbolPatternError, is_export_visible};
 pub use fixups::{
     FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page, pack_page_strided,
