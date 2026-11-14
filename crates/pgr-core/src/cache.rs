@@ -42,9 +42,11 @@ use std::path::{Path, PathBuf};
 const POI_MAGIC: &[u8; 8] = b"PGRPOI1\0";
 
 /// Cache format version (M7): the framing *and* payload layout revision.
-/// Bump when the frame or codec changes shape; v1 (M6) entries are then
-/// silently missed and reclaimed by the directory self-heal.
-pub const CACHE_FORMAT_VERSION: u32 = 2;
+/// Bump when the frame or codec changes shape; older entries are then
+/// silently missed and reclaimed by the directory self-heal. **v3**
+/// (M30) adds the parsed object's `LC_DATA_IN_CODE` entries to the
+/// payload — v1/v2 entries decode to `None` and re-parse.
+pub const CACHE_FORMAT_VERSION: u32 = 3;
 
 /// Parser revision: bumped when Pass 1's parse semantics change in a way
 /// that would make a stored POI stale even though the framing is unchanged.
@@ -479,6 +481,13 @@ pub fn encode_poi(obj: &InputObject, split_symbols: bool) -> Vec<u8> {
             put_u64(&mut p, r.end);
         }
     }
+    // M30 (v3 payload): the data-in-code stream rides the tail — one
+    // 8-byte entry per record, `__text`-relative as parsed.
+    put_u32(&mut p, obj.data_in_code.len() as u32);
+    for e in &obj.data_in_code {
+        put_u32(&mut p, e.offset);
+        put_u32(&mut p, u32::from(e.length) | (u32::from(e.kind) << 16));
+    }
     frame(*POI_MAGIC, &p)
 }
 
@@ -570,6 +579,18 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
         }
         atoms.push(ranges);
     }
+    // M30 (v3 payload): the data-in-code stream rides the tail.
+    let n_dice = r.u32()? as usize;
+    let mut data_in_code = Vec::with_capacity(n_dice.min(1 << 20));
+    for _ in 0..n_dice {
+        let offset = r.u32()?;
+        let packed = r.u32()?;
+        data_in_code.push(pgr_format::DataInCodeEntry {
+            offset,
+            length: packed as u16,
+            kind: (packed >> 16) as u16,
+        });
+    }
     if r.at != r.b.len() {
         return None;
     }
@@ -580,6 +601,7 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
         symbols,
         symbol_names,
         atoms,
+        data_in_code,
         subsections_via_symbols,
         from_archive,
         archive_name,
@@ -921,7 +943,7 @@ mod m7_versioned {
             PARSER_REVISION,
             "frame field 2 is the parser revision"
         );
-        assert_eq!(CACHE_FORMAT_VERSION, 2, "M7 bumps the format to v2");
+        assert_eq!(CACHE_FORMAT_VERSION, 3, "M30 bumps the format to v3");
         let tenc = encode_frozen_dylib(&tiny_dylib());
         assert_eq!(
             u32::from_le_bytes(tenc[8..12].try_into().unwrap()),
