@@ -78,7 +78,7 @@ fn sections_of(layout: &pgr_core::layout::Layout) -> Vec<(&str, &str, u64, u32)>
 }
 
 /// The identity proxy: header bytes + file size (the header carries the
-/// section_64 entries — an align or offset move shows up there).
+/// `section_64` entries — an align or offset move shows up there).
 fn identity(tweak: impl FnOnce(&mut LinkConfig)) -> (Vec<u8>, u64) {
     let l = plan(tweak);
     (l.header_bytes, l.file_size)
