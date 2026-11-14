@@ -1378,7 +1378,13 @@ fn record_v5_round_trips_the_resolution_snapshot() {
     )
     .unwrap();
 
-    assert_eq!(record.format_version, 5, "the resolve wiring is v5");
+    // The resolution snapshot rides the record since v5 (the M9
+    // resolve wiring); M30's `__LINKEDIT` plan bump moved the format
+    // to v6 — the snapshot contract crosses it unchanged.
+    assert_eq!(
+        record.format_version, 6,
+        "the record format is v6 (the M30 bump)"
+    );
     let snap = record
         .resolution
         .as_ref()
