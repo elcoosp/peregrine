@@ -169,5 +169,22 @@ harness = false
 name = "pie"
 harness = false
 
+# The M28 sect-align bench: the link across the -sectalign decisions
+# (the empty default table beside raised floors over the same corpus) —
+# the default is a shape-parity gate (an empty table plans the pre-M28
+# bytes), the raised floors price the packing loop's realignment.
+[[bench]]
+name = "sect_align"
+harness = false
+
+# The M29 header-pad bench: the link across the -headerpad decisions
+# (the natural region beside the named floor over the same corpus) —
+# the natural region is a shape-parity gate (an unnamed pad plans the
+# pre-M29 bytes), the named floor prices the packing loop's
+# reservation.
+[[bench]]
+name = "header_pad"
+harness = false
+
 [lints]
 workspace = true
