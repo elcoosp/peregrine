@@ -5,6 +5,25 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M34)
+
+- **M34** — compact-unwind synthesis: the input `__LD,__compact_unwind` tables the Pass-1
+  sweep kept dropping (the `S_ATTR_DEBUG` section the `__LD` skip hid) now ride the atom map
+  onto the output `__TEXT,__unwind_info` — the section dyld's unwinder and every backtrace
+  reader walks. The format reader (`pgr_format::read_compact_unwind`) decodes the table with
+  typed refusals; the parse validates it against the object's sections (a range the object
+  cannot vouch for, a dangling personality/LSDA reference, a zero-length or duplicate range
+  refuse with the fix); the carriage translates through the placed piece list (dead-stripped
+  functions drop their rows, ICF-folded duplicates land once on the canonical copy, the
+  personality/LSDA references root their targets under `-dead_strip`); `pgr_core::unwind::synthesize`
+  builds the section (personality rows in first-use order, the sorted index with its terminator,
+  regular second-level pages under the 4096-entry cap, the LSDA rows sorted) — the public seam a
+  build system plans with before any link runs. An entry-free corpus plans the pre-M34 bytes (no
+  section at all); the relocatable output never engages the carriage; the POI cache codec carries
+  the parsed rows (v5; stale entries self-heal); the verifier's `unwind` family joins the
+  `--checks` registry (`Check::Unwind`, code `unwind_info`) and gates the broken shapes; the
+  `compact_unwind` bench and the `compact_unwind_link` consumer example ride along.
+
 ### Added (M32–M33)
 
 - **M32** — the UUID suppression (`-no_uuid`): the third advisory no-op promoted — the output's `LC_UUID` command drops on the named decision (24 bytes narrower, no uuid field for the emit two-pass derivation to patch); the emit patch paths consult the plan offset's absent sentinel (`0`, the `__LINKEDIT` offset convention); the verifier's absence warning names the decision, never a defect; daemon wire v23 carries the decision; the `uuid` bench and the `no_uuid_link` consumer example ride along.
