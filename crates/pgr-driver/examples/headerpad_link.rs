@@ -46,12 +46,13 @@ fn first_text_offset(image: &[u8]) -> u32 {
             let seg =
                 pgr_format::SegmentCommand64::parse(cmd.bytes, 0).expect("the segment parses");
             if seg.name() == Ok("__TEXT") {
-                for s in seg
+                let sects = seg
                     .sections(cmd.bytes, pgr_format::SegmentCommand64::SIZE)
-                    .expect("the sections parse")
-                {
-                    return s.offset;
-                }
+                    .expect("the sections parse");
+                return sects
+                    .first()
+                    .expect("the text segment carries a section")
+                    .offset;
             }
         }
     }
