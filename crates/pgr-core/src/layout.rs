@@ -413,6 +413,33 @@ pub struct LinkConfig {
     /// segmented output can suppress, and the relocatable object's
     /// header carries no function-starts command at all.
     pub function_starts: bool,
+    /// M32 — the UUID suppression: `-no_uuid` drops the output's
+    /// `LC_UUID` command (no uuid field for the emit two-pass
+    /// derivation to patch, `sizeofcmds` 24 bytes narrower). The flag
+    /// rode the driver surface as an accepted no-op since M1; the
+    /// default (`true`) keeps every pre-M32 link byte-identical — the
+    /// derived-UUID command rides every segmented image, its field
+    /// zeroed in the header bytes until the emit patches it after
+    /// hashing. There is no output-kind conflict: every segmented
+    /// output can suppress, and the relocatable object's header
+    /// carries no `LC_UUID` command at all — the emit patch paths
+    /// consult the plan offset's absent sentinel (`0`, the convention
+    /// every `__LINKEDIT` offset field shares) instead of carrying a
+    /// second copy of the decision.
+    pub uuid: bool,
+    /// M33 — the private-extern decision: `-keep_private_externs`
+    /// holds an input private-extern definition (`N_PEXT`, the
+    /// compilers' `.private_extern`) external (`N_EXT | N_SECT |
+    /// N_PEXT`, exported like any other definition) instead of the
+    /// default **conversion** into a local (`N_SECT | N_PEXT`, the
+    /// same row the export filter's hidden path emits, absent from the
+    /// export trie, counted in the dysymtab locals range). The flag
+    /// rode the driver surface as an accepted no-op since M1; the
+    /// pre-M33 tree dropped the input bit at parse, exporting private
+    /// externs publicly. The decision only fires on the input
+    /// `N_PEXT` bit — a corpus without private externs plans the
+    /// pre-M33 bytes under either decision.
+    pub keep_private_externs: bool,
 }
 
 impl Default for LinkConfig {
@@ -465,6 +492,8 @@ impl Default for LinkConfig {
             header_pad: None,
             data_in_code: true,
             function_starts: true,
+            uuid: true,
+            keep_private_externs: false,
         }
     }
 }
@@ -648,7 +677,9 @@ pub struct LinkeditPlan {
     pub indirect_off: u64,
     /// Indirect symbol table size in bytes (0 when empty).
     pub indirect_size: usize,
-    /// Byte offset of the `LC_UUID` uuid field inside the header bytes.
+    /// Byte offset of the `LC_UUID` uuid field inside the header bytes
+    /// (`0` when the M32 suppression names the command off — the
+    /// absent sentinel every `__LINKEDIT` offset field shares).
     pub uuid_at: u64,
     /// Code signature file offset (16-aligned).
     pub sig_off: u64,
@@ -706,8 +737,9 @@ pub struct Layout {
     /// M6 legacy fixups: the classic `LC_DYLD_INFO_ONLY` opcode streams
     /// (`None` when the image uses chained fixups or carries no slots).
     pub dyld_info: Option<crate::dyld_info::DyldInfoPlan>,
-    /// Header + load-command bytes (the UUID field is zeroed; emit patches
-    /// it after hashing).
+    /// Header + load-command bytes (the UUID field is zeroed when the
+    /// command rides; emit patches it after hashing — the M32
+    /// suppression leaves no uuid field at all).
     pub header_bytes: Vec<u8>,
     /// Byte offset of the `LC_MAIN` entryoff field inside the header bytes
     /// (executables only; 0 otherwise).
@@ -1768,6 +1800,7 @@ pub fn layout(
         atom_addr: &state.atom_addr,
         live,
         fold,
+        keep_private_externs: cfg.keep_private_externs,
     };
     let mut symbols = build_symtab(objects, res, interner, &commons, &visible, &symtab_ctx);
     // `__mh_execute_header`: the image's own exported header symbol (ld64
@@ -3844,13 +3877,18 @@ struct SymtabContext<'a> {
     atom_addr: &'a std::collections::HashMap<(u32, usize), Vec<(u64, u64)>>,
     live: &'a crate::deadstrip::LiveSet,
     fold: &'a crate::icf::FoldPlan,
+    /// M33: the private-extern keep decision (the conversion is the
+    /// default) — the input `N_PEXT` bit names it.
+    keep_private_externs: bool,
 }
 
 /// Builds the output symbol table: locals (file order), ext defs (file
 /// order), commons (name order); `n_sect` remapped to output sections.
 /// M3: hidden externals (export filters) become private externals
 /// (`N_SECT | N_PEXT`, `external: false`) merged into the locals range in
-/// (file, sym) order — ld64's `-exported_symbols_list` behavior.
+/// (file, sym) order — ld64's `-exported_symbols_list` behavior. M33:
+/// input private externs (`N_PEXT`) convert into the same locals shape
+/// unless `-keep_private_externs` holds them external.
 fn build_symtab(
     objects: &[InputObject],
     res: &Resolution,
@@ -3859,8 +3897,14 @@ fn build_symtab(
     visible: &dyn Fn(&[u8]) -> bool,
     ctx: &SymtabContext<'_>,
 ) -> Vec<OutputSymbol> {
-    let (sections, addr_of, atom_addr, live, fold) =
-        (ctx.sections, ctx.addr_of, ctx.atom_addr, ctx.live, ctx.fold);
+    let (sections, addr_of, atom_addr, live, fold, keep_private_externs) = (
+        ctx.sections,
+        ctx.addr_of,
+        ctx.atom_addr,
+        ctx.live,
+        ctx.fold,
+        ctx.keep_private_externs,
+    );
     // Output section lookup by (file, input section): (index, base).
     let mut sect_of: std::collections::HashMap<(u32, usize), usize> =
         std::collections::HashMap::new();
@@ -3966,7 +4010,8 @@ fn build_symtab(
             continue;
         };
         // Dead definitions (M5/D12) leave the symtab and the trie.
-        if let Some(sym) = obj.symbols.get(def.sym)
+        let input_sym = obj.symbols.get(def.sym);
+        if let Some(sym) = input_sym
             && !sym_live(obj, sym)
         {
             continue;
@@ -3975,9 +4020,19 @@ fn build_symtab(
             continue;
         };
         let osect = osect_of(def.file.0, sect, def.value);
+        // M33: the input `N_PEXT` bit names the private-extern
+        // decision — the default converts the row into a local (the
+        // filter-hidden shape, `N_SECT | N_PEXT`), `-keep_private_externs`
+        // holds it external with the bit set (the pre-M33 tree dropped
+        // the bit, exporting private externs publicly).
+        let pext_input = input_sym.is_some_and(|s| s.pext);
+        let mut n_type = N_EXT | N_SECT;
+        if pext_input {
+            n_type |= N_PEXT;
+        }
         let entry = OutputSymbol {
             name: id,
-            n_type: N_EXT | N_SECT,
+            n_type,
             n_sect: if osect == usize::MAX {
                 0
             } else {
@@ -3987,11 +4042,11 @@ fn build_symtab(
             value,
             external: true,
         };
-        if visible(interner.bytes(id)) {
-            out.push(entry);
-        } else {
-            // Hidden: a private external local (`N_PEXT`), ordered by its
-            // defining (file, sym) position within the locals range.
+        if (pext_input && !keep_private_externs) || !visible(interner.bytes(id)) {
+            // Hidden: a private external local (`N_PEXT`) — the export
+            // filter's hidden shape and the M33 converted private
+            // extern share it — ordered by its defining (file, sym)
+            // position within the locals range.
             hidden.push((
                 (def.file.0, def.sym as u32),
                 OutputSymbol {
@@ -4000,6 +4055,8 @@ fn build_symtab(
                     ..entry
                 },
             ));
+        } else {
+            out.push(entry);
         }
     }
     // Commons: name-sorted (the allocation order); address from the
@@ -4016,17 +4073,26 @@ fn build_symtab(
         else {
             continue;
         };
+        // M33: the input `N_PEXT` bit names the same decision a
+        // section-defined private extern does — the default converts
+        // the row into a local, the keep holds it external.
+        let pext_input = objects
+            .get(def.file.0 as usize)
+            .and_then(|obj| obj.symbols.get(def.sym))
+            .is_some_and(|s| s.pext);
+        let mut n_type = N_EXT | N_SECT;
+        if pext_input {
+            n_type |= N_PEXT;
+        }
         let entry = OutputSymbol {
             name: *id,
-            n_type: N_EXT | N_SECT,
+            n_type,
             n_sect: (ci + 1) as u8,
             n_desc: 0,
             value: sections[ci].vm_addr + piece.offset,
             external: true,
         };
-        if visible(interner.bytes(*id)) {
-            out.push(entry);
-        } else {
+        if (pext_input && !keep_private_externs) || !visible(interner.bytes(*id)) {
             hidden.push((
                 (def.file.0, def.sym as u32),
                 OutputSymbol {
@@ -4035,6 +4101,8 @@ fn build_symtab(
                     ..entry
                 },
             ));
+        } else {
+            out.push(entry);
         }
     }
     // Merge hidden defs into the locals range (both sides already sorted by
@@ -4356,7 +4424,7 @@ fn build_header(
         + 1 // LC_DYLD_EXPORTS_TRIE
         + u32::from(cfg.function_starts) // LC_FUNCTION_STARTS (M31)
         + u32::from(hi.emit_dice) // LC_DATA_IN_CODE (M30)
-        + 1 // LC_UUID
+        + u32::from(cfg.uuid) // LC_UUID (M32)
         + u32::from(cfg.adhoc)
         + u32::try_from(hi.dylibs.len()).map_err(|_| LinkError::Internal {
             message: "dylib count exceeds u32".into(),
@@ -4394,7 +4462,7 @@ fn build_header(
             + 16 // LC_DYLD_EXPORTS_TRIE
             + usize::from(cfg.function_starts) * 16 // LC_FUNCTION_STARTS (M31)
             + if hi.emit_dice { 16 } else { 0 } // LC_DATA_IN_CODE (M30)
-            + 24 // LC_UUID
+            + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
             + if cfg.adhoc { 16 } else { 0 } // LC_CODE_SIGNATURE
             + hi.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
             + cfg.umbrella.region_size()
@@ -4686,10 +4754,20 @@ fn build_header(
         w32(&mut buf, lc + 12, hi.dice_len as u32);
         lc += 16;
     }
-    let uuid_at = lc + 8;
-    w32(&mut buf, lc, pgr_format::consts::LC_UUID);
-    w32(&mut buf, lc + 4, 24);
-    lc += 24;
+    // M32: the UUID suppression — the command and the uuid field it
+    // carries are the always-carried default; the named decision
+    // drops both, and the plan offset names the absent sentinel (the
+    // convention every `__LINKEDIT` offset field shares). The emit
+    // patch paths consult the sentinel, never a second decision copy.
+    let uuid_at;
+    if cfg.uuid {
+        w32(&mut buf, lc, pgr_format::consts::LC_UUID);
+        w32(&mut buf, lc + 4, 24);
+        uuid_at = lc + 8;
+        lc += 24;
+    } else {
+        uuid_at = 0;
+    }
     if cfg.adhoc {
         w32(&mut buf, lc, pgr_format::consts::LC_CODE_SIGNATURE);
         w32(&mut buf, lc + 4, 16);
@@ -4745,7 +4823,7 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice
         + 16 // LC_DYLD_EXPORTS_TRIE
         + usize::from(cfg.function_starts) * 16 // LC_FUNCTION_STARTS (M31)
         + usize::from(emit_dice) * 16 // LC_DATA_IN_CODE (M30)
-        + 24 // LC_UUID
+        + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
         + usize::from(cfg.adhoc) * 16 // LC_CODE_SIGNATURE
 }
 
