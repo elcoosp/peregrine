@@ -281,6 +281,10 @@ pub struct ImageBuilder {
     /// M19: the dylib/bundle preferred load address (the non-executable
     /// constant-delta delta).
     image_base: Option<u64>,
+    /// M29: the header-region floor (the `-headerpad` reservation the
+    /// `__TEXT` packing grows to before the first section). `None`
+    /// keeps the pre-M29 natural region.
+    header_pad: Option<u64>,
     /// M17: the per-segment protection overrides (`(name, maxprot,
     /// initprot)`; unnamed segments keep the house table). Written
     /// during assembly, so the ad-hoc signature is computed over the
@@ -351,6 +355,7 @@ impl ImageBuilder {
             pointer_format: PointerFormatKind::Offset64,
             pagezero: None,
             image_base: None,
+            header_pad: None,
             seg_prots: Vec::new(),
             stack_size: None,
             sub_cmds: Vec::new(),
@@ -380,6 +385,7 @@ impl ImageBuilder {
             pointer_format: PointerFormatKind::Offset64,
             pagezero: None,
             image_base: None,
+            header_pad: None,
             seg_prots: Vec::new(),
             stack_size: None,
             sub_cmds: Vec::new(),
@@ -408,6 +414,7 @@ impl ImageBuilder {
             pointer_format: PointerFormatKind::Offset64,
             pagezero: None,
             image_base: None,
+            header_pad: None,
             seg_prots: Vec::new(),
             stack_size: None,
             sub_cmds: Vec::new(),
@@ -520,6 +527,15 @@ impl ImageBuilder {
     /// (the broken-shape gates build it on purpose).
     pub fn set_image_base(&mut self, vmaddr: u64) {
         self.image_base = Some(vmaddr);
+    }
+
+    /// Reserves the header region the M29 `-headerpad` knob names: the
+    /// fixture's `__TEXT` packing grows the reserved region to at least
+    /// the named floor before the first section (the same decision the
+    /// layout plans). `None` keeps the pre-M29 natural region — every
+    /// earlier fixture built byte-identically.
+    pub fn set_header_pad(&mut self, pad: Option<u64>) {
+        self.header_pad = pad;
     }
 
     /// Overrides one segment's `(maxprot, initprot)` pair — the M17
@@ -765,7 +781,16 @@ impl ImageBuilder {
                 align_up(placed.last().map_or(0, |(_, f, v)| f + v), PAGE_SIZE_16K)
             };
             let mut cursor = if seg_i == 0 {
-                align_up(header_len as u64, 16)
+                // M29: the named header-region floor grows the reserved
+                // region to at least the named space before the first
+                // section (the same decision the layout plans); a floor
+                // at or below the natural region plans the pre-M29
+                // bytes.
+                align_up(
+                    self.header_pad
+                        .map_or(header_len as u64, |p| p.max(header_len as u64)),
+                    16,
+                )
             } else {
                 seg_fileoff
             };
