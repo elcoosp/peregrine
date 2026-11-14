@@ -1,6 +1,6 @@
 # Peregrine Benchmarks — Recorded Baselines
 
-**Status: M0–M29 surfaces recorded on the dev sandbox.** These numbers exist to (a) prove the
+**Status: M0–M31 surfaces recorded on the dev sandbox.** These numbers exist to (a) prove the
 harness works end-to-end from day one and (b) give each pass a regression anchor.
 
 > [!WARNING]
@@ -480,7 +480,7 @@ Nanoseconds per name against a millisecond-scale Pass 3 — off the hot path by 
 magnitude. Hundreds of globs over hundreds of thousands of names is the shape that would need
 a prefix index; this bench is where that decision lives.
 
-## Knob parity (M10–M29)
+## Knob parity (M10–M31)
 
 **Shared reading for every row below**: parity within the sandbox's run-to-run spread (up to
 ±20 %; criterion change-detection non-significant where a p-value is shown). Each released knob
@@ -507,7 +507,7 @@ one string swap in an existing command, one bit in one header word, one packing-
 alignment raise, and one reservation floor whose default plans the pre-knob bytes. Their
 medians land in this table with the next recording pass on the dev sandbox (the same
 convention the hardware gates carry: numbers only from the rig that measured the rest —
-a dev-sandbox re-measure under a different host would not be comparable).
+a dev-sandbox re-measure under a different host would not be comparable). The M30–M31 rows ride the same shape (`data_in_code`, `func_starts` — commands in the inventory above): the carriage is one Pass-1 decode, one containment check and 8 `__LINKEDIT` bytes per entry, and the suppression is one dropped command — parity is the honest expectation, the bench pins it. Their medians land in this table with the next recording pass.
 
 **Platform word (M10 rung 2)** — one rebase-slot corpus per platform at its floor (20 samples);
 the encoding decision is one integer compare in Pass 3:
