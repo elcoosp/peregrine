@@ -164,23 +164,28 @@ fn emit_fused(buf: &mut [u8], layout: &Layout, objects: &[InputObject]) -> Resul
         }
         // §9: the UUID derives from the page hashes of the UUID-zeroed image
         // (the header bytes carry a zero UUID until this write), then the
-        // header page re-hashes. Only page 0 can change.
-        let uuid = signature::derive_uuid(&hashes);
+        // header page re-hashes. Only page 0 can change. M32: the
+        // suppression leaves the image uuid-free — the per-tile tables
+        // hashed it as it is, so there is nothing to derive, write or
+        // re-hash.
         let uuid_at = layout.linkedit.uuid_at as usize;
-        let dst = buf
-            .get_mut(uuid_at..uuid_at + 16)
-            .ok_or(EmitError::Internal {
-                message: "UUID field leaves the output buffer".into(),
-            })?;
-        dst.copy_from_slice(&uuid);
-        let first = buf
-            .get_mut(..HASH_PAGE as usize)
-            .ok_or(EmitError::Internal {
-                message: "output smaller than one hash page".into(),
-            })?;
-        let mut h = Sha256::new();
-        h.update(first);
-        hashes[..32].copy_from_slice(&h.finalize());
+        if uuid_at != 0 {
+            let uuid = signature::derive_uuid(&hashes);
+            let dst = buf
+                .get_mut(uuid_at..uuid_at + 16)
+                .ok_or(EmitError::Internal {
+                    message: "UUID field leaves the output buffer".into(),
+                })?;
+            dst.copy_from_slice(&uuid);
+            let first = buf
+                .get_mut(..HASH_PAGE as usize)
+                .ok_or(EmitError::Internal {
+                    message: "output smaller than one hash page".into(),
+                })?;
+            let mut h = Sha256::new();
+            h.update(first);
+            hashes[..32].copy_from_slice(&h.finalize());
+        }
 
         // The SuperBlob lands last (beyond the hashed range).
         write_superblob(layout, &mut *buf, &hashes)?;
