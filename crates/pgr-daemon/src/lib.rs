@@ -110,8 +110,11 @@ mod tests {
         // config's private-extern keep as a tail byte (M33,
         // `-keep_private_externs`): a resident relink carries the
         // private-extern decision the client asked for, never the
-        // pre-M33 conversion default.
-        assert_eq!(crate::PROTO_VERSION, 24);
+        // pre-M33 conversion default — and the config's compact-unwind
+        // suppression as a tail byte (M36, `-no_compact_unwind`): a
+        // resident relink carries the suppression decision the client
+        // asked for, never the pre-M36 carry default.
+        assert_eq!(crate::PROTO_VERSION, 25);
     }
 
     #[test]
