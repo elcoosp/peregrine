@@ -245,6 +245,32 @@ pub fn compute(
             }
         }
     }
+    // M34: the compact-unwind table's personality and LSDA references
+    // keep their targets alive (ld64 semantics — the section names
+    // functions the unwinder calls and data the exception tables read;
+    // a stripped target would leave the section pointing at bytes the
+    // image dropped). The annotated functions themselves are NOT roots
+    // — a dead function's row drops with its placement, the same
+    // shape the M30 dice carriage rides.
+    for (fi, obj) in objects.iter().enumerate() {
+        for e in &obj.compact_unwind {
+            for value in [e.personality, e.lsda] {
+                if value == 0 {
+                    continue;
+                }
+                for (si, sect) in obj.sections.iter().enumerate() {
+                    if sect.segment == "__TEXT"
+                        && sect.size > 0
+                        && sect.addr <= value
+                        && value < sect.addr + sect.size
+                        && let Some(node) = node_of(fi as u32, si as u32, value - sect.addr)
+                    {
+                        roots.push(node);
+                    }
+                }
+            }
+        }
+    }
 
     // ---- mark phase (worklist BFS over the pre-built edges) -------------------
     let mut commons: std::collections::BTreeSet<u32> = root_commons.into_iter().collect();
