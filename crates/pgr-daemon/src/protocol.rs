@@ -118,8 +118,17 @@ use sha2::{Digest, Sha256};
 /// never the pre-M21 absence); **v15** appends the dyld-environment
 /// list to that tail (M22 — one length-prefixed entry per
 /// `DYLD_<var>=<value>` pair; a resident relink exports the variables
-/// the client named, never the pre-M22 absence).
-pub const PROTO_VERSION: u32 = 16;
+/// the client named, never the pre-M22 absence); **v16** appends the
+/// symbol-alias pairs and the bundle-loader surface to that tail (M24
+/// and M25 — a resident relink exports the names and binds against the
+/// host the client named); **v17** appends the loader path (M26 — a
+/// present byte, then the `-dylinker` path; a resident relink execs
+/// the loader the client named, never the pre-M26 `/usr/lib/dyld`
+/// default); **v18** appends the PIE decision (M27 — one byte naming
+/// whether the executable drops `MH_PIE`; a resident relink carries
+/// the flag word the client asked for, never the pre-M27 PIE-always
+/// default).
+pub const PROTO_VERSION: u32 = 18;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -701,6 +710,20 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     } else {
         put_u8(out, 0);
     }
+    // M26 (v17 wire): the loader path rides the tail after the bundle
+    // loader — a present byte, then the `-dylinker` path string; a
+    // resident relink execs the loader the client named, never the
+    // pre-M26 `/usr/lib/dyld` default.
+    if let Some(loader) = &cfg.dylinker {
+        put_u8(out, 1);
+        put_str(out, loader.path());
+    } else {
+        put_u8(out, 0);
+    }
+    // M27 (v18 wire): the PIE decision rides the tail after the
+    // loader path — one byte; a resident relink carries the flag word
+    // the client asked for, never the pre-M27 PIE-always default.
+    put_u8(out, u8::from(cfg.no_pie));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -894,6 +917,18 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     } else {
         None
     };
+    // M26 (v17 wire): the loader path — the same validation the flag
+    // parse pays, so an empty, NUL-bearing or relative path is
+    // malformed, never a silently changed loader.
+    let dylinker = if r.u8()? != 0 {
+        Some(pgr_core::Dylinker::from_flag(&r.str()?).map_err(|_| malformed())?)
+    } else {
+        None
+    };
+    // M27 (v18 wire): the PIE decision — one byte, no validation
+    // beyond the bool (the output-kind refusal is the link's, not the
+    // wire's).
+    let no_pie = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -948,6 +983,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         dyld_envs,
         aliases,
         bundle_loader,
+        dylinker,
+        no_pie,
     })
 }
 
@@ -1155,6 +1192,16 @@ mod tests {
                     .expect("one decision per name");
                 aliases
             },
+            // The v17 tail: a non-default loader path must survive the
+            // round trip verbatim (a resident relink execs the loader
+            // the client named, never the pre-M26 default).
+            dylinker: Some(
+                pgr_core::Dylinker::from_flag("/usr/local/bin/mydyld").expect("the path validates"),
+            ),
+            // The v18 tail: a non-default PIE decision must survive the
+            // round trip verbatim (a resident relink carries the flag
+            // word the client asked for, never the PIE-always default).
+            no_pie: true,
             symbol_order: None,
         }
     }
@@ -1816,6 +1863,135 @@ mod tests {
         let mut bad = body;
         bad[hits[0] - 4..hits[0]].copy_from_slice(&0u32.to_le_bytes()); // an empty pair
         let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_loader_path_round_trips() {
+        // v17: a non-default `-dylinker` path must survive the round
+        // trip verbatim (a resident relink execs the loader the client
+        // named, never the pre-M26 default).
+        let cfg = rich_config();
+        assert_eq!(
+            cfg.dylinker
+                .as_ref()
+                .map(pgr_core::Dylinker::path)
+                .expect("rich_config names a loader"),
+            "/usr/local/bin/mydyld",
+            "rich_config carries the v17 knob"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert_eq!(
+            back.config
+                .dylinker
+                .as_ref()
+                .map(pgr_core::Dylinker::path)
+                .expect("the loader crosses"),
+            "/usr/local/bin/mydyld",
+            "the path crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_pie_decision_round_trips() {
+        // v18: a non-default `-no_pie` must survive the round trip
+        // verbatim (a resident relink carries the flag word the client
+        // asked for, never the PIE-always default).
+        let cfg = rich_config();
+        assert!(cfg.no_pie, "rich_config carries the v18 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert!(back.config.no_pie, "the decision crosses byte-for-byte");
+    }
+
+    #[test]
+    fn a_wire_garbage_dylinker_is_malformed() {
+        // v17: a path off the -dylinker grammar is malformed, not
+        // silently exec'd (the kernel would refuse a relative loader at
+        // exec time anyway — the wire names the grammar up front).
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The path rides as (u32 len, path bytes) exactly once; the
+        // length field sits right before the path bytes.
+        let needle = b"/usr/local/bin/mydyld";
+        let mut hits = Vec::new();
+        for i in 4..body.len().saturating_sub(needle.len()) {
+            if &body[i..i + needle.len()] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the path rides exactly once");
+        let mut bad = body;
+        bad[hits[0] - 4..hits[0]].copy_from_slice(&0u32.to_le_bytes()); // an empty path
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+        // And a relative path is malformed the same way: rewrite the
+        // length, splice a shorter relative name in, truncate nothing
+        // else — decode re-validates the grammar.
+        let mut rel = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        let rel_path = b"bin/dyld";
+        let tail_start = hits[0] + needle.len();
+        rel[hits[0] - 4..hits[0]].copy_from_slice(&(rel_path.len() as u32).to_le_bytes());
+        rel[hits[0]..hits[0] + rel_path.len()].copy_from_slice(rel_path);
+        // Shift the remainder left over the consumed suffix (the path
+        // bytes shorter than the original) — the string reader reads
+        // exactly `len` bytes, so the leftover bytes would corrupt the
+        // fields after; build instead by re-splicing: keep everything
+        // before, the rewritten frame, everything after the old frame.
+        let old_frame_end = tail_start;
+        let mut fixed = Vec::with_capacity(rel.len());
+        fixed.extend_from_slice(&rel[..tail_start]);
+        fixed.extend_from_slice(&rel[old_frame_end..]);
+        rel = fixed;
+        let err = LinkRequest::decode(&rel).unwrap_err();
         assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
 }
