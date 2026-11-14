@@ -96,7 +96,7 @@ same pipeline in a resident session for warm relinks.
 | `pgr-core` | Passes 1–3: interning, resolution, layout, ICF, dead-strip, thunks, fixup planning, caches, reverse reference index, slack policy, the validated image-knob decisions |
 | `pgr-emit` | Passes 4–5: fused tile emit, ad-hoc signing, writer pool — plus the incremental engine (record, plan, clone-and-patch) and `-r` object assembly |
 | `pgr-verify` | the read-side verifier: library + CLI, selectable checks, JSON reports, baseline diffs |
-| `pgr-daemon` | `pgrd`: versioned wire protocol (v16), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit |
+| `pgr-daemon` | `pgrd`: versioned wire protocol (v22), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit |
 | `pgr-fixtures` | deterministic Mach-O object/archive builders shared by tests, benches and the fuzz corpus |
 
 ## Fast edit loops
@@ -204,6 +204,7 @@ Not-yet-supported surface (`-ObjC`, TLV, LTO execution) is **rejected with a cle
 | Order & report | `-order_file` (ld64-style rank sort), `-map` (rendered from the emit plan — report and bytes cannot disagree) |
 | Size | `-dead_strip`, `-icf=safe\|all\|none`, cross-input `__cstring` merging, lazy archive member pull |
 | Fixups & signing | `-fixup_chains`/`-no_fixup_chains`, `-fixup_chains_format offset64\|arm64e` (incl. authenticated PAC words), `-adhoc`/`-no_adhoc` |
+| Linkedit metadata | `-no_function_starts` (suppress `LC_FUNCTION_STARTS`), `-no_data_in_code` (suppress the carried data-in-code stream) |
 | Dyld environment | `-dyld_env DYLD_<var>=<value>` (main executable only) |
 | Fast paths | `-cache`/`-no_cache`/`-cache_max`, `-resident`/`-resident_socket`, `-incremental`/`-no_incremental`/`-incremental-verify` |
 | Queries | `--print-record`, `--print-fixup-encoding`; `pgr-verify --strict --json --checks --list-checks --baseline --fail-on` |
@@ -289,10 +290,10 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 | **M23–M25** | `-reexport_framework`, `-alias` (one body, two names), `-bundle_loader` |
 | **M26–M27** | Header assembly: `-dylinker` (the loader path), `-no_pie` (the flag word) |
 | **M28–M29** | Packing decisions: `-sectalign` (per-section alignment floors), `-headerpad` (the reserved header region — the advisory no-op promoted) |
+| **M30–M31** | Linkedit metadata: data-in-code carriage (the input `LC_DATA_IN_CODE` streams ride the atom map onto the output — the design doc's named slot, no longer dropped), `-no_data_in_code` (the suppression), `-no_function_starts` (the second advisory no-op promoted — the command drops on the named decision) |
 
 Every knob ships the same way: a validated decision in the library, verifier gates for the
-shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage
-(protocol v20) — and a byte-identical default.
+shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v22)
 
 **Still on the roadmap:** the Apple Silicon hardware gates · LTO object execution ·
 compact-unwind synthesis · TLV · ObjC/Swift semantics beyond section pass-through.
@@ -308,7 +309,7 @@ Each ships in its crate's `examples/` with a matching bench — run with
 `segprot_link` · `stack_size_link` · `icf_link` · `dead_strip_link` · `image_base_link` ·
 `umbrella_link` · `sub_client_link` · `dyld_env_link` · `reexport_framework_link` ·
 `alias_link` · `bundle_loader_link` · `dylinker_link` · `no_pie_link` ·
-`sectalign_link` · `headerpad_link`
+`sectalign_link` · `headerpad_link` · `data_in_code_link` · `function_starts_link`
 
 </details>
 
