@@ -263,6 +263,7 @@ mod tests {
             ],
             trie: Vec::new(),
             func_starts: Vec::new(),
+            data_in_code: Vec::new(),
             strtab: Vec::new(),
             str_offsets: Vec::new(),
             indirect_syms: Vec::new(),
