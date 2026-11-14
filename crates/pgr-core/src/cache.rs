@@ -45,9 +45,10 @@ const POI_MAGIC: &[u8; 8] = b"PGRPOI1\0";
 /// Bump when the frame or codec changes shape; older entries are then
 /// silently missed and reclaimed by the directory self-heal. **v3**
 /// (M30) adds the parsed object's `LC_DATA_IN_CODE` entries to the
-/// payload; **v4** (M33) adds the input symbol's private-extern bit —
-/// v1–v3 entries decode to `None` and re-parse.
-pub const CACHE_FORMAT_VERSION: u32 = 4;
+/// payload; **v4** (M33) adds the input symbol's private-extern bit;
+/// **v5** (M34) adds the parsed object's `__LD,__compact_unwind`
+/// rows — v1–v4 entries decode to `None` and re-parse.
+pub const CACHE_FORMAT_VERSION: u32 = 5;
 
 /// Parser revision: bumped when Pass 1's parse semantics change in a way
 /// that would make a stored POI stale even though the framing is unchanged.
@@ -493,6 +494,16 @@ pub fn encode_poi(obj: &InputObject, split_symbols: bool) -> Vec<u8> {
         put_u32(&mut p, e.offset);
         put_u32(&mut p, u32::from(e.length) | (u32::from(e.kind) << 16));
     }
+    // M34 (v5 payload): the compact-unwind rows ride beside them — one
+    // 32-byte record per row, blob-relative as parsed.
+    put_u32(&mut p, obj.compact_unwind.len() as u32);
+    for e in &obj.compact_unwind {
+        put_u64(&mut p, e.range_start);
+        put_u32(&mut p, e.range_length);
+        put_u32(&mut p, e.encoding);
+        put_u64(&mut p, e.personality);
+        put_u64(&mut p, e.lsda);
+    }
     frame(*POI_MAGIC, &p)
 }
 
@@ -598,6 +609,24 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
             kind: (packed >> 16) as u16,
         });
     }
+    // M34 (v5 payload): the compact-unwind rows ride beside the dice
+    // stream.
+    let n_unwind = r.u32()? as usize;
+    let mut compact_unwind = Vec::with_capacity(n_unwind.min(1 << 20));
+    for _ in 0..n_unwind {
+        let range_start = r.u64()?;
+        let range_length = r.u32()?;
+        let encoding = r.u32()?;
+        let personality = r.u64()?;
+        let lsda = r.u64()?;
+        compact_unwind.push(pgr_format::CompactUnwindEntry {
+            range_start,
+            range_length,
+            encoding,
+            personality,
+            lsda,
+        });
+    }
     if r.at != r.b.len() {
         return None;
     }
@@ -609,6 +638,7 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
         symbol_names,
         atoms,
         data_in_code,
+        compact_unwind,
         subsections_via_symbols,
         from_archive,
         archive_name,
@@ -950,7 +980,7 @@ mod m7_versioned {
             PARSER_REVISION,
             "frame field 2 is the parser revision"
         );
-        assert_eq!(CACHE_FORMAT_VERSION, 4, "M33 bumps the format to v4");
+        assert_eq!(CACHE_FORMAT_VERSION, 5, "M34 bumps the format to v5");
         let tenc = encode_frozen_dylib(&tiny_dylib());
         assert_eq!(
             u32::from_le_bytes(tenc[8..12].try_into().unwrap()),
