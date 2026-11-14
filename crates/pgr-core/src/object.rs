@@ -259,6 +259,9 @@ pub(crate) struct ObjectParts {
     /// M30 — the cached parse's `LC_DATA_IN_CODE` entries (the same
     /// `__text`-section-relative stream the fresh parse carries).
     pub data_in_code: Vec<pgr_format::DataInCodeEntry>,
+    /// M34 — the cached parse's `__LD,__compact_unwind` rows (the
+    /// same address-space table the fresh parse carries).
+    pub compact_unwind: Vec<pgr_format::CompactUnwindEntry>,
     /// `MH_SUBSECTIONS_VIA_SYMBOLS`.
     pub subsections_via_symbols: bool,
     /// True for archive members.
@@ -303,6 +306,13 @@ pub struct InputObject {
     /// object cannot vouch for refuses with the typed error, never
     /// rides silently.
     pub data_in_code: Vec<pgr_format::DataInCodeEntry>,
+    /// M34 — the object's `__LD,__compact_unwind` table: one 32-byte
+    /// row per function (`pgr_format::CompactUnwindEntry`), the
+    /// unwind metadata the Pass-1 sweep kept dropping (the `__LD`
+    /// segment rides the debug-ish skip). Validated at parse — a row
+    /// annotating bytes the object does not carry, or a dangling
+    /// personality/LSDA reference, refuses with the typed error.
+    pub compact_unwind: Vec<pgr_format::CompactUnwindEntry>,
 }
 
 /// One parallel-decode worker result (the symbol table slice).
@@ -325,6 +335,7 @@ impl InputObject {
             subsections_via_symbols: p.subsections_via_symbols,
             atoms: p.atoms,
             data_in_code: p.data_in_code,
+            compact_unwind: p.compact_unwind,
         }
     }
 
@@ -398,6 +409,30 @@ impl InputObject {
             }
         }
 
+        // ---- M34: the compact-unwind table ---------------------------------
+        // The `__LD,__compact_unwind` section (S_ATTR_DEBUG — the shape
+        // older linkers ignore and carrying linkers remove) decodes
+        // through the format reader (the 32-byte-width refusal rides
+        // that gate) and validates against the section table below.
+        let mut compact_unwind: Vec<pgr_format::CompactUnwindEntry> = Vec::new();
+        if let Some(table) = sections
+            .iter()
+            .find(|s| s.segment == "__LD" && s.name == "__compact_unwind")
+            && table.size > 0
+        {
+            let payload = bytes
+                .get(table.data.start as usize..table.data.end as usize)
+                .ok_or_else(|| {
+                    fail(
+                        "the __LD,__compact_unwind table leaves the object's bytes — \
+                         the section is malformed"
+                            .into(),
+                    )
+                })?;
+            compact_unwind = pgr_format::read_compact_unwind(payload)
+                .map_err(|e| fail(format!("compact unwind: {e}")))?;
+        }
+
         // ---- data-in-code validation (M30) ---------------------------------
         // The entries annotate `__text`: without the section there is
         // nothing to annotate, and a range past the section's bytes
@@ -424,6 +459,107 @@ impl InputObject {
                     )));
                 }
             }
+        }
+
+        // ---- compact-unwind validation (M34) --------------------------------
+        // The rows annotate the object's own bytes: a function range
+        // must sit inside `__text` (the code section the carriage
+        // translates from), a personality reference names a function
+        // inside `__text`, an LSDA reference names data inside some
+        // `__TEXT` section — and every range carries bytes. A table the
+        // object cannot vouch for refuses with the fix, never rides
+        // silently. The blob-relative addresses normalize to their
+        // carrying section's base (the one subtraction the symbol
+        // values take — the LLVM single-segment convention and the
+        // legacy per-section convention collapse the same way), so the
+        // carriage's lookups read the same section-relative space.
+        if !compact_unwind.is_empty() {
+            let text = sections
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.segment == "__TEXT" && s.name == "__text");
+            let Some((_, text)) = text else {
+                return Err(fail(
+                    "compact-unwind rows annotate __text, but the object carries no __text \
+                     section — drop the __LD,__compact_unwind table or link an object with code"
+                        .into(),
+                ));
+            };
+            let in_text = |v: u64, len: u64, what: &str| -> Result<u64, LinkError> {
+                if v >= text.addr && v + len <= text.addr + text.size {
+                    Ok(v - text.addr)
+                } else {
+                    Err(fail(format!(
+                        "compact-unwind {what} ({v:#x}, {len} bytes) in the object's \
+                         __LD,__compact_unwind table is beyond the __text section \
+                         ({:#x} bytes at {:#x}) — the table must annotate bytes the \
+                         object carries",
+                        text.size, text.addr
+                    )))
+                }
+            };
+            let normalized = compact_unwind
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    if e.range_length == 0 {
+                        return Err(fail(format!(
+                            "compact-unwind row {i} carries a zero-length range — drop the row \
+                             or fix the function's extent"
+                        )));
+                    }
+                    let range_start =
+                        in_text(e.range_start, u64::from(e.range_length), "function range")?;
+                    let personality = if e.personality == 0 {
+                        0
+                    } else {
+                        in_text(e.personality, 4, "personality reference")?
+                    };
+                    // The LSDA address stays blob-relative (the carriage
+                    // normalizes it onto the covering section's base —
+                    // the coverage gate here refuses anything no
+                    // __TEXT section vouches for).
+                    if e.lsda != 0
+                        && !sections.iter().any(|s| {
+                            s.segment == "__TEXT"
+                                && s.size > 0
+                                && s.addr <= e.lsda
+                                && e.lsda < s.addr + s.size
+                        })
+                    {
+                        return Err(fail(format!(
+                            "compact-unwind row {i} names an LSDA ({:#x}) outside every \
+                             __TEXT section the object carries — the table must annotate \
+                             bytes the object carries",
+                            e.lsda
+                        )));
+                    }
+                    let lsda = e.lsda;
+                    Ok(pgr_format::CompactUnwindEntry {
+                        range_start,
+                        range_length: e.range_length,
+                        encoding: e.encoding,
+                        personality,
+                        lsda,
+                    })
+                })
+                .collect::<Result<Vec<_>, LinkError>>()?;
+            // The rows binary-search in the section's consumers: a
+            // duplicate function range is the malformed shape the
+            // carriage cannot carry (the synthesizer refuses it too —
+            // the refusal lands here, at the input boundary).
+            let mut sorted = normalized;
+            sorted.sort_by_key(|e| e.range_start);
+            for w in sorted.windows(2) {
+                if w[0].range_start == w[1].range_start {
+                    return Err(fail(format!(
+                        "compact-unwind rows {} and {} both name function {:#x} — the table \
+                         must carry one row per function",
+                        w[0].range_start, w[1].range_start, w[0].range_start
+                    )));
+                }
+            }
+            compact_unwind = sorted;
         }
 
         // ---- sweep 2: symbol table -----------------------------------------
@@ -454,6 +590,7 @@ impl InputObject {
                 != 0,
             atoms: Vec::new(),
             data_in_code: dice,
+            compact_unwind,
         };
         Ok(obj)
     }
