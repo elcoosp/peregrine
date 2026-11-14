@@ -103,8 +103,15 @@ mod tests {
         // config's function-starts suppression as a tail byte (M31,
         // `-no_function_starts`): a resident relink carries the
         // linkedit-metadata decision the client asked for, never the
-        // pre-M31 always-carried default.
-        assert_eq!(crate::PROTO_VERSION, 22);
+        // pre-M31 always-carried default — and the config's UUID
+        // suppression as a tail byte (M32, `-no_uuid`): a resident
+        // relink carries the derived-UUID decision the client asked
+        // for, never the pre-M32 always-carried default — and the
+        // config's private-extern keep as a tail byte (M33,
+        // `-keep_private_externs`): a resident relink carries the
+        // private-extern decision the client asked for, never the
+        // pre-M33 conversion default.
+        assert_eq!(crate::PROTO_VERSION, 24);
     }
 
     #[test]
