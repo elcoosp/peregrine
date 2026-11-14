@@ -32,6 +32,7 @@ pub mod signature;
 pub mod symtab;
 pub mod tbd;
 pub mod trie;
+pub mod unwind;
 
 pub use dyld_info::{BindEntry, BindOrdinal, DyldInfoCommand, RebaseEntry};
 
@@ -48,6 +49,7 @@ pub use segment::{Section64, SegmentCommand64};
 pub use signature::{CodeDirectory, SuperBlob};
 pub use symtab::{DysymtabCommand, Nlist64, SymtabCommand};
 pub use trie::exports as trie_exports;
+pub use unwind::{CompactUnwindEntry, read_compact_unwind, write_compact_unwind};
 
 /// The export surface a `-bundle_loader` host presents (M25): the
 /// names the bundle's undefined references may bind against. The host
