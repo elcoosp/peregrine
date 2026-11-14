@@ -220,5 +220,22 @@ harness = false
 name = "keep_pext"
 harness = false
 
+# The M35 compressed-unwind bench: the link across the synthesis's
+# page families (the entry-free corpus beside the carried one whose
+# rows all qualify) over the same corpus — a shape-parity gate, the
+# compressed rows halve the second-level entry width — plus the
+# synthesis seam's own cost across table sizes and both families.
+[[bench]]
+name = "unwind_compressed"
+harness = false
+
+# The M36 no-compact-unwind bench: the link across the suppression
+# decision (the carried default beside the named suppression over the
+# same carried corpus) — a shape-parity gate, the suppression is one
+# dropped synthetic section.
+[[bench]]
+name = "no_compact_unwind"
+harness = false
+
 [lints]
 workspace = true
