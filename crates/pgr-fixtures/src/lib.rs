@@ -29,13 +29,13 @@ use pgr_format::consts::{
     CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE, CSSLOT_CODEDIRECTORY, DYLD_CHAINED_IMPORT,
     DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
     DYLD_CHAINED_PTR_START_NONE, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE,
-    LC_DYLD_CHAINED_FIXUPS, LC_DYLD_ENVIRONMENT, LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB,
-    LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64,
-    LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_BUNDLE, MH_DYLDLINK,
-    MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL,
-    N_EXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS,
-    S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE,
-    VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
+    LC_DATA_IN_CODE, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_ENVIRONMENT, LC_DYLD_EXPORTS_TRIE,
+    LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN,
+    LC_SEGMENT_64, LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_BUNDLE,
+    MH_DYLDLINK, MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE,
+    MH_TWOLEVEL, N_EXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64,
+    PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD,
+    VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::fixups::{
     Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
@@ -333,6 +333,13 @@ pub struct ImageBuilder {
     /// `-no_pie` knob's image shape — the strict verifier accepts both
     /// (the flag is a decision, not a defect).
     pie: bool,
+    /// M30: the `LC_DATA_IN_CODE` entries the fixture emits —
+    /// `__TEXT`-segment-relative, in stream order. Written during
+    /// assembly, so the ad-hoc signature is computed over the final
+    /// bytes. The values are the knob's — an unsorted, overlapping or
+    /// out-of-bounds stream is the verifier's finding to name (the
+    /// broken-shape gates build them on purpose).
+    data_in_code: Vec<pgr_format::DataInCodeEntry>,
 }
 
 impl ImageBuilder {
@@ -363,6 +370,7 @@ impl ImageBuilder {
             dyld_envs: Vec::new(),
             loader_path: None,
             pie: true,
+            data_in_code: Vec::new(),
         }
     }
 
@@ -393,6 +401,7 @@ impl ImageBuilder {
             dyld_envs: Vec::new(),
             loader_path: None,
             pie: true,
+            data_in_code: Vec::new(),
         }
     }
 
@@ -422,12 +431,22 @@ impl ImageBuilder {
             dyld_envs: Vec::new(),
             loader_path: None,
             pie: true,
+            data_in_code: Vec::new(),
         }
     }
 
     /// Appends a segment (`__TEXT` first; others in canonical order).
     pub fn add_segment(&mut self, seg: SegmentSpec) {
         self.segments.push(seg);
+    }
+
+    /// Names the fixture's `LC_DATA_IN_CODE` entries (M30):
+    /// `__TEXT`-segment-relative (the output convention the verifier's
+    /// contract reads), in stream order. The honest image emits them
+    /// sorted and disjoint; the broken shapes are the verifier gates'
+    /// fixture controls, built on purpose.
+    pub fn add_data_in_code(&mut self, entries: Vec<pgr_format::DataInCodeEntry>) {
+        self.data_in_code = entries;
     }
 
     /// Registers a dependent dylib (`LC_LOAD_DYLIB`), returning its 1-based
@@ -752,6 +771,9 @@ impl ImageBuilder {
         }
         add_cmd(16); // LC_DYLD_EXPORTS_TRIE (always: executables export)
         add_cmd(16); // LC_FUNCTION_STARTS
+        if !self.data_in_code.is_empty() {
+            add_cmd(16); // LC_DATA_IN_CODE (M30)
+        }
         add_cmd(24); // LC_UUID
         add_cmd(16); // LC_CODE_SIGNATURE
         let header_len = 32 + sizeofcmds;
@@ -931,6 +953,14 @@ impl ImageBuilder {
         let trie = build_minimal_trie(exec, &self.symbols, &sect_infos)?;
         let func_starts: Vec<u8> = vec![0x00]; // one ULEB delta: entry at 0
 
+        // ---- data-in-code payload (M30) -----------------------------------
+        let mut dice_bytes = Vec::with_capacity(self.data_in_code.len() * 8);
+        for e in &self.data_in_code {
+            dice_bytes.extend_from_slice(&e.offset.to_le_bytes());
+            dice_bytes.extend_from_slice(&e.length.to_le_bytes());
+            dice_bytes.extend_from_slice(&e.kind.to_le_bytes());
+        }
+
         // ---- __LINKEDIT segment + content layout ------------------------
         let linkedit_fileoff = align_up(placed.last().map_or(0, |(_, f, v)| f + v), PAGE_SIZE_16K);
         placed.push(("__LINKEDIT".into(), linkedit_fileoff, 0)); // vmsize patched below
@@ -960,6 +990,11 @@ impl ImageBuilder {
             take(trie.len() as u64, 4)
         };
         let func_off = take(func_starts.len() as u64, 4);
+        let dice_off = if dice_bytes.is_empty() {
+            0
+        } else {
+            take(dice_bytes.len() as u64, 4)
+        };
 
         // ---- signature sizing (TDD §9 formulas) --------------------------
         let sig_off = align_up(cur, 8);
@@ -1213,6 +1248,13 @@ impl ImageBuilder {
         w32(&mut buf, lc + 8, func_off as u32);
         w32(&mut buf, lc + 12, func_starts.len() as u32);
         lc += 16;
+        if !dice_bytes.is_empty() {
+            w32(&mut buf, lc, LC_DATA_IN_CODE);
+            w32(&mut buf, lc + 4, 16);
+            w32(&mut buf, lc + 8, dice_off as u32);
+            w32(&mut buf, lc + 12, dice_bytes.len() as u32);
+            lc += 16;
+        }
         let uuid_at = lc + 8;
         w32(&mut buf, lc, LC_UUID);
         w32(&mut buf, lc + 4, 24);
@@ -1282,6 +1324,10 @@ impl ImageBuilder {
             buf[trie_off as usize..trie_off as usize + trie.len()].copy_from_slice(&trie);
         }
         buf[func_off as usize..func_off as usize + func_starts.len()].copy_from_slice(&func_starts);
+        if !dice_bytes.is_empty() {
+            let at = dice_off as usize;
+            buf[at..at + dice_bytes.len()].copy_from_slice(&dice_bytes);
+        }
 
         // ---- chain words into the __got slots ---------------------------
         for (i, word) in slot_words.iter().enumerate() {
