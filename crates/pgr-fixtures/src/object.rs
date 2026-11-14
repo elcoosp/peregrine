@@ -27,8 +27,9 @@ use pgr_format::consts::{
     ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
     ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED, CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64,
     LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF,
-    PLATFORM_MACOS, RELOC_LENGTH_4, RELOC_LENGTH_8, S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS,
-    S_REGULAR, S_ZEROFILL, SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
+    PLATFORM_MACOS, RELOC_LENGTH_4, RELOC_LENGTH_8, S_ATTR_DEBUG, S_ATTR_PURE_INSTRUCTIONS,
+    S_CSTRING_LITERALS, S_REGULAR, S_ZEROFILL, SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ,
+    VM_PROT_WRITE,
 };
 use pgr_format::cursor::pod_read_unaligned_at;
 use pgr_format::reloc::RelocationInfo;
@@ -239,6 +240,23 @@ impl ObjectSection {
             flags: S_REGULAR | S_ATTR_PURE_INSTRUCTIONS,
             data,
             relocs,
+        }
+    }
+
+    /// The object-side compact-unwind table (`__LD,__compact_unwind`):
+    /// one 32-byte row per function (`pgr_format::CompactUnwindEntry`,
+    /// blob-relative addresses — the shape the M34 carriage parses).
+    /// The section carries `S_ATTR_DEBUG`, the shape older linkers
+    /// ignore and carrying linkers remove.
+    #[must_use]
+    pub fn compact_unwind(entries: &[pgr_format::CompactUnwindEntry]) -> Self {
+        Self {
+            name: String::from_utf8_lossy(pgr_format::consts::SECT_COMPACT_UNWIND).into_owned(),
+            segment: String::from_utf8_lossy(pgr_format::consts::SEG_COMPACT_UNWIND).into_owned(),
+            align_log2: 3,
+            flags: S_ATTR_DEBUG,
+            data: pgr_format::write_compact_unwind(entries),
+            relocs: Vec::new(),
         }
     }
 
