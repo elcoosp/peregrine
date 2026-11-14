@@ -216,6 +216,10 @@ pub struct InputSymbol {
     pub common_align: Option<u32>,
     /// `N_ALT_ENTRY` (`n_desc)`: merges into the preceding atom (M5/D1).
     pub alt_entry: bool,
+    /// `N_PEXT` (`n_type`): the compilers' private-extern bit — the
+    /// input shape the M33 keep-private-externs decision reads (the
+    /// pre-M33 tree dropped it, exporting private externs publicly).
+    pub pext: bool,
 }
 
 impl InputSymbol {
@@ -609,6 +613,7 @@ impl InputObject {
                 weak_ref: raw.n_desc & N_WEAK_REF != 0,
                 common_align,
                 alt_entry: raw.n_desc & pgr_format::consts::N_ALT_ENTRY != 0,
+                pext: raw.n_type & pgr_format::consts::N_PEXT != 0,
             });
         }
         Ok((symbols, names))
