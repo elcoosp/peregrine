@@ -291,6 +291,7 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 | **M26–M27** | Header assembly: `-dylinker` (the loader path), `-no_pie` (the flag word) |
 | **M28–M29** | Packing decisions: `-sectalign` (per-section alignment floors), `-headerpad` (the reserved header region — the advisory no-op promoted) |
 | **M30–M31** | Linkedit metadata: data-in-code carriage (the input `LC_DATA_IN_CODE` streams ride the atom map onto the output — the design doc's named slot, no longer dropped), `-no_data_in_code` (the suppression), `-no_function_starts` (the second advisory no-op promoted — the command drops on the named decision) |
+| **M32–M33** | The last two advisory no-ops promoted: `-no_uuid` (the derived-UUID suppression — the command drops, the emit patch paths consult the plan offset's absent sentinel), `-keep_private_externs` (the private-extern decision — the input `N_PEXT` bit the tree dropped at parse now converts into the locals range by default or stays external and exported under the named keep) |
 
 Every knob ships the same way: a validated decision in the library, verifier gates for the
 shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v22)
@@ -309,7 +310,7 @@ Each ships in its crate's `examples/` with a matching bench — run with
 `segprot_link` · `stack_size_link` · `icf_link` · `dead_strip_link` · `image_base_link` ·
 `umbrella_link` · `sub_client_link` · `dyld_env_link` · `reexport_framework_link` ·
 `alias_link` · `bundle_loader_link` · `dylinker_link` · `no_pie_link` ·
-`sectalign_link` · `headerpad_link` · `data_in_code_link` · `function_starts_link`
+`sectalign_link` · `headerpad_link` · `data_in_code_link` · `function_starts_link` · `no_uuid_link` · `keep_private_externs_link`
 
 </details>
 
