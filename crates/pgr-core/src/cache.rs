@@ -45,8 +45,9 @@ const POI_MAGIC: &[u8; 8] = b"PGRPOI1\0";
 /// Bump when the frame or codec changes shape; older entries are then
 /// silently missed and reclaimed by the directory self-heal. **v3**
 /// (M30) adds the parsed object's `LC_DATA_IN_CODE` entries to the
-/// payload — v1/v2 entries decode to `None` and re-parse.
-pub const CACHE_FORMAT_VERSION: u32 = 3;
+/// payload; **v4** (M33) adds the input symbol's private-extern bit —
+/// v1–v3 entries decode to `None` and re-parse.
+pub const CACHE_FORMAT_VERSION: u32 = 4;
 
 /// Parser revision: bumped when Pass 1's parse semantics change in a way
 /// that would make a stored POI stale even though the framing is unchanged.
@@ -468,6 +469,10 @@ pub fn encode_poi(obj: &InputObject, split_symbols: bool) -> Vec<u8> {
         put_u8(&mut p, u8::from(s.weak_ref));
         put_u32(&mut p, s.common_align.unwrap_or(u32::MAX));
         put_u8(&mut p, u8::from(s.alt_entry));
+        // M33 (v4 payload): the private-extern bit rides the symbol —
+        // the decision the layout reads, carried beside the other
+        // `n_type` bits.
+        put_u8(&mut p, u8::from(s.pext));
     }
     put_u32(&mut p, obj.peek_symbol_names().len() as u32);
     for name in obj.peek_symbol_names() {
@@ -547,6 +552,7 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
         let weakly_referenced = r.u8()? != 0;
         let common_raw = r.u32()?;
         let alt_entry = r.u8()? != 0;
+        let pext = r.u8()? != 0;
         symbols.push(InputSymbol {
             name: crate::ids::StringId(0),
             external,
@@ -557,6 +563,7 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
             weak_ref: weakly_referenced,
             common_align: (common_raw != u32::MAX).then_some(common_raw),
             alt_entry,
+            pext,
         });
     }
     let n_names = r.u32()? as usize;
@@ -943,7 +950,7 @@ mod m7_versioned {
             PARSER_REVISION,
             "frame field 2 is the parser revision"
         );
-        assert_eq!(CACHE_FORMAT_VERSION, 3, "M30 bumps the format to v3");
+        assert_eq!(CACHE_FORMAT_VERSION, 4, "M33 bumps the format to v4");
         let tenc = encode_frozen_dylib(&tiny_dylib());
         assert_eq!(
             u32::from_le_bytes(tenc[8..12].try_into().unwrap()),
