@@ -127,8 +127,14 @@ use sha2::{Digest, Sha256};
 /// default); **v18** appends the PIE decision (M27 — one byte naming
 /// whether the executable drops `MH_PIE`; a resident relink carries
 /// the flag word the client asked for, never the pre-M27 PIE-always
-/// default).
-pub const PROTO_VERSION: u32 = 18;
+/// default); **v19** appends the section-alignment floors (M28 — one
+/// length-prefixed `(segment, section, exponent)` triple per
+/// `-sectalign` decision, in flag order; a resident relink aligns the
+/// sections the client named, never the pre-M28 input-only shape);
+/// **v20** appends the header-region floor (M29 — a present byte, then
+/// the `-headerpad` floor as a u64; a resident relink reserves the
+/// region the client named, never the pre-M29 natural size alone).
+pub const PROTO_VERSION: u32 = 20;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -724,6 +730,29 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // loader path — one byte; a resident relink carries the flag word
     // the client asked for, never the pre-M27 PIE-always default.
     put_u8(out, u8::from(cfg.no_pie));
+    // M28 (v19 wire): the section-alignment floors ride the tail after
+    // the PIE decision — count, then one (segment, section, exponent)
+    // triple per `-sectalign` decision, in flag order; a resident
+    // relink aligns the sections the client named, never the pre-M28
+    // input-only shape. The decode pays the seam's validation through
+    // the raw door, so a foreign frame is malformed, never a silently
+    // widened alignment.
+    put_u32(out, cfg.sect_aligns.iter().count() as u32);
+    for d in cfg.sect_aligns.iter() {
+        put_str(out, d.segment().name());
+        put_str(out, d.section());
+        put_u8(out, d.align_log2() as u8);
+    }
+    // M29 (v20 wire): the header-region floor rides the tail after the
+    // section-alignment floors — a present byte, then the `-headerpad`
+    // floor as a u64; a resident relink reserves the region the client
+    // named, never the pre-M29 natural size alone.
+    if let Some(pad) = &cfg.header_pad {
+        put_u8(out, 1);
+        put_u64(out, pad.floor_bytes());
+    } else {
+        put_u8(out, 0);
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -929,6 +958,31 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // beyond the bool (the output-kind refusal is the link's, not the
     // wire's).
     let no_pie = r.u8()? != 0;
+    // M28 (v19 wire): the section-alignment floors — count, then one
+    // (segment, section, exponent) triple per decision, in flag order.
+    // The raw door pays the same validation the flag does (the
+    // section-bearing segment, the 16-byte name grammar, the 0x4000
+    // ceiling), and a twice-named pair is a malformed frame, never a
+    // last-write-wins surprise.
+    let mut sect_aligns = pgr_core::sect_align::SectAlignTable::default();
+    for _ in 0..r.u32()? {
+        let seg = pgr_core::segprot::SegName::parse(&r.str()?).map_err(|_| malformed())?;
+        let sect = r.str()?;
+        let exp = u32::from(r.u8()?);
+        let decision = pgr_core::sect_align::SectAlign::from_exponent(seg, &sect, exp)
+            .map_err(|_| malformed())?;
+        sect_aligns.push(decision).map_err(|_| malformed())?;
+    }
+    // M29 (v20 wire): the header-region floor — a present byte, then
+    // the floor as a u64. The decode pays the seam's validation (the
+    // raw door refuses zero, an unaligned value and anything beyond
+    // the first page), so a foreign frame is malformed, never a
+    // silently grown reservation.
+    let header_pad = if r.u8()? == 0 {
+        None
+    } else {
+        Some(pgr_core::header_pad::HeaderPad::from_override(r.u64()?).map_err(|_| malformed())?)
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -985,6 +1039,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         bundle_loader,
         dylinker,
         no_pie,
+        sect_aligns,
+        header_pad,
     })
 }
 
@@ -1202,6 +1258,34 @@ mod tests {
             // round trip verbatim (a resident relink carries the flag
             // word the client asked for, never the PIE-always default).
             no_pie: true,
+            // The v19 tail: non-default section-alignment floors must
+            // survive the round trip verbatim, in flag order (a
+            // resident relink aligns the sections the client named,
+            // never the pre-M28 input-only shape).
+            sect_aligns: {
+                let mut table = pgr_core::sect_align::SectAlignTable::default();
+                table
+                    .push(
+                        pgr_core::sect_align::SectAlign::from_flag("__DATA", "__data", 0x4000)
+                            .expect("the floor validates"),
+                    )
+                    .expect("one decision per pair");
+                table
+                    .push(
+                        pgr_core::sect_align::SectAlign::from_flag("__TEXT", "__text", 0x1000)
+                            .expect("the floor validates"),
+                    )
+                    .expect("one decision per pair");
+                table
+            },
+            // The v20 tail: a non-default header-region floor must
+            // survive the round trip verbatim (a resident relink
+            // reserves the region the client named, never the pre-M29
+            // natural size alone).
+            header_pad: Some(
+                pgr_core::header_pad::HeaderPad::from_override(0x2000)
+                    .expect("the floor validates"),
+            ),
             symbol_order: None,
         }
     }
@@ -1929,6 +2013,174 @@ mod tests {
         )
         .unwrap();
         assert!(back.config.no_pie, "the decision crosses byte-for-byte");
+    }
+
+    #[test]
+    fn the_sect_align_floors_round_trip() {
+        // v19: non-default `-sectalign` floors must survive the round
+        // trip verbatim, in flag order (a resident relink aligns the
+        // sections the client named, never the pre-M28 input-only
+        // shape).
+        let cfg = rich_config();
+        let named: Vec<(String, String, u32)> = cfg
+            .sect_aligns
+            .iter()
+            .map(|d| {
+                (
+                    d.segment().name().to_string(),
+                    d.section().to_string(),
+                    d.align_log2(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("__DATA".to_string(), "__data".to_string(), 14),
+                ("__TEXT".to_string(), "__text".to_string(), 12),
+            ],
+            "rich_config carries the v19 knobs"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        let crossed: Vec<(String, String, u32)> = back
+            .config
+            .sect_aligns
+            .iter()
+            .map(|d| {
+                (
+                    d.segment().name().to_string(),
+                    d.section().to_string(),
+                    d.align_log2(),
+                )
+            })
+            .collect();
+        assert_eq!(crossed, named, "the floors cross byte-for-byte, in order");
+    }
+
+    #[test]
+    fn the_header_pad_floor_round_trips() {
+        // v20: a non-default `-headerpad` floor must survive the round
+        // trip verbatim (a resident relink reserves the region the
+        // client named, never the pre-M29 natural size alone).
+        let cfg = rich_config();
+        assert_eq!(
+            cfg.header_pad
+                .as_ref()
+                .map(pgr_core::header_pad::HeaderPad::floor_bytes),
+            Some(0x2000),
+            "rich_config carries the v20 knob"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert_eq!(
+            back.config
+                .header_pad
+                .as_ref()
+                .map(pgr_core::header_pad::HeaderPad::floor_bytes),
+            Some(0x2000),
+            "the floor crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_header_pad_is_malformed() {
+        // v20: a floor off the -headerpad grammar is malformed, not
+        // silently reserved (the decode pays the same validation the
+        // flag does — the raw door is not a bypass).
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The floor rides the config tail as (present byte, u64); the
+        // value 0x2000 appears exactly once in that slot — find it and
+        // rewrite it to an unaligned floor.
+        let floor = 0x2000u64.to_le_bytes();
+        let needle: Vec<u8> = [1u8].into_iter().chain(floor).collect();
+        let mut hits = Vec::new();
+        for i in 0..body.len().saturating_sub(needle.len()) {
+            if body[i..i + needle.len()] == needle[..] {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the floor rides exactly once");
+        let mut bad = body;
+        let value_at = hits[0] + 1;
+        bad[value_at..value_at + 8].copy_from_slice(&0x2001u64.to_le_bytes());
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_wire_garbage_sect_align_is_malformed() {
+        // v19: an exponent off the -sectalign grammar is malformed, not
+        // silently widened (the decode pays the same validation the
+        // flag does — the raw door is not a bypass).
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The last floor byte is `__TEXT,__text`'s exponent (12); the
+        // table rides at the frame tail, so the byte just before the
+        // request's trailing fields is the exponent to corrupt — find
+        // it by splicing a whole second table entry instead: rewrite
+        // the count to name one more entry than the body carries.
+        // Simpler and exact: decode with the exponent byte raised past
+        // the ceiling by locating the 12 that closes the config body.
+        let needle: &[u8] = &[b'_', b'_', b't', b'e', b'x', b't', 12];
+        let mut hits = Vec::new();
+        for i in 0..body.len().saturating_sub(needle.len()) {
+            if &body[i..i + needle.len()] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(hits.len(), 1, "the last floor rides exactly once");
+        let mut bad = body;
+        bad[hits[0] + needle.len() - 1] = 15; // exponent 15 > 14
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
 
     #[test]
