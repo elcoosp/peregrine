@@ -440,6 +440,19 @@ pub struct LinkConfig {
     /// `N_PEXT` bit — a corpus without private externs plans the
     /// pre-M33 bytes under either decision.
     pub keep_private_externs: bool,
+    /// M36 — the compact-unwind suppression: `-no_compact_unwind`
+    /// drops the output `__TEXT,__unwind_info` section (no synthetic
+    /// piece, no section slot — the pre-M34 bytes exactly). The
+    /// default (`true`) keeps every pre-M36 link byte-identical: the
+    /// M34 carriage rides whenever an input carries the
+    /// `__LD,__compact_unwind` table, and the M35 rung compresses the
+    /// qualifying rows. There is no output-kind conflict: every
+    /// segmented output can suppress, and the relocatable path stops
+    /// at Pass 2 (the decision simply never fires there). The
+    /// suppression is a Pass-3 decision — never a parse blindfold: the
+    /// parse still validates the table, and a broken table refuses
+    /// with the knob set.
+    pub compact_unwind: bool,
 }
 
 impl Default for LinkConfig {
@@ -494,6 +507,7 @@ impl Default for LinkConfig {
             function_starts: true,
             uuid: true,
             keep_private_externs: false,
+            compact_unwind: true,
         }
     }
 }
@@ -1652,8 +1666,10 @@ pub fn layout(
     // placement fixed point — the same loop the `__chain_starts` size
     // rides — because the surviving-row set and the personality dedup
     // are a function of the strip and the fold the placements already
-    // speak.
-    let emit_unwind = objects.iter().any(|o| !o.compact_unwind.is_empty());
+    // speak. M36: the suppression drops the section on the named
+    // decision (the parse still validates the table — the knob is a
+    // Pass-3 decision, never a parse blindfold).
+    let emit_unwind = cfg.compact_unwind && objects.iter().any(|o| !o.compact_unwind.is_empty());
     let mut unwind_size = 0usize;
     prepare_buckets(
         &mut buckets,
