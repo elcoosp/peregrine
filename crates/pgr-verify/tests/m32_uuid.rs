@@ -1,5 +1,5 @@
-//! M32 — the verifier's UUID contract reads the decision, not a
-//! constant: the M0 absence warning ("no LC_UUID") named Peregrine's
+//! M32 — the verifier's `UUID` contract reads the decision, not a
+//! constant: the M0 absence warning ("no `LC_UUID`") named Peregrine's
 //! always-carried default, which the M32 suppression unnames — an
 //! image without `LC_UUID` is a *decision* (the `-no_uuid` link), not
 //! a defect, so it verifies strict. The carried command's payload is
