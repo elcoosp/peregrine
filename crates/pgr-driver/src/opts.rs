@@ -1500,6 +1500,15 @@ fn apply_flag(
         "-keep_private_externs" => {
             opts.config.keep_private_externs = true;
         }
+        // M36: the compact-unwind suppression. ld64's flag; the surface
+        // refused it as unknown until now — the carriage reads the
+        // decision, and the output's `__TEXT,__unwind_info` section
+        // drops (the pre-M34 bytes exactly). The parse still validates
+        // the table — the knob is a Pass-3 decision, never a parse
+        // blindfold. A boolean knob with no output-kind conflict.
+        "-no_compact_unwind" => {
+            opts.config.compact_unwind = false;
+        }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
         // kind conflict is `finish`'s (it sees the whole surface).
