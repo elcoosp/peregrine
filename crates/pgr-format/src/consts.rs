@@ -606,3 +606,9 @@ pub const UNWIND_PERSONALITY_MASK: u32 = 0x3000_0000;
 /// Compressed-page entry function-offset field
 /// (`UNWIND_INFO_COMPRESSED_ENTRY_FUNC_OFFSET`).
 pub const UNWIND_INFO_COMPRESSED_ENTRY_FUNC_OFFSET_MASK: u32 = 0x00FF_FFFF;
+/// The compressed-page entry's encoding-index field: the top 8 bits
+/// (`(entry >> UNWIND_INFO_COMPRESSED_ENTRY_ENCODING_INDEX_SHIFT) &
+/// 0xFF`), indexing the section-level common encodings array first
+/// and the page-local array second (libunwind's two-tier decode) —
+/// the M35 rung rides tier one.
+pub const UNWIND_INFO_COMPRESSED_ENTRY_ENCODING_INDEX_SHIFT: u32 = 24;
