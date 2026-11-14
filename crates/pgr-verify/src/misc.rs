@@ -1,6 +1,7 @@
 //! Miscellaneous `__LINKEDIT` checks: entry point, dylinker, build version,
-//! function starts (ULEB), data-in-code, export trie bounds and UUID
-//! presence.
+//! function starts (ULEB), data-in-code and export trie bounds. The UUID
+//! command's absence reads as the M32 suppression decision — the carried
+//! payload is opaque, so there is nothing to gate.
 
 use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report};
@@ -160,14 +161,14 @@ pub(crate) fn check_entry_and_version(img: &ParsedImage<'_>, report: &mut Report
     }
 }
 
-/// Function-starts, data-in-code, export-trie and UUID checks.
+/// Function-starts, data-in-code, export-trie and UUID checks (the
+/// UUID absence is the M32 suppression decision — nothing to gate).
 pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, report: &mut Report) {
     let text_vmsize = img
         .segments
         .iter()
         .find(|s| s.name() == Ok("__TEXT"))
         .map_or(0, |s| s.vmsize);
-    let mut uuid_present = false;
     for cmd in &img.commands {
         match cmd.kind {
             LoadCommandKind::LinkeditData(LC_FUNCTION_STARTS) => {
@@ -216,23 +217,13 @@ pub(crate) fn check_linkedit_payloads(bytes: &[u8], img: &ParsedImage<'_>, repor
                     }
                 }
             }
-            LoadCommandKind::Uuid => {
-                uuid_present = true;
-            }
+            // M32: the UUID command's absence reads as the
+            // `-no_uuid` suppression decision, never a defect — the
+            // pre-M32 warning named Peregrine's always-carried
+            // default, which the decision unnames; the carried payload
+            // is opaque (the derived bytes are the emit's business).
             _ => {}
         }
-    }
-    if !uuid_present
-        && matches!(
-            img.header.filetype,
-            pgr_format::consts::MH_EXECUTE | pgr_format::consts::MH_DYLIB
-        )
-    {
-        report.issues.push(Issue::warning(
-            Code::LinkeditPayload,
-            "no LC_UUID (Peregrine derives one from the page hashes)",
-            None,
-        ));
     }
 }
 
