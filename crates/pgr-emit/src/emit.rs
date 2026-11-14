@@ -233,15 +233,22 @@ fn write_signature(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     if le.sig_size == 0 {
         return Ok(());
     }
-    let zeroed = signature::page_hashes(buf, le.uuid_at as usize, le.sig_off, true);
-    let uuid = signature::derive_uuid(&zeroed);
-    let dst = buf
-        .get_mut(le.uuid_at as usize..le.uuid_at as usize + 16)
-        .ok_or(EmitError::Internal {
-            message: "UUID field leaves the output buffer".into(),
-        })?;
-    dst.copy_from_slice(&uuid);
-    let hashes = signature::page_hashes(buf, le.uuid_at as usize, le.sig_off, false);
+    // M32: the uuid patch consults the plan offset's absent sentinel —
+    // a suppressed image has no uuid field to zero, derive or write,
+    // so the hashes hash the bytes as they are.
+    let hashes = if le.uuid_at != 0 {
+        let zeroed = signature::page_hashes(buf, le.uuid_at as usize, le.sig_off, true);
+        let uuid = signature::derive_uuid(&zeroed);
+        let dst = buf
+            .get_mut(le.uuid_at as usize..le.uuid_at as usize + 16)
+            .ok_or(EmitError::Internal {
+                message: "UUID field leaves the output buffer".into(),
+            })?;
+        dst.copy_from_slice(&uuid);
+        signature::page_hashes(buf, le.uuid_at as usize, le.sig_off, false)
+    } else {
+        signature::page_hashes(buf, 0, le.sig_off, false)
+    };
     // M3: only executables carry the CS_EXECSEG_MAIN_BINARY flag; dylibs
     // and bundles sign with execSegFlags = 0.
     let is_exec = layout.filetype == pgr_format::consts::MH_EXECUTE;
