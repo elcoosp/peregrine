@@ -177,6 +177,15 @@ pub fn link_from_objects(
     let (objects, interner, export_ids, loader_ids) =
         pull_and_intern(objects, archives, cfg, parallel, cache, true)?;
 
+    // ---- M39: the make-undefined marks ---------------------------------------
+    // The names resolve against the finished interner batch (object
+    // symbols, dylib exports, aliases): a name nothing interned was
+    // never defined or referenced by any input — the vacuous decision
+    // refuses with the fix. The definition check (a mark must land on a
+    // real definition) runs in `Resolution::install_make_undefined`,
+    // on both resolve paths.
+    let make_undefined_ids = make_undefined_ids(&cfg.make_undefined, &interner)?;
+
     // ---- Pass 2: resolution --------------------------------------------------
     // M9 GA rung — the resolve's record-side wiring: a relink whose record
     // vouches a snapshot plans Pass 2 through the recorded decisions
@@ -206,6 +215,7 @@ pub fn link_from_objects(
                     &objects,
                     &cfg.dylibs,
                     &loader_export_names,
+                    &make_undefined_ids,
                     cfg.undefined_policy,
                 ) {
                     Ok(res) => Some(res),
@@ -236,6 +246,7 @@ pub fn link_from_objects(
         reused
     } else {
         let mut full = Resolution::default();
+        full.install_make_undefined(&make_undefined_ids, &objects, &interner)?;
         full.install(&objects)?;
         full.install_dylibs(&cfg.dylibs, &export_ids);
         full.install_loader_exports(&loader_ids);
@@ -267,6 +278,34 @@ pub fn link_from_objects(
         interner,
         resolve_snapshot,
     })
+}
+
+/// Resolves the M39 make-undefined names against the finished interner
+/// batch: a name nothing interned was never defined or referenced by
+/// any input, so the decision is vacuous — the refusal names the
+/// misspelling (the `-alias` convention; the definition check itself
+/// runs in [`Resolution::install_make_undefined`], where the parse's
+/// symbol tables are in hand).
+fn make_undefined_ids(
+    table: &crate::make_undefined::MakeUndefined,
+    interner: &Interner,
+) -> Result<Vec<StringId>, LinkError> {
+    table
+        .iter()
+        .map(|entry| {
+            interner
+                .lookup(entry.name().as_bytes())
+                .ok_or_else(|| LinkError::Symbol {
+                    name: String::new(),
+                    message: format!(
+                        "-U {} marks a defined symbol undefined, but no input defines or \
+                         references it — nothing to strip; check the spelling (C symbols \
+                         carry the leading underscore) or drop the -U decision",
+                        entry.name()
+                    ),
+                })
+        })
+        .collect()
 }
 
 /// The Pass 1–2 front half both link shapes share: the S7 archive pull
@@ -415,6 +454,33 @@ pub fn link_reloc(
                       but the relocatable output plans no segments and carries its \
                       input sections verbatim — drop -headerpad or link a segmented \
                       output"
+                .into(),
+        });
+    }
+    // M38: the install-name auto-floor is the same packing decision —
+    // the reserved region has no load commands to grow here. The
+    // re-check backs the driver surface's earlier refusal (the M38
+    // gate matrix links the relocatable output to prove it).
+    if cfg.header_pad_max_install_names {
+        return Err(LinkError::Layout {
+            message: "-headerpad_max_install_names grows the header region the load \
+                      commands occupy, but the relocatable output plans no segments \
+                      and carries its input sections verbatim — drop \
+                      -headerpad_max_install_names or link a segmented output"
+                .into(),
+        });
+    }
+    // M39: the make-undefined marks are a Pass-2 decision — the
+    // relocatable output opens its undefineds by design and carries its
+    // input symbol table verbatim, so a mark has nothing to strip. The
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either.
+    if !cfg.make_undefined.is_empty() {
+        return Err(LinkError::Layout {
+            message: "-U marks a defined symbol undefined, but the relocatable output \
+                      opens its undefineds by design and carries its input symbol table \
+                      verbatim — nothing to strip: drop -U or link an image (an \
+                      executable, dylib or bundle)"
                 .into(),
         });
     }
