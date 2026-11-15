@@ -31,6 +31,7 @@ fn dylibs() -> Vec<Dylib> {
         weak: false,
         reexport: false,
         lazy: false,
+        upward: false,
     };
     vec![
         dy("@rpath/lib_with_a_long_install_name.dylib", "fn_a"),
