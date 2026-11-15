@@ -52,6 +52,7 @@ pub mod init_offsets;
 pub mod interner;
 pub mod layout;
 pub mod link;
+pub mod make_undefined;
 pub mod map;
 pub mod object;
 pub mod order;
@@ -96,6 +97,7 @@ pub use link::{
     LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, RelocLink,
     check_load_symbols, link, link_cached, link_from_objects, link_reloc, link_with,
 };
+pub use make_undefined::{MakeUndefined, MakeUndefinedError, MakeUndefinedName};
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use pagezero::PageZero;
 pub use platform::FixupEncoding;
