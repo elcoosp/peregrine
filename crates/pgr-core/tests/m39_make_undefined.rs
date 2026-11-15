@@ -103,6 +103,7 @@ fn f_dylib() -> Dylib {
         exports: vec![b"_f".to_vec()],
         weak: false,
         lazy: false,
+        upward: false,
         reexport: false,
     }
 }
