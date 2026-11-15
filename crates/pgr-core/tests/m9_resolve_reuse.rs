@@ -82,6 +82,7 @@ fn reused_resolve(
         objects,
         dylibs,
         &[],
+        &[],
         UndefinedPolicy::Error,
     )
 }
