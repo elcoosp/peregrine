@@ -509,6 +509,30 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-U` name the core seam refuses (M39): non-empty, NUL-free,
+    /// named once. The seam's refusal rides the help — the grammar the
+    /// flag accepts, not just the verdict.
+    #[error("invalid value for -U: {raw}")]
+    #[diagnostic(help("{message}"))]
+    MakeUndefinedValue {
+        /// The refused name as written.
+        raw: String,
+        /// The core seam's refusal (the fix).
+        message: String,
+    },
+    /// A `-U` surface conflict (M39): the marks are a Pass-2 decision —
+    /// the relocatable output opens its undefineds by design and carries
+    /// its input symbol table verbatim, so a mark has nothing to strip.
+    /// The verdict names the shape conflict; the help is the fix — the
+    /// house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    MakeUndefinedConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// A `-dyld_env` pair the core seam refuses (M22): the
     /// `DYLD_<var>=<value>` grammar (a `DYLD_`-prefixed non-empty
     /// variable, one `=`, NUL-free), named once. The seam's refusal
@@ -701,12 +725,12 @@ const NOOP_FLAGS: [&str; 4] = [
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
 /// M14 released the weak/lazy dylib family (`-weak_framework`,
 /// `-lazy_framework`, `-lazy_library`), M15 released `-pagezero_size`
-/// (the image-base seam) and M20 released the umbrella re-exports
-/// (`-sub_umbrella`, `-sub_library`) — the `MH_DYLINKER` output kind,
-/// make-undefined and `ObjC` semantics stay here with their roadmap entry.
-const LATER_FLAGS: [(&str, &str); 3] = [
+/// (the image-base seam), M20 released the umbrella re-exports
+/// (`-sub_umbrella`, `-sub_library`) and M39 released make-undefined
+/// (`-U`, the Pass-2 mark) — the `MH_DYLINKER` output kind and `ObjC`
+/// semantics stay here with their roadmap entry.
+const LATER_FLAGS: [(&str, &str); 2] = [
     ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
-    ("-U", "later milestone (make-undefined)"),
     (
         "-ObjC",
         "ObjC/Swift semantics beyond section pass-through are a later milestone",
@@ -1410,6 +1434,26 @@ fn apply_flag(
                     message: e.to_string(),
                 })?;
         }
+        // M39: the make-undefined marks. The same validation the core
+        // seam pays runs here, so the refusal names the grammar; the
+        // output-kind conflict is `finish`'s (it sees the whole
+        // surface).
+        "-U" => {
+            let v = next_value(args, i, arg)?;
+            let mark = pgr_core::MakeUndefinedName::from_flag(&v).map_err(|e| {
+                OptsError::MakeUndefinedValue {
+                    raw: v.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            opts.config
+                .make_undefined
+                .push(mark)
+                .map_err(|e| OptsError::MakeUndefinedValue {
+                    raw: v.clone(),
+                    message: e.to_string(),
+                })?;
+        }
         // M21: the client list's entries. The same validation the core
         // seam pays runs here, so the refusal names the grammar; the
         // output-kind conflict is `finish`'s (it sees the whole
@@ -1936,6 +1980,23 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             }
             Ot::Execute => {}
         }
+    }
+    // M39: the make-undefined marks are a Pass-2 decision — the
+    // relocatable output opens its undefineds by design and carries its
+    // input symbol table verbatim, so a mark has nothing to strip. An
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one (the library's `link_reloc` re-checks so no
+    // caller can plan the shape either).
+    if !opts.config.make_undefined.is_empty()
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::MakeUndefinedConflict {
+            verdict: "-U marks a defined symbol undefined, but the relocatable output \
+                      opens its undefineds by design and carries its input symbol table \
+                      verbatim"
+                .into(),
+            fix: "drop -U or link an image (an executable, dylib or bundle)".into(),
+        });
     }
     // M26: the loader path is an executable decision —
     // `LC_LOAD_DYLINKER` is the main-executable command (the §8.2
@@ -2716,6 +2777,46 @@ mod tests {
             o.config.source_version,
             Some(1u64 << 40 | 2 << 30 | 3 << 20 | 4 << 10 | 5)
         );
+    }
+
+    #[test]
+    fn m39_make_undefined_marks_shape_the_config() {
+        let o = parse(&args(&[
+            "-o",
+            "out",
+            "-U",
+            "_override_me",
+            "-U",
+            "_also_gone",
+            "-undefined",
+            "dynamic_lookup",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(
+            o.config.make_undefined.names(),
+            ["_override_me", "_also_gone"]
+        );
+    }
+
+    #[test]
+    fn m39_make_undefined_values_are_validated() {
+        // The grammar (empty, NUL, repeated) refuses at parse time; the
+        // verdict names the flag and the core seam's refusal rides the
+        // miette help (the same split the M21 clients ride — the module
+        // tests own the grammar wording).
+        let err = parse(&args(&["-o", "out", "-U", "", "a.o"])).unwrap_err();
+        assert!(err.to_string().contains("-U"), "{err}");
+        assert!(parse(&args(&["-o", "out", "-U", "_bad\0name", "a.o"])).is_err());
+        assert!(parse(&args(&["-o", "out", "-U", "_f", "-U", "_f", "a.o"])).is_err());
+    }
+
+    #[test]
+    fn m39_the_relocatable_output_refuses_the_marks() {
+        let err = parse(&args(&["-o", "out", "-r", "-U", "_f", "a.o"])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("-U"), "{msg}");
+        assert!(msg.contains("relocatable"), "{msg}");
     }
 
     #[test]
