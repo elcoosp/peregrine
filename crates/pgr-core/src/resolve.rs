@@ -148,7 +148,7 @@ impl Resolution {
     /// parse: a name no input object defines has nothing to strip (the
     /// vacuous decision refuses with the fix — the `-alias` misspelling
     /// convention; a name the interner never saw refuses the same way,
-    /// before this call, in [`crate::link`]).
+    /// before this call, in [`crate::link::link`]).
     ///
     /// # Errors
     /// [`LinkError::Symbol`] naming the marked symbol nothing defines.
@@ -354,6 +354,67 @@ impl Resolution {
                 cursor += 1;
             }
         }
+    }
+
+    /// M42 — the unused-dylib drop (`-dead_strip_dylibs`): drops every
+    /// input dylib no referenced name binds against *as it is linked*
+    /// and renumbers the two-level ordinals onto the kept command
+    /// order. A dylib is used when a referenced name resolves to its
+    /// export (no in-image definition won — the bind carries the
+    /// dylib's ordinal) or when the reference was left to dyld (a
+    /// dynamic lookup binds flat and may reach any loaded image's
+    /// exports, so the provider cannot be proven unreachable). The
+    /// re-export dylibs always ride: their `LC_REEXPORT_DYLIB` command
+    /// is an identity obligation and their REEXPORT nodes join the
+    /// image's export trie. Returns the kept dylibs in command order —
+    /// the `LinkConfig.dylibs` replacement the header assembly reads.
+    #[must_use]
+    pub fn dead_strip_dylibs(&mut self) -> Vec<Dylib> {
+        // Used ordinals: every referenced name whose bind names a dylib
+        // (no in-image winner) or could reach one through dyld (the
+        // dynamic-lookup set), keyed by the first-exporting dylib the
+        // two-level map carries.
+        let mut used = vec![false; self.dylibs.len()];
+        for name in self.references.keys() {
+            let Some(&ordinal) = self.dylib_exports.get(name) else {
+                continue;
+            };
+            let idx = ordinal as usize - 1;
+            if idx >= used.len() {
+                continue;
+            }
+            if self.dynamic_lookups.contains(name) || !self.defs.contains_key(name) {
+                used[idx] = true;
+            }
+        }
+        // The kept list rides in command order; re-exports are identity
+        // obligations (the trie contract cannot survive their drop).
+        let mut kept: Vec<Dylib> = Vec::new();
+        let mut remap: Vec<Option<u16>> = Vec::with_capacity(self.dylibs.len());
+        for (i, dylib) in self.dylibs.iter().enumerate() {
+            if dylib.reexport || used[i] {
+                kept.push(dylib.clone());
+                remap.push(Some(kept.len() as u16));
+            } else {
+                remap.push(None);
+            }
+        }
+        // The two-level map compacts onto the kept list: an entry whose
+        // provider dropped named no bind (its names' winners are
+        // in-image definitions nothing binds dylib-ly — the drop rule
+        // above kept every provider a bind or a lookup can reach).
+        // Total (no indexing panic): an entry whose provider dropped
+        // named no bind (the drop rule kept every provider a bind or a
+        // lookup can reach).
+        let mut compacted = std::collections::BTreeMap::new();
+        for (name, ordinal) in &self.dylib_exports {
+            if let Some(Some(new_ordinal)) = remap.get(*ordinal as usize - 1) {
+                compacted.insert(*name, *new_ordinal);
+            }
+        }
+        self.dylib_exports = compacted;
+        self.dylibs.clone_from(&kept);
+        kept
     }
 
     /// Verifies every referenced name resolves (Pass 2, static + dylib
