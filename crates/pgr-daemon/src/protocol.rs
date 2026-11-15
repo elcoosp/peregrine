@@ -159,8 +159,12 @@ use sha2::{Digest, Sha256};
 /// asked for, never the pre-M38 natural default); **v27** appends the
 /// make-undefined marks (M39 — the `-U` names, count-prefixed like the
 /// rpaths; a resident relink strips the definitions the client marked,
-/// never the pre-M39 carried definitions).
-pub const PROTO_VERSION: u32 = 27;
+/// never the pre-M39 carried definitions); **v28** appends the
+/// export-trie suppression (M40 — one byte naming whether the image
+/// drops the `LC_DYLD_EXPORTS_TRIE` command; a resident relink carries
+/// the export-surface decision the client asked for, never the pre-M40
+/// always-carried default).
+pub const PROTO_VERSION: u32 = 28;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -818,6 +822,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     for name in cfg.make_undefined.names() {
         put_str(out, name);
     }
+    // M40 (v28 wire): the export-trie suppression rides the tail after
+    // the marks — one byte; a resident relink carries the
+    // export-surface decision the client asked for, never the pre-M40
+    // always-carried default.
+    put_u8(out, u8::from(!cfg.exported_symbols));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1080,6 +1089,10 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         let name = pgr_core::MakeUndefinedName::from_flag(&r.str()?).map_err(|_| malformed())?;
         make_undefined.push(name).map_err(|_| malformed())?;
     }
+    // M40 (v28 wire): the export-trie suppression — one byte, no
+    // validation beyond the bool (the absence is the decision; the
+    // output-kind conflicts the core re-checks refuse at link time).
+    let no_exported_symbols = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1145,6 +1158,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         compact_unwind: !no_compact_unwind,
         header_pad_max_install_names: header_pad_max,
         make_undefined,
+        exported_symbols: !no_exported_symbols,
     })
 }
 
@@ -1430,6 +1444,9 @@ mod tests {
                     .expect("one decision per name");
                 marks
             },
+            // The v28 tail: the export-trie suppression rides the
+            // default here — the knob the round-trip test flips.
+            exported_symbols: true,
             symbol_order: None,
         }
     }
@@ -2465,6 +2482,36 @@ mod tests {
             back.config.make_undefined.names(),
             ["_override_me", "_also_gone"],
             "the marks cross byte-for-byte, in flag order"
+        );
+    }
+
+    #[test]
+    fn the_export_trie_suppression_round_trips() {
+        // v28: a non-default export-trie suppression must survive the
+        // round trip verbatim (a resident relink carries the
+        // export-surface decision the client asked for, never the
+        // pre-M40 always-carried default).
+        let mut cfg = rich_config();
+        assert!(cfg.exported_symbols, "rich_config carries the default");
+        cfg.exported_symbols = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.exported_symbols,
+            "the suppression crosses byte-for-byte"
         );
     }
 
