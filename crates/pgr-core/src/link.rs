@@ -242,7 +242,7 @@ pub fn link_from_objects(
             }
         }
     });
-    let res = if let Some(reused) = reused {
+    let mut res = if let Some(reused) = reused {
         reused
     } else {
         let mut full = Resolution::default();
@@ -252,6 +252,27 @@ pub fn link_from_objects(
         full.install_loader_exports(&loader_ids);
         full.require_all_resolved(&interner, &objects, cfg.undefined_policy)?;
         full
+    };
+    // M42: the unused-dylib drop (`-dead_strip_dylibs`) — the Pass-2
+    // decision the kept command list reads. The compaction rides both
+    // resolve paths (the full install and the reuse replay): the
+    // resolution compacts its two-level map onto the kept dylibs and
+    // returns them, and the config's dylib list — the header assembly's
+    // `LC_LOAD_DYLIB` commands and the trie's REEXPORT loop — becomes
+    // the kept list. Everything downstream (the record snapshot, the
+    // dead-strip roots, the fixup planner's ordinals) reads the
+    // compacted state. The default path never clones the config.
+    let cfg_owned;
+    let cfg: &LinkConfig = if cfg.dead_strip_dylibs {
+        let kept = res.dead_strip_dylibs();
+        cfg_owned = {
+            let mut c = cfg.clone();
+            c.dylibs = kept;
+            c
+        };
+        &cfg_owned
+    } else {
+        cfg
     };
     // The record side: capture the finished Pass-2 state when the caller
     // asked for it (the `-incremental` record), so the v5 record section
@@ -427,6 +448,19 @@ pub fn link_reloc(
             message: "-bundle_loader binds a bundle against its host process, but the \
                       relocatable output opens its undefineds by design — drop \
                       -bundle_loader or link a bundle"
+                .into(),
+        });
+    }
+    // M42: the unused-dylib drop is a segmented-output decision — the
+    // relocatable output carries no load commands (its symbol table is
+    // the input's, verbatim), so there is nothing to strip. The
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either.
+    if cfg.dead_strip_dylibs {
+        return Err(LinkError::Layout {
+            message: "-dead_strip_dylibs drops the load commands of unused dylibs, but the \
+                      relocatable output opens its undefineds by design and carries no load \
+                      commands — drop -dead_strip_dylibs or link a segmented output"
                 .into(),
         });
     }
