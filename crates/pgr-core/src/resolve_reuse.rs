@@ -261,6 +261,7 @@ pub fn install_reused(
     objects: &[InputObject],
     dylibs: &[Dylib],
     loader_exports: &[Vec<u8>],
+    make_undefined: &[StringId],
     policy: UndefinedPolicy,
 ) -> Result<Resolution, LinkError> {
     let span = tracing::info_span!(
@@ -282,6 +283,10 @@ pub fn install_reused(
         .collect();
     redecide_map.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let mut res = Resolution::default();
+    // M39: the relink's own `-U` marks ride the replay exactly like the
+    // full walk — the marked keys never install (the vacuous-decision
+    // validation runs against the relink parse, the same refusal).
+    res.install_make_undefined(make_undefined, objects, interner)?;
 
     // 1. Reuse: walk the relink parse's unchanged files; every symbol with
     //    a recorded winner in its slot carries that decision verbatim (the
