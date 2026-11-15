@@ -484,6 +484,19 @@ pub fn link_reloc(
                 .into(),
         });
     }
+    // M40: the export-trie suppression is a header-assembly decision —
+    // the relocatable output carries no __LINKEDIT commands at all, so
+    // a named suppression has no command to drop. The re-check backs
+    // the driver surface's earlier refusal: no library caller can plan
+    // the shape either.
+    if !cfg.exported_symbols {
+        return Err(LinkError::Layout {
+            message: "-no_exported_symbols drops the output's LC_DYLD_EXPORTS_TRIE, but \
+                      the relocatable output carries no __LINKEDIT commands at all — \
+                      drop -no_exported_symbols or link an executable"
+                .into(),
+        });
+    }
     let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None)?;
     let (objects, interner, _export_ids, _loader_ids) =
         pull_and_intern(objects, archives, cfg, parallel, None, false)?;
