@@ -117,8 +117,14 @@ mod tests {
         // config's export-trie suppression as a tail byte (M40,
         // `-no_exported_symbols`): a resident relink carries the
         // export-surface decision the client asked for, never the
-        // pre-M40 always-carried default.
-        assert_eq!(crate::PROTO_VERSION, 28);
+        // pre-M40 always-carried default — and the config's dedup
+        // toggle as a tail byte (M41, `-no_deduplicate`): a resident
+        // relink carries the D4 decision the client asked for, never
+        // the pre-M41 merge default — and the config's unused-dylib
+        // drop as a tail byte (M42, `-dead_strip_dylibs`): a resident
+        // relink carries the drop decision the client asked for, never
+        // the pre-M42 keep-every-dylib default.
+        assert_eq!(crate::PROTO_VERSION, 30);
     }
 
     #[test]
