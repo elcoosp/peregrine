@@ -5,6 +5,20 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M39)
+
+- **M39** — the make-undefined mark (`-U <symbol>`): the flag the surface carried as a later
+  item since M2 is the Pass-2 decision the definition install reads — the named symbol's
+  definition (`N_SECT` or common) never installs *as it is linked*, so the symtab row, the
+  export-trie node and the `__common` slot drop and the defining atom loses its liveness root
+  (`-dead_strip` drops the body nothing references anymore), and the stripped references follow
+  the `-undefined` policy like any unresolved name (a dynamic lookup under `-undefined
+  dynamic_lookup`; the vacuous refusal names the misspelling under the default). The empty table
+  keeps every pre-M39 link byte-identical; the marks ride the resolve-reuse replay (a relink
+  strips like the full walk); the relocatable output refuses the knob; the daemon wire v27
+  carries the names; the `make_undefined` bench and the `make_undefined_link` consumer example
+  ride along.
+
 ### Added (M38)
 
 - **M38** — the install-name auto-floor (`-headerpad_max_install_names`): the flag the
