@@ -96,7 +96,7 @@ same pipeline in a resident session for warm relinks.
 | `pgr-core` | Passes 1–3: interning, resolution, layout, ICF, dead-strip, thunks, fixup planning, caches, reverse reference index, slack policy, the validated image-knob decisions |
 | `pgr-emit` | Passes 4–5: fused tile emit, ad-hoc signing, writer pool — plus the incremental engine (record, plan, clone-and-patch) and `-r` object assembly |
 | `pgr-verify` | the read-side verifier: library + CLI, selectable checks, JSON reports, baseline diffs |
-| `pgr-daemon` | `pgrd`: versioned wire protocol (v24), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit |
+| `pgr-daemon` | `pgrd`: versioned wire protocol (v25), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit |
 | `pgr-fixtures` | deterministic Mach-O object/archive builders shared by tests, benches and the fuzz corpus |
 
 ## Fast edit loops
@@ -295,12 +295,14 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 | **M34** | Compact-unwind synthesis: the input `__LD,__compact_unwind` tables the Pass-1 sweep kept dropping (the `S_ATTR_DEBUG` section the `__LD` skip hid) ride the atom map onto the output `__TEXT,__unwind_info` — the section dyld's unwinder and every backtrace reader walks (header arrays, personality rows in first-use order, the sorted index, regular second-level pages, the LSDA rows); dead-stripped functions drop their rows, ICF-folded duplicates land once on the canonical copy, the personality/LSDA references root their targets under `-dead_strip`; an entry-free corpus plans the pre-M34 bytes (`pgr_core::unwind::synthesize` is the public seam a build system can plan with before any link runs) |
 | **M35** | Compact-unwind compressed second-level pages: the density rung past the M34 regular pages — a row rides the compressed family exactly when its offset fits the 24-bit field and its final encoding word sits in the section-level common encodings array (the distinct words in first-use order, capped at the 8-bit index space), consecutive same-family rows share a page, and the compressed page's page-local encodings array rides empty (the two-tier decode libunwind runs answers at tier one); qualifying rows halve the second-level entry width (a 4096-row single-encoding table plans 50 % of the M34 bytes), `pgr_core::unwind::plan_shape`/`synthesized_size_shape` plan the exact shape before any link runs, and the verifier's `unwind` family walks both page families |
 | **M36** | The compact-unwind suppression: `-no_compact_unwind` drops the output `__TEXT,__unwind_info` section on the named decision (the pre-M34 bytes exactly, byte-identical to the entry-free link; the file-size delta rides the 16 KiB segment congruence) — the parse still validates the table (the knob is a Pass-3 decision, never a parse blindfold), an incremental knob flip lands on the relayout rung's correct image and the record renews so the cycle never stalls, and the daemon wire v25 carries the decision the resident relink asked for |
+| **M37** | Thread-local variables (TLV): the input `S_THREAD_LOCAL_*` sections the pipeline rejected since M5 ride the atom map onto the output `__DATA` segment — the `__thread_vars` descriptors (16-byte thunk/initializer pairs; a section off the stride refuses at parse with the fix), the `__thread_data` initializers, the `__thread_bss` zero-fills (VM-only, their own section — never merged into `__common`); the `ARM64_RELOC_TLVP_LOAD_PAGE21`/`PAGEOFF12` descriptor loads decode and patch ADRP/scaled-LDR-imm12 directly against the descriptor's vaddr (no GOT slot — the descriptor is always a local definition; a descriptor load past this image's definitions refuses with the fix, thread-local variables cannot bind across a dylib boundary); the descriptor slots ride chained fixups (the thunk's bind, the initializer's rebase) and the header declares `MH_HAS_TLV_DESCRIPTORS` exactly when the image carries a thread-local section; the verifier's `tlv` family joins the `--checks` registry (the marker/section parity, the descriptor stride, the descriptors' thread-local data) and the relocatable output round-trips the surface (`-r` keeps the sections and re-encodes the TLVP pair; the object links again) |
+| **M38** | The install-name auto-floor: `-headerpad_max_install_names` — the flag the surface carried as a later item since M29 — is the decision the packing loop reads: the reserved header region grows past its natural size by every load-dylib command's room to grow its install name to the longest install name in the image (+1 NUL, 8-byte aligned — `pgr_core::header_pad::install_names_growth` is the public seam a build system can plan with), the space `install_name_tool` needs to rewrite any install name in place; the default (`false`) keeps every pre-M38 link byte-identical, a single-name surface plans zero growth, the floor composes with `-headerpad` (both are minimums — the bigger wins), the relocatable output refuses the knob, and the daemon wire v26 carries the decision |
 
 Every knob ships the same way: a validated decision in the library, verifier gates for the
 shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v25)
 
 **Still on the roadmap:** the Apple Silicon hardware gates · LTO object execution ·
-TLV · ObjC/Swift semantics beyond section pass-through.
+ObjC/Swift semantics beyond section pass-through.
 
 <details><summary><b>Consumer examples (one per milestone surface)</b></summary>
 
@@ -314,7 +316,7 @@ Each ships in its crate's `examples/` with a matching bench — run with
 `umbrella_link` · `sub_client_link` · `dyld_env_link` · `reexport_framework_link` ·
 `alias_link` · `bundle_loader_link` · `dylinker_link` · `no_pie_link` ·
 `sectalign_link` · `headerpad_link` · `data_in_code_link` · `function_starts_link` · `no_uuid_link` · `keep_private_externs_link` · `compact_unwind_link` ·
-`compact_unwind_compressed_link` · `no_compact_unwind_link` · `library_link` · `link_map` · `order_file_link`
+`compact_unwind_compressed_link` · `no_compact_unwind_link` · `tlv_link` · `headerpad_max_install_names_link` · `library_link` · `link_map` · `order_file_link`
 
 </details>
 
