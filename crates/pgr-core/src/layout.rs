@@ -548,6 +548,24 @@ pub struct LinkConfig {
     /// like a segmented one (its object carries the member's sections
     /// verbatim), so `-r` rides the same pull.
     pub objc: bool,
+    /// M46 — the export-dynamic roots: `-export_dynamic` — ld64's
+    /// liveness rule, *"Preserves all global symbols in main
+    /// executables during dead stripping"* (the `ld` man page) — is the
+    /// decision the dead-strip root set reads (see
+    /// [`crate::deadstrip`]): every global definition in the image (an
+    /// `N_SECT` def or a common) roots the mark phase, so a
+    /// plugin-style main executable keeps its unreferenced entry points
+    /// (the `dlsym` surface is a runtime contract the static fixpoint
+    /// cannot see). The default (`false`) keeps every pre-M46 link
+    /// byte-identical: the roots stay the entry, the `-u` marks, the
+    /// aliases and the sections' own attributes. The knob is an
+    /// executable decision — a dylib's and a bundle's strip already
+    /// roots every definition (the export surface is the contract) and
+    /// the relocatable output strips nothing (its symbol table is the
+    /// input's, verbatim) — so all three refuse the knob with the fix
+    /// (the layout's re-check backs the driver surface's earlier
+    /// refusal, and [`crate::link::link_reloc`] re-checks too).
+    pub export_dynamic: bool,
 }
 
 impl Default for LinkConfig {
@@ -609,6 +627,7 @@ impl Default for LinkConfig {
             deduplicate: true,
             dead_strip_dylibs: false,
             objc: false,
+            export_dynamic: false,
         }
     }
 }
@@ -1585,6 +1604,39 @@ pub fn layout(
                 "-dyld_env exports DYLD_* variables through the loader, but the \
                  relocatable output carries no loader commands",
                 "drop the flag or link an executable",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M46: the export-dynamic roots are an executable decision — a
+    // dylib's and a bundle's strip already roots every definition (the
+    // export surface is the contract the strip serves) and the
+    // relocatable output strips nothing (its symbol table is the
+    // input's, verbatim), so a named knob has nothing to widen there.
+    // The refusal rides here (not only on the driver surface and
+    // `link_reloc`) so every caller pays it: a silently dropped knob
+    // would claim a `dlsym` surface the output never carries.
+    if cfg.export_dynamic && cfg.filetype != OutputType::Execute {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Dylib => (
+                "-export_dynamic preserves global symbols during dead stripping, but \
+                 this output is a dylib",
+                "every definition already roots a dylib's strip (the export surface is \
+                 the contract): link an executable or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-export_dynamic preserves global symbols during dead stripping, but \
+                 this output is a bundle",
+                "every definition already roots a bundle's strip (the dlopen surface is \
+                 the contract): link an executable or drop the flag",
+            ),
+            _ => (
+                "-export_dynamic preserves global symbols during dead stripping, but \
+                 the relocatable output strips nothing",
+                "the object's symbol table is the input's, verbatim: drop the flag or \
+                 link an executable",
             ),
         };
         return Err(LinkError::Layout {
@@ -4917,6 +4969,15 @@ fn build_header(
                 pgr_format::consts::LC_LOAD_WEAK_DYLIB
             } else if d.reexport {
                 pgr_format::consts::LC_REEXPORT_DYLIB
+            } else if d.upward {
+                // M45 `-upward_library`/`-upward_framework`: dyld's
+                // umbrella-relationship command; the two-level ordinal
+                // space counts it like a plain load (the format reader
+                // has decoded the opcode since M0). The mark names the
+                // family of a plain load only — a lazy, weak or re-export
+                // load keeps its command, the obligations outrank the
+                // mark, and the driver's flags name one kind per path.
+                pgr_format::consts::LC_LOAD_UPWARD_DYLIB
             } else {
                 pgr_format::consts::LC_LOAD_DYLIB
             }
