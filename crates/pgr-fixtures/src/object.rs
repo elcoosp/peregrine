@@ -25,11 +25,12 @@ use crate::pad_name;
 use pgr_format::consts::{
     ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
     ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
-    ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED, CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64,
-    LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF,
-    PLATFORM_MACOS, RELOC_LENGTH_4, RELOC_LENGTH_8, S_ATTR_DEBUG, S_ATTR_PURE_INSTRUCTIONS,
-    S_CSTRING_LITERALS, S_REGULAR, S_ZEROFILL, SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ,
-    VM_PROT_WRITE,
+    ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_TLVP_LOAD_PAGE21, ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
+    ARM64_RELOC_UNSIGNED, CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_BUILD_VERSION, MH_OBJECT,
+    N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PLATFORM_MACOS, RELOC_LENGTH_4,
+    RELOC_LENGTH_8, S_ATTR_DEBUG, S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS, S_REGULAR,
+    S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_VARIABLES, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL,
+    SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::cursor::pod_read_unaligned_at;
 use pgr_format::reloc::RelocationInfo;
@@ -204,6 +205,35 @@ impl ObjectReloc {
         }
     }
 
+    /// ADRP against the symbol's TLV descriptor
+    /// (`ARM64_RELOC_TLVP_LOAD_PAGE21`, external — the descriptor is
+    /// always a definition in the image being linked; M37).
+    #[must_use]
+    pub const fn tlvp_page21(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: true,
+            length_log2: RELOC_LENGTH_4,
+            extern_: true,
+            rtype: ARM64_RELOC_TLVP_LOAD_PAGE21,
+        }
+    }
+
+    /// LDR against the symbol's TLV descriptor
+    /// (`ARM64_RELOC_TLVP_LOAD_PAGEOFF12`, external; M37).
+    #[must_use]
+    pub const fn tlvp_pageoff12(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: false,
+            length_log2: RELOC_LENGTH_8,
+            extern_: true,
+            rtype: ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
+        }
+    }
+
     /// Positions the relocation at `offset` within its section.
     #[must_use]
     pub const fn at(mut self, offset: u32) -> Self {
@@ -317,6 +347,55 @@ impl ObjectSection {
     fn with_size(mut self, size: usize) -> Self {
         self.data = vec![0u8; size];
         self
+    }
+
+    /// A thread-local initializer section (`__DATA,__thread_data`,
+    /// `S_THREAD_LOCAL_REGULAR`; M37): the bytes dyld copies into a
+    /// thread's TLV area at first access.
+    #[must_use]
+    pub fn thread_data(data: Vec<u8>) -> Self {
+        Self {
+            name: "__thread_data".into(),
+            segment: "__DATA".into(),
+            align_log2: 3,
+            flags: S_THREAD_LOCAL_REGULAR,
+            data,
+            relocs: Vec::new(),
+        }
+    }
+
+    /// A thread-local descriptor section (`__DATA,__thread_vars`,
+    /// `S_THREAD_LOCAL_VARIABLES`; M37): one 16-byte
+    /// thunk/initializer descriptor per thread-local variable. The
+    /// descriptor slots relocate like any 8-byte pointer (the thunk's
+    /// `UNSIGNED` bind, the initializer's `UNSIGNED` rebase).
+    #[must_use]
+    pub fn thread_vars(data: Vec<u8>, relocs: Vec<ObjectReloc>) -> Self {
+        Self {
+            name: "__thread_vars".into(),
+            segment: "__DATA".into(),
+            align_log2: 3,
+            flags: S_THREAD_LOCAL_VARIABLES,
+            data,
+            relocs,
+        }
+    }
+
+    /// A thread-local zero-fill section (`__DATA,__thread_bss`,
+    /// `S_THREAD_LOCAL_ZEROFILL`; M37): occupies VM like
+    /// [`ObjectSection::zerofill`], keeps its own section (dyld's TLV
+    /// allocation walks it — it never merges into `__common`).
+    #[must_use]
+    pub fn thread_bss(size: usize, align_log2: u32) -> Self {
+        Self {
+            name: "__thread_bss".into(),
+            segment: "__DATA".into(),
+            align_log2,
+            flags: S_THREAD_LOCAL_ZEROFILL,
+            data: Vec::new(),
+            relocs: Vec::new(),
+        }
+        .with_size(size)
     }
 }
 
@@ -669,7 +748,10 @@ impl ObjectBuilder {
         lc += 72;
         for (i, sec) in self.sections.iter().enumerate() {
             let (addr, size) = placed[i];
-            let zerofill = sec.flags & SECTION_TYPE_MASK == S_ZEROFILL;
+            let zerofill = matches!(
+                sec.flags & SECTION_TYPE_MASK,
+                S_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
+            );
             let mut sect = [0u8; 80];
             sect[0..16].copy_from_slice(&pad_name(sec.name.as_bytes()));
             sect[16..32].copy_from_slice(&pad_name(sec.segment.as_bytes()));
@@ -723,7 +805,10 @@ impl ObjectBuilder {
         // ---- section data --------------------------------------------------
         for (i, sec) in self.sections.iter().enumerate() {
             let (addr, size) = placed[i];
-            let zerofill = sec.flags & SECTION_TYPE_MASK == S_ZEROFILL;
+            let zerofill = matches!(
+                sec.flags & SECTION_TYPE_MASK,
+                S_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
+            );
             if !zerofill && size > 0 {
                 let at = header_len + addr as usize;
                 buf[at..at + size as usize].copy_from_slice(&sec.data);
