@@ -54,6 +54,7 @@ pub mod layout;
 pub mod link;
 pub mod make_undefined;
 pub mod map;
+pub mod objc;
 pub mod object;
 pub mod order;
 pub mod pagezero;
@@ -98,6 +99,7 @@ pub use link::{
     check_load_symbols, link, link_cached, link_from_objects, link_reloc, link_with,
 };
 pub use make_undefined::{MakeUndefined, MakeUndefinedError, MakeUndefinedName};
+pub use objc::{OBJC_METADATA_PREFIXES, defines_objc_metadata};
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use pagezero::PageZero;
 pub use platform::FixupEncoding;
