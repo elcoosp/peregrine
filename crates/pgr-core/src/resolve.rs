@@ -29,7 +29,7 @@
 use crate::LinkError;
 use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
-use crate::object::{InputObject, InputSymbol};
+use crate::object::{InputObject, InputSymbol, RelocTarget};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Definition rank (lower wins; TDD §5 Pass 2).
@@ -131,9 +131,58 @@ pub struct Resolution {
     /// references that resolve against the host process at load time,
     /// binding with the main-executable ordinal (`0xFF`).
     loader_exports: BTreeSet<u32>,
+    /// Names `-U` marked as undefined (M39): the keys that never
+    /// install — a definition or common of a marked name is dropped
+    /// *as it is linked* (ld64's phrasing), so the symtab row, the
+    /// export-trie node and the `__common` slot the definition would
+    /// have claimed all drop, and the defining atom loses its
+    /// liveness root. References to a marked name follow the
+    /// `-undefined` policy like any unresolved name.
+    make_undefined: BTreeSet<u32>,
 }
 
 impl Resolution {
+    /// Installs the make-undefined marks (M39): every named symbol is
+    /// treated as undefined *as it is linked* — its definitions and
+    /// commons never install. The decision is validated against the
+    /// parse: a name no input object defines has nothing to strip (the
+    /// vacuous decision refuses with the fix — the `-alias` misspelling
+    /// convention; a name the interner never saw refuses the same way,
+    /// before this call, in [`crate::link`]).
+    ///
+    /// # Errors
+    /// [`LinkError::Symbol`] naming the marked symbol nothing defines.
+    pub fn install_make_undefined(
+        &mut self,
+        ids: &[StringId],
+        objects: &[InputObject],
+        interner: &Interner,
+    ) -> Result<(), LinkError> {
+        for id in ids {
+            let defined = objects.iter().any(|obj| {
+                obj.symbols.iter().any(|sym| {
+                    sym.name == *id
+                        && sym.external
+                        && !sym.stab
+                        && (sym.is_defined() || sym.is_common())
+                })
+            });
+            if !defined {
+                return Err(LinkError::Symbol {
+                    name: String::new(),
+                    message: format!(
+                        "-U {} marks a defined symbol undefined, but no input defines it — \
+                         nothing to strip; check the spelling (C symbols carry the leading \
+                         underscore) or drop the -U decision",
+                        interner.name(*id)
+                    ),
+                });
+            }
+            self.make_undefined.insert(id.0);
+        }
+        Ok(())
+    }
+
     /// Installs every definition of every object (Pass 2 step 1) and records
     /// undefined references.
     ///
@@ -146,6 +195,9 @@ impl Resolution {
                     continue;
                 }
                 let key = sym.name.0;
+                if self.make_undefined.contains(&key) {
+                    continue; // M39: marked as undefined while being linked
+                }
                 if sym.is_defined() {
                     let rank = if obj.from_archive {
                         if sym.weak_def {
@@ -318,6 +370,46 @@ impl Resolution {
     ) -> Result<(), LinkError> {
         self.dynamic_lookups.clear();
         let mut missing: Vec<String> = Vec::new();
+        // M39: the marked names' *relocation* references. A well-formed
+        // object references an external name through an undefined symtab
+        // row — the symtab walk below. A marked name's reference is
+        // different: the same object also *defines* it (one symtab row),
+        // so the only reference sites are the relocations themselves,
+        // and the definition was just stripped. The walk scopes the
+        // `-undefined` policy to exactly those sites — a marked name
+        // referenced from the code refuses under the default policy (the
+        // fix) and rides the dynamic lookup under `-undefined
+        // dynamic_lookup`, like any unresolved reference.
+        for obj in objects {
+            for sect in &obj.sections {
+                for reloc in &sect.relocs {
+                    let RelocTarget::Extern(id) = reloc.target else {
+                        continue;
+                    };
+                    if !self.make_undefined.contains(&id.0)
+                        || self.defs.contains_key(&id.0)
+                        || self.dylib_exports.contains_key(&id.0)
+                        || self.loader_exports.contains(&id.0)
+                    {
+                        continue;
+                    }
+                    match policy {
+                        UndefinedPolicy::DynamicLookup => {
+                            self.dynamic_lookups.insert(id.0);
+                        }
+                        UndefinedPolicy::Error => {
+                            missing.push(format!(
+                                "\"{}\" (referenced from {} through a relocation) — -U marks \
+                                 it undefined; bind it at runtime with -undefined \
+                                 dynamic_lookup (or -flat_namespace), or drop the -U decision",
+                                interner.name(id),
+                                obj.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         for (key, refs) in &self.references {
             if self.defs.contains_key(key)
                 || self.dylib_exports.contains_key(key)
@@ -341,10 +433,22 @@ impl Resolution {
                     let file_name = objects
                         .get(file.0 as usize)
                         .map_or_else(|| format!("input {}", file.0), |o| o.name.clone());
-                    missing.push(format!(
-                        "\"{}\" (referenced from {file_name})",
-                        interner.name(crate::ids::StringId(*key))
-                    ));
+                    if self.make_undefined.contains(key) {
+                        // M39: the reference is unresolved *because* the
+                        // decision stripped its definition — the refusal
+                        // names the knob and the runtime-binding fix.
+                        missing.push(format!(
+                            "\"{}\" (referenced from {file_name}) — -U marks it undefined; \
+                             bind it at runtime with -undefined dynamic_lookup (or \
+                             -flat_namespace), or drop the -U decision",
+                            interner.name(crate::ids::StringId(*key))
+                        ));
+                    } else {
+                        missing.push(format!(
+                            "\"{}\" (referenced from {file_name})",
+                            interner.name(crate::ids::StringId(*key))
+                        ));
+                    }
                 }
             }
         }
@@ -417,13 +521,18 @@ impl Resolution {
             && self.dylib_exports == other.dylib_exports
             && self.loader_exports == other.loader_exports
             && self.dynamic_lookups == other.dynamic_lookups
+            && self.make_undefined == other.make_undefined
     }
 
     /// Copies one recorded winner verbatim (M9 tier-2c): the name sits
     /// outside the propagation seeds, so its recorded decision is still
     /// the decision the full walk would reach. No precedence check — the
-    /// digest table vouches for the defining section.
+    /// digest table vouches for the defining section. A `-U`-marked name
+    /// (M39) is never a winner: the full walk never installed one.
     pub(crate) fn copy_winner(&mut self, key: u32, lite: &DefLite) {
+        if self.make_undefined.contains(&key) {
+            return;
+        }
         self.defs.insert(key, Def::from(lite.clone()));
     }
 
@@ -436,12 +545,16 @@ impl Resolution {
 
     /// Replays one recorded or freshly parsed candidate through the
     /// precedence rules (M9 tier-2c): the same decision `install` reaches,
-    /// fed from the snapshot instead of an object walk.
+    /// fed from the snapshot instead of an object walk. A `-U`-marked
+    /// name (M39) skips the install — the full walk never installed one.
     ///
     /// # Errors
     /// [`LinkError::Symbol`] on a duplicate strong definition — the same
     /// error `install` lands on for the same candidate stream.
     pub(crate) fn replay_candidate(&mut self, key: u32, cand: &DefLite) -> Result<(), LinkError> {
+        if self.make_undefined.contains(&key) {
+            return Ok(());
+        }
         match cand.rank {
             Rank::Common => {
                 self.replay_common(key, cand);
