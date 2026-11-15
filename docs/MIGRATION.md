@@ -92,12 +92,13 @@ tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 
 A linker that silently drops a flag it does not implement is worse than one
 that says so. These are rejected with the roadmap entry in the message:
-`-dylinker`, `-U`, `-sub_library`, `-sub_umbrella`.
+`-dylinker`, `-ObjC`.
 (`-order_file` left this list when its rank-based subset shipped at M11,
 alongside `-map`; the weak/lazy dylib family — `-weak_framework`,
 `-lazy_framework`, `-lazy_library` — left it at M14, `-pagezero_size`
 left it at M15, the image base becoming a validated `LinkConfig` decision,
-and `-U` left it at M39 — the make-undefined mark: `-U _f -undefined
+`-sub_umbrella`/`-sub_library` left it at M20 (the umbrella region), and
+`-U` left it at M39 — the make-undefined mark: `-U _f -undefined
 dynamic_lookup` strips `_f`'s definition as it is linked and binds the
 reference flat at load time.)
 
