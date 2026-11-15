@@ -71,6 +71,7 @@ fn dylib(install_name: &str, exports: &[&str]) -> Dylib {
         exports: exports.iter().map(|e| e.as_bytes().to_vec()).collect(),
         weak: false,
         lazy: false,
+        upward: false,
         reexport: false,
     }
 }
