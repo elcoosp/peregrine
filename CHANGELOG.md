@@ -5,6 +5,36 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M46)
+
+- **M46** — the export-dynamic roots (`-export_dynamic`): ld64's liveness rule — *"Preserves all
+  global symbols in main executables during dead stripping"* (the `ld` man page) — is the decision
+  the dead-strip root set reads: every global definition in the image (an `N_SECT` def or a
+  common) roots the mark phase, so a plugin-style main executable keeps its unreferenced entry
+  points (the `dlsym` surface is a runtime contract the static fixpoint cannot see). The default
+  (`false`) keeps every pre-M46 link byte-identical. The knob is an executable decision — a
+  dylib's and a bundle's strip already roots every definition (the export surface is the
+  contract), and the relocatable output strips nothing (its symbol table is the input's,
+  verbatim) — so all three refuse the knob with the fix (the layout's re-check and `link_reloc`
+  back the driver surface's refusal). The daemon wire v33 carries the decision; the
+  `export_dynamic` bench and the `export_dynamic_link` consumer example ride along.
+
+### Added (M45)
+
+- **M45** — the upward-dylib load (`-upward_library <path>` / `-upward_framework <name>`): ld64's
+  umbrella-relationship mark — the opcode `pgr-format` has decoded since M0
+  (`LC_LOAD_UPWARD_DYLIB`, the weak/upward/lazy family in the load-command reader) but no
+  producer could name — joins the surface as the fourth load-command kind
+  (`pgr_core::resolve::Dylib::upward`). The command rides the two-level ordinal space exactly
+  like a plain load (dyld's own rule — the verifier's walk and pair gate count it), the mark
+  names the family of a plain load only (a lazy, weak or re-export load keeps its command — the
+  obligations outrank the mark), and the driver's flags name one kind per path. The framework
+  form resolves through the `-F` search after the lazy frameworks (the LC order — and with it
+  the two-level ordinals — is plain, re-export, weak, lazy, then upward); an empty list leaves
+  every pre-M45 link byte-identical. The daemon wire v32 carries the kind (one byte per dylib
+  beside weak/re-export/lazy — the M14 lazy-byte convention); the `upward` bench and the
+  `upward_library_link` consumer example ride along.
+
 ### Added (M44)
 
 - **M44** — the dylib-identity default (`-final_output`): ld64's flag — previously unknown on
