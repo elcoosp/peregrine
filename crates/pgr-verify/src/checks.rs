@@ -121,6 +121,11 @@ pub enum Check {
     /// dyld's unwinder walks — header arrays, index, second-level
     /// pages, LSDA rows — against the `__TEXT` the image maps.
     Unwind,
+    /// The thread-local surface contract (M37): the
+    /// `MH_HAS_TLV_DESCRIPTORS` marker against the `S_THREAD_LOCAL_*`
+    /// sections the image carries, the `__thread_vars` descriptor
+    /// stride, and the descriptors' thread-local data.
+    Tlv,
     /// The `B`/`BL` branch-range decode pass (the veneer gate).
     BranchRange,
     /// The classic `LC_DYLD_INFO(_ONLY)` rebase/bind opcode streams.
@@ -132,7 +137,7 @@ pub enum Check {
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 10] = [
+    pub const ALL: [Check; 11] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
@@ -140,6 +145,7 @@ impl Check {
         Check::Fixups,
         Check::ChainStarts,
         Check::Unwind,
+        Check::Tlv,
         Check::BranchRange,
         Check::DyldInfo,
         Check::Signature,
@@ -156,6 +162,7 @@ impl Check {
             Check::Fixups => "fixups",
             Check::ChainStarts => "chain_starts",
             Check::Unwind => "unwind",
+            Check::Tlv => "tlv",
             Check::BranchRange => "branch_range",
             Check::DyldInfo => "dyld_info",
             Check::Signature => "signature",
@@ -172,9 +179,10 @@ impl Check {
             Check::Fixups => 4,
             Check::ChainStarts => 5,
             Check::Unwind => 6,
-            Check::BranchRange => 7,
-            Check::DyldInfo => 8,
-            Check::Signature => 9,
+            Check::Tlv => 7,
+            Check::BranchRange => 8,
+            Check::DyldInfo => 9,
+            Check::Signature => 10,
         }
     }
 }
@@ -437,6 +445,29 @@ impl ImageCheck for UnwindCheck {
     }
 }
 
+/// The M37 thread-local surface contract.
+struct TlvCheck;
+
+impl ImageCheck for TlvCheck {
+    fn check(&self) -> Check {
+        Check::Tlv
+    }
+    fn summary(&self) -> &'static str {
+        "TLV contract: MH_HAS_TLV_DESCRIPTORS parity, __thread_vars descriptor stride, thread-local data"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::Tlv]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        if matches!(
+            ctx.parsed.header.filetype,
+            MH_EXECUTE | MH_DYLIB | MH_BUNDLE
+        ) {
+            crate::tlv::check_tlv(ctx.bytes, ctx.parsed, ctx.report);
+        }
+    }
+}
+
 impl ImageCheck for ChainStartsCheck {
     fn check(&self) -> Check {
         Check::ChainStarts
@@ -525,7 +556,7 @@ impl ImageCheck for SignatureCheck {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 10] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 11] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
@@ -533,6 +564,7 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 10] = [
     &FixupsCheck,
     &ChainStartsCheck,
     &UnwindCheck,
+    &TlvCheck,
     &BranchRangeCheck,
     &DyldInfoCheck,
     &SignatureCheck,
