@@ -229,6 +229,17 @@ harness = false
 name = "unwind_compressed"
 harness = false
 
+# The M34 compact-unwind bench: the link across the carriage's shapes
+# (entry-free corpus, carried table) plus the synthesis seam's own
+# cost across table sizes. (The bench file predates its [[bench]]
+# entry: auto-discovery compiled it under the libtest harness, whose
+# generated main shadowed the criterion one — the bench compiled,
+# "passed" and measured nothing. The explicit entry names the file the
+# docs inventory always carried.)
+[[bench]]
+name = "unwind"
+harness = false
+
 # The M36 no-compact-unwind bench: the link across the suppression
 # decision (the carried default beside the named suppression over the
 # same carried corpus) — a shape-parity gate, the suppression is one
@@ -282,6 +293,14 @@ harness = false
 # command.
 [[bench]]
 name = "dead_strip_dylibs"
+harness = false
+
+# The M43 ObjC-pull bench: the link across the -ObjC decision
+# (reference-driven default, the metadata pull, -all_load) over the
+# same 64-object corpus with a half-ObjC archive — a shape gate, the
+# pull costs one ranlib-index prefix walk plus the members it admits.
+[[bench]]
+name = "objc"
 harness = false
 
 [lints]
