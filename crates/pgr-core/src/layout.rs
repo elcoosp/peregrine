@@ -496,6 +496,42 @@ pub struct LinkConfig {
     /// ride the trie — the layout's re-check backs the driver surface's
     /// earlier refusal).
     pub exported_symbols: bool,
+    /// M41 — the dedup toggle: `-no_deduplicate` turns the D4
+    /// `__cstring` merge off — every input literal rides the output
+    /// verbatim (one whole-section piece per input
+    /// `S_CSTRING_LITERALS` section, every symbol on its own instance —
+    /// the pre-D4 shape). The default (`true`) keeps every pre-M41 link
+    /// byte-identical: identical literals still merge into one
+    /// canonical copy and the duplicates' references remap onto it (the
+    /// M5/D4 contract). The knob is a Pass-3 decision — never a parse
+    /// blindfold: the parse still splits cstring sections into atoms
+    /// (liveness and the POI cache are flag-independent), dead-strip
+    /// still drops dead literals under either decision (the knob
+    /// widens the merge off, never the strip), and there is no
+    /// output-kind conflict — the relocatable output never engaged the
+    /// merge (its sections are the input's, verbatim), so `-r` plans
+    /// the same bytes under both decisions.
+    pub deduplicate: bool,
+    /// M42 — the unused-dylib drop: `-dead_strip_dylibs` removes every
+    /// input dylib no referenced name binds against *as it is linked* —
+    /// the two-level bind names its provider, so a dylib whose exports
+    /// nothing references cannot serve a bind — and the kept list
+    /// compacts the two-level ordinals onto it (symtab `n_desc` rows,
+    /// the chained-fixups import table and the classic opcode binds all
+    /// read the compacted table). The default (`false`) keeps every
+    /// pre-M42 link byte-identical: every input dylib rides its
+    /// `LC_LOAD_DYLIB` command regardless of use, ld64's shape. The
+    /// re-export dylibs always ride (their `LC_REEXPORT_DYLIB` command
+    /// is an identity obligation and their REEXPORT nodes join the
+    /// export trie), and every dylib a dynamic-lookup reference could
+    /// reach rides (the flat bind names no provider — the loader may
+    /// reach any loaded image's exports). The knob is a Pass-2-to-3
+    /// decision — the driver refuses it on the relocatable output (the
+    /// object carries no load commands) and under `-flat_namespace`
+    /// (the flat bind names no provider), and
+    /// [`crate::link::link_reloc`] re-checks so no library caller can
+    /// plan the shape either.
+    pub dead_strip_dylibs: bool,
 }
 
 impl Default for LinkConfig {
@@ -554,6 +590,8 @@ impl Default for LinkConfig {
             compact_unwind: true,
             header_pad_max_install_names: false,
             exported_symbols: true,
+            deduplicate: true,
+            dead_strip_dylibs: false,
         }
     }
 }
@@ -2649,9 +2687,12 @@ pub struct CStringInstance {
 /// Builds the per-bucket piece lists (offsets assigned later by `place`).
 /// With dead-strip active (M5/D12), every live atom becomes one piece and
 /// dead atoms are dropped; without it the M1–M4 shape (one piece per input
-/// section) is preserved byte-for-byte. `S_CSTRING_LITERALS` buckets always
-/// take the D4 path: one piece per unique string (first live instance
-/// canonical), every instance recorded for the remap table.
+/// section) is preserved byte-for-byte. `S_CSTRING_LITERALS` buckets take
+/// the D4 path while `dedup` holds: one piece per unique string (first
+/// live instance canonical), every instance recorded for the remap table.
+/// The M41 `-no_deduplicate` decision falls them through the plain paths
+/// instead — one whole-section piece per input (or atom-granular under
+/// strip/order/fold, the dead literals still dropping) and no remap.
 fn build_bucket_pieces(
     objects: &[InputObject],
     buckets: &BucketTable,
@@ -2660,6 +2701,7 @@ fn build_bucket_pieces(
     live: &crate::deadstrip::LiveSet,
     fold: &crate::icf::FoldPlan,
     order_active: bool,
+    dedup: bool,
 ) -> Result<(Vec<Vec<Piece>>, Vec<(usize, Vec<CStringInstance>)>), LinkError> {
     let mut pieces_of_bucket: Vec<Vec<Piece>> = vec![Vec::new(); buckets.len()];
     let mut cstring_instances: Vec<(usize, Vec<CStringInstance>)> = Vec::new();
@@ -2680,8 +2722,14 @@ fn build_bucket_pieces(
             if bi == usize::MAX {
                 continue;
             }
-            let is_cstring =
-                !in_sect.zerofill && in_sect.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
+            // D4 while the M41 decision holds: cstring sections collect
+            // string instances; the bucket's pieces are the canonical
+            // (first live) copy of each unique string. With the dedup
+            // off (`-no_deduplicate`) the section falls through to the
+            // plain paths below — the verbatim pass-through.
+            let is_cstring = dedup
+                && !in_sect.zerofill
+                && in_sect.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
             if is_cstring {
                 // D4: collect this section's string instances; the bucket's
                 // pieces are the canonical (first live) copy of each unique
@@ -2878,6 +2926,7 @@ fn place(
         live,
         fold,
         cfg.symbol_order.is_some(),
+        cfg.deduplicate,
     )?;
     // ---- M11: the order file's ranks (TDD §8.4) -----------------------------
     // Applied *before* the synthetic pieces (whose buckets keep their
@@ -3214,7 +3263,13 @@ fn place(
     let mut veneer_addr_of: std::collections::HashMap<(u32, usize, u32), u64> =
         std::collections::HashMap::new();
     for (si, s) in sections.iter().enumerate() {
-        let is_cstring = s.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
+        // D4 while the M41 decision holds: cstring pieces feed the
+        // canonical-address table the remap loop reads. With the dedup
+        // off (`-no_deduplicate`) the pieces are ordinary ones — the
+        // atom-identity table below must see them (a dead-stripped or
+        // ordered link moves literals; the containment lookups read the
+        // moved addresses, not the section base).
+        let is_cstring = cfg.deduplicate && s.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
         for (pi, p) in s.pieces.iter().enumerate() {
             let addr = s.vm_addr + p.offset;
             flat.push(FlatPiece {
@@ -4217,7 +4272,13 @@ fn build_symtab(
     let mut out: Vec<OutputSymbol> = Vec::new();
 
     // M6 ICF: a symbol inside a folded atom reports the canonical copy's
-    // output section (its own piece is not placed).
+    // output section (its own piece is not placed). M41/D4: a definition
+    // whose input section merged away *entirely* (every atom a duplicate
+    // of an earlier copy — no piece of its own remains in the output
+    // stream) resolves through its remapped address: the section that
+    // contains the address is the canonical copy's. Without the
+    // fallback the row rides `n_sect 0` — the shape the symtab contract
+    // refuses.
     let osect_of = |file: u32, sect: usize, value: u64| -> usize {
         let key = if fold.is_empty() {
             (file, sect)
@@ -4228,7 +4289,18 @@ fn build_symtab(
                 .and_then(|start| fold.canonical_of(file, sect, start))
                 .map_or((file, sect), |(cf, cs, _)| (cf, cs))
         };
-        sect_of.get(&key).copied().unwrap_or(usize::MAX)
+        if let Some(&i) = sect_of.get(&key) {
+            return i;
+        }
+        objects
+            .get(file as usize)
+            .and_then(|obj| sym_addr(obj, sect, value))
+            .and_then(|addr| {
+                sections
+                    .iter()
+                    .position(|s| !s.zerofill && s.vm_addr <= addr && addr < s.vm_addr + s.size)
+            })
+            .unwrap_or(usize::MAX)
     };
 
     // Locals: file order, symbol order; stabs skipped; non-section locals
