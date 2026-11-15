@@ -50,7 +50,9 @@ pub struct Options {
     pub bundle_loader: Option<String>,
     /// Minimum page size accepted for `-segalign` on arm64 (16 KiB default).
     pub segalign: u64,
-    /// `-headerpad` (advisory at M1: commands never grow after the link).
+    /// `-headerpad <n>` (the M29 header-region floor: the flag the
+    /// surface carried as an advisory no-op since M1 is the decision
+    /// the packing loop reads).
     pub headerpad: u64,
     /// `-L` library search directories, in command-line order.
     pub lib_dirs: Vec<String>,
@@ -682,6 +684,17 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-dead_strip_dylibs` surface conflict (M42): the unused-dylib
+    /// drop cannot apply where it was requested. The verdict names the
+    /// shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    DeadStripDylibsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// `-platform_version`: the SDK is older than the deployment target
     /// (M10 rung 2). The SDK ships the deployment target's interfaces;
     /// building against an older one produces images dyld may refuse.
@@ -725,14 +738,10 @@ pub enum OptsError {
 /// `-no_data_in_code` off this list (the data-in-code carriage reads
 /// the decision), M31 promoted `-no_function_starts` (the
 /// function-starts suppression reads it), M32 promoted `-no_uuid`
-/// (the UUID suppression reads it) and M33 promoted
-/// `-keep_private_externs` (the private-extern decision reads it).
-const NOOP_FLAGS: [&str; 4] = [
-    "-no_adhoc_extensions",
-    "-demangle",
-    "-no_demangle",
-    "-no_deduplicate",
-];
+/// (the UUID suppression reads it), M33 promoted
+/// `-keep_private_externs` (the private-extern decision reads it) and
+/// M41 promoted `-no_deduplicate` (the D4 merge reads it).
+const NOOP_FLAGS: [&str; 3] = ["-no_adhoc_extensions", "-demangle", "-no_demangle"];
 
 /// Flags that arrive at a later milestone (rejected with the roadmap entry).
 /// M14 released the weak/lazy dylib family (`-weak_framework`,
@@ -1585,6 +1594,24 @@ fn apply_flag(
         "-no_exported_symbols" => {
             opts.config.exported_symbols = false;
         }
+        // M41: the dedup toggle. The flag rode the surface as an
+        // accepted no-op since M7; the layout's piece builder reads the
+        // decision — identical literals stop merging, every input
+        // `__cstring` section rides verbatim (the pre-D4 shape). A
+        // boolean knob with no output-kind conflict (the relocatable
+        // output never engaged the merge).
+        "-no_deduplicate" => {
+            opts.config.deduplicate = false;
+        }
+        // M42: the unused-dylib drop. ld64's flag — previously unknown,
+        // now the Pass-2 decision the resolve reads: every input dylib
+        // no referenced name binds against leaves the header, the kept
+        // list compacts the two-level ordinals. The surface conflicts
+        // (the relocatable output, flat namespace) are `finish`'s — it
+        // sees the whole surface.
+        "-dead_strip_dylibs" => {
+            opts.config.dead_strip_dylibs = true;
+        }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
         // kind conflict is `finish`'s (it sees the whole surface).
@@ -2135,6 +2162,38 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                           carries re-export dylibs whose REEXPORT nodes ride that trie"
                     .into(),
                 fix: "drop the re-export dylibs or drop -no_exported_symbols".into(),
+            });
+        }
+    }
+    // M42: the unused-dylib drop's surface conflicts. The relocatable
+    // output carries no load commands (its symbol table is the input's,
+    // verbatim — nothing to strip), and under `-flat_namespace` every
+    // bind rides the flat-lookup ordinal (the bind names no provider —
+    // the drop cannot be proven safe). An explicitly named knob that
+    // cannot apply is a refusal, never a silently dropped one (the
+    // library's re-checks back this so no caller can plan the shape
+    // either).
+    if opts.config.dead_strip_dylibs {
+        if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+            return Err(OptsError::DeadStripDylibsConflict {
+                verdict: "-dead_strip_dylibs drops the load commands of unused dylibs, but \
+                          the relocatable output opens its undefineds by design and \
+                          carries no load commands"
+                    .into(),
+                fix: "drop the flag or link a segmented output (an executable, dylib or \
+                      bundle)"
+                    .into(),
+            });
+        }
+        if opts.config.flat_namespace {
+            return Err(OptsError::DeadStripDylibsConflict {
+                verdict: "-dead_strip_dylibs drops the load commands of unused dylibs, but \
+                          the flat-namespace bind rides the flat-lookup ordinal — it \
+                          names no provider"
+                    .into(),
+                fix: "drop -dead_strip_dylibs (flat binds may reach any loaded image's \
+                      exports) or link two-level (the default)"
+                    .into(),
             });
         }
     }
@@ -3089,13 +3148,13 @@ mod tests {
     #[test]
     fn m7_build_system_noop_flags_are_accepted() {
         // Flags Xcode/clang -fuse-ld/CMake pass that Peregrine honors by
-        // doing exactly what it already does (no demangling, no dedup
-        // toggles): accepted, no effect, value flags consume their value.
+        // doing exactly what it already does (no demangling): accepted,
+        // no effect, value flags consume their value. `-no_deduplicate`
+        // left this list at M41 (the D4 merge reads the decision).
         let o = parse(&args(&[
             "-o",
             "out",
             "-demangle",
-            "-no_deduplicate",
             "a.o",
             "-object_path_lto",
             "/tmp/lto.o",
@@ -3105,5 +3164,10 @@ mod tests {
         assert_eq!(o.inputs, ["a.o", "b.o"]);
         let o2 = parse(&args(&["-o", "out", "-no_demangle", "a.o"])).unwrap();
         assert_eq!(o2.inputs, ["a.o"]);
+        let o3 = parse(&args(&["-o", "out", "-no_deduplicate", "a.o"])).unwrap();
+        assert!(
+            !o3.config.deduplicate,
+            "the promoted toggle reads the decision (M41)"
+        );
     }
 }
