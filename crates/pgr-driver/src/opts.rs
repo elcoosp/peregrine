@@ -670,6 +670,18 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-no_exported_symbols` surface conflict (M40): the export-trie
+    /// suppression cannot apply (or survive) where it was requested. The
+    /// verdict names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ExportedSymbolsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// `-platform_version`: the SDK is older than the deployment target
     /// (M10 rung 2). The SDK ships the deployment target's interfaces;
     /// building against an older one produces images dyld may refuse.
@@ -1561,6 +1573,18 @@ fn apply_flag(
         "-no_compact_unwind" => {
             opts.config.compact_unwind = false;
         }
+        // M40: the export-trie suppression. ld64's flag — the last
+        // always-carried `__LINKEDIT` command the surface could not
+        // name; the header assembly reads the decision — the output's
+        // `LC_DYLD_EXPORTS_TRIE` command drops (no `__LINKEDIT` slot,
+        // no trie bytes). A boolean knob; the knob is an executable
+        // decision (a dylib's trie is its two-level contract, a
+        // bundle's the dlopen surface), so the output-kind conflict is
+        // `finish`'s — it sees the whole surface, the re-export
+        // conflict included (REEXPORT nodes ride the trie).
+        "-no_exported_symbols" => {
+            opts.config.exported_symbols = false;
+        }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
         // kind conflict is `finish`'s (it sees the whole surface).
@@ -2056,6 +2080,62 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 });
             }
             Ot::Execute => {}
+        }
+    }
+    // M40: the export-trie suppression is an executable decision — a
+    // main executable's trie is the dlsym/debugger surface (its dylib
+    // partners bind into their own tries), while a dylib's trie IS the
+    // two-level contract its clients bind through, a bundle's the
+    // dlopen surface, and the relocatable output carries no __LINKEDIT
+    // commands at all. An explicitly named knob that cannot apply is a
+    // refusal, never a silently dropped one (the library's re-checks
+    // back this so no caller can plan the shape either).
+    if !opts.config.exported_symbols {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Dylib => {
+                return Err(OptsError::ExportedSymbolsConflict {
+                    verdict: "-no_exported_symbols drops the export trie, but this \
+                              output is a dylib"
+                        .into(),
+                    fix: "a dylib's trie IS the two-level contract its clients bind \
+                          through: link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Bundle => {
+                return Err(OptsError::ExportedSymbolsConflict {
+                    verdict: "-no_exported_symbols drops the export trie, but this \
+                              output is a bundle"
+                        .into(),
+                    fix: "a bundle's trie is the dlopen/dlsym surface its host \
+                          resolves against: link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Relocatable => {
+                return Err(OptsError::ExportedSymbolsConflict {
+                    verdict: "-no_exported_symbols drops the export trie, but the \
+                              relocatable output carries no __LINKEDIT commands"
+                        .into(),
+                    fix: "drop the flag or link an executable".into(),
+                });
+            }
+            Ot::Execute => {}
+        }
+        // The re-export conflict: the REEXPORT trie nodes ride the
+        // export trie — suppressing the trie silently breaks the
+        // re-export contract (a client walking the image's exports
+        // would miss every re-exported name). The inputs resolve into
+        // `config.dylibs` at scan time, so the parse-time surface is
+        // the input lists.
+        if !opts.reexport_library_inputs.is_empty() || !opts.reexport_frameworks.is_empty() {
+            return Err(OptsError::ExportedSymbolsConflict {
+                verdict: "-no_exported_symbols drops the export trie, but the link \
+                          carries re-export dylibs whose REEXPORT nodes ride that trie"
+                    .into(),
+                fix: "drop the re-export dylibs or drop -no_exported_symbols".into(),
+            });
         }
     }
     match opts.config.filetype {
