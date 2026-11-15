@@ -114,7 +114,7 @@ mod tests {
         // suppression as a tail byte (M36, `-no_compact_unwind`): a
         // resident relink carries the suppression decision the client
         // asked for, never the pre-M36 carry default.
-        assert_eq!(crate::PROTO_VERSION, 25);
+        assert_eq!(crate::PROTO_VERSION, 26);
     }
 
     #[test]
