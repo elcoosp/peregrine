@@ -88,6 +88,7 @@ fn dylib(install_name: &str) -> Dylib {
         exports: vec![b"_fn_a".to_vec()],
         weak: false,
         lazy: false,
+        upward: false,
         reexport: false,
     }
 }
