@@ -163,8 +163,14 @@ use sha2::{Digest, Sha256};
 /// export-trie suppression (M40 — one byte naming whether the image
 /// drops the `LC_DYLD_EXPORTS_TRIE` command; a resident relink carries
 /// the export-surface decision the client asked for, never the pre-M40
-/// always-carried default).
-pub const PROTO_VERSION: u32 = 28;
+/// always-carried default); **v29** appends the dedup toggle (M41 — one
+/// byte naming whether identical literals stop merging; a resident
+/// relink carries the D4 decision the client asked for, never the
+/// pre-M41 merge default); **v30** appends the unused-dylib drop (M42 —
+/// one byte naming whether input dylibs nothing binds against leave the
+/// header; a resident relink carries the drop decision the client asked
+/// for, never the pre-M42 keep-every-dylib default).
+pub const PROTO_VERSION: u32 = 30;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -827,6 +833,16 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // export-surface decision the client asked for, never the pre-M40
     // always-carried default.
     put_u8(out, u8::from(!cfg.exported_symbols));
+    // M41 (v29 wire): the dedup toggle rides the tail after the
+    // export-trie suppression — one byte; a resident relink carries the
+    // D4 decision the client asked for, never the pre-M41 merge
+    // default.
+    put_u8(out, u8::from(!cfg.deduplicate));
+    // M42 (v30 wire): the unused-dylib drop rides the tail after the
+    // dedup toggle — one byte; a resident relink carries the drop
+    // decision the client asked for, never the pre-M42 keep-every-dylib
+    // default.
+    put_u8(out, u8::from(cfg.dead_strip_dylibs));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1093,6 +1109,14 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // validation beyond the bool (the absence is the decision; the
     // output-kind conflicts the core re-checks refuse at link time).
     let no_exported_symbols = r.u8()? != 0;
+    // M41 (v29 wire): the dedup toggle — one byte, no validation
+    // beyond the bool (the merge follows the decision; the pass-through
+    // shape the core plans is contract-free).
+    let no_deduplicate = r.u8()? != 0;
+    // M42 (v30 wire): the unused-dylib drop — one byte; the resolve
+    // compacts the kept list at link time (the re-export exemption and
+    // the dynamic-lookup reach the core re-checks refuse).
+    let dead_strip_dylibs = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1159,6 +1183,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         header_pad_max_install_names: header_pad_max,
         make_undefined,
         exported_symbols: !no_exported_symbols,
+        deduplicate: !no_deduplicate,
+        dead_strip_dylibs,
     })
 }
 
@@ -1447,6 +1473,12 @@ mod tests {
             // The v28 tail: the export-trie suppression rides the
             // default here — the knob the round-trip test flips.
             exported_symbols: true,
+            // The v29 tail: the dedup toggle rides the default here —
+            // the knob the round-trip test flips.
+            deduplicate: true,
+            // The v30 tail: the unused-dylib drop rides the default
+            // here — the knob the round-trip test flips.
+            dead_strip_dylibs: false,
             symbol_order: None,
         }
     }
@@ -1812,11 +1844,6 @@ mod tests {
             if body[i..i + 8] == needle {
                 hits.push(i);
             }
-        }
-        eprintln!("BODY around 650..700: {:02x?}", &body[650..700]);
-        eprintln!("BODY len {}", body.len());
-        for h in &hits {
-            eprintln!("HIT at {} bytes {:02x?}", h, &body[*h..*h + 12]);
         }
         assert_eq!(hits.len(), 1, "the reserve rides exactly once");
         let mut bad = body;
@@ -2512,6 +2539,62 @@ mod tests {
         assert!(
             !back.config.exported_symbols,
             "the suppression crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_no_deduplicate_decision_round_trips() {
+        // v29: a non-default dedup toggle must survive the round trip
+        // verbatim (a resident relink carries the D4 decision the
+        // client asked for, never the pre-M41 merge default).
+        let mut cfg = rich_config();
+        assert!(cfg.deduplicate, "rich_config carries the default");
+        cfg.deduplicate = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(!back.config.deduplicate, "the toggle crosses byte-for-byte");
+    }
+
+    #[test]
+    fn the_dead_strip_dylibs_decision_round_trips() {
+        // v30: a non-default unused-dylib drop must survive the round
+        // trip verbatim (a resident relink carries the drop decision
+        // the client asked for, never the pre-M42 keep-every-dylib
+        // default).
+        let mut cfg = rich_config();
+        assert!(!cfg.dead_strip_dylibs, "rich_config carries the default");
+        cfg.dead_strip_dylibs = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.dead_strip_dylibs,
+            "the drop decision crosses byte-for-byte"
         );
     }
 
