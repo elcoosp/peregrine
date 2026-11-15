@@ -14,8 +14,10 @@ use crate::ids::{FileId, StringId};
 use pgr_format::consts::{
     ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
     ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
-    ARM64_RELOC_POINTER_TO_GOT, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED, N_EXT, N_STAB,
-    N_TYPE, N_UNDF, N_WEAK_DEF, N_WEAK_REF, S_ZEROFILL, SECTION_TYPE_MASK,
+    ARM64_RELOC_POINTER_TO_GOT, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_TLVP_LOAD_PAGE21,
+    ARM64_RELOC_TLVP_LOAD_PAGEOFF12, ARM64_RELOC_UNSIGNED, N_EXT, N_STAB, N_TYPE, N_UNDF,
+    N_WEAK_DEF, N_WEAK_REF, S_THREAD_LOCAL_VARIABLES, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL,
+    SECTION_TYPE_MASK,
 };
 use rayon::prelude::*;
 
@@ -80,6 +82,14 @@ pub enum RelocKind {
     /// A pointer whose value is the symbol's GOT slot address (M2: the
     /// slot becomes a chained rebase targeting the GOT slot's vaddr).
     PointerToGot,
+    /// ADRP against the symbol's TLV descriptor (M37: the descriptor is
+    /// a `__thread_vars` definition in this image — the load patches
+    /// directly against its vaddr, no GOT slot, no chain slot).
+    TlvpLoadPage21,
+    /// LDR against the symbol's TLV descriptor (M37: imm12 scaled by the
+    /// access size, the same LDR (immediate, unsigned offset) encoding
+    /// the GOT-load pageoff12 patches).
+    TlvpLoadPageOff12,
     /// Paired subtraction: this relocation's `target` is the *subtrahend*;
     /// the preceding `SUBTRACTOR` named the minuend.
     Subtractor {
@@ -978,6 +988,26 @@ impl InputObject {
                         });
                         i += 1;
                     }
+                    ARM64_RELOC_TLVP_LOAD_PAGE21 | ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
+                        // Standalone TLV descriptor load (M37): clang emits
+                        // `adrp x8, _x@TLVPPAGE` / `ldr x8, [x8, _x@TLVPLOFF]`
+                        // against the descriptor symbol — no ADDEND pair, the
+                        // addend is zero.
+                        let target = self.reloc_target(r, &fail)?;
+                        let kind = if r.rtype() == ARM64_RELOC_TLVP_LOAD_PAGE21 {
+                            RelocKind::TlvpLoadPage21
+                        } else {
+                            RelocKind::TlvpLoadPageOff12
+                        };
+                        decoded.push(DecodedReloc {
+                            offset: r.r_address,
+                            kind,
+                            target,
+                            pcrel: r.pcrel(),
+                            length_log2: r.length_log2(),
+                        });
+                        i += 1;
+                    }
                     other => {
                         return Err(unsupported(format!(
                             "relocation type {other} is not an arm64 construct Peregrine \
@@ -1032,10 +1062,23 @@ fn convert_section(
     file_bytes: &[u8],
     fail: &dyn Fn(String) -> LinkError,
 ) -> Result<InputSection, LinkError> {
-    let zerofill = s.flags & SECTION_TYPE_MASK == S_ZEROFILL;
+    let s_type = s.flags & SECTION_TYPE_MASK;
+    let zerofill = s_type == S_ZEROFILL || s_type == S_THREAD_LOCAL_ZEROFILL;
     let size = s.size;
     let name = name16(&s.sectname);
     let segment = name16(&s.segname);
+    // M37: the TLV descriptor section's contract is the 16-byte
+    // descriptor stride dyld's unwinder-adjacent allocator walks — a
+    // section the object cannot vouch for refuses at parse, the fix
+    // named (regenerate the object; clang emits one 16-byte
+    // thunk/initializer pair per thread-local variable).
+    if s_type == S_THREAD_LOCAL_VARIABLES && size % 16 != 0 {
+        return Err(fail(format!(
+            "TLV descriptor section {segment},{name}: size {size} is not a multiple of the \
+             16-byte descriptor stride — regenerate the object (clang emits one 16-byte \
+             thunk/initializer pair per thread-local variable)"
+        )));
+    }
 
     let mut data = 0u64..0u64;
     if !zerofill && size > 0 {
