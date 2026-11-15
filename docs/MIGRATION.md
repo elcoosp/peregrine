@@ -95,8 +95,11 @@ that says so. These are rejected with the roadmap entry in the message:
 `-dylinker`, `-U`, `-sub_library`, `-sub_umbrella`.
 (`-order_file` left this list when its rank-based subset shipped at M11,
 alongside `-map`; the weak/lazy dylib family — `-weak_framework`,
-`-lazy_framework`, `-lazy_library` — left it at M14, and `-pagezero_size`
-left it at M15, the image base becoming a validated `LinkConfig` decision.)
+`-lazy_framework`, `-lazy_library` — left it at M14, `-pagezero_size`
+left it at M15, the image base becoming a validated `LinkConfig` decision,
+and `-U` left it at M39 — the make-undefined mark: `-U _f -undefined
+dynamic_lookup` strips `_f`'s definition as it is linked and binds the
+reference flat at load time.)
 
 ## Peregrine-specific: the Stage A link cache
 
