@@ -33,9 +33,9 @@ use pgr_core::resolve::Dylib;
 use pgr_emit::write_image;
 use std::path::Path;
 
-/// The load-command kind a framework flag names (M14): plain load,
-/// weak load, or lazy load — the `-framework` search is shared, the
-/// kind is per flag list.
+/// The load-command kind a framework flag names (M14; M45 adds the
+/// upward kind): plain load, weak load, lazy load or upward load — the
+/// `-framework` search is shared, the kind is per flag list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DylibKind {
     /// `-framework` (plain `LC_LOAD_DYLIB`).
@@ -47,6 +47,9 @@ enum DylibKind {
     Weak,
     /// `-lazy_framework` (`LC_LAZY_LOAD_DYLIB`).
     Lazy,
+    /// `-upward_framework` (`LC_LOAD_UPWARD_DYLIB`, the M45
+    /// umbrella-relationship mark).
+    Upward,
 }
 
 /// The driver outcome: bytes written, plus the plan for diagnostics.
@@ -323,6 +326,7 @@ pub fn scan_dylib(path: &str, bytes: &[u8]) -> Result<Dylib, DriverError> {
         weak: false,
         reexport: false,
         lazy: false,
+        upward: false,
     })
 }
 
@@ -390,6 +394,7 @@ pub fn tbd_to_dylib_cached(
         weak,
         reexport: false,
         lazy: false,
+        upward: false,
     };
     if let Some(cache) = cache {
         let key = pgr_core::cache::PoiCache::content_key(bytes, false);
@@ -855,7 +860,9 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     // weak, then lazy). M23: the re-export frameworks resolve through
     // the same search after the plain frameworks and before the weak
     // ones (the order is plain, re-export, weak, then lazy — an empty
-    // list leaves every pre-M23 link byte-identical).
+    // list leaves every pre-M23 link byte-identical). M45: the upward
+    // frameworks resolve after the lazy ones (the order is plain,
+    // re-export, weak, lazy, then upward — the umbrella mark rides last).
     let framework_dirs = opts::effective_framework_dirs(&opts.framework_dirs, &opts.syslibroots);
     for (name, kind) in opts
         .frameworks
@@ -868,6 +875,11 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         )
         .chain(opts.weak_frameworks.iter().map(|n| (n, DylibKind::Weak)))
         .chain(opts.lazy_frameworks.iter().map(|n| (n, DylibKind::Lazy)))
+        .chain(
+            opts.upward_frameworks
+                .iter()
+                .map(|n| (n, DylibKind::Upward)),
+        )
     {
         match resolve_framework(name, &framework_dirs)? {
             Some((path, bytes)) => {
@@ -889,6 +901,7 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
                 };
                 dylib.lazy = kind == DylibKind::Lazy;
                 dylib.reexport = kind == DylibKind::Reexport;
+                dylib.upward = kind == DylibKind::Upward;
                 dylibs.push(dylib);
             }
             None => {
@@ -1019,6 +1032,7 @@ fn map_input(
         let mut dylib = tbd_to_dylib_cached(path, &bytes, weak, cache)?;
         dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
         dylib.lazy = opts_index.is_some_and(|i| opts.lazy_library_inputs.contains(&i));
+        dylib.upward = opts_index.is_some_and(|i| opts.upward_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
     }
@@ -1030,6 +1044,7 @@ fn map_input(
         let mut dylib = scan_dylib(path, &bytes)?;
         dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
         dylib.lazy = opts_index.is_some_and(|i| opts.lazy_library_inputs.contains(&i));
+        dylib.upward = opts_index.is_some_and(|i| opts.upward_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
     }
@@ -1701,8 +1716,13 @@ pub fn usage() -> String {
     s.push_str("                               order (refused with -r and -resident)\n");
     s.push_str("  -weak_library <path>         weak-load a dylib\n");
     s.push_str("  -lazy_library <path>         lazy-load a dylib (LC_LAZY_LOAD_DYLIB)\n");
+    s.push_str("  -upward_library <path>       load a dylib as the umbrella relationship\n");
+    s.push_str("                               (LC_LOAD_UPWARD_DYLIB, M45): the\n");
+    s.push_str("                               sub-umbrella its umbrella loads upward\n");
     s.push_str("  -weak_framework <name>       weak-load a framework dylib\n");
     s.push_str("  -lazy_framework <name>       lazy-load a framework dylib\n");
+    s.push_str("  -upward_framework <name>     load a framework dylib as the umbrella\n");
+    s.push_str("                               relationship (LC_LOAD_UPWARD_DYLIB, M45)\n");
     s.push_str("  -source_version <A.B.C.D.E>  LC_SOURCE_VERSION\n");
     s.push_str("  -fixup_chains | -no_fixup_chains    chained fixups (default on)\n");
     s.push_str("  -fixup_chains_format <fmt>   chain word family: offset64 (default)\n");
@@ -1732,6 +1752,10 @@ pub fn usage() -> String {
     s.push_str("                               default 2 GiB, 0 = unbounded)\n");
     s.push_str("  -no_cache                    disable the link cache\n");
     s.push_str("  -icf=safe|-icf=all|-no_icf   identical code folding (default none)\n");
+    s.push_str("  -export_dynamic              preserve every global symbol during dead\n");
+    s.push_str("                               stripping (M46): each definition roots the\n");
+    s.push_str("                               mark phase — the dlsym surface (refused\n");
+    s.push_str("                               with -dylib, -bundle and -r)\n");
     s.push_str("  -incremental                 M9 in-place relink: patch only the\n");
     s.push_str("                               changed 16 KiB tiles into a clone of\n");
     s.push_str("                               the previous output and re-sign the\n");
