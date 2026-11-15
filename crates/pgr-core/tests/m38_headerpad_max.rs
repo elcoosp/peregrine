@@ -26,6 +26,33 @@ use pgr_core::link::{LinkInput, link};
 use pgr_core::resolve::Dylib;
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
+/// `_main` (RET) plus a local `_fn_a` definition — the corpus the
+/// dylib-less gates link (nothing unresolved, no install names).
+fn self_contained_corpus() -> Vec<LinkInput> {
+    let mut b = ObjectBuilder::new("main.o");
+    let text = b.add_section(ObjectSection::text(
+        "__text",
+        vec![0xC0, 0x03, 0x5F, 0xD6, 0xC0, 0x03, 0x5F, 0xD6],
+        Vec::new(),
+    ));
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: text,
+        value: 0,
+        weak: false,
+    });
+    b.add_symbol(ObjectSymbol::Defined {
+        name: "_fn_a".into(),
+        section_index: text,
+        value: 4,
+        weak: false,
+    });
+    vec![LinkInput {
+        name: "main.o".to_string(),
+        bytes: b.build().expect("the fixture object builds"),
+    }]
+}
+
 /// `_main` (RET) with one external reference (`_fn_a`) so the dylibs
 /// resolve; the corpus is the same for every gate.
 fn main_corpus() -> Vec<LinkInput> {
@@ -98,7 +125,11 @@ fn the_floor_covers_the_longest_install_name() {
     let short = "@rpath/lib_a.dylib";
     let names = [long, short];
     let aligned = |n: &str| (n.len() as u64 + 1 + 7) & !7;
-    let growth = (aligned(long) - aligned(short)) * 2;
+    // Per-command room (the `install_names_growth` semantics): every
+    // command gets the room to hold the longest name — the long name is
+    // already the longest (its room is 0), the short one grows by the
+    // aligned difference.
+    let growth = (aligned(long) - aligned(short)) + (aligned(long) - aligned(long));
     let natural = region_size(&plan(&bytes, |c| {
         c.dylibs = dylibs(&names);
     }));
@@ -165,13 +196,17 @@ fn the_effective_floor_is_the_max_of_the_two_knobs() {
 
 #[test]
 fn the_relocatable_output_refuses_the_knob() {
+    // The `-r` pipeline is `link_reloc` (the driver's `-r` path) — the
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either.
     let bytes = main_corpus();
     let cfg = LinkConfig {
         filetype: OutputType::Relocatable,
         header_pad_max_install_names: true,
         ..LinkConfig::default()
     };
-    let err = link(&bytes, &[], &cfg).expect_err("the relocatable output refuses the knob");
+    let err = pgr_core::link::link_reloc(&bytes, &[], &cfg, pgr_core::Parallelism::Serial)
+        .expect_err("the relocatable output refuses the knob");
     let msg = err.to_string();
     assert!(
         msg.contains("headerpad"),
@@ -184,7 +219,7 @@ fn the_relocatable_output_refuses_the_knob() {
 #[test]
 fn a_corpus_without_dylibs_plans_the_natural_region() {
     // No install names: nothing to grow, the pre-M38 bytes verbatim.
-    let bytes = main_corpus();
+    let bytes = self_contained_corpus();
     let natural = region_size(&plan(&bytes, |c| {
         c.header_pad_max_install_names = true;
     }));
