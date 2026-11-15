@@ -77,6 +77,19 @@ pub struct Dylib {
     /// Mutually exclusive with `reexport` by flag shape; `weak` composes
     /// (a weak lazy load binds weakly, the command kind stays lazy).
     pub lazy: bool,
+    /// M45 `-upward_library`/`-upward_framework`: the dylib loads as
+    /// `LC_LOAD_UPWARD_DYLIB` — ld64's umbrella-relationship mark for a
+    /// sub-umbrella loaded by its umbrella (the load rides *upward*
+    /// within the framework region dyld maps). Under chained fixups the
+    /// command participates in the two-level ordinal space exactly like
+    /// a plain load (the verifier's walk counts it — the format reader
+    /// has decoded the opcode since M0; the producer surface names it
+    /// from M45). The `reexport` obligation outranks the mark (a
+    /// re-export keeps its `LC_REEXPORT_DYLIB` command), `weak` composes
+    /// (weakness rides the binds — a weak upward load binds weakly, the
+    /// command kind stays upward), and `lazy` outranks it (one load
+    /// command per dylib; the driver marks one kind per path).
+    pub upward: bool,
 }
 
 /// What to do with references no input and no dylib resolves.
