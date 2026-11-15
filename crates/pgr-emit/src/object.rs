@@ -41,10 +41,11 @@ use pgr_core::{DecodedReloc, LinkConfig, RelocKind, RelocLink, RelocTarget};
 use pgr_format::consts::{
     ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
     ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
-    ARM64_RELOC_POINTER_TO_GOT, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED,
-    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_BUILD_VERSION, LC_DYSYMTAB, LC_SEGMENT_64, LC_SYMTAB,
-    MH_MAGIC_64, MH_OBJECT, N_ALT_ENTRY, N_EXT, N_SECT, N_WEAK_DEF, N_WEAK_REF, S_ZEROFILL,
-    SECTION_TYPE_MASK, VM_PROT_READ, VM_PROT_WRITE,
+    ARM64_RELOC_POINTER_TO_GOT, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_TLVP_LOAD_PAGE21,
+    ARM64_RELOC_TLVP_LOAD_PAGEOFF12, ARM64_RELOC_UNSIGNED, CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64,
+    LC_BUILD_VERSION, LC_DYSYMTAB, LC_SEGMENT_64, LC_SYMTAB, MH_MAGIC_64, MH_OBJECT, N_ALT_ENTRY,
+    N_EXT, N_SECT, N_WEAK_DEF, N_WEAK_REF, S_ZEROFILL, SECTION_TYPE_MASK, VM_PROT_READ,
+    VM_PROT_WRITE,
 };
 use pgr_format::reloc::RelocationInfo;
 use std::collections::{BTreeMap, HashMap};
@@ -206,7 +207,12 @@ fn layout_sections(link: &RelocLink) -> (Vec<OutputSection>, Placement) {
     let mut index: HashMap<(&str, &str), usize> = HashMap::new();
     for obj in &link.objects {
         for (si, sect) in obj.sections.iter().enumerate() {
-            let zerofill = sect.flags & SECTION_TYPE_MASK == S_ZEROFILL;
+            // M37: the thread-local zero-fill occupies VM like the plain
+            // S_ZEROFILL (it carries no file bytes either way).
+            let zerofill = matches!(
+                sect.flags & SECTION_TYPE_MASK,
+                S_ZEROFILL | pgr_format::consts::S_THREAD_LOCAL_ZEROFILL
+            );
             let key = (sect.segment.as_str(), sect.name.as_str());
             if let Some(&out) = index.get(&key) {
                 let s = &mut sections[out];
@@ -588,6 +594,25 @@ fn encode_one(
                 r.length_log2,
                 idx_extern(&r.target),
                 ARM64_RELOC_POINTER_TO_GOT,
+            ));
+        }
+        RelocKind::TlvpLoadPage21 | RelocKind::TlvpLoadPageOff12 => {
+            // M37: the standalone descriptor-load pair re-encodes as it
+            // decoded — no ADDEND leader, the target is the descriptor
+            // symbol the next link resolves again.
+            let idx = extern_index(&r.target)?;
+            let rtype = if r.kind == RelocKind::TlvpLoadPage21 {
+                ARM64_RELOC_TLVP_LOAD_PAGE21
+            } else {
+                ARM64_RELOC_TLVP_LOAD_PAGEOFF12
+            };
+            out.push(entry(
+                addr,
+                idx,
+                r.pcrel,
+                r.length_log2,
+                idx_extern(&r.target),
+                rtype,
             ));
         }
         RelocKind::Subtractor { minuend } => {
