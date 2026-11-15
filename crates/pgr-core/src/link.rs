@@ -531,6 +531,20 @@ pub fn link_reloc(
                 .into(),
         });
     }
+    // M46: the export-dynamic roots are an executable decision — the
+    // relocatable output strips nothing (its symbol table is the
+    // input's, verbatim), so a named knob has nothing to widen. The
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either.
+    if cfg.export_dynamic {
+        return Err(LinkError::Layout {
+            message: "-export_dynamic preserves global symbols during dead stripping, but \
+                      the relocatable output strips nothing — the object's symbol table \
+                      is the input's, verbatim: drop -export_dynamic or link an \
+                      executable"
+                .into(),
+        });
+    }
     let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None)?;
     let (objects, interner, _export_ids, _loader_ids) =
         pull_and_intern(objects, archives, cfg, parallel, None, false)?;
