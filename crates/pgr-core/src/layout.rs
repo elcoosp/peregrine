@@ -142,6 +142,20 @@ pub struct LinkConfig {
     /// seed the archive pull loop (a member defining one of these is
     /// pulled even when nothing references it).
     pub load_symbols: Vec<Vec<u8>>,
+    /// M39 — the make-undefined decisions: the `-U <name>` symbols
+    /// treated as undefined *as they are linked* (see
+    /// [`crate::make_undefined`]). The default (the empty table) keeps
+    /// every pre-M39 link byte-identical. A marked name never installs
+    /// in Pass 2 — its symtab row, export-trie node and `__common` slot
+    /// drop, the defining atom loses its liveness root — and its
+    /// references follow [`Self::undefined_policy`] like any unresolved
+    /// name. The table validates its names' grammar at construction and
+    /// the link re-checks that every mark lands on a definition (the
+    /// vacuous decision refuses with the fix); the relocatable output
+    /// refuses the knob (its input symbol table rides verbatim — the
+    /// driver refuses at parse time, [`crate::link::link_reloc`]
+    /// re-checks so no library caller can plan the shape either).
+    pub make_undefined: crate::make_undefined::MakeUndefined,
     /// M6 `-icf`: identical-code-folding level (default `None`, ld64's
     /// documented default; see [`crate::icf`]).
     pub icf: crate::icf::IcfMode,
@@ -491,6 +505,7 @@ impl Default for LinkConfig {
             dead_strippable: false,
             dead_strip: false,
             load_symbols: Vec::new(),
+            make_undefined: crate::make_undefined::MakeUndefined::new(),
             icf: crate::icf::IcfMode::default(),
             layout_slack: None,
             slack_anchor: Vec::new(),
