@@ -173,8 +173,15 @@ use sha2::{Digest, Sha256};
 /// the `ObjC` pull (M43 — one byte naming whether archive members
 /// implementing an Objective-C class or category ride the archive pull;
 /// a resident relink carries the pull decision the client asked for,
-/// never the pre-M43 reference-driven default).
-pub const PROTO_VERSION: u32 = 31;
+/// never the pre-M43 reference-driven default); **v32** appends the
+/// upward-load kind (M45 — one byte per dylib naming whether it loads
+/// as `LC_LOAD_UPWARD_DYLIB`; the wire never silently flattens the
+/// umbrella mark into a plain load, the M14 lazy-byte convention);
+/// **v33** appends the export-dynamic roots (M46 — one byte naming
+/// whether every global definition roots the dead-strip mark phase; a
+/// resident relink carries the `dlsym` decision the client asked for,
+/// never the pre-M46 entry-root default).
+pub const PROTO_VERSION: u32 = 33;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -654,6 +661,10 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         // wire never silently flattens an `LC_LAZY_LOAD_DYLIB` request
         // into a plain load.
         put_u8(out, u8::from(d.lazy));
+        // M45 (v32 wire): the upward-load kind rides beside lazy — the
+        // wire never silently flattens an `LC_LOAD_UPWARD_DYLIB` request
+        // into a plain load.
+        put_u8(out, u8::from(d.upward));
     }
     // M10 rung 4 slice 2 (v6 wire): the chain word family rides the tail
     // of the config body (the append-in-place upgrade convention).
@@ -851,6 +862,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // byte; a resident relink carries the pull decision the client
     // asked for, never the pre-M43 reference-driven default.
     put_u8(out, u8::from(cfg.objc));
+    // M46 (v33 wire): the export-dynamic roots ride the tail after the
+    // pull — one byte; a resident relink carries the root-widening
+    // decision the client asked for, never the pre-M46 entry-root
+    // default.
+    put_u8(out, u8::from(cfg.export_dynamic));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -942,6 +958,9 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
                 weak: r.u8()? != 0,
                 reexport: r.u8()? != 0,
                 lazy: r.u8()? != 0,
+                // M45 (v32 wire): the upward-load kind (the mirror of the
+                // encode's fourth kind byte).
+                upward: r.u8()? != 0,
             })
         })
         .collect::<Result<Vec<Dylib>, DecodeError>>()?;
@@ -1129,6 +1148,10 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // the bool (the pull reads the decision in the S7 fixpoint; the
     // metadata members ride in member file order either way).
     let objc = r.u8()? != 0;
+    // M46 (v33 wire): the export-dynamic roots — one byte, no validation
+    // beyond the bool (the roots widen the mark phase at link time; the
+    // output-kind conflicts the core re-checks refuse at link time).
+    let export_dynamic = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1198,6 +1221,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         deduplicate: !no_deduplicate,
         dead_strip_dylibs,
         objc,
+        export_dynamic,
     })
 }
 
@@ -1234,6 +1258,7 @@ mod tests {
                 weak: true,
                 reexport: true,
                 lazy: true,
+                upward: true,
             }],
             flat_namespace: true,
             undefined_policy: pgr_core::resolve::UndefinedPolicy::DynamicLookup,
@@ -1495,6 +1520,9 @@ mod tests {
             // The v31 tail: the ObjC pull rides the default here — the
             // decision the round-trip test flips.
             objc: false,
+            // The v33 tail: the export-dynamic roots ride the default
+            // here — the decision the round-trip test flips.
+            export_dynamic: false,
             symbol_order: None,
         }
     }
@@ -2639,6 +2667,72 @@ mod tests {
         )
         .expect("the frame decodes");
         assert!(back.config.objc, "the pull decision crosses byte-for-byte");
+    }
+
+    #[test]
+    fn the_upward_load_kind_round_trips() {
+        // v32: the upward-load kind rides beside lazy/weak/re-export (the
+        // M14 lazy-byte convention) — the wire never silently flattens an
+        // `LC_LOAD_UPWARD_DYLIB` request into a plain load, so a resident
+        // relink carries the umbrella mark the client named.
+        let mut cfg = rich_config();
+        // rich_config carries every kind flag set; flip it to the
+        // upward-only shape the round trip must protect.
+        assert!(cfg.dylibs[0].upward, "rich_config carries the kind set");
+        cfg.dylibs[0].weak = false;
+        cfg.dylibs[0].reexport = false;
+        cfg.dylibs[0].lazy = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        let dylib = &back.config.dylibs[0];
+        assert!(dylib.upward, "the upward kind crosses byte-for-byte");
+        assert!(
+            !dylib.lazy && !dylib.reexport && !dylib.weak,
+            "the other kinds stay clear (the mark is the only one set)"
+        );
+    }
+
+    #[test]
+    fn the_export_dynamic_roots_round_trip() {
+        // v33: a non-default export-dynamic decision must survive the
+        // round trip verbatim (a resident relink carries the dlsym
+        // decision the client asked for, never the pre-M46 entry-root
+        // default).
+        let mut cfg = rich_config();
+        assert!(!cfg.export_dynamic, "rich_config carries the default");
+        cfg.export_dynamic = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.export_dynamic,
+            "the root-widening decision crosses byte-for-byte"
+        );
     }
 
     #[test]
