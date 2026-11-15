@@ -51,6 +51,8 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | `-reexport_library <path>` | same (`LC_REEXPORT_DYLIB` + trie REEXPORT nodes) |
 | `-weak_framework <name>` / `-lazy_framework <name>` | same (`LC_LOAD_WEAK_DYLIB` with weak binds / `LC_LAZY_LOAD_DYLIB`; M14) |
 | `-lazy_library <path>` | same (`LC_LAZY_LOAD_DYLIB`; the command rides the two-level ordinal space like a plain load — M14) |
+| `-upward_library <path>` / `-upward_framework <name>` | same (`LC_LOAD_UPWARD_DYLIB` — the umbrella-relationship load; the command rides the two-level ordinal space like a plain load — M45) |
+| `-export_dynamic` | same (every global definition roots the dead-strip mark phase in a main executable — the `dlsym` surface; M46) |
 | `-exported_symbols_list` / `-unexported_symbols_list` | same (`*` globs supported — each star matches any, possibly empty, byte run; M14) |
 | `-mark_dead_strippable_dylib` | same |
 | `-dead_strip` / `-no_dead_strip` | same (mark-sweep over symbol-boundary atoms) |
@@ -88,9 +90,12 @@ function-starts suppression), `-no_uuid` (M32, the UUID suppression),
 and every input `__cstring` section rides verbatim; code dedup stays an
 opt-in via `-icf`), `-dead_strip_dylibs` (M42, the unused-dylib drop),
 `-ObjC` (M43, the ObjC archive pull — members implementing an
-Objective-C class or category ride the pull without a reference) and
+Objective-C class or category ride the pull without a reference),
 `-final_output` (M44, the dylib-identity default — the install name a
-dylib link derives when `-install_name` is absent).
+dylib link derives when `-install_name` is absent) and
+`-upward_library`/`-upward_framework` (M45, the umbrella-relationship load)
+with `-export_dynamic` (M46, the dead-strip root widening — every global
+definition roots the mark phase in a main executable).
 
 The flags that look like no-ops but actually shape the link (the default
 behavior already matches what they request on arm64) are mapped in the
