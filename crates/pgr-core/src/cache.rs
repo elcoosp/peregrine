@@ -52,7 +52,10 @@ pub const CACHE_FORMAT_VERSION: u32 = 5;
 
 /// Parser revision: bumped when Pass 1's parse semantics change in a way
 /// that would make a stored POI stale even though the framing is unchanged.
-pub const PARSER_REVISION: u32 = 1;
+/// **v2** (M37) reclassifies `S_THREAD_LOCAL_ZEROFILL` as a zero-fill (the
+/// pre-v2 parse carried it byte-backed) and validates the `__thread_vars`
+/// descriptor stride at parse — v1 entries decode to `None` and re-parse.
+pub const PARSER_REVISION: u32 = 2;
 
 /// The directory-level format marker file name. Its payload is
 /// `"PGR-CACHE-FORMAT\0" || format_version(u32) || parser_revision(u32)`;
