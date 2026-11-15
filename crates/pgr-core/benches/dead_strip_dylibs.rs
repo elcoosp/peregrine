@@ -76,6 +76,7 @@ fn dylibs() -> Vec<Dylib> {
             .collect(),
         weak: false,
         lazy: false,
+        upward: false,
         reexport: false,
     };
     let unused = Dylib {
@@ -88,6 +89,7 @@ fn dylibs() -> Vec<Dylib> {
             .collect(),
         weak: false,
         lazy: false,
+        upward: false,
         reexport: false,
     };
     vec![used, unused]
