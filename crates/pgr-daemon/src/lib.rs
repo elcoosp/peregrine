@@ -113,8 +113,12 @@ mod tests {
         // pre-M33 conversion default — and the config's compact-unwind
         // suppression as a tail byte (M36, `-no_compact_unwind`): a
         // resident relink carries the suppression decision the client
-        // asked for, never the pre-M36 carry default.
-        assert_eq!(crate::PROTO_VERSION, 27);
+        // asked for, never the pre-M36 carry default — and the
+        // config's export-trie suppression as a tail byte (M40,
+        // `-no_exported_symbols`): a resident relink carries the
+        // export-surface decision the client asked for, never the
+        // pre-M40 always-carried default.
+        assert_eq!(crate::PROTO_VERSION, 28);
     }
 
     #[test]
