@@ -80,6 +80,27 @@ impl HeaderPad {
     }
 }
 
+/// The install-name growth `-headerpad_max_install_names` plans with
+/// (M38): every load-dylib command's name field grown to the longest
+/// install name in the image (+1 NUL, 8-byte aligned) — the sum of the
+/// room each command needs, the space `install_name_tool` needs to
+/// rewrite any install name in place without rewriting the offsets
+/// behind it. A single-name surface plans zero growth (the name already
+/// is the longest — the pre-M38 bytes); the caller adds the result to
+/// the natural header region (the packing loop takes the max of the
+/// two floors — both are minimums).
+#[must_use]
+pub fn install_names_growth(names: &[&str]) -> u64 {
+    let Some(longest) = names.iter().map(|n| n.len()).max() else {
+        return 0;
+    };
+    let aligned = |len: usize| ((len + 1 + 7) & !7) as u64;
+    names
+        .iter()
+        .map(|n| aligned(longest) - aligned(n.len()))
+        .sum()
+}
+
 /// A `-headerpad` refusal: the message names the fix (the grammar the
 /// flag accepts), never just the verdict.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
