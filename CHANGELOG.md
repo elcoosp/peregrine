@@ -5,6 +5,22 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M40)
+
+- **M40** — the export-trie suppression (`-no_exported_symbols`): the last always-carried
+  `__LINKEDIT` command the surface could not name (`LC_DYLD_EXPORTS_TRIE`, hard-wired since
+  M2) drops on the named decision — no `__LINKEDIT` slot, no trie bytes, `sizeofcmds` 16
+  bytes narrower — and the image verifies strict (absence is the decision, never a defect;
+  the M31/M32/M36 always-carried-family shape). The default (`true`) keeps every pre-M40
+  link byte-identical. The knob is an executable decision: a main executable's trie is the
+  `dlsym`/debugger surface, a dylib's trie *is* the two-level contract its clients bind
+  through and a bundle's the dlopen surface — a dylib, a bundle and `-r` refuse the knob
+  with the fix, and a link carrying re-export dylibs refuses (the REEXPORT nodes ride the
+  trie). The classic `-no_fixup_chains` path plans the same suppression; the verifier's
+  dylib contract gates the trie-less foreign shape; the daemon wire v28 carries the
+  decision; the `exported_symbols` bench and the `no_exported_symbols_link` consumer
+  example ride along.
+
 ### Added (M39)
 
 - **M39** — the make-undefined mark (`-U <symbol>`): the flag the surface carried as a later
