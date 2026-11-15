@@ -86,7 +86,11 @@ function-starts suppression), `-no_uuid` (M32, the UUID suppression),
 (M29, the header-region floor — the advisory no-op it carried since M1) and
 `-no_deduplicate` (M41, the dedup toggle — identical literals stop merging
 and every input `__cstring` section rides verbatim; code dedup stays an
-opt-in via `-icf`).
+opt-in via `-icf`), `-dead_strip_dylibs` (M42, the unused-dylib drop),
+`-ObjC` (M43, the ObjC archive pull — members implementing an
+Objective-C class or category ride the pull without a reference) and
+`-final_output` (M44, the dylib-identity default — the install name a
+dylib link derives when `-install_name` is absent).
 
 The flags that look like no-ops but actually shape the link (the default
 behavior already matches what they request on arm64) are mapped in the
@@ -97,16 +101,18 @@ tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 ## Rejected with an actionable message
 
 A linker that silently drops a flag it does not implement is worse than one
-that says so. These are rejected with the roadmap entry in the message:
-`-dylinker`, `-ObjC`.
+that says so. The list is empty today — every flag that waited here shipped:
 (`-order_file` left this list when its rank-based subset shipped at M11,
 alongside `-map`; the weak/lazy dylib family — `-weak_framework`,
 `-lazy_framework`, `-lazy_library` — left it at M14, `-pagezero_size`
 left it at M15, the image base becoming a validated `LinkConfig` decision,
-`-sub_umbrella`/`-sub_library` left it at M20 (the umbrella region), and
+`-sub_umbrella`/`-sub_library` left it at M20 (the umbrella region),
 `-U` left it at M39 — the make-undefined mark: `-U _f -undefined
 dynamic_lookup` strips `_f`'s definition as it is linked and binds the
-reference flat at load time.)
+reference flat at load time — `-dylinker` left it at M26 (its stale entry
+here outlived the release and left with the M43 promotion), and `-ObjC`
+left it at M43 — the ObjC archive pull: members implementing an
+Objective-C class or category ride the pull without a reference.)
 
 ## Peregrine-specific: the Stage A link cache
 
