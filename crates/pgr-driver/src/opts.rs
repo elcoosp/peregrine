@@ -66,6 +66,9 @@ pub struct Options {
     /// Indices into `inputs` loaded lazily (`-lazy_library`, M14:
     /// `LC_LAZY_LOAD_DYLIB`).
     pub lazy_library_inputs: Vec<usize>,
+    /// Indices into `inputs` loaded upward (`-upward_library`, M45:
+    /// `LC_LOAD_UPWARD_DYLIB` — ld64's umbrella-relationship mark).
+    pub upward_library_inputs: Vec<usize>,
     /// Indices into `inputs` loaded as `LC_REEXPORT_DYLIB`
     /// (`-reexport_library`, M3).
     pub reexport_library_inputs: Vec<usize>,
@@ -88,6 +91,10 @@ pub struct Options {
     /// M14 `-lazy_framework <name>` (repeatable): the framework dylib
     /// loads as `LC_LAZY_LOAD_DYLIB` (dyld's delay-load surface).
     pub lazy_frameworks: Vec<String>,
+    /// M45 `-upward_framework <name>` (repeatable): the framework dylib
+    /// loads as `LC_LOAD_UPWARD_DYLIB` (the umbrella-relationship mark —
+    /// the sub-umbrella its umbrella loads upward).
+    pub upward_frameworks: Vec<String>,
     /// M23 `-reexport_framework <name>` (repeatable): the framework
     /// dylib loads as `LC_REEXPORT_DYLIB` and its exports join this
     /// image's export trie as REEXPORT nodes (the M3 `-reexport_library`
@@ -215,6 +222,7 @@ impl Default for Options {
             force_load: Vec::new(),
             weak_library_inputs: Vec::new(),
             lazy_library_inputs: Vec::new(),
+            upward_library_inputs: Vec::new(),
             reexport_library_inputs: Vec::new(),
             exported_list_path: None,
             unexported_list_path: None,
@@ -224,6 +232,7 @@ impl Default for Options {
             frameworks: Vec::new(),
             weak_frameworks: Vec::new(),
             lazy_frameworks: Vec::new(),
+            upward_frameworks: Vec::new(),
             reexport_frameworks: Vec::new(),
             framework_dirs: Vec::new(),
             sectcreate: Vec::new(),
@@ -715,6 +724,17 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-export_dynamic` surface conflict (M46): the dead-strip root
+    /// widening cannot apply where it was requested. The verdict names
+    /// the shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ExportDynamicConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// `-platform_version`: the SDK is older than the deployment target
     /// (M10 rung 2). The SDK ships the deployment target's interfaces;
     /// building against an older one produces images dyld may refuse.
@@ -1146,6 +1166,15 @@ fn apply_flag(
             opts.inputs.push(v);
             opts.lazy_library_inputs.push(opts.inputs.len() - 1);
         }
+        "-upward_library" => {
+            // M45: the whole dylib loads as the umbrella relationship
+            // (LC_LOAD_UPWARD_DYLIB) — the sub-umbrella its umbrella
+            // loads upward; under chained fixups the command rides the
+            // two-level ordinal space like a plain load.
+            let v = next_value(args, i, arg)?;
+            opts.inputs.push(v);
+            opts.upward_library_inputs.push(opts.inputs.len() - 1);
+        }
         "-weak_framework" => {
             // M14: the framework dylib loads weakly (the -framework
             // search with the weak-load kind).
@@ -1156,6 +1185,13 @@ fn apply_flag(
             // M14: the framework dylib delays (LC_LAZY_LOAD_DYLIB).
             let v = next_value(args, i, arg)?;
             opts.lazy_frameworks.push(v);
+        }
+        "-upward_framework" => {
+            // M45: the framework dylib loads as the umbrella relationship
+            // (LC_LOAD_UPWARD_DYLIB) — the -framework search with the
+            // upward-load kind.
+            let v = next_value(args, i, arg)?;
+            opts.upward_frameworks.push(v);
         }
         "-reexport_framework" => {
             // M23: the framework dylib re-exports through this image's
@@ -1646,6 +1682,13 @@ fn apply_flag(
         // sees the whole surface.
         "-dead_strip_dylibs" => {
             opts.config.dead_strip_dylibs = true;
+        }
+        // M46: the export-dynamic roots — every global definition in a
+        // main executable roots the dead-strip mark phase (the `dlsym`
+        // surface). The surface conflicts (dylib, bundle, the relocatable
+        // output) are `finish`'s — it sees the whole surface.
+        "-export_dynamic" => {
+            opts.config.export_dynamic = true;
         }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
@@ -2267,6 +2310,49 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                       exports) or link two-level (the default)"
                     .into(),
             });
+        }
+    }
+    // M46: the export-dynamic roots' surface conflicts. The knob is an
+    // executable decision — a dylib's and a bundle's strip already
+    // roots every definition (the export surface is the contract), and
+    // the relocatable output strips nothing (its symbol table is the
+    // input's, verbatim). An explicitly named knob that cannot apply is
+    // a refusal, never a silently dropped one (the library's re-checks
+    // — the layout and `link_reloc` — back this so no caller can plan
+    // the shape either).
+    if opts.config.export_dynamic {
+        match opts.config.filetype {
+            pgr_core::layout::OutputType::Execute => {}
+            pgr_core::layout::OutputType::Dylib => {
+                return Err(OptsError::ExportDynamicConflict {
+                    verdict: "-export_dynamic preserves global symbols during dead \
+                              stripping, but this output is a dylib"
+                        .into(),
+                    fix: "every definition already roots a dylib's strip (the export \
+                          surface is the contract): link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            pgr_core::layout::OutputType::Bundle => {
+                return Err(OptsError::ExportDynamicConflict {
+                    verdict: "-export_dynamic preserves global symbols during dead \
+                              stripping, but this output is a bundle"
+                        .into(),
+                    fix: "every definition already roots a bundle's strip (the dlopen \
+                          surface is the contract): link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            pgr_core::layout::OutputType::Relocatable => {
+                return Err(OptsError::ExportDynamicConflict {
+                    verdict: "-export_dynamic preserves global symbols during dead \
+                              stripping, but the relocatable output strips nothing"
+                        .into(),
+                    fix: "the object's symbol table is the input's, verbatim: drop the \
+                          flag or link an executable"
+                        .into(),
+                });
+            }
         }
     }
     match opts.config.filetype {
