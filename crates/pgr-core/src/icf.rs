@@ -278,6 +278,10 @@ fn kind_fp(kind: &RelocKind) -> u8 {
         RelocKind::PageOff12 { .. } => 4,
         RelocKind::Unsigned => 5,
         RelocKind::Subtractor { .. } => 6,
+        // M37: the descriptor-load pair — the same target family the GOT
+        // kinds share a discriminant over (the offset distinguishes the
+        // two halves of a pair).
+        RelocKind::TlvpLoadPage21 | RelocKind::TlvpLoadPageOff12 => 7,
     }
 }
 
