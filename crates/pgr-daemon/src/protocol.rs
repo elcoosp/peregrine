@@ -152,8 +152,12 @@ use sha2::{Digest, Sha256};
 /// the compact-unwind suppression (M36 — one byte naming whether the
 /// image drops the `__unwind_info` section; a resident relink carries
 /// the suppression decision the client asked for, never the pre-M36
-/// carry default).
-pub const PROTO_VERSION: u32 = 25;
+/// carry default); **v26** appends the install-name auto-floor (M38 —
+/// one byte naming whether the reserved header region grows past its
+/// natural size by every load command's room to the longest install
+/// name; a resident relink carries the header-pad decision the client
+/// asked for, never the pre-M38 natural default).
+pub const PROTO_VERSION: u32 = 26;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -798,6 +802,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // carries the suppression decision the client asked for, never the
     // pre-M36 carry default.
     put_u8(out, u8::from(!cfg.compact_unwind));
+    // M38 (v26 wire): the install-name auto-floor rides the tail after
+    // the compact-unwind suppression — one byte; a resident relink
+    // carries the header-pad decision the client asked for, never the
+    // pre-M38 natural default.
+    put_u8(out, u8::from(cfg.header_pad_max_install_names));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1048,6 +1057,10 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // validation beyond the bool (the absence is the decision; the
     // parse validates the table the carriage would have carried).
     let no_compact_unwind = r.u8()? != 0;
+    // M38 (v26 wire): the install-name auto-floor — one byte, no
+    // validation beyond the bool (the growth is a packing-loop floor
+    // the layout computes from the dylib install names).
+    let header_pad_max = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1111,6 +1124,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         uuid: !no_uuid,
         keep_private_externs,
         compact_unwind: !no_compact_unwind,
+        header_pad_max_install_names: header_pad_max,
     })
 }
 
@@ -1381,6 +1395,7 @@ mod tests {
             // the ones that shape bytes, and the suppression is the
             // knob the round-trip test flips.
             compact_unwind: true,
+            header_pad_max_install_names: false,
             symbol_order: None,
         }
     }
@@ -2328,6 +2343,36 @@ mod tests {
         assert!(
             back.config.keep_private_externs,
             "the keep crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_header_pad_auto_floor_round_trips() {
+        // v26: a non-default install-name auto-floor must survive the
+        // round trip verbatim (a resident relink carries the header-pad
+        // decision the client asked for, never the pre-M38 natural
+        // default).
+        let mut cfg = rich_config();
+        assert!(!cfg.header_pad_max_install_names);
+        cfg.header_pad_max_install_names = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.header_pad_max_install_names,
+            "the auto-floor crosses byte-for-byte"
         );
     }
 
