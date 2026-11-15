@@ -919,6 +919,7 @@ fn import_lib(exports: &[&str]) -> Dylib {
         weak: false,
         reexport: false,
         lazy: false,
+        upward: false,
     }
 }
 
