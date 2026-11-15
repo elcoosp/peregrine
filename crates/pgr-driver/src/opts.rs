@@ -3,10 +3,12 @@
 //! frameworks, M6 caches, M7 `-syslibroot`, M8 `-resident`, M9
 //! `-incremental`, M10 `-r` relocatable output and the platform surface).
 //! Flags real builds use that have not landed yet (the `MH_DYLINKER`
-//! output kind, make-undefined, TLV, bitcode) are
+//! output kind, make-undefined, bitcode) are
 //! rejected with actionable messages rather than silently ignored — a
 //! linker that pretends to understand a flag it drops is worse than one
-//! that says "not yet". `-order_file` landed at M11 (the rank-based
+//! that says "not yet". TLV thread-locals link since M37 (the input
+//! sections the parse validates ride the atom map onto the output).
+//! `-order_file` landed at M11 (the rank-based
 //! subset TDD §12 scoped from the start).
 
 use pgr_core::fixups::FixupPointerFormat;
@@ -1506,6 +1508,12 @@ fn apply_flag(
         // drops (the pre-M34 bytes exactly). The parse still validates
         // the table — the knob is a Pass-3 decision, never a parse
         // blindfold. A boolean knob with no output-kind conflict.
+        // M38: the install-name auto-floor — the reserved header region
+        // grows by every load command's room to the longest install
+        // name; the floor composes with `-headerpad` (both minimums).
+        "-headerpad_max_install_names" => {
+            opts.config.header_pad_max_install_names = true;
+        }
         "-no_compact_unwind" => {
             opts.config.compact_unwind = false;
         }
