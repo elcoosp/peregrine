@@ -5,6 +5,39 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M44)
+
+- **M44** — the dylib-identity default (`-final_output`): ld64's flag — previously unknown on
+  the surface — supplies the install name a dylib link derives when `-install_name` is absent
+  (the `ld` man page: "Specifies the install name of a dylib if -install_name is not used" —
+  the multi-arch driver names the universal path so every arch slice records it instead of
+  its own `-o` path). An explicit `-install_name` wins (the man-page rule). The default (flag
+  absent) keeps every pre-M44 link byte-identical: the derived install name stays the `-o`
+  path. Executables, bundles and the relocatable output refuse the knob with the fix (the
+  identity rides `LC_MAIN`, a bundle dlopens without a region, the object carries no identity
+  commands). The `final_output` bench and the `final_output_link` consumer example ride along.
+
+### Added (M43)
+
+- **M43** — the ObjC archive pull (`-ObjC`): the flag the surface carried as a later item
+  since M6 is the Pass-0 liveness decision the archive pull reads — archive members
+  implementing an Objective-C class or category ride the pull without a reference (the
+  modern clang emitter names a class with `_OBJC_CLASS_$_`/`_OBJC_METACLASS_$_` and a
+  category with `_OBJC_CATEGORY_$_`; the ObjC runtime registers the metadata by section
+  address at load time, so no static reference exists to seed the S7 fixpoint — the decision
+  rides the ranlib index every link already parses, a member whose index entry names the
+  metadata family joins the pull in member file order, and its own undefineds continue the
+  fixpoint). The default (`false`) keeps every pre-M43 link byte-identical: the pull stays
+  reference-driven and the unreferenced member stays unparsed. A member defining none of the
+  metadata names is not pulled by the knob (the rule is class-or-category, not `-all_load`).
+  There is no output-kind conflict — the relocatable output consumes pulled members exactly
+  like a segmented one, so `-r` rides the same pull. The daemon wire v31 carries the
+  decision; the `objc` bench and the `objc_link` consumer example ride along. The dead
+  `LATER_FLAGS` entry that outlived `-dylinker`'s M26 release left with the promotion (the
+  explicit arm won the match first — the entry shadowed nothing), and the M34 `unwind` bench
+  gained the `[[bench]]` entry its file always implied (auto-discovery compiled it under the
+  libtest harness, whose generated main shadowed the criterion one).
+
 ### Added (M42)
 
 - **M42** — the unused-dylib drop (`-dead_strip_dylibs`): ld64's flag — previously unknown on
