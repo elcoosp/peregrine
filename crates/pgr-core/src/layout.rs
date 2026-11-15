@@ -532,6 +532,22 @@ pub struct LinkConfig {
     /// [`crate::link::link_reloc`] re-checks so no library caller can
     /// plan the shape either.
     pub dead_strip_dylibs: bool,
+    /// M43 — the `-ObjC` archive pull: archive members implementing an
+    /// Objective-C class or category ride the pull even though nothing
+    /// in the link references them (ld64's man-page rule — the `ObjC`
+    /// runtime registers the metadata by section address at load time,
+    /// so no static reference exists to seed the S7 fixpoint). The
+    /// decision rides the ranlib index every link already parses: a
+    /// member whose index entry names a class, metaclass or category
+    /// metadata symbol ([`crate::objc::OBJC_METADATA_PREFIXES`]) joins
+    /// the pull in member file order, and its own undefineds continue
+    /// the fixpoint. The default (`false`) keeps every pre-M43 link
+    /// byte-identical: the pull stays reference-driven and the
+    /// unreferenced member stays unparsed. There is no output-kind
+    /// conflict — the relocatable output consumes pulled members exactly
+    /// like a segmented one (its object carries the member's sections
+    /// verbatim), so `-r` rides the same pull.
+    pub objc: bool,
 }
 
 impl Default for LinkConfig {
@@ -592,6 +608,7 @@ impl Default for LinkConfig {
             exported_symbols: true,
             deduplicate: true,
             dead_strip_dylibs: false,
+            objc: false,
         }
     }
 }
