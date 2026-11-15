@@ -123,8 +123,11 @@ mod tests {
         // the pre-M41 merge default — and the config's unused-dylib
         // drop as a tail byte (M42, `-dead_strip_dylibs`): a resident
         // relink carries the drop decision the client asked for, never
-        // the pre-M42 keep-every-dylib default.
-        assert_eq!(crate::PROTO_VERSION, 30);
+        // the pre-M42 keep-every-dylib default — and the config's
+        // ObjC pull as a tail byte (M43, `-ObjC`): a resident relink
+        // carries the pull decision the client asked for, never the
+        // pre-M43 reference-driven default.
+        assert_eq!(crate::PROTO_VERSION, 31);
     }
 
     #[test]
