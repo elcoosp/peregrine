@@ -267,5 +267,22 @@ harness = false
 name = "exported_symbols"
 harness = false
 
+# The M41 dedup-toggle bench: the link across the -no_deduplicate
+# decision (the merged pool, the verbatim pass-through) over the same
+# 64-object corpus with cross-object duplicate literals — a
+# shape-parity gate, the toggle removes plan work and adds copy bytes.
+[[bench]]
+name = "no_deduplicate"
+harness = false
+
+# The M42 dead-strip-dylibs bench: the link across the
+# -dead_strip_dylibs decision (every input dylib carried, the unused
+# command dropped) over the same 64-object corpus with one bind each —
+# a shape-parity gate, the drop is one skipped walk and one dropped
+# command.
+[[bench]]
+name = "dead_strip_dylibs"
+harness = false
+
 [lints]
 workspace = true
