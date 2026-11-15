@@ -126,8 +126,14 @@ mod tests {
         // the pre-M42 keep-every-dylib default — and the config's
         // ObjC pull as a tail byte (M43, `-ObjC`): a resident relink
         // carries the pull decision the client asked for, never the
-        // pre-M43 reference-driven default.
-        assert_eq!(crate::PROTO_VERSION, 31);
+        // pre-M43 reference-driven default — and the dylib list's
+        // upward-load kind per dylib (M45, `-upward_library`/
+        // `-upward_framework`): the wire never silently flattens the
+        // umbrella mark into a plain load — and the export-dynamic
+        // roots as a tail byte (M46, `-export_dynamic`): a resident
+        // relink carries the dlsym decision the client asked for,
+        // never the pre-M46 entry-root default.
+        assert_eq!(crate::PROTO_VERSION, 33);
     }
 
     #[test]
