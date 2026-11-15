@@ -265,6 +265,7 @@ fn bench_resolve(c: &mut Criterion) {
                         &relink_objects,
                         &[],
                         &[],
+                        &[],
                         UndefinedPolicy::Error,
                     )
                     .unwrap()
