@@ -156,8 +156,11 @@ use sha2::{Digest, Sha256};
 /// one byte naming whether the reserved header region grows past its
 /// natural size by every load command's room to the longest install
 /// name; a resident relink carries the header-pad decision the client
-/// asked for, never the pre-M38 natural default).
-pub const PROTO_VERSION: u32 = 26;
+/// asked for, never the pre-M38 natural default); **v27** appends the
+/// make-undefined marks (M39 — the `-U` names, count-prefixed like the
+/// rpaths; a resident relink strips the definitions the client marked,
+/// never the pre-M39 carried definitions).
+pub const PROTO_VERSION: u32 = 27;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -807,6 +810,14 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // carries the header-pad decision the client asked for, never the
     // pre-M38 natural default.
     put_u8(out, u8::from(cfg.header_pad_max_install_names));
+    // M39 (v27 wire): the make-undefined marks ride the tail after the
+    // auto-floor — count-prefixed names (the rpaths shape); a resident
+    // relink strips the definitions the client marked, never the
+    // pre-M39 carried definitions.
+    put_u32(out, cfg.make_undefined.count() as u32);
+    for name in cfg.make_undefined.names() {
+        put_str(out, name);
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1061,6 +1072,14 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // validation beyond the bool (the growth is a packing-loop floor
     // the layout computes from the dylib install names).
     let header_pad_max = r.u8()? != 0;
+    // M39 (v27 wire): the make-undefined marks — count-prefixed names
+    // (the rpaths shape); the names ride the core seam's validation, so
+    // a malformed frame names the grammar it broke.
+    let mut make_undefined = pgr_core::make_undefined::MakeUndefined::new();
+    for _ in 0..r.u32()? {
+        let name = pgr_core::MakeUndefinedName::from_flag(&r.str()?).map_err(|_| malformed())?;
+        make_undefined.push(name).map_err(|_| malformed())?;
+    }
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1125,6 +1144,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         keep_private_externs,
         compact_unwind: !no_compact_unwind,
         header_pad_max_install_names: header_pad_max,
+        make_undefined,
     })
 }
 
@@ -1396,6 +1416,20 @@ mod tests {
             // knob the round-trip test flips.
             compact_unwind: true,
             header_pad_max_install_names: false,
+            // The v27 tail: a non-default make-undefined table must
+            // survive the round trip verbatim, in flag order (a
+            // resident relink strips the definitions the client
+            // marked, never the pre-M39 carried definitions).
+            make_undefined: {
+                let mut marks = pgr_core::make_undefined::MakeUndefined::new();
+                marks
+                    .push(pgr_core::MakeUndefinedName::from_flag("_override_me").expect("valid"))
+                    .expect("one decision per name");
+                marks
+                    .push(pgr_core::MakeUndefinedName::from_flag("_also_gone").expect("valid"))
+                    .expect("one decision per name");
+                marks
+            },
             symbol_order: None,
         }
     }
@@ -2403,6 +2437,64 @@ mod tests {
         assert!(
             !back.config.compact_unwind,
             "the suppression crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_make_undefined_marks_round_trip() {
+        // v27: a non-default make-undefined table must survive the
+        // round trip verbatim, in flag order (a resident relink strips
+        // the definitions the client marked, never the pre-M39 carried
+        // definitions).
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: rich_config(),
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .unwrap();
+        assert_eq!(
+            back.config.make_undefined.names(),
+            ["_override_me", "_also_gone"],
+            "the marks cross byte-for-byte, in flag order"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_make_undefined_name_is_malformed() {
+        // v27: a name off the core seam's grammar is malformed, not
+        // silently marked (the decode pays the same validation the flag
+        // does — the raw door is not a bypass).
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        // The marks are the wire tail's last section: the count rides
+        // right behind the v26 auto-floor byte. Flip the count to 1 and
+        // append an empty name (the grammar refuses it).
+        let count_pos = body.len() - 8 - 4;
+        let mut frame = body[..count_pos].to_vec();
+        frame.extend_from_slice(&1u32.to_le_bytes());
+        frame.extend_from_slice(&0u32.to_le_bytes()); // empty string
+        assert!(
+            LinkRequest::decode(&frame).is_err(),
+            "the empty name refuses"
         );
     }
 
