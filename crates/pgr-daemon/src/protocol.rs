@@ -169,8 +169,12 @@ use sha2::{Digest, Sha256};
 /// pre-M41 merge default); **v30** appends the unused-dylib drop (M42 —
 /// one byte naming whether input dylibs nothing binds against leave the
 /// header; a resident relink carries the drop decision the client asked
-/// for, never the pre-M42 keep-every-dylib default).
-pub const PROTO_VERSION: u32 = 30;
+/// for, never the pre-M42 keep-every-dylib default); **v31** appends
+/// the `ObjC` pull (M43 — one byte naming whether archive members
+/// implementing an Objective-C class or category ride the archive pull;
+/// a resident relink carries the pull decision the client asked for,
+/// never the pre-M43 reference-driven default).
+pub const PROTO_VERSION: u32 = 31;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -843,6 +847,10 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // decision the client asked for, never the pre-M42 keep-every-dylib
     // default.
     put_u8(out, u8::from(cfg.dead_strip_dylibs));
+    // M43 (v31 wire): the ObjC pull rides the tail after the drop — one
+    // byte; a resident relink carries the pull decision the client
+    // asked for, never the pre-M43 reference-driven default.
+    put_u8(out, u8::from(cfg.objc));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1117,6 +1125,10 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // compacts the kept list at link time (the re-export exemption and
     // the dynamic-lookup reach the core re-checks refuse).
     let dead_strip_dylibs = r.u8()? != 0;
+    // M43 (v31 wire): the ObjC pull — one byte, no validation beyond
+    // the bool (the pull reads the decision in the S7 fixpoint; the
+    // metadata members ride in member file order either way).
+    let objc = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1185,6 +1197,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         exported_symbols: !no_exported_symbols,
         deduplicate: !no_deduplicate,
         dead_strip_dylibs,
+        objc,
     })
 }
 
@@ -1479,6 +1492,9 @@ mod tests {
             // The v30 tail: the unused-dylib drop rides the default
             // here — the knob the round-trip test flips.
             dead_strip_dylibs: false,
+            // The v31 tail: the ObjC pull rides the default here — the
+            // decision the round-trip test flips.
+            objc: false,
             symbol_order: None,
         }
     }
@@ -2596,6 +2612,33 @@ mod tests {
             back.config.dead_strip_dylibs,
             "the drop decision crosses byte-for-byte"
         );
+    }
+
+    #[test]
+    fn the_objc_pull_decision_round_trips() {
+        // v31: a non-default ObjC pull must survive the round trip
+        // verbatim (a resident relink carries the pull decision the
+        // client asked for, never the pre-M43 reference-driven
+        // default).
+        let mut cfg = rich_config();
+        assert!(!cfg.objc, "rich_config carries the default");
+        cfg.objc = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(back.config.objc, "the pull decision crosses byte-for-byte");
     }
 
     #[test]
