@@ -478,6 +478,24 @@ pub struct LinkConfig {
     /// the relocatable output refuses the knob (the layout's re-check
     /// backs the driver surface's earlier refusal).
     pub header_pad_max_install_names: bool,
+    /// M40 — the export-trie suppression: `-no_exported_symbols` drops
+    /// the output's `LC_DYLD_EXPORTS_TRIE` command (no `__LINKEDIT`
+    /// slot, no trie bytes, `sizeofcmds` 16 bytes narrower). ld64's
+    /// flag: the export surface is `dlsym`/debugger-facing on a main
+    /// executable — its dylib partners bind *into their own* tries,
+    /// never the executable's — so a program nothing binds against
+    /// through its exports can name the build off and skip the walk.
+    /// The default (`true`) keeps every pre-M40 link byte-identical —
+    /// the command rides even when its trie is empty (the
+    /// always-carried shape, like the M31 function starts). The knob is
+    /// an executable decision: a dylib's trie *is* the two-level
+    /// contract its clients bind through and a bundle's is the
+    /// dlopen/`dlsym` surface, so both refuse with the fix, the
+    /// relocatable output carries no `__LINKEDIT` commands at all, and
+    /// a link carrying re-export dylibs refuses (the REEXPORT nodes
+    /// ride the trie — the layout's re-check backs the driver surface's
+    /// earlier refusal).
+    pub exported_symbols: bool,
 }
 
 impl Default for LinkConfig {
@@ -535,6 +553,7 @@ impl Default for LinkConfig {
             keep_private_externs: false,
             compact_unwind: true,
             header_pad_max_install_names: false,
+            exported_symbols: true,
         }
     }
 }
@@ -1611,6 +1630,49 @@ pub fn layout(
             message: format!("{verdict} — {fix}"),
         });
     }
+    // M40: the export-trie suppression is an executable decision — a
+    // main executable's trie is the `dlsym`/debugger surface (its dylib
+    // partners bind into their own tries, never the exe's), while a
+    // dylib's trie *is* the two-level contract its clients bind
+    // through and a bundle's is the dlopen surface. The refusal rides
+    // here (not only on the driver surface) so every caller pays it: a
+    // silently dropped trie would hide the exports the caller's
+    // clients resolve against.
+    if !cfg.exported_symbols && cfg.filetype != OutputType::Execute {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Dylib => (
+                "-no_exported_symbols drops the export trie, but this output is a dylib",
+                "a dylib's trie IS the two-level contract its clients bind through: \
+                 link an executable or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-no_exported_symbols drops the export trie, but this output is a bundle",
+                "a bundle's trie is the dlopen/dlsym surface its host resolves \
+                 against: link an executable or drop the flag",
+            ),
+            _ => (
+                "-no_exported_symbols drops the export trie, but the relocatable \
+                 output carries no __LINKEDIT commands",
+                "drop the flag or link an executable",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M40: the re-export conflict — the REEXPORT trie nodes ride the
+    // export trie, so suppressing the trie silently breaks the
+    // re-export contract (a client walking the image's exports would
+    // miss every re-exported name). An explicitly named combination
+    // that cannot apply is a refusal, never a silently dropped one.
+    if !cfg.exported_symbols && cfg.dylibs.iter().any(|d| d.reexport) {
+        return Err(LinkError::Layout {
+            message: "-no_exported_symbols drops the export trie, but the link carries \
+                      re-export dylibs whose REEXPORT nodes ride that trie — drop the \
+                      re-export dylibs or drop -no_exported_symbols"
+                .into(),
+        });
+    }
     // M24: an alias is an image-surface decision — the relocatable
     // output carries the input symtab verbatim, so a named pair has no
     // symtab row to grow. The refusal rides here (not only on the
@@ -2134,43 +2196,52 @@ pub fn layout(
     // addresses; `-reexport_library` exports become REEXPORT nodes with the
     // dylib's 1-based ordinal. Local definitions shadow re-exports of the
     // same name (the trie builder keeps the first of each equal name).
+    // M40: the `-no_exported_symbols` suppression never runs the walk —
+    // the bytes ride empty (the plan's `trie_off` takes the absent
+    // sentinel, the command drops in the header assembly).
     let mut exports: Vec<crate::trie::Export> = Vec::new();
-    for sym in &symbols {
-        if !sym.external || sym.n_type & N_SECT == 0 {
-            continue;
-        }
-        let name = interner.bytes(sym.name);
-        if !visible(name) {
-            continue;
-        }
-        let flags = u32::from(sym.n_desc & N_WEAK_DEF != 0)
-            * crate::trie::EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
-        exports.push(crate::trie::Export {
-            name,
-            info: crate::trie::ExportInfo::Regular {
-                flags,
-                address: sym.value,
-            },
-        });
-    }
-    for (ord, d) in cfg.dylibs.iter().enumerate() {
-        if !d.reexport {
-            continue;
-        }
-        for name in &d.exports {
+    if cfg.exported_symbols {
+        for sym in &symbols {
+            if !sym.external || sym.n_type & N_SECT == 0 {
+                continue;
+            }
+            let name = interner.bytes(sym.name);
             if !visible(name) {
                 continue;
             }
+            let flags = u32::from(sym.n_desc & N_WEAK_DEF != 0)
+                * crate::trie::EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
             exports.push(crate::trie::Export {
                 name,
-                info: crate::trie::ExportInfo::Reexport {
-                    ordinal: u64::try_from(ord + 1).unwrap_or(1),
-                    imported_name: b"",
+                info: crate::trie::ExportInfo::Regular {
+                    flags,
+                    address: sym.value,
                 },
             });
         }
+        for (ord, d) in cfg.dylibs.iter().enumerate() {
+            if !d.reexport {
+                continue;
+            }
+            for name in &d.exports {
+                if !visible(name) {
+                    continue;
+                }
+                exports.push(crate::trie::Export {
+                    name,
+                    info: crate::trie::ExportInfo::Reexport {
+                        ordinal: u64::try_from(ord + 1).unwrap_or(1),
+                        imported_name: b"",
+                    },
+                });
+            }
+        }
     }
-    let trie = crate::trie::build(&mut exports, image_base)?;
+    let trie = if cfg.exported_symbols {
+        crate::trie::build(&mut exports, image_base)?
+    } else {
+        Vec::new()
+    };
     let has_reexports = cfg.dylibs.iter().any(|d| d.reexport);
 
     // ---- entry (executables only; dylibs/bundles have no LC_MAIN) --------------
@@ -2246,7 +2317,15 @@ pub fn layout(
     } else {
         0
     };
-    let trie_off = take(trie.len(), 4, &mut cur);
+    // M40: the suppression takes no LINKEDIT slot at all — `trie_off`
+    // rides the absent sentinel (`0`, the convention every `__LINKEDIT`
+    // offset field shares) instead of aligning the cursor past an
+    // empty chunk.
+    let trie_off = if trie.is_empty() {
+        0
+    } else {
+        take(trie.len(), 4, &mut cur)
+    };
     let func_off = if func_starts.is_empty() {
         0
     } else {
@@ -4763,7 +4842,7 @@ fn build_header(
         + 1 // LC_SYMTAB
         + 1 // LC_DYSYMTAB
         + u32::from(!matches!(fixup_lc, FixupLc::None))
-        + 1 // LC_DYLD_EXPORTS_TRIE
+        + u32::from(cfg.exported_symbols) // LC_DYLD_EXPORTS_TRIE (M40)
         + u32::from(cfg.function_starts) // LC_FUNCTION_STARTS (M31)
         + u32::from(hi.emit_dice) // LC_DATA_IN_CODE (M30)
         + u32::from(cfg.uuid) // LC_UUID (M32)
@@ -4801,7 +4880,7 @@ fn build_header(
             + 24 // LC_SYMTAB
             + 80 // LC_DYSYMTAB
             + fixup_lc.size()
-            + 16 // LC_DYLD_EXPORTS_TRIE
+            + usize::from(cfg.exported_symbols) * 16 // LC_DYLD_EXPORTS_TRIE (M40)
             + usize::from(cfg.function_starts) * 16 // LC_FUNCTION_STARTS (M31)
             + if hi.emit_dice { 16 } else { 0 } // LC_DATA_IN_CODE (M30)
             + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
@@ -5084,11 +5163,16 @@ fn build_header(
         w32(&mut buf, lc + 44, 0); // export_size
         lc += 48;
     }
-    w32(&mut buf, lc, pgr_format::consts::LC_DYLD_EXPORTS_TRIE);
-    w32(&mut buf, lc + 4, 16);
-    w32(&mut buf, lc + 8, hi.trie_off as u32);
-    w32(&mut buf, lc + 12, hi.trie_len as u32);
-    lc += 16;
+    if cfg.exported_symbols {
+        // M40: the export-trie suppression names the command off — no
+        // slot, no payload, the header omits it entirely (the M31/M32
+        // always-carried-family shape).
+        w32(&mut buf, lc, pgr_format::consts::LC_DYLD_EXPORTS_TRIE);
+        w32(&mut buf, lc + 4, 16);
+        w32(&mut buf, lc + 8, hi.trie_off as u32);
+        w32(&mut buf, lc + 12, hi.trie_len as u32);
+        lc += 16;
+    }
     if cfg.function_starts {
         w32(&mut buf, lc, pgr_format::consts::LC_FUNCTION_STARTS);
         w32(&mut buf, lc + 4, 16);
@@ -5171,7 +5255,7 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice
         + 80 // LC_DYSYMTAB
         + usize::from(fixup_lc == FixupLc::Chained) * 16 // LC_DYLD_CHAINED_FIXUPS
         + usize::from(fixup_lc == FixupLc::DyldInfo) * 48 // LC_DYLD_INFO_ONLY
-        + 16 // LC_DYLD_EXPORTS_TRIE
+        + usize::from(cfg.exported_symbols) * 16 // LC_DYLD_EXPORTS_TRIE (M40)
         + usize::from(cfg.function_starts) * 16 // LC_FUNCTION_STARTS (M31)
         + usize::from(emit_dice) * 16 // LC_DATA_IN_CODE (M30)
         + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
