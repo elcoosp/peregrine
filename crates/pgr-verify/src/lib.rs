@@ -54,6 +54,7 @@ pub mod pair;
 pub mod report_json;
 pub mod signature;
 pub mod structural;
+pub mod tlv;
 pub mod unwind;
 
 pub use baseline::{BaselineDelta, CodeIdentity, IssueIdentity, IssueKey, OffsetIdentity};
@@ -129,6 +130,13 @@ pub enum Code {
     /// the image does not carry (M34) — the section dyld's unwinder
     /// walks must be internally consistent and annotate `__TEXT`.
     UnwindInfo,
+    /// The image's thread-local surface is inconsistent (M37): the
+    /// `MH_HAS_TLV_DESCRIPTORS` marker must ride the header exactly when
+    /// the image carries `S_THREAD_LOCAL_*` sections, the `__thread_vars`
+    /// descriptors must be whole 16-byte thunk/initializer pairs, and the
+    /// descriptors must have thread-local data to point at — the contract
+    /// dyld's load-time TLV allocation keys on.
+    Tlv,
     /// Suspicious but non-fatal condition.
     Suspicious,
 }
@@ -137,7 +145,7 @@ impl Code {
     /// Every issue code, in declaration order (the `report_json` reader
     /// matches canonical names against this table; tooling can enumerate
     /// the surface the way `Check::ALL` enumerates the families).
-    pub const ALL: [Code; 20] = [
+    pub const ALL: [Code; 21] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -157,6 +165,7 @@ impl Code {
         Code::DyldInfoStreams,
         Code::FixupsFloor,
         Code::UnwindInfo,
+        Code::Tlv,
         Code::Suspicious,
     ];
 
@@ -183,6 +192,7 @@ impl Code {
             Code::DyldInfoStreams => "dyld_info_streams",
             Code::FixupsFloor => "fixups_floor",
             Code::UnwindInfo => "unwind_info",
+            Code::Tlv => "tlv",
             Code::Suspicious => "suspicious",
         }
     }
