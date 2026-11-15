@@ -229,6 +229,19 @@ pub fn compute(
                 root_name(id);
             }
         }
+        // M46: `-export_dynamic` — every global definition in the main
+        // executable is a root (ld64's man page: "Preserves all global
+        // symbols in main executables during dead stripping"). The
+        // `dlsym`/plugin surface is a runtime contract the static
+        // fixpoint cannot see; the decision is executable-only (a
+        // dylib's and a bundle's strip already roots every definition,
+        // the refusals keep the knob honest) and the default (`false`)
+        // widens nothing.
+        if cfg.export_dynamic && cfg.filetype.is_executable() {
+            for (id, _def) in res.definitions() {
+                root_name(id);
+            }
+        }
     }
     // `__mod_init_func` / `S_ATTR_NO_DEAD_STRIP` sections stay whole.
     for (fi, obj) in objects.iter().enumerate() {
