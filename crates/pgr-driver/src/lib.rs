@@ -1677,6 +1677,9 @@ pub fn usage() -> String {
     s.push_str("  -flat_namespace              flat-lookup binds (drop MH_TWOLEVEL)\n");
     s.push_str("  -undefined error|dynamic_lookup   unresolved-reference policy\n");
     s.push_str("  -u <symbol>                  force the symbol to be defined\n");
+    s.push_str("  -U <symbol>                  mark the symbol undefined while linking (M39):\n");
+    s.push_str("                               the definition drops, the reference binds\n");
+    s.push_str("                               per -undefined (refused with -r)\n");
     s.push_str("  -order_file <path>           rank symbols in the output (M11): one\n");
     s.push_str("                               `symbol` or `object.o:symbol` per line;\n");
     s.push_str("                               ranked pieces lead, unranked keep their\n");
