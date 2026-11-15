@@ -461,7 +461,7 @@ pub fn plan_shape(entries: &[UnwindEntry]) -> Result<UnwindShape, SynthesisError
 /// (`a compressed page's rows all indexed at plan time`) names the
 /// plan-internal invariant that a compressed page's rows all carry a
 /// common-array index — impossible to break through the public
-/// surface, because [`plan`] qualifies a compressed page's rows
+/// surface, because `plan` qualifies a compressed page's rows
 /// against the same array the emit resolves through.
 pub fn synthesize(entries: &[UnwindEntry]) -> Result<UnwindInfo, SynthesisError> {
     let p = plan(entries)?;
