@@ -29,8 +29,8 @@ use pgr_format::consts::{
     MH_BINDS_TO_WEAK, MH_TWOLEVEL, MH_WEAK_DEFINES, N_ABS, N_EXT, N_PEXT, N_SECT, N_UNDF,
     N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K, REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS,
     S_ATTR_SOME_INSTRUCTIONS, S_CSTRING_LITERALS, S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR,
-    S_SYMBOL_STUBS, S_ZEROFILL, SECTION_TYPE_MASK, STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ,
-    VM_PROT_WRITE,
+    S_SYMBOL_STUBS, S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_VARIABLES, S_THREAD_LOCAL_ZEROFILL,
+    S_ZEROFILL, SECTION_TYPE_MASK, STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use rayon::prelude::*;
 
@@ -453,6 +453,17 @@ pub struct LinkConfig {
     /// parse still validates the table, and a broken table refuses
     /// with the knob set.
     pub compact_unwind: bool,
+    /// M38 — the install-name auto-floor: `-headerpad_max_install_names`
+    /// grows the reserved header region past its natural size by every
+    /// load-dylib command's room to grow its install name to the longest
+    /// install name in the image (+1 NUL, 8-byte aligned) — the space
+    /// `install_name_tool` needs to rewrite any install name in place
+    /// (see [`crate::header_pad::install_names_growth`]). The default
+    /// (`false`) keeps every pre-M38 link byte-identical; the floor
+    /// composes with `-headerpad` (both are minimums — the bigger wins);
+    /// the relocatable output refuses the knob (the layout's re-check
+    /// backs the driver surface's earlier refusal).
+    pub header_pad_max_install_names: bool,
 }
 
 impl Default for LinkConfig {
@@ -508,6 +519,7 @@ impl Default for LinkConfig {
             uuid: true,
             keep_private_externs: false,
             compact_unwind: true,
+            header_pad_max_install_names: false,
         }
     }
 }
@@ -938,6 +950,19 @@ fn scan_needs(
                             ),
                         });
                     }
+                    RelocKind::TlvpLoadPage21 | RelocKind::TlvpLoadPageOff12 => {
+                        return Err(LinkError::Unsupported {
+                            file: obj.name.clone(),
+                            message: format!(
+                                "TLV descriptor load for \"{}\" — a descriptor load must \
+                                 target a `__thread_vars` descriptor defined in this image \
+                                 (thread-local variables cannot bind across a dylib boundary); \
+                                 define the variable locally or reach it through an accessor \
+                                 the dylib exports",
+                                interner.name(id)
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -1103,8 +1128,13 @@ fn bucket_for(
             ),
         });
     }
-    let zerofill = in_sect.zerofill || in_sect.flags & SECTION_TYPE_MASK == S_ZEROFILL;
-    let name = if zerofill {
+    // M37: a thread-local zero-fill keeps its own section — dyld's TLV
+    // allocation walks `__thread_bss` by name-able type, so it never
+    // merges into the `__common` bucket the plain `S_ZEROFILL` shares.
+    let tlv_zerofill = in_sect.flags & SECTION_TYPE_MASK == S_THREAD_LOCAL_ZEROFILL;
+    let zerofill =
+        in_sect.zerofill || in_sect.flags & SECTION_TYPE_MASK == S_ZEROFILL || tlv_zerofill;
+    let name = if zerofill && !tlv_zerofill {
         // Zero-fill inputs and commons share the __common bucket
         // (S_ZEROFILL output; the kernel zero-fills the tail).
         "__common".to_string()
@@ -1510,7 +1540,9 @@ pub fn layout(
     // refusal rides here (not only on the driver surface and
     // `link_reloc`) so every caller pays it: a silently dropped knob
     // would claim a reserved region the output never carries.
-    if cfg.header_pad.is_some() && cfg.filetype == OutputType::Relocatable {
+    if (cfg.header_pad.is_some() || cfg.header_pad_max_install_names)
+        && cfg.filetype == OutputType::Relocatable
+    {
         return Err(LinkError::Layout {
             message: "-headerpad reserves the header region the load commands occupy, \
                       but the relocatable output plans no segments and carries its \
@@ -2999,12 +3031,25 @@ fn place(
             // region `install_name_tool` grows install names in. The
             // max is the floor semantics, so a floor at or below the
             // natural size plans the pre-M29 bytes.
-            align_up_u64(
-                cfg.header_pad.as_ref().map_or(header_len as u64, |p| {
-                    p.floor_bytes().max(header_len as u64)
-                }),
-                8,
-            )
+            let natural = header_len as u64;
+            let mut floor = cfg
+                .header_pad
+                .as_ref()
+                .map_or(natural, |p| p.floor_bytes().max(natural));
+            // M38: the install-name auto-floor — the natural region plus
+            // every load-dylib command's room to grow its install name
+            // to the longest install name in the image. Both floors are
+            // minimums, so the effective region is the max.
+            if cfg.header_pad_max_install_names {
+                let growth = crate::header_pad::install_names_growth(
+                    &cfg.dylibs
+                        .iter()
+                        .map(|d| d.install_name.as_str())
+                        .collect::<Vec<&str>>(),
+                );
+                floor = floor.max(natural + growth);
+            }
+            align_up_u64(floor, 8)
         } else {
             seg_fileoff
         };
@@ -3794,6 +3839,26 @@ fn resolve_reloc(
             patches.push(PatchOp::PageOff12 {
                 in_offset: r.offset,
                 imm12: ((slot & 0xFFF) >> r.length_log2) as u32,
+            });
+        }
+        RelocKind::TlvpLoadPage21 => {
+            // M37: the descriptor is a definition in this image (the
+            // scan refused every cross-image shape) — the load patches
+            // directly against its vaddr, no slot, no chain word.
+            let target = lookup(obj, r.target, 0, space)?;
+            let page_delta = ((target as i64) >> 12) - ((slot_v as i64) >> 12);
+            patches.push(PatchOp::Adrp {
+                in_offset: r.offset,
+                page_delta,
+            });
+        }
+        RelocKind::TlvpLoadPageOff12 => {
+            let target = lookup(obj, r.target, 0, space)?;
+            // LDR (immediate, unsigned offset): imm12 scaled by the
+            // access size (8 bytes for an X-register descriptor load).
+            patches.push(PatchOp::PageOff12 {
+                in_offset: r.offset,
+                imm12: ((target & 0xFFF) >> r.length_log2) as u32,
             });
         }
         RelocKind::PointerToGot => {
@@ -4768,6 +4833,15 @@ fn build_header(
     }
     if hi.binds_to_weak {
         flags |= MH_BINDS_TO_WEAK;
+    }
+    // M37: the TLV marker dyld's load-time allocation keys on — the flag
+    // rides the header exactly when the image carries a thread-local
+    // section (data, zero-fill or descriptors).
+    if sections.iter().any(|s| {
+        let t = s.flags & SECTION_TYPE_MASK;
+        t == S_THREAD_LOCAL_REGULAR || t == S_THREAD_LOCAL_ZEROFILL || t == S_THREAD_LOCAL_VARIABLES
+    }) {
+        flags |= pgr_format::consts::MH_HAS_TLV_DESCRIPTORS;
     }
     w32(&mut buf, 24, flags);
 
