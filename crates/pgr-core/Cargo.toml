@@ -252,5 +252,12 @@ harness = false
 name = "headerpad_max"
 harness = false
 
+# The M39 make-undefined bench: the link across the -U decisions (the
+# empty table, 8 and 64 marks) over the same 64-object corpus — a
+# shape-parity gate, a mark is one dropped definition at install time.
+[[bench]]
+name = "make_undefined"
+harness = false
+
 [lints]
 workspace = true
