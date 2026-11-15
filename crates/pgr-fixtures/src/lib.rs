@@ -353,6 +353,13 @@ pub struct ImageBuilder {
     /// `-no_pie` knob's image shape — the strict verifier accepts both
     /// (the flag is a decision, not a defect).
     pie: bool,
+    /// M37: extra header flag bits OR'd into the assembled flags word
+    /// (`MH_HAS_TLV_DESCRIPTORS` — the load-time TLV-allocation marker
+    /// the verifier's contract reads). The default adds nothing, so
+    /// every pre-M37 fixture builds byte-identical. Written during
+    /// assembly, so the ad-hoc signature is computed over the final
+    /// bytes.
+    mh_flags: u32,
     /// M30: the `LC_DATA_IN_CODE` entries the fixture emits —
     /// `__TEXT`-segment-relative, in stream order. Written during
     /// assembly, so the ad-hoc signature is computed over the final
@@ -394,6 +401,7 @@ impl ImageBuilder {
             dyld_envs: Vec::new(),
             loader_path: None,
             pie: true,
+            mh_flags: 0,
             data_in_code: Vec::new(),
             no_uuid: false,
         }
@@ -426,6 +434,7 @@ impl ImageBuilder {
             dyld_envs: Vec::new(),
             loader_path: None,
             pie: true,
+            mh_flags: 0,
             data_in_code: Vec::new(),
             no_uuid: false,
         }
@@ -457,6 +466,7 @@ impl ImageBuilder {
             dyld_envs: Vec::new(),
             loader_path: None,
             pie: true,
+            mh_flags: 0,
             data_in_code: Vec::new(),
             no_uuid: false,
         }
@@ -564,6 +574,15 @@ impl ImageBuilder {
     /// assembled bytes either way).
     pub fn set_pie(&mut self, pie: bool) {
         self.pie = pie;
+    }
+
+    /// ORs extra header flag bits into the assembled flags word (the
+    /// M37 `MH_HAS_TLV_DESCRIPTORS` marker the hand-built TLV shapes
+    /// set and the verifier's contract reads). The default adds
+    /// nothing; the signature is computed over the assembled bytes
+    /// either way, so strict verification rides the same recompute.
+    pub fn set_mh_flags(&mut self, flags: u32) {
+        self.mh_flags |= flags;
     }
 
     /// Sets the dylib/bundle preferred load address (the image base) —
@@ -1063,7 +1082,7 @@ impl ImageBuilder {
 
         // ---- assemble header + load commands ----------------------------
         let mut buf = vec![0u8; file_len as usize];
-        let flags = if exec {
+        let flags = (if exec {
             MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | if self.pie { MH_PIE } else { 0 }
         } else if bundle {
             // A bundle carries no re-export surface (dlopen-able, no
@@ -1073,7 +1092,7 @@ impl ImageBuilder {
             // The minimal builder never re-exports: set the marker dyld
             // and the verifier expect on a re-export-free dylib.
             MH_DYLDLINK | MH_TWOLEVEL | MH_NO_REEXPORTED_DYLIBS
-        };
+        }) | self.mh_flags;
         buf[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
         buf[4..8].copy_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
         buf[8..12].copy_from_slice(&CPU_SUBTYPE_ARM64_ALL.to_le_bytes());
