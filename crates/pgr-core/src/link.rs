@@ -698,6 +698,68 @@ fn pull_archive_members(
         }
     }
 
+    // M43 eager path: the `-ObjC` pull (ld64's man-page rule — members
+    // implementing an Objective-C class or category ride without a
+    // reference, because the ObjC runtime registers the metadata by
+    // section address at load time and no static reference exists to
+    // seed the fixpoint). The scan rides the ranlib index every link
+    // already parsed — a member whose index entry names a class,
+    // metaclass or category metadata symbol joins the pull — and the
+    // members ride in member file order, the same determinism the
+    // `-all_load` path keeps. The pulled members' own names feed the
+    // fixpoint below (a category pulls its class's provider, a member
+    // pulls its own providers). Archives under `-all_load`/`-force_load`
+    // skip the pass: the eager pass above already carries every member.
+    if cfg.objc {
+        let span = tracing::info_span!("objc_pull", archives = archives.len());
+        let _entered = span.enter();
+        for (ai, arch) in archives.iter().enumerate() {
+            if arch.all_load {
+                continue;
+            }
+            let metadata_members: Vec<u32> = {
+                let mut members: Vec<u32> = arch
+                    .index
+                    .iter()
+                    .filter(|(name, _)| crate::objc::defines_objc_metadata(name))
+                    .map(|(_, member)| *member)
+                    .collect();
+                members.sort_unstable();
+                members.dedup();
+                members
+            };
+            for member_index in &metadata_members {
+                let Some(member) = arch.members.get(*member_index as usize) else {
+                    return Err(LinkError::Internal {
+                        message: format!(
+                            "archive {}: index entry points at member {} of {}",
+                            arch.name,
+                            member_index,
+                            arch.members.len()
+                        ),
+                    });
+                };
+                if !pulled_set.insert((ai, member.offset)) {
+                    continue;
+                }
+                let obj = parse_member(
+                    arch,
+                    member,
+                    base_file + pulled.len() as u32,
+                    cfg.dead_strip,
+                    cache,
+                )?;
+                record_names(&obj, &mut defined, &mut undefined);
+                pulled.push(obj);
+            }
+            tracing::debug!(
+                archive = %arch.name,
+                pulled = metadata_members.len(),
+                "the -ObjC pull named the metadata members"
+            );
+        }
+    }
+
     // Lazy fixpoint: scan indexes in archive command order; a member is
     // pulled when it defines a still-unresolved name.
     loop {
