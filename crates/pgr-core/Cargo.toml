@@ -259,5 +259,13 @@ harness = false
 name = "make_undefined"
 harness = false
 
+# The M40 export-trie bench: the link across the -no_exported_symbols
+# decision (the default trie, the suppressed surface) over the same
+# 64-object corpus — a shape-parity gate, the suppression skips the
+# trie walk and its __LINKEDIT slot.
+[[bench]]
+name = "exported_symbols"
+harness = false
+
 [lints]
 workspace = true
