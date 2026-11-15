@@ -115,6 +115,7 @@ fn bench_dylib(exports: &[&str]) -> Dylib {
         weak: false,
         reexport: false,
         lazy: false,
+        upward: false,
     }
 }
 
