@@ -56,6 +56,7 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | `-dead_strip` / `-no_dead_strip` | same (mark-sweep over symbol-boundary atoms) |
 | `-icf=safe` / `-icf=all` / `-no_icf` | same (default `none`) |
 | `-all_load` / `-force_load <archive>` / `-u <symbol>` | same (archives pull members lazily via ranlib) |
+| `-dead_strip_dylibs` | same (input dylibs nothing binds against leave the header — the kept list compacts the two-level ordinals; re-export dylibs and dynamic-lookup providers always ride; M42) |
 | `-fixup_chains` / `-no_fixup_chains` | same (chained `LC_DYLD_CHAINED_FIXUPS` by default; below the deployment floor — or with `-no_fixup_chains` — the classic `LC_DYLD_INFO_ONLY` streams encode the same fixups) |
 | `-fixup_chains_format offset64\|arm64e` | same family vocabulary (M10 rung 4; an explicitly named family refuses a target below the platform's chained-fixups floor — raise the target or drop the flag) |
 | `-platform_version <platform> <min> <sdk>` | same (`<platform>` ∈ `macos`, `ios`, `tvos`, `watchos`, `visionos`; the SDK must be at least the deployment target) |
@@ -74,13 +75,18 @@ silently dropped):
 
 - `-demangle` / `-no_demangle` — symbol names are stored verbatim in the
   symtab (demangling is a consumer-side concern);
-- `-no_deduplicate` — cstring/code dedup stays on (the arm64 default; there
-  is no off switch yet);
 - `-object_path_lto <path>` — the value is consumed; LLVM bitcode inputs are
   diagnosed clearly (rebuild with `-fno-lto`);
-- `-no_uuid`, `-no_function_starts`, `-no_data_in_code`,
-  `-keep_private_externs`, `-no_adhoc_extensions`;
-- `-headerpad <n>` — advisory: load commands never grow after the link.
+- `-no_adhoc_extensions`.
+
+Flags that left this list when they became real decisions: `-no_data_in_code`
+(M30, the data-in-code carriage), `-no_function_starts` (M31, the
+function-starts suppression), `-no_uuid` (M32, the UUID suppression),
+`-keep_private_externs` (M33, the private-extern decision), `-headerpad <n>`
+(M29, the header-region floor — the advisory no-op it carried since M1) and
+`-no_deduplicate` (M41, the dedup toggle — identical literals stop merging
+and every input `__cstring` section rides verbatim; code dedup stays an
+opt-in via `-icf`).
 
 The flags that look like no-ops but actually shape the link (the default
 behavior already matches what they request on arm64) are mapped in the
