@@ -12,5 +12,8 @@ ship.toml
 .github/pr-body.md
 .github/commit-plan.tsv
 docs/launch.md
-ship.toml
-.github/pr-body.md
+# the killed-daemon gate can drop an ELF core in the workspace root
+# (ulimit-enabled hosts only — CI's runners core-dump to nowhere)
+/core
+# the link cache's default directory name when a test runs from a crate root
+.pgr-cache/
