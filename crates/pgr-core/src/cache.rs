@@ -328,6 +328,7 @@ impl From<FrozenDylib> for Dylib {
             weak: false,
             reexport: false,
             lazy: false,
+            upward: false,
         }
     }
 }
@@ -891,6 +892,7 @@ mod tests {
             weak: false,
             reexport: false,
             lazy: false,
+            upward: false,
         };
         let frozen = FrozenDylib::from(&d);
         let enc = encode_frozen_dylib(&frozen);
@@ -951,6 +953,7 @@ mod m7_versioned {
             weak: false,
             reexport: false,
             lazy: false,
+            upward: false,
         })
     }
 
