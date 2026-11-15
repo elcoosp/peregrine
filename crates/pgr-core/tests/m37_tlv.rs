@@ -18,7 +18,7 @@
 //!   against the descriptor's vaddr (imm12 scaled by the access size),
 //!   never through a GOT slot;
 //! * the zero-fills — `S_THREAD_LOCAL_ZEROFILL` is a zero-fill (VM-only,
-//!   file_off 0, its own section — never merged into `__common`);
+//!   `file_off` 0, its own section — never merged into `__common`);
 //! * the refusals — a descriptor section off the 16-byte stride refuses
 //!   with the fix; a descriptor load past this image's own definitions
 //!   refuses (thread-local variables cannot bind across a dylib
@@ -141,10 +141,11 @@ fn corpus(bytes: Vec<u8>) -> Vec<LinkInput> {
 /// `_tlv_get_addr` thunk bind rides the flat-lookup ordinal, no dylib
 /// fixture needed).
 fn lookup_cfg() -> LinkConfig {
-    let mut cfg = LinkConfig::default();
-    cfg.flat_namespace = true;
-    cfg.undefined_policy = UndefinedPolicy::DynamicLookup;
-    cfg
+    LinkConfig {
+        flat_namespace: true,
+        undefined_policy: UndefinedPolicy::DynamicLookup,
+        ..LinkConfig::default()
+    }
 }
 
 /// Links the corpus under `tweak`.
