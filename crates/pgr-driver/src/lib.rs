@@ -936,9 +936,16 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         .map(|s| s.as_bytes().to_vec())
         .collect();
     // M3 dylib defaults: the install name defaults to the output path
-    // (ld64 behavior); dylibs/bundles never load a dylinker.
+    // (ld64 behavior); M44 `-final_output` supplies the default when
+    // named (the man-page rule — the multi-arch driver records the
+    // universal path, not the slice's `-o` path; the explicit
+    // `-install_name` always wins); dylibs/bundles never load a
+    // dylinker.
     if config.filetype == pgr_core::layout::OutputType::Dylib && config.install_name.is_none() {
-        config.install_name = Some(opts.output.clone());
+        config.install_name = Some(match opts.final_output.clone() {
+            Some(final_output) => final_output,
+            None => opts.output.clone(),
+        });
     }
     if config.filetype != pgr_core::layout::OutputType::Execute {
         config.dynamic_linker = false;
@@ -1665,6 +1672,10 @@ pub fn usage() -> String {
     s.push_str("                               is itself a link input (M10)\n");
     s.push_str("  -install_name <path>         LC_ID_DYLIB install name (with -dylib;\n");
     s.push_str("                               defaults to the output path)\n");
+    s.push_str("  -final_output <path>         the install-name default when -install_name\n");
+    s.push_str("                               is absent (M44): the multi-arch driver\n");
+    s.push_str("                               names the universal path, every slice\n");
+    s.push_str("                               records it (refused without -dylib)\n");
     s.push_str("  -current_version <X.Y.Z>     LC_ID_DYLIB current version\n");
     s.push_str("  -compatibility_version <X.Y.Z>   LC_ID_DYLIB compatibility version\n");
     s.push_str("  -reexport_library <path>     LC_REEXPORT_DYLIB + trie re-exports\n");
@@ -1680,6 +1691,10 @@ pub fn usage() -> String {
     s.push_str("  -U <symbol>                  mark the symbol undefined while linking (M39):\n");
     s.push_str("                               the definition drops, the reference binds\n");
     s.push_str("                               per -undefined (refused with -r)\n");
+    s.push_str("  -ObjC                        pull archive members implementing an\n");
+    s.push_str("                               Objective-C class or category (M43):\n");
+    s.push_str("                               the metadata names no static reference —\n");
+    s.push_str("                               the runtime registers by section address\n");
     s.push_str("  -order_file <path>           rank symbols in the output (M11): one\n");
     s.push_str("                               `symbol` or `object.o:symbol` per line;\n");
     s.push_str("                               ranked pieces lead, unranked keep their\n");
@@ -1752,7 +1767,7 @@ pub fn usage() -> String {
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
-    s.push_str("member pull (S7), -dead_strip, -all_load/-force_load, -filelist,\n");
+    s.push_str("member pull (S7), -dead_strip, -all_load/-force_load, -ObjC, -filelist,\n");
     s.push_str("-framework/-F, -sectcreate, __cstring merging; -order_file and\n");
     s.push_str("-map shipped at M11, --print-record at M13 (the queries above).\n");
     s
