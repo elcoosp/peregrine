@@ -119,6 +119,14 @@ pub struct Options {
     /// `SUDO_UID` when the environment carries it, else the process id;
     /// `pgr_daemon::default_socket` is the derivation).
     pub resident_socket: Option<String>,
+    /// M44 `-final_output <path>`: the dylib-identity default — the
+    /// install name a dylib link derives when `-install_name` is absent
+    /// (the `ld` man page: "Specifies the install name of a dylib if
+    /// `-install_name` is not used"; the multi-arch driver names it so
+    /// every arch slice records the universal path, not its own `-o`
+    /// path). An explicit `-install_name` wins; refused where an install
+    /// name has nothing to ride (execute, bundle, relocatable).
+    pub final_output: Option<String>,
     /// M9 `-incremental` (architecture doc §7.3): the in-place incremental
     /// relink. Records the link state next to the output
     /// (`<output>.pgr-inc`) and, on the next link, patches only the changed
@@ -225,6 +233,7 @@ impl Default for Options {
             syslibroots: Vec::new(),
             resident: false,
             resident_socket: None,
+            final_output: None,
             incremental: false,
             incremental_verify: false,
             chain_word_format_explicit: false,
@@ -695,6 +704,17 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-final_output` surface conflict (M44): the dylib-identity
+    /// default cannot apply where it was requested. The verdict names
+    /// the shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    FinalOutputConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// `-platform_version`: the SDK is older than the deployment target
     /// (M10 rung 2). The SDK ships the deployment target's interfaces;
     /// building against an older one produces images dyld may refuse.
@@ -747,16 +767,14 @@ const NOOP_FLAGS: [&str; 3] = ["-no_adhoc_extensions", "-demangle", "-no_demangl
 /// M14 released the weak/lazy dylib family (`-weak_framework`,
 /// `-lazy_framework`, `-lazy_library`), M15 released `-pagezero_size`
 /// (the image-base seam), M20 released the umbrella re-exports
-/// (`-sub_umbrella`, `-sub_library`) and M39 released make-undefined
-/// (`-U`, the Pass-2 mark) — the `MH_DYLINKER` output kind and `ObjC`
-/// semantics stay here with their roadmap entry.
-const LATER_FLAGS: [(&str, &str); 2] = [
-    ("-dylinker", "MH_DYLINKER outputs are a later milestone"),
-    (
-        "-ObjC",
-        "ObjC/Swift semantics beyond section pass-through are a later milestone",
-    ),
-];
+/// (`-sub_umbrella`, `-sub_library`), M26 released the `MH_DYLINKER`
+/// output kind (`-dylinker`), M39 released make-undefined (`-U`, the
+/// Pass-2 mark) and M43 released the `ObjC` pull (`-ObjC`, the archive
+/// liveness rule) — the list is empty and the mechanism stays for the
+/// next later-milestone flag. (The `-dylinker` entry that outlived its
+/// M26 release shadowed nothing — the explicit arm won the match first,
+/// so the entry was dead weight and left with the M43 promotion.)
+const LATER_FLAGS: [(&str, &str); 0] = [];
 
 /// Parses argv (without the program name). `@response-file` arguments are
 /// expanded in place first (recursively, ld64-style tokenization).
@@ -1206,6 +1224,16 @@ fn apply_flag(
             let v = next_value(args, i, arg)?;
             opts.config.install_name = Some(v);
         }
+        // M44: the dylib-identity default — the install name a dylib
+        // link derives when -install_name is absent (the explicit
+        // -install_name wins; the identity-block conflicts refuse in
+        // finish: an executable's identity is LC_MAIN, a bundle dlopens
+        // without a region, and the relocatable output carries no
+        // identity commands).
+        "-final_output" => {
+            let v = next_value(args, i, arg)?;
+            opts.final_output = Some(v);
+        }
         "-current_version" => {
             let v = next_value(args, i, arg)?;
             opts.config.current_version =
@@ -1298,6 +1326,13 @@ fn apply_flag(
             let v = next_value(args, i, arg)?;
             opts.force_load_archives.push(v);
         }
+        // M43: the ObjC pull — members implementing an Objective-C class
+        // or category ride the archive pull without a reference (the
+        // runtime registers the metadata by section address, so no
+        // static reference seeds the fixpoint). The decision rides the
+        // config: the pull reads it in Pass 0's fixpoint, never a parse
+        // blindfold.
+        "-ObjC" => opts.config.objc = true,
         "-filelist" => {
             let v = next_value(args, i, arg)?;
             // `path[,dir]`: entries resolve against the optional directory.
@@ -1909,6 +1944,43 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                               but the relocatable output carries no identity commands"
                         .into(),
                     fix: "drop the flags or link a dylib (-dylib)".into(),
+                });
+            }
+            Ot::Dylib => {}
+        }
+    }
+    // M44: `-final_output` is a dylib's identity default — the same
+    // refusal shape as the M20 region above: an explicitly named knob
+    // that cannot apply is a refusal, never a silently dropped one.
+    if opts.final_output.is_some() {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Execute => {
+                return Err(OptsError::FinalOutputConflict {
+                    verdict: "-final_output names a dylib's install-name default, \
+                              but this output is an executable"
+                        .into(),
+                    fix: "the identity rides LC_MAIN: link a dylib (-dylib) or \
+                          drop -final_output"
+                        .into(),
+                });
+            }
+            Ot::Bundle => {
+                return Err(OptsError::FinalOutputConflict {
+                    verdict: "-final_output names a dylib's install-name default, \
+                              but this output is a bundle"
+                        .into(),
+                    fix: "bundles dlopen without an install-name identity: link a \
+                          dylib (-dylib) or drop -final_output"
+                        .into(),
+                });
+            }
+            Ot::Relocatable => {
+                return Err(OptsError::FinalOutputConflict {
+                    verdict: "-final_output names a dylib's install-name default, \
+                              but the relocatable output carries no identity commands"
+                        .into(),
+                    fix: "drop -final_output or link a dylib (-dylib)".into(),
                 });
             }
             Ot::Dylib => {}
@@ -2604,12 +2676,15 @@ mod tests {
         let o = parse(&args(&["-o", "out", "-order_file", "f.txt", "a.o"])).unwrap();
         assert_eq!(o.order_file.as_deref(), Some("f.txt"));
         // M14: the weak/lazy dylib family left the list too (the
-        // acceptance is gated in tests/m14_lazy_dylibs.rs) — the
-        // umbrella/ObjC refusals remain the actionable surface.
+        // acceptance is gated in tests/m14_lazy_dylibs.rs); M43
+        // released the ObjC pull and emptied the list — the umbrella
+        // refusals remain the actionable surface and `-ObjC` parses
+        // into its decision (the acceptance is gated in
+        // tests/m43_objc.rs).
         let err = parse(&args(&["-o", "out", "-sub_umbrella", "Foo", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("umbrella"), "{err}");
-        let err = parse(&args(&["-o", "out", "-ObjC", "a.o"])).unwrap_err();
-        assert!(err.to_string().contains("ObjC"), "{err}");
+        let o = parse(&args(&["-o", "out", "-ObjC", "a.o"])).unwrap();
+        assert!(o.config.objc, "the released flag names its decision");
         let err = parse(&args(&["-o", "out", "--wat", "a.o"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"), "{err}");
     }
