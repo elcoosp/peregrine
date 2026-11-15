@@ -49,3 +49,11 @@ harness = false
 [[bench]]
 name = "platform"
 harness = false
+
+# The M44 final-output bench: the dylib link across the -final_output
+# decision (the -o-path default beside the named universal path) over
+# the same 16-object corpus — a shape-parity gate, the identity default
+# is one string fill before Pass 0.
+[[bench]]
+name = "final_output"
+harness = false
