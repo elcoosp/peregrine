@@ -237,5 +237,20 @@ harness = false
 name = "no_compact_unwind"
 harness = false
 
+# The M37 TLV bench: the link across the thread-local carriage (the
+# TLV-free corpus beside the carried corpus) — a shape-parity gate, the
+# carriage is two sections and a header flag per variable.
+[[bench]]
+name = "tlv"
+harness = false
+
+# The M38 headerpad-max bench: the link across the install-name
+# auto-floor (the natural region beside the auto-floored region over
+# the same dylib-bound corpus) — a shape-parity gate, the floor is one
+# integer max in the packing loop.
+[[bench]]
+name = "headerpad_max"
+harness = false
+
 [lints]
 workspace = true
