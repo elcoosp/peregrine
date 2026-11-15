@@ -303,5 +303,21 @@ harness = false
 name = "objc"
 harness = false
 
+# The M45 upward-load bench: the link across the load-command kinds
+# (plain load vs the LC_LOAD_UPWARD_DYLIB umbrella mark) over the same
+# 256-bind corpus — a shape-parity gate, the kind is one header opcode
+# per dylib.
+[[bench]]
+name = "upward"
+harness = false
+
+# The M46 export-dynamic bench: the link across the -export_dynamic
+# decision (the entry-root default, the widened all-globals root set)
+# over the same 64-object corpus with four dead globals each — a
+# shape-parity gate, the widened roots price the kept bodies.
+[[bench]]
+name = "export_dynamic"
+harness = false
+
 [lints]
 workspace = true
