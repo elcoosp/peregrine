@@ -5,6 +5,41 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M42)
+
+- **M42** — the unused-dylib drop (`-dead_strip_dylibs`): ld64's flag — previously unknown on
+  the surface — is the Pass-2 decision the resolve reads: every input dylib no referenced name
+  binds against *as it is linked* leaves the header (the two-level bind names its provider — a
+  dylib whose exports nothing references cannot serve a bind), and the kept list compacts the
+  two-level ordinals onto it (symtab `n_desc` rows, the chained-fixups import table and the
+  classic opcode binds all read the compacted table). The default (`false`) keeps every
+  pre-M42 link byte-identical: every input dylib rides its `LC_LOAD_DYLIB` command regardless
+  of use. The re-export dylibs always ride (their `LC_REEXPORT_DYLIB` command is an identity
+  obligation and their REEXPORT nodes join the export trie), and every dylib a dynamic-lookup
+  reference could reach rides (the flat bind names no provider — the loader may reach any
+  loaded image's exports). The knob is a Pass-2-to-3 decision — the relocatable output refuses
+  it (the object carries no load commands), `-flat_namespace` refuses it (the flat bind names
+  no provider), and `link_reloc` re-checks so no library caller can plan the shape either.
+  The daemon wire v30 carries the decision; the `dead_strip_dylibs` bench and the
+  `dead_strip_dylibs_link` consumer example ride along.
+
+### Added (M41)
+
+- **M41** — the dedup toggle (`-no_deduplicate`): the flag the surface carried as an accepted
+  no-op since M7 is the Pass-3 decision the D4 piece builder reads — identical literals stop
+  merging, every input `S_CSTRING_LITERALS` section rides the output verbatim (one
+  whole-section piece per input, every symbol on its own instance — the pre-D4 shape). The
+  default (`true`) keeps every pre-M41 link byte-identical (the M5/D4 merge and its remap
+  unchanged). The knob is a Pass-3 decision — never a parse blindfold: the parse still splits
+  cstring sections into atoms (liveness and the POI cache are flag-independent), dead-strip
+  still drops dead literals under either decision, and there is no output-kind conflict (the
+  relocatable output never engaged the merge). Riding the same seam, the symtab's
+  output-section lookup now resolves a definition whose input section merged away *entirely*
+  (every atom a duplicate — no piece of its own remains) through its remapped address
+  instead of shipping the `n_sect 0` row the symtab contract refuses. The daemon wire v29
+  carries the decision; the `no_deduplicate` bench and the `no_deduplicate_link` consumer
+  example ride along.
+
 ### Added (M40)
 
 - **M40** — the export-trie suppression (`-no_exported_symbols`): the last always-carried
