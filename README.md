@@ -96,7 +96,7 @@ same pipeline in a resident session for warm relinks.
 | `pgr-core` | Passes 1–3: interning, resolution, layout, ICF, dead-strip, thunks, fixup planning, caches, reverse reference index, slack policy, the validated image-knob decisions |
 | `pgr-emit` | Passes 4–5: fused tile emit, ad-hoc signing, writer pool — plus the incremental engine (record, plan, clone-and-patch) and `-r` object assembly |
 | `pgr-verify` | the read-side verifier: library + CLI, selectable checks, JSON reports, baseline diffs |
-| `pgr-daemon` | `pgrd`: versioned wire protocol (v27), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit |
+| `pgr-daemon` | `pgrd`: versioned wire protocol (v28), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit |
 | `pgr-fixtures` | deterministic Mach-O object/archive builders shared by tests, benches and the fuzz corpus |
 
 ## Fast edit loops
@@ -191,7 +191,7 @@ proptests. Mach-O constants are cross-checked against the `object` crate in CI.
 
 A tracked checklist, not a promise: [docs/COMPAT.md](docs/COMPAT.md) lists each ld64 load
 command, driver flag and semantic behavior with its status, shipping milestone and fixture.
-Not-yet-supported surface (`-ObjC`, TLV, LTO execution) is **rejected with a clear message**.
+Not-yet-supported surface (`-ObjC`, LTO execution) is **rejected with a clear message**.
 
 | Group | Flags |
 |---|---|
@@ -204,7 +204,7 @@ Not-yet-supported surface (`-ObjC`, TLV, LTO execution) is **rejected with a cle
 | Order & report | `-order_file` (ld64-style rank sort), `-map` (rendered from the emit plan — report and bytes cannot disagree) |
 | Size | `-dead_strip`, `-icf=safe\|all\|none`, cross-input `__cstring` merging, lazy archive member pull |
 | Fixups & signing | `-fixup_chains`/`-no_fixup_chains`, `-fixup_chains_format offset64\|arm64e` (incl. authenticated PAC words), `-adhoc`/`-no_adhoc` |
-| Linkedit metadata | `-no_function_starts` (suppress `LC_FUNCTION_STARTS`), `-no_data_in_code` (suppress the carried data-in-code stream), `-no_compact_unwind` (suppress the synthesized `__unwind_info` section — the parse still validates the table) |
+| Linkedit metadata | `-no_function_starts` (suppress `LC_FUNCTION_STARTS`), `-no_data_in_code` (suppress the carried data-in-code stream), `-no_compact_unwind` (suppress the synthesized `__unwind_info` section — the parse still validates the table), `-no_exported_symbols` (suppress `LC_DYLD_EXPORTS_TRIE` — executables only; a dylib's trie is its two-level contract) |
 | Dyld environment | `-dyld_env DYLD_<var>=<value>` (main executable only) |
 | Fast paths | `-cache`/`-no_cache`/`-cache_max`, `-resident`/`-resident_socket`, `-incremental`/`-no_incremental`/`-incremental-verify` |
 | Queries | `--print-record`, `--print-fixup-encoding`; `pgr-verify --strict --json --checks --list-checks --baseline --fail-on` |
@@ -298,9 +298,10 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 | **M37** | Thread-local variables (TLV): the input `S_THREAD_LOCAL_*` sections the pipeline rejected since M5 ride the atom map onto the output `__DATA` segment — the `__thread_vars` descriptors (16-byte thunk/initializer pairs; a section off the stride refuses at parse with the fix), the `__thread_data` initializers, the `__thread_bss` zero-fills (VM-only, their own section — never merged into `__common`); the `ARM64_RELOC_TLVP_LOAD_PAGE21`/`PAGEOFF12` descriptor loads decode and patch ADRP/scaled-LDR-imm12 directly against the descriptor's vaddr (no GOT slot — the descriptor is always a local definition; a descriptor load past this image's definitions refuses with the fix, thread-local variables cannot bind across a dylib boundary); the descriptor slots ride chained fixups (the thunk's bind, the initializer's rebase) and the header declares `MH_HAS_TLV_DESCRIPTORS` exactly when the image carries a thread-local section; the verifier's `tlv` family joins the `--checks` registry (the marker/section parity, the descriptor stride, the descriptors' thread-local data) and the relocatable output round-trips the surface (`-r` keeps the sections and re-encodes the TLVP pair; the object links again) |
 | **M38** | The install-name auto-floor: `-headerpad_max_install_names` — the flag the surface carried as a later item since M29 — is the decision the packing loop reads: the reserved header region grows past its natural size by every load-dylib command's room to grow its install name to the longest install name in the image (+1 NUL, 8-byte aligned — `pgr_core::header_pad::install_names_growth` is the public seam a build system can plan with), the space `install_name_tool` needs to rewrite any install name in place; the default (`false`) keeps every pre-M38 link byte-identical, a single-name surface plans zero growth, the floor composes with `-headerpad` (both are minimums — the bigger wins), the relocatable output refuses the knob, and the daemon wire v26 carries the decision |
 | **M39** | The make-undefined mark: `-U <symbol>` — the flag the surface carried as a later item since M2 is the Pass-2 decision the definition install reads: the named symbol's definition (`N_SECT` or common) never installs *as it is linked* — the symtab row, the export-trie node and the `__common` slot drop, and the defining atom loses its liveness root (`-dead_strip` drops the body nothing references anymore) — and the stripped references follow the `-undefined` policy like any unresolved name (a dynamic lookup under `-undefined dynamic_lookup`, the vacuous refusal naming the misspelling under the default `error`; a stripped definition may also rebind against the dylib that exports the name); the empty table keeps every pre-M39 link byte-identical, the marks ride the resolve-reuse replay (a relink strips like the full walk, the equality gate holds), the relocatable output refuses the knob (`-r` carries its input symbol table verbatim — the driver refuses at parse time, `link_reloc` re-checks), the daemon wire v27 carries the names, and the `make_undefined` bench plus the `make_undefined_link` consumer example ride along |
+| **M40** | The export-trie suppression: `-no_exported_symbols` — the last always-carried `__LINKEDIT` command the surface could not name (`LC_DYLD_EXPORTS_TRIE`, hard-wired since M2) drops on the named decision: no `__LINKEDIT` slot, no trie bytes, `sizeofcmds` 16 bytes narrower (`pgr_core::trie::build` never runs); the default (`true`) keeps every pre-M40 link byte-identical — the command rides even when its trie is empty, the always-carried family shape (M31 function starts, M32 UUID, M36 compact unwind); the knob is an executable decision — a main executable's trie is the `dlsym`/debugger surface (its dylib partners bind *into their own* tries, never the exe's), while a dylib's trie *is* the two-level contract its clients bind through and a bundle's the dlopen surface, so a dylib, a bundle and `-r` refuse the knob with the fix (the layout re-checks so no library caller can plan the shape either), and a link carrying re-export dylibs refuses (the REEXPORT nodes ride the trie); the classic `-no_fixup_chains` path plans the same suppression (the trie is the export surface, not a fixups artifact), the verifier's dylib contract gates the trie-less foreign shape (the export surface is missing — two-level clients cannot bind), and the daemon wire v28 carries the decision; the `exported_symbols` bench plus the `no_exported_symbols_link` consumer example ride along |
 
 Every knob ships the same way: a validated decision in the library, verifier gates for the
-shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v27)
+shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v28)
 
 **Still on the roadmap:** the Apple Silicon hardware gates · LTO object execution ·
 ObjC/Swift semantics beyond section pass-through.
@@ -317,7 +318,7 @@ Each ships in its crate's `examples/` with a matching bench — run with
 `umbrella_link` · `sub_client_link` · `dyld_env_link` · `reexport_framework_link` ·
 `alias_link` · `bundle_loader_link` · `dylinker_link` · `no_pie_link` ·
 `sectalign_link` · `headerpad_link` · `data_in_code_link` · `function_starts_link` · `no_uuid_link` · `keep_private_externs_link` · `compact_unwind_link` ·
-`compact_unwind_compressed_link` · `no_compact_unwind_link` · `tlv_link` · `headerpad_max_install_names_link` · `make_undefined_link` · `library_link` · `link_map` · `order_file_link`
+`compact_unwind_compressed_link` · `no_compact_unwind_link` · `tlv_link` · `headerpad_max_install_names_link` · `make_undefined_link` · `no_exported_symbols_link` · `library_link` · `link_map` · `order_file_link`
 
 </details>
 
