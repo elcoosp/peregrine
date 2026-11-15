@@ -5,6 +5,40 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M38)
+
+- **M38** — the install-name auto-floor (`-headerpad_max_install_names`): the flag the
+  surface carried as a later item since M29 is the decision the packing loop reads — the
+  reserved header region grows past its natural size by every load-dylib command's room to
+  grow its install name to the longest install name in the image (+1 NUL, 8-byte aligned;
+  `pgr_core::header_pad::install_names_growth` is the public seam), the space
+  `install_name_tool` needs to rewrite any install name in place. The default (`false`)
+  keeps every pre-M38 link byte-identical; a single-name surface plans zero growth; the
+  floor composes with `-headerpad` (both are minimums — the bigger wins); the relocatable
+  output refuses the knob; the daemon wire v26 carries the decision; the `headerpad_max`
+  bench and the `headerpad_max_install_names_link` consumer example ride along.
+
+### Added (M37)
+
+- **M37** — thread-local variables (TLV): the input `S_THREAD_LOCAL_*` sections the
+  pipeline rejected since M5 ride the atom map onto the output `__DATA` segment — the
+  `__thread_vars` descriptors (16-byte thunk/initializer pairs; a section off the stride
+  refuses at parse with the fix), the `__thread_data` initializers, the `__thread_bss`
+  zero-fills (VM-only, their own section — never merged into `__common`). The
+  `ARM64_RELOC_TLVP_LOAD_PAGE21`/`PAGEOFF12` descriptor loads decode
+  (`RelocKind::TlvpLoadPage21`/`TlvpLoadPageOff12`) and patch ADRP/scaled-LDR-imm12
+  directly against the descriptor's vaddr — no GOT slot, the descriptor is always a local
+  definition; a descriptor load past this image's definitions refuses with the fix
+  (thread-local variables cannot bind across a dylib boundary). The descriptor slots ride
+  chained fixups (the thunk's bind, the initializer's rebase) and the header declares
+  `MH_HAS_TLV_DESCRIPTORS` exactly when the image carries a thread-local section. The
+  verifier's `tlv` family joins the `--checks` registry (`Check::Tlv`, code `tlv` — the
+  marker/section parity, the descriptor stride, the descriptors' thread-local data); the
+  relocatable output round-trips the surface (`-r` keeps the sections and re-encodes the
+  TLVP pair, the object links again); the POI cache parser revision bumps to v2 (the
+  zero-fill reclassification self-heals stale entries); the `tlv` bench and the `tlv_link`
+  consumer example ride along.
+
 ### Added (M36)
 
 - **M36** — the compact-unwind suppression (`-no_compact_unwind`): the output
