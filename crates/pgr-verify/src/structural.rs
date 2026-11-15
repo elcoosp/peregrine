@@ -806,6 +806,27 @@ pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
                     Some(24),
                 ));
             }
+            // M40: the export surface IS the two-level contract — a
+            // dylib whose header carries no `LC_DYLD_EXPORTS_TRIE`
+            // cannot serve the two-level binds its clients resolve
+            // through. The `-no_exported_symbols` suppression is
+            // executable-only, so a trie-less dylib is always a
+            // foreign shape (the Peregrine linker refuses to plan it).
+            let carries_exports = img.commands.iter().any(|c| {
+                matches!(
+                    c.kind,
+                    LoadCommandKind::LinkeditData(pgr_format::consts::LC_DYLD_EXPORTS_TRIE)
+                )
+            });
+            if !carries_exports {
+                report.issues.push(Issue::warning(
+                    Code::ExportTrie,
+                    "dylib carries no LC_DYLD_EXPORTS_TRIE — two-level clients cannot \
+                     bind against it; the -no_exported_symbols suppression is \
+                     executable-only",
+                    None,
+                ));
+            }
         }
         MH_BUNDLE => {
             if n_id > 0 {
