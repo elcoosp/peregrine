@@ -102,6 +102,16 @@ pub const LC_LOAD_DYLIB: u32 = 0xc;
 pub const LC_ID_DYLIB: u32 = 0xd;
 /// Dynamic linker path (`/usr/lib/dyld`).
 pub const LC_LOAD_DYLINKER: u32 = 0xe;
+/// A dylib's load-time initializer, the 32-bit family (`LC_ROUTINES`,
+/// `routines_command`, 40 bytes): dyld's `hasInitializer` walk reads it
+/// beside the 64-bit opcode. A 64-bit image carries the
+/// [`LC_ROUTINES_64`] shape instead.
+pub const LC_ROUTINES: u32 = 0x11;
+/// A dylib's load-time initializer (`-init`, M48): the resolved
+/// initializer's address rides the 72-byte `routines_command_64` —
+/// dyld's `hasInitializer` walk reads the command before the
+/// `__mod_init_func` sections. One `init_address` u64 at byte 8.
+pub const LC_ROUTINES_64: u32 = 0x1a;
 /// The umbrella dylib names a sub-umbrella member (`-sub_umbrella`,
 /// M20): dyld may load the umbrella when asked for the member by name.
 pub const LC_SUB_UMBRELLA: u32 = 0x13;
