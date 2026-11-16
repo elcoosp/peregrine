@@ -382,8 +382,101 @@ pub(crate) fn check_load_commands(img: &ParsedImage<'_>, report: &mut Report) {
         }
     }
     check_umbrella_region(img, report);
+    check_routines_region(img, report);
     check_dyld_environment(img, report);
     check_load_dylinker(img, report);
+}
+
+/// The M48 dylib-initializer contract: `LC_ROUTINES_64` is the dylib
+/// command dyld's `hasInitializer` walk reads first — the resolved
+/// initializer's image-space vaddr rides `init_address` (byte 8). The
+/// invariants the fixture knob can break are named: a routines command
+/// off a dylib (an executable's initializer surface is `LC_MAIN`, a
+/// bundle dlopens without one, a relocatable object carries no load
+/// commands), the 32-bit family opcode (`LC_ROUTINES`, 40 bytes — no
+/// place in a 64-bit arm64 image), an undersized command, a duplicate
+/// (dyld calls the initializer once), and an `init_address` that names
+/// no executable mapping (dyld would jump into nowhere at load time).
+fn check_routines_region(img: &ParsedImage<'_>, report: &mut Report) {
+    let is_dylib = img.header.filetype == MH_DYLIB;
+    let mut seen: usize = 0;
+    for cmd in &img.commands {
+        let LoadCommandKind::Routines = cmd.kind else {
+            continue;
+        };
+        let opcode = u32::from_le_bytes(cmd.bytes[0..4].try_into().expect("cmd rides byte 0"));
+        if opcode == pgr_format::consts::LC_ROUTINES {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                "LC_ROUTINES is the 32-bit routines_command family (40 bytes) — a 64-bit \
+                 arm64 image carries the LC_ROUTINES_64 shape (opcode 0x1a, 72 bytes)",
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        if !is_dylib {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_ROUTINES_64 is a dylib initializer command (dyld's hasInitializer \
+                     reads it from dylibs); this image carries filetype {:#x}",
+                    img.header.filetype
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        if cmd.cmdsize != 72 {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_ROUTINES_64 cmdsize {} must be 72 (the routines_command_64)",
+                    cmd.cmdsize
+                ),
+                Some(cmd.offset as u64),
+            ));
+            continue;
+        }
+        seen += 1;
+        if seen > 1 {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "duplicate LC_ROUTINES_64: dyld calls the initializer once, so the \
+                     second command is a silently dropped decision ({seen} commands seen)"
+                ),
+                Some(cmd.offset as u64),
+            ));
+        }
+        let init_addr = u64::from_le_bytes(
+            cmd.bytes[8..16]
+                .try_into()
+                .expect("init_address rides byte 8"),
+        );
+        // The address must name an executable mapping: dyld jumps to it
+        // at load time. A vaddr outside every `VM_PROT_EXECUTE` segment
+        // is a hostile or mis-derived initializer — the shape the
+        // `-init` seam can break when the symbol resolves somewhere
+        // unexpected.
+        let in_exec = img.segments.iter().any(|seg| {
+            seg.initprot & pgr_format::consts::VM_PROT_EXECUTE
+                == pgr_format::consts::VM_PROT_EXECUTE
+                && seg.vmsize > 0
+                && init_addr >= seg.vmaddr
+                && init_addr < seg.vmaddr.saturating_add(seg.vmsize)
+        });
+        if !in_exec {
+            report.issues.push(Issue::error(
+                Code::LoadCommandMalformed,
+                format!(
+                    "LC_ROUTINES_64 init_address {init_addr:#x} names no executable \
+                     mapping — dyld calls the address at load time, so the initializer \
+                     must ride a VM_PROT_EXECUTE segment"
+                ),
+                Some(cmd.offset as u64),
+            ));
+        }
+    }
 }
 
 /// The M22 dyld-environment contract: `LC_DYLD_ENVIRONMENT` is the
