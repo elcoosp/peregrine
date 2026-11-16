@@ -617,6 +617,20 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// An `-init` surface conflict (M48): the dylib initializer is a
+    /// dylib-only command (ld64: "-init can only be used with
+    /// -dynamiclib") — an executable's initializer surface is
+    /// `LC_MAIN`, a bundle dlopens without one, and the relocatable
+    /// output carries no load commands at all. The verdict names the
+    /// shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    InitConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-alias` pair the core seam refuses (M24): the
     /// `-alias <alias_name> <definition_name>` grammar (two non-empty,
     /// NUL-free, distinct names), named once. The seam's refusal rides
@@ -1690,6 +1704,26 @@ fn apply_flag(
         "-export_dynamic" => {
             opts.config.export_dynamic = true;
         }
+        // M47: the branch-island suppression — ld64's knob (`on` by
+        // default) rides the Pass-3 fixed point: the layout stops
+        // planning veneers, and an out-of-range branch the ±128 MiB
+        // `imm26` window cannot reach refuses the link with the site
+        // named. There is no output-kind conflict (the relocatable
+        // output resolves no branches, so the decision is inert there —
+        // the M41/M43 shape).
+        "-no_branch_islands" => {
+            opts.config.branch_islands = false;
+        }
+        // M48: the dylib initializer — ld64's `-init <symbol>` names
+        // the load-time initializer dyld calls when the image loads
+        // (the LC_ROUTINES_64 command; the name resolves like the
+        // entry seam's). The output-kind conflicts (executable, bundle,
+        // the relocatable output) are `finish`'s — it sees the whole
+        // surface.
+        "-init" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.init_symbol = Some(v);
+        }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
         // kind conflict is `finish`'s (it sees the whole surface).
@@ -2351,6 +2385,49 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                     fix: "the object's symbol table is the input's, verbatim: drop the \
                           flag or link an executable"
                         .into(),
+                });
+            }
+        }
+    }
+    // M48: the dylib initializer's surface conflicts. The knob is a
+    // dylib decision — ld64's own validation ("-init can only be used
+    // with -dynamiclib"): an executable's initializer surface is
+    // LC_MAIN (its entry), a bundle dlopens without a dylib
+    // initializer, and the relocatable output carries no load commands
+    // at all. An explicitly named knob that cannot apply is a refusal,
+    // never a silently dropped one (the library's re-checks — the
+    // layout and `link_reloc` — back this so no caller can plan the
+    // shape either).
+    if opts.config.init_symbol.is_some() {
+        match opts.config.filetype {
+            pgr_core::layout::OutputType::Dylib => {}
+            pgr_core::layout::OutputType::Execute => {
+                return Err(OptsError::InitConflict {
+                    verdict: "-init names a load-time initializer dyld calls when the \
+                              image loads, but this output is an executable"
+                        .into(),
+                    fix: "the executable's initializer surface is LC_MAIN (its entry): \
+                          link a dylib (-dylib) or drop the flag"
+                        .into(),
+                });
+            }
+            pgr_core::layout::OutputType::Bundle => {
+                return Err(OptsError::InitConflict {
+                    verdict: "-init names a load-time initializer dyld calls when the \
+                              image loads, but this output is a bundle"
+                        .into(),
+                    fix: "bundles dlopen without a dylib initializer: link a dylib \
+                          (-dylib) or drop the flag"
+                        .into(),
+                });
+            }
+            pgr_core::layout::OutputType::Relocatable => {
+                return Err(OptsError::InitConflict {
+                    verdict: "-init names a load-time initializer dyld calls when the \
+                              image loads, but the relocatable output carries no load \
+                              commands"
+                        .into(),
+                    fix: "drop the flag or link a dylib".into(),
                 });
             }
         }
