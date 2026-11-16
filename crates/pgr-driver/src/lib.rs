@@ -1716,6 +1716,12 @@ pub fn usage() -> String {
     s.push_str("                               executable (M51): MH_ALLOW_STACK_EXECUTION\n");
     s.push_str("                               rides the header word (refused with\n");
     s.push_str("                               -dylib, -bundle and -r)\n");
+    s.push_str("  -rename_section <fromSeg> <fromSect> <toSeg> <toSect>   rename the\n");
+    s.push_str("                               input section before grouping (M53): the\n");
+    s.push_str("                               renamed section groups with its new name\n");
+    s.push_str("                               and lands in the new segment (names max\n");
+    s.push_str("                               16 bytes; the synthetic targets refuse;\n");
+    s.push_str("                               inert with -r)\n");
     s.push_str("  -no_weak_imports             refuse weak imports dyld must look up\n");
     s.push_str("                               at runtime (M50): a weak reference no\n");
     s.push_str("                               link-time input resolves refuses with the\n");
