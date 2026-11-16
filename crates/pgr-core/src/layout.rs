@@ -647,6 +647,21 @@ pub struct LinkConfig {
     /// relocatable output strips nothing (its symbol table is the
     /// input's, verbatim — the M41/M43/M47 inert-for-relocatable shape).
     pub no_dead_strip_inits_and_terms: bool,
+    /// M53 — the section renames: `-rename_section <fromSeg> <fromSect>
+    /// <toSeg> <toSect>` — ld64's flag ("Renames section
+    /// orgSegment/orgSection to newSegment/newSection") is the Pass-3
+    /// decision the section classification reads (see
+    /// [`crate::rename`]): the first entry naming an input section's
+    /// `(segment, name)` pair renames it before grouping, so the section
+    /// groups with its new name and lands in the new segment — the
+    /// protections follow the segment the way ld64's reader-level rename
+    /// does. The default (the empty table) keeps every pre-M53 link
+    /// byte-identical — the classification pair rides every link it
+    /// always did. There is no output-kind conflict: every linked
+    /// output's sections ride the same buckets, and the relocatable
+    /// output never reads the table (its section table is the input's,
+    /// verbatim — the M41/M43/M47 inert-for-relocatable shape).
+    pub renames: crate::rename::SectionRenames,
 }
 
 impl Default for LinkConfig {
@@ -698,6 +713,7 @@ impl Default for LinkConfig {
             no_pie: false,
             allow_stack_execute: false,
             no_dead_strip_inits_and_terms: false,
+            renames: crate::rename::SectionRenames::default(),
             sect_aligns: crate::sect_align::SectAlignTable::default(),
             header_pad: None,
             data_in_code: true,
@@ -1283,6 +1299,7 @@ fn bucket_inputs(
     objects: &[InputObject],
     res: &Resolution,
     init_skip: &std::collections::HashSet<(u32, usize)>,
+    renames: &crate::rename::SectionRenames,
 ) -> Result<(BucketTable, Vec<Vec<usize>>, usize), LinkError> {
     let mut buckets: Vec<(String, String, u32, bool)> = Vec::new(); // (seg, name, flags, zerofill)
     let mut bucket_of: Vec<Vec<usize>> = Vec::with_capacity(objects.len());
@@ -1297,7 +1314,7 @@ fn bucket_inputs(
                 per_sect.push(usize::MAX);
                 continue;
             }
-            let bucket = bucket_for(in_sect, obj, &mut buckets, &mut fixup_slot_count)?;
+            let bucket = bucket_for(in_sect, obj, &mut buckets, &mut fixup_slot_count, renames)?;
             per_sect.push(bucket);
         }
         bucket_of.push(per_sect);
@@ -1318,26 +1335,10 @@ fn bucket_for(
     obj: &InputObject,
     buckets: &mut BucketTable,
     fixup_slot_count: &mut usize,
+    renames: &crate::rename::SectionRenames,
 ) -> Result<usize, LinkError> {
     if in_sect.size == 0 {
         return Ok(usize::MAX);
-    }
-    let debugish = in_sect.segment.starts_with("__LLVM")
-        || matches!(in_sect.segment.as_str(), "__LD" | "__DWARF");
-    if debugish {
-        return Ok(usize::MAX); // no load-time bytes at M1
-    }
-    if !matches!(
-        in_sect.segment.as_str(),
-        "__TEXT" | "__DATA_CONST" | "__DATA"
-    ) {
-        return Err(LinkError::Unsupported {
-            file: obj.name.clone(),
-            message: format!(
-                "input section {} in segment {} (M1 buckets __TEXT/__DATA_CONST/__DATA only)",
-                in_sect.name, in_sect.segment
-            ),
-        });
     }
     // M37: a thread-local zero-fill keeps its own section — dyld's TLV
     // allocation walks `__thread_bss` by name-able type, so it never
@@ -1345,13 +1346,33 @@ fn bucket_for(
     let tlv_zerofill = in_sect.flags & SECTION_TYPE_MASK == S_THREAD_LOCAL_ZEROFILL;
     let zerofill =
         in_sect.zerofill || in_sect.flags & SECTION_TYPE_MASK == S_ZEROFILL || tlv_zerofill;
-    let name = if zerofill && !tlv_zerofill {
+    // M53: the rename decision reads before the classification (ld64
+    // applies the rename at reader level — the renamed pair is the pair
+    // every later rule sees), but the zero-fill type rule outranks it:
+    // the `__common` merge is by type (`S_ZEROFILL` bytes always bucket
+    // `__common` in their input segment), a rename names regular
+    // sections.
+    let (seg, name) = if zerofill && !tlv_zerofill {
         // Zero-fill inputs and commons share the __common bucket
         // (S_ZEROFILL output; the kernel zero-fills the tail).
-        "__common".to_string()
+        (in_sect.segment.as_str(), "__common")
     } else {
-        in_sect.name.clone()
+        renames
+            .apply(&in_sect.segment, &in_sect.name)
+            .unwrap_or((in_sect.segment.as_str(), in_sect.name.as_str()))
     };
+    let debugish = seg.starts_with("__LLVM") || matches!(seg, "__LD" | "__DWARF");
+    if debugish {
+        return Ok(usize::MAX); // no load-time bytes at M1
+    }
+    if !matches!(seg, "__TEXT" | "__DATA_CONST" | "__DATA") {
+        return Err(LinkError::Unsupported {
+            file: obj.name.clone(),
+            message: format!(
+                "input section {name} in segment {seg} (M1 buckets __TEXT/__DATA_CONST/__DATA only)"
+            ),
+        });
+    }
     *fixup_slot_count += in_sect
         .relocs
         .iter()
@@ -1360,12 +1381,12 @@ fn bucket_for(
     Ok(
         if let Some(i) = buckets
             .iter()
-            .position(|(seg, n, _, _)| seg == &in_sect.segment && n == &name)
+            .position(|(bseg, bname, _, _)| bseg == seg && bname == name)
         {
             buckets[i].2 |= in_sect.flags;
             i
         } else {
-            buckets.push((in_sect.segment.clone(), name, in_sect.flags, zerofill));
+            buckets.push((seg.to_owned(), name.to_owned(), in_sect.flags, zerofill));
             buckets.len() - 1
         },
     )
@@ -1991,7 +2012,8 @@ pub fn layout(
         .map(|s| (objects[s.file as usize].sections[s.in_sect].size / 8) as usize)
         .sum();
     // ---- bucketing ---------------------------------------------------------
-    let (mut buckets, mut bucket_of, _pre_strip_slots) = bucket_inputs(objects, res, &init_skip)?;
+    let (mut buckets, mut bucket_of, _pre_strip_slots) =
+        bucket_inputs(objects, res, &init_skip, &cfg.renames)?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
     let needs = scan_needs(objects, res, interner, live)?;
     // The fixups payload exists when *any* slot is planned: input pointer
