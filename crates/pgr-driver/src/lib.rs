@@ -1706,6 +1706,10 @@ pub fn usage() -> String {
     s.push_str("  -U <symbol>                  mark the symbol undefined while linking (M39):\n");
     s.push_str("                               the definition drops, the reference binds\n");
     s.push_str("                               per -undefined (refused with -r)\n");
+    s.push_str("  -no_weak_imports             refuse weak imports dyld must look up\n");
+    s.push_str("                               at runtime (M50): a weak reference no\n");
+    s.push_str("                               link-time input resolves refuses with the\n");
+    s.push_str("                               symbol named; a resolved one never does\n");
     s.push_str("  -ObjC                        pull archive members implementing an\n");
     s.push_str("                               Objective-C class or category (M43):\n");
     s.push_str("                               the metadata names no static reference —\n");
