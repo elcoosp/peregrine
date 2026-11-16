@@ -358,5 +358,22 @@ harness = false
 name = "no_weak_imports"
 harness = false
 
+# The M51 stack-execution bench: the link across the -allow_stack_execute
+# decisions (the bitless default, the named flag word) over the same
+# 64-object corpus — a shape-parity gate, the decision is one bit in one
+# header word (the M27 PIE bench's shape, one flag word over).
+[[bench]]
+name = "stack_exec"
+harness = false
+
+# The M52 dead-strip init/term-roots bench: the link across the
+# -no_dead_strip_inits_and_terms decisions (the term-strip default, the
+# rooted term sections) over the same 64-object corpus with one
+# unreferenced __mod_term_func entry each — a shape gate, a root keeps
+# a body the strip would drop.
+[[bench]]
+name = "dead_strip_inits"
+harness = false
+
 [lints]
 workspace = true
