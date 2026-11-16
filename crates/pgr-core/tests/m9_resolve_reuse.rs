@@ -59,7 +59,7 @@ fn full_resolve(
             .collect();
         res.install_dylibs(dylibs, &export_ids);
     }
-    res.require_all_resolved(interner, objects, UndefinedPolicy::Error)?;
+    res.require_all_resolved(interner, objects, UndefinedPolicy::Error, false)?;
     Ok(res)
 }
 
@@ -84,6 +84,7 @@ fn reused_resolve(
         &[],
         &[],
         UndefinedPolicy::Error,
+        false,
     )
 }
 
