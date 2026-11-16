@@ -66,6 +66,8 @@ fn load_command_opcodes_match_object() {
         LC_LOAD_DYLIB,
         LC_ID_DYLIB,
         LC_LOAD_DYLINKER,
+        LC_ROUTINES,
+        LC_ROUTINES_64,
         LC_SUB_UMBRELLA,
         LC_SUB_LIBRARY,
         LC_SUB_CLIENT,
