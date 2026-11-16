@@ -99,7 +99,10 @@ pub use link::{
     check_load_symbols, link, link_cached, link_from_objects, link_reloc, link_with,
 };
 pub use make_undefined::{MakeUndefined, MakeUndefinedError, MakeUndefinedName};
-pub use objc::{OBJC_METADATA_PREFIXES, defines_objc_metadata};
+pub use objc::{
+    OBJC_METADATA_PREFIXES, OBJC1_METADATA_PREFIXES, ObjcFamily, classify_objc_metadata,
+    defines_objc_metadata,
+};
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use pagezero::PageZero;
 pub use platform::FixupEncoding;
