@@ -59,6 +59,7 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | `-no_weak_imports` | same (a weak import dyld must look up at runtime refuses with the symbol named — a link-time resolution never does; M50) |
 | `-allow_stack_execute` | same (the `MH_ALLOW_STACK_EXECUTION` flag word rides the executable's header — every stack in the task, the pthread stacks included, maps executable; executables only — the kernel loads a dylib or a bundle itself; M51) |
 | `-no_dead_strip_inits_and_terms` | same (the termination-pointer sections join the init sections' dead-strip roots — a term routine nothing references survives `-dead_strip`; the init half is the default; M52) |
+| `-rename_section <fromSeg> <fromSect> <toSeg> <toSect>` | same (the renamed section groups with its new name and lands in the new segment — the protections follow the segment; every name within the Mach-O 16-byte field width, a synthetic source or target refuses, the zero-fill type rule outranks the map, the relocatable output never reads the table; M53) |
 | `-exported_symbols_list` / `-unexported_symbols_list` | same (`*` globs supported — each star matches any, possibly empty, byte run; M14) |
 | `-mark_dead_strippable_dylib` | same |
 | `-dead_strip` / `-no_dead_strip` | same (mark-sweep over symbol-boundary atoms) |
