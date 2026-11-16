@@ -441,9 +441,14 @@ impl Resolution {
         interner: &Interner,
         objects: &[crate::object::InputObject],
         policy: UndefinedPolicy,
+        no_weak_imports: bool,
     ) -> Result<(), LinkError> {
         self.dynamic_lookups.clear();
         let mut missing: Vec<String> = Vec::new();
+        // M50: the weak-import refusals, one entry per runtime-lookup
+        // weak reference (kept beside `missing` so the aggregate error
+        // names the lane, not just the symbols).
+        let mut weak_imports: Vec<String> = Vec::new();
         // M39: the marked names' *relocation* references. A well-formed
         // object references an external name through an undefined symtab
         // row — the symtab walk below. A marked name's reference is
@@ -492,15 +497,37 @@ impl Resolution {
                 continue;
             }
             let (file, sym) = refs.first().copied().unwrap_or((FileId(0), 0));
+            // M50: the weak-import refusal reads the same weak bit the
+            // lookup fallthrough reads — a weak reference no input, no
+            // dylib and no loader resolves is a bind dyld must look up
+            // at runtime (ld64's proxy shape), and `-no_weak_imports`
+            // refuses it with the site named (ld64: "weak import of
+            // symbol '%s' not supported because of option:
+            // -no_weak_imports"). A resolved weak reference never
+            // reaches this lane: the knob prices the runtime lookup,
+            // not the weakness.
+            let is_weak_ref = objects
+                .get(file.0 as usize)
+                .and_then(|o| o.symbols.get(sym).map(|s| s.weak_ref))
+                == Some(true);
+            if is_weak_ref && no_weak_imports {
+                let file_name = objects
+                    .get(file.0 as usize)
+                    .map_or_else(|| format!("input {}", file.0), |o| o.name.clone());
+                weak_imports.push(format!(
+                    "\"{}\" (referenced from {file_name}) — the name would ride dyld's \
+                     runtime lookup; link the provider that exports it or drop the \
+                     -no_weak_imports decision",
+                    interner.name(crate::ids::StringId(*key))
+                ));
+                continue;
+            }
             match policy {
                 UndefinedPolicy::DynamicLookup => {
                     self.dynamic_lookups.insert(*key);
                 }
                 UndefinedPolicy::Error => {
-                    let is_weak_ref = objects
-                        .get(file.0 as usize)
-                        .and_then(|o| o.symbols.get(sym).map(|s| s.weak_ref));
-                    if is_weak_ref == Some(true) {
+                    if is_weak_ref {
                         self.dynamic_lookups.insert(*key);
                         continue;
                     }
@@ -525,6 +552,15 @@ impl Resolution {
                     }
                 }
             }
+        }
+        if !weak_imports.is_empty() {
+            return Err(LinkError::Symbol {
+                name: String::new(),
+                message: format!(
+                    "weak import(s) not supported under -no_weak_imports: {}",
+                    weak_imports.join(", ")
+                ),
+            });
         }
         if missing.is_empty() {
             Ok(())
@@ -1086,7 +1122,7 @@ mod tests {
 
         let (interner, _objects, mut res) = run(vec![a]);
         let err = res
-            .require_all_resolved(&interner, &[], UndefinedPolicy::Error)
+            .require_all_resolved(&interner, &[], UndefinedPolicy::Error, false)
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("_nowhere"), "{msg}");
@@ -1125,7 +1161,7 @@ mod tests {
         });
 
         let (interner, _objects, mut res) = run(vec![a, b]);
-        res.require_all_resolved(&interner, &[], UndefinedPolicy::Error)
+        res.require_all_resolved(&interner, &[], UndefinedPolicy::Error, false)
             .unwrap();
     }
 }
