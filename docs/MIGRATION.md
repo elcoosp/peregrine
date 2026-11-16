@@ -55,6 +55,8 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | `-export_dynamic` | same (every global definition roots the dead-strip mark phase in a main executable — the `dlsym` surface; M46) |
 | `-no_branch_islands` | same (the Pass-3 veneer fixed point stops planning branch islands — an out-of-range branch the ±128 MiB `imm26` window cannot reach refuses the link with the site named; M47) |
 | `-init <symbol>` | same (the dylib's load-time initializer rides `LC_ROUTINES_64` — the resolved initializer's image-space vaddr; dylibs only, ld64's "-init can only be used with -dynamiclib" — M48) |
+| `-ObjC` (GCC-era members) | same (the pull admits the ObjC1/GCC-era `.objc_class_name_`/`.objc_category_name_` index symbols beside the modern `$_` family — ld64's `.objc_c` matcher rule; the protocol list stays out — M49) |
+| `-no_weak_imports` | same (a weak import dyld must look up at runtime refuses with the symbol named — a link-time resolution never does; M50) |
 | `-exported_symbols_list` / `-unexported_symbols_list` | same (`*` globs supported — each star matches any, possibly empty, byte run; M14) |
 | `-mark_dead_strippable_dylib` | same |
 | `-dead_strip` / `-no_dead_strip` | same (mark-sweep over symbol-boundary atoms) |
