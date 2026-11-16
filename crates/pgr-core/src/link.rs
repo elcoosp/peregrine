@@ -217,6 +217,7 @@ pub fn link_from_objects(
                     &loader_export_names,
                     &make_undefined_ids,
                     cfg.undefined_policy,
+                    cfg.no_weak_imports,
                 ) {
                     Ok(res) => Some(res),
                     // The shape guard passed but the replay refused an
@@ -250,7 +251,12 @@ pub fn link_from_objects(
         full.install(&objects)?;
         full.install_dylibs(&cfg.dylibs, &export_ids);
         full.install_loader_exports(&loader_ids);
-        full.require_all_resolved(&interner, &objects, cfg.undefined_policy)?;
+        full.require_all_resolved(
+            &interner,
+            &objects,
+            cfg.undefined_policy,
+            cfg.no_weak_imports,
+        )?;
         full
     };
     // M42: the unused-dylib drop (`-dead_strip_dylibs`) — the Pass-2
