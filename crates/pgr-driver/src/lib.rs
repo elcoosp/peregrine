@@ -1706,6 +1706,16 @@ pub fn usage() -> String {
     s.push_str("  -U <symbol>                  mark the symbol undefined while linking (M39):\n");
     s.push_str("                               the definition drops, the reference binds\n");
     s.push_str("                               per -undefined (refused with -r)\n");
+    s.push_str("  -no_dead_strip_inits_and_terms   the initialization and termination\n");
+    s.push_str("                               routines never strip (M52): the\n");
+    s.push_str("                               termination-pointer sections join the\n");
+    s.push_str("                               init sections' dead-strip roots (the\n");
+    s.push_str("                               init half is the default)\n");
+    s.push_str("  -allow_stack_execute          mark the executable so every stack in\n");
+    s.push_str("                               the task (main and pthreads) maps\n");
+    s.push_str("                               executable (M51): MH_ALLOW_STACK_EXECUTION\n");
+    s.push_str("                               rides the header word (refused with\n");
+    s.push_str("                               -dylib, -bundle and -r)\n");
     s.push_str("  -no_weak_imports             refuse weak imports dyld must look up\n");
     s.push_str("                               at runtime (M50): a weak reference no\n");
     s.push_str("                               link-time input resolves refuses with the\n");
