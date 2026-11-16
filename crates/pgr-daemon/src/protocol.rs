@@ -187,8 +187,11 @@ use sha2::{Digest, Sha256};
 /// pre-M47 islands-by-default); **v35** appends the dylib initializer
 /// (M48 — a present byte, then the `-init` symbol name; a resident
 /// relink carries the initializer the client named, never the pre-M48
-/// absence).
-pub const PROTO_VERSION: u32 = 35;
+/// absence); **v36** appends the weak-import refusal (M50 — one byte
+/// naming whether a weak reference dyld must look up at runtime refuses
+/// the link; a resident relink carries the decision the client asked
+/// for, never the pre-M50 runtime-lookup fallthrough).
+pub const PROTO_VERSION: u32 = 36;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -891,6 +894,10 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     } else {
         put_u8(out, 0);
     }
+    // M50 (v36 wire): the weak-import refusal rides the tail after the
+    // initializer — one byte; a resident relink carries the decision the
+    // client asked for, never the pre-M50 runtime-lookup fallthrough.
+    put_u8(out, u8::from(cfg.no_weak_imports));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1187,6 +1194,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // (the unresolved one is the core's Symbol refusal, the output-kind
     // conflicts its re-check's).
     let init_symbol = if r.u8()? != 0 { Some(r.str()?) } else { None };
+    // M50 (v36 wire): the weak-import refusal — one byte, no validation
+    // beyond the bool (the decision reads in the resolve's undefined
+    // walk; the refusal is the core's typed Symbol error, a link-time
+    // resolution never refuses).
+    let no_weak_imports = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1259,6 +1271,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         export_dynamic,
         branch_islands: !no_branch_islands,
         init_symbol,
+        no_weak_imports,
     })
 }
 
@@ -1567,6 +1580,9 @@ mod tests {
             // The v35 tail: the dylib initializer rides the default
             // here — the name the round-trip test names.
             init_symbol: None,
+            // The v36 tail: the weak-import refusal rides the default
+            // here — the round-trip test names the set decision.
+            no_weak_imports: false,
             symbol_order: None,
         }
     }
@@ -2711,6 +2727,36 @@ mod tests {
         )
         .expect("the frame decodes");
         assert!(back.config.objc, "the pull decision crosses byte-for-byte");
+    }
+
+    #[test]
+    fn the_weak_import_refusal_round_trips() {
+        // v36: a non-default weak-import refusal must survive the round
+        // trip verbatim (a resident relink carries the decision the
+        // client asked for, never the pre-M50 runtime-lookup
+        // fallthrough).
+        let mut cfg = rich_config();
+        assert!(!cfg.no_weak_imports, "rich_config carries the default");
+        cfg.no_weak_imports = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.no_weak_imports,
+            "the refusal decision crosses byte-for-byte"
+        );
     }
 
     #[test]
