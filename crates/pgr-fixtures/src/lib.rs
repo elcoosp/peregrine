@@ -1420,7 +1420,7 @@ impl ImageBuilder {
         // M32: the suppression leaves the header uuid-free — the hashes
         // hash the bytes as they are (there is no uuid slot to zero).
         let hashes = if uuid_at != 0 {
-            let h1 = page_hashes(&mut buf, uuid_at, nblocks, sig_off, true);
+            let h1 = page_hashes(&mut buf, uuid_at, nblocks, sig_off, true)?;
             let uuid = {
                 let mut h = Sha256::new();
                 h.update(&h1);
@@ -1429,9 +1429,9 @@ impl ImageBuilder {
                 u
             };
             buf[uuid_at..uuid_at + 16].copy_from_slice(&uuid);
-            page_hashes(&mut buf, uuid_at, nblocks, sig_off, false)
+            page_hashes(&mut buf, uuid_at, nblocks, sig_off, false)?
         } else {
-            page_hashes(&mut buf, 0, nblocks, sig_off, false)
+            page_hashes(&mut buf, 0, nblocks, sig_off, false)?
         };
         let sig = build_superblob(
             &self.ident,
@@ -1934,14 +1934,26 @@ pub fn filler(seed: u64, len: usize) -> Vec<u8> {
 
 /// Computes the SHA-256 page hashes over `file[0..sig_off]`, optionally
 /// zeroing the 16 UUID bytes first (two-pass UUID derivation).
+///
+/// # Errors
+/// [`BuildError`] when the UUID window rides past the buffer — a layout
+/// bug, not a runtime condition (TDD §2: "typed errors, never panic").
 fn page_hashes(
     buf: &mut [u8],
     uuid_at: usize,
     nblocks: usize,
     sig_off: u64,
     zero_uuid: bool,
-) -> Vec<u8> {
-    let saved: [u8; 16] = buf[uuid_at..uuid_at + 16].try_into().unwrap();
+) -> Result<Vec<u8>, BuildError> {
+    let saved: [u8; 16] = buf
+        .get(uuid_at..uuid_at + 16)
+        .and_then(|window| window.try_into().ok())
+        .ok_or_else(|| {
+            BuildError(format!(
+                "the 16-byte UUID window at {uuid_at} rides past the {}-byte buffer",
+                buf.len()
+            ))
+        })?;
     if zero_uuid {
         buf[uuid_at..uuid_at + 16].fill(0);
     }
@@ -1954,7 +1966,7 @@ fn page_hashes(
         out.extend_from_slice(&h.finalize());
     }
     buf[uuid_at..uuid_at + 16].copy_from_slice(&saved);
-    out
+    Ok(out)
 }
 
 pub mod archive;
