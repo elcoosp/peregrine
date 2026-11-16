@@ -454,7 +454,7 @@ fn harness(
     full.install_make_undefined(&mark_ids, &objects, &interner)
         .unwrap();
     full.install(&objects).unwrap();
-    full.require_all_resolved(&interner, &objects, UndefinedPolicy::DynamicLookup)
+    full.require_all_resolved(&interner, &objects, UndefinedPolicy::DynamicLookup, false)
         .unwrap();
     let snapshot = ResolutionSnapshot::capture(&objects, &interner, &full, &[], &[]);
     let digests = section_digests(&objects);
@@ -477,6 +477,7 @@ fn the_reuse_replay_honors_the_mark() {
         &[],
         &mark_ids,
         UndefinedPolicy::DynamicLookup,
+        false,
     )
     .expect("the replay installs");
     let f = interner.lookup(b"_f").unwrap();
