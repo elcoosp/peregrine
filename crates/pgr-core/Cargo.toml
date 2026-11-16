@@ -337,5 +337,26 @@ harness = false
 name = "dylib_init"
 harness = false
 
+# The M49 GCC-era ObjC-pull bench: the link across the -ObjC decision
+# over the M43 corpus shape with the metadata half split into the two
+# families (16 modern `_OBJC_CLASS_$_` members, 16 GCC-era
+# `.objc_class_name_` members, 32 plain) — a shape-parity gate, the
+# widened classifier walks the same ranlib table every link already
+# parses and the pull admits both families (the smoke gate pins the
+# admitted count).
+[[bench]]
+name = "objc_pre2"
+harness = false
+
+# The M50 weak-import-refusal bench: the link across the
+# -no_weak_imports decision (the runtime-lookup fallthrough default, the
+# named refusal) over the same 64-object corpus whose every weak
+# reference resolves against the weak-loaded dylib — a shape-parity gate,
+# a resolved weak bind is not a runtime lookup and never refuses (the
+# byte-identity smoke gate pins it).
+[[bench]]
+name = "no_weak_imports"
+harness = false
+
 [lints]
 workspace = true
