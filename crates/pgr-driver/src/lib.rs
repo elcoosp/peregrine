@@ -1756,6 +1756,15 @@ pub fn usage() -> String {
     s.push_str("                               stripping (M46): each definition roots the\n");
     s.push_str("                               mark phase — the dlsym surface (refused\n");
     s.push_str("                               with -dylib, -bundle and -r)\n");
+    s.push_str("  -no_branch_islands           refuse the branch veneers the layout\n");
+    s.push_str("                               plans for out-of-range B/BL (M47): a\n");
+    s.push_str("                               branch the ±128 MiB imm26 window cannot\n");
+    s.push_str("                               reach then fails the link with the site\n");
+    s.push_str("                               named (default: islands on, ld64's)\n");
+    s.push_str("  -init <symbol>               the load-time initializer dyld calls when\n");
+    s.push_str("                               the dylib loads (M48): the resolved\n");
+    s.push_str("                               address rides LC_ROUTINES_64 (refused\n");
+    s.push_str("                               with executables, bundles and -r)\n");
     s.push_str("  -incremental                 M9 in-place relink: patch only the\n");
     s.push_str("                               changed 16 KiB tiles into a clone of\n");
     s.push_str("                               the previous output and re-sign the\n");
