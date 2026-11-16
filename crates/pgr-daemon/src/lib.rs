@@ -138,8 +138,15 @@ mod tests {
         // `-init <symbol>`) and the weak-import refusal as a tail byte
         // (M50, `-no_weak_imports`): a resident relink carries the
         // decision the client asked for, never the pre-M50
-        // runtime-lookup fallthrough.
-        assert_eq!(crate::PROTO_VERSION, 36);
+        // runtime-lookup fallthrough — and the stack-execution
+        // decision as a tail byte (M51, `-allow_stack_execute`): a
+        // resident relink carries the flag word the client asked for,
+        // never the pre-M51 bitless default — and the dead-strip
+        // init/term roots as a tail byte (M52,
+        // `-no_dead_strip_inits_and_terms`): a resident relink strips
+        // the routines the client asked to keep, never the pre-M52
+        // term-strip default.
+        assert_eq!(crate::PROTO_VERSION, 38);
     }
 
     #[test]
