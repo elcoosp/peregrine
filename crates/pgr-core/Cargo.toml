@@ -375,5 +375,13 @@ harness = false
 name = "dead_strip_inits"
 harness = false
 
+# The M53 section-rename bench: the link across the -rename_section
+# decisions (the empty map, the renamed __mydata pairs) over the same
+# 64-object corpus — a shape gate, a rename is one map lookup per
+# classified section.
+[[bench]]
+name = "rename_sections"
+harness = false
+
 [lints]
 workspace = true
