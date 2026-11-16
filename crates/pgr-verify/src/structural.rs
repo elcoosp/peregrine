@@ -874,6 +874,17 @@ pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
                     Some(24),
                 ));
             }
+            // M51: the stack-execution bit is an executable decision —
+            // the kernel gives the privilege to an exec'd main
+            // executable's stacks (main and pthreads); an image the
+            // kernel loads itself gains nothing from the flag word.
+            if img.header.flags & pgr_format::consts::MH_ALLOW_STACK_EXECUTION != 0 {
+                report.issues.push(Issue::warning(
+                    Code::HeaderInvalid,
+                    "MH_ALLOW_STACK_EXECUTION is only meaningful for executables",
+                    Some(24),
+                ));
+            }
             if let Some(id) = &img.id_dylib {
                 if id.current_version < id.compatibility_version {
                     report.issues.push(Issue::warning(
@@ -933,6 +944,16 @@ pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
                 report.issues.push(Issue::warning(
                     Code::HeaderInvalid,
                     "MH_PIE is only meaningful for executables",
+                    Some(24),
+                ));
+            }
+            // M51: the stack-execution bit is an executable decision —
+            // a bundle dlopens without an exec'd main thread to
+            // privilege.
+            if img.header.flags & pgr_format::consts::MH_ALLOW_STACK_EXECUTION != 0 {
+                report.issues.push(Issue::warning(
+                    Code::HeaderInvalid,
+                    "MH_ALLOW_STACK_EXECUTION is only meaningful for executables",
                     Some(24),
                 ));
             }
