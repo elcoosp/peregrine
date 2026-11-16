@@ -566,6 +566,38 @@ pub struct LinkConfig {
     /// (the layout's re-check backs the driver surface's earlier
     /// refusal, and [`crate::link::link_reloc`] re-checks too).
     pub export_dynamic: bool,
+    /// M47 — the branch-island suppression: `-no_branch_islands` —
+    /// ld64's knob (`fAllowBranchIslands`, on by default) is the
+    /// decision the M6 veneer fixed point reads (see
+    /// [`crate::thunks`]): when the flag names the suppression, the
+    /// layout stops planning a veneer for an out-of-range `B`/`BL`,
+    /// and a branch the ±128 MiB `imm26` window cannot reach refuses
+    /// the link with the site named (ld64 reports the same condition
+    /// when islands are disabled). The default (`true`) keeps every
+    /// pre-M47 link byte-identical — the veneer set stays a pure
+    /// function of the placed addresses. There is no output-kind
+    /// conflict: every segmented output plans branches, the
+    /// relocatable output resolves none (its relocations ride
+    /// verbatim), so `-r` never reads the decision (the M41/M43
+    /// inert-for-relocatable shape).
+    pub branch_islands: bool,
+    /// M48 — the dylib initializer: `-init <symbol>` — ld64's flag
+    /// ("Specifies the name of an initializer to be called by dyld when
+    /// the image is loaded") is the decision the header assembly reads:
+    /// the resolved initializer's address rides `LC_ROUTINES_64` (the
+    /// 72-byte `routines_command_64` — dyld's `hasInitializer` walk
+    /// reads the command before the `__mod_init_func` sections), and
+    /// the name resolves like the entry seam's (an unresolved one
+    /// refuses with the `Symbol` error). The default (`None`) keeps
+    /// every pre-M48 link byte-identical — no command rides. The knob
+    /// is a dylib decision (ld64: "-init can only be used with
+    /// -dynamiclib"): an executable's initializer surface is `LC_MAIN`
+    /// (its entry), a bundle dlopens without a dylib initializer, and
+    /// the relocatable output carries no load commands at all — all
+    /// three refuse the knob with the fix (the layout's re-check and
+    /// [`crate::link::link_reloc`] back the driver surface's earlier
+    /// refusal).
+    pub init_symbol: Option<String>,
 }
 
 impl Default for LinkConfig {
@@ -628,6 +660,8 @@ impl Default for LinkConfig {
             dead_strip_dylibs: false,
             objc: false,
             export_dynamic: false,
+            branch_islands: true,
+            init_symbol: None,
         }
     }
 }
@@ -1083,10 +1117,15 @@ fn scan_needs(
 /// veneer and still overflows means its atom alone spans more than the
 /// arm64 branch range — unrecoverable without splitting input atoms, so
 /// the link fails with a diagnostic (ld64 reports the same condition).
+/// M47: under `-no_branch_islands` the fixed point plans no veneer at
+/// all — the first out-of-range branch is the typed refusal (ld64's
+/// same condition when islands are disabled), the site named with the
+/// fix.
 fn scan_branch_overflow(
     objects: &[InputObject],
     state: &PlacedState,
     planned: &[crate::thunks::VeneerSpec],
+    cfg: &LinkConfig,
 ) -> Result<Vec<crate::thunks::VeneerSpec>, LinkError> {
     let mut specs: Vec<crate::thunks::VeneerSpec> = Vec::new();
     for fp in &state.flat {
@@ -1106,6 +1145,18 @@ fn scan_branch_overflow(
                     message: format!(
                         "branch site {site:?} is out of arm64 branch range even with a veneer \
                          — a single atom spans more than ±128 MiB"
+                    ),
+                });
+            }
+            // M47: the named suppression — no islands, no veneer. The
+            // branch the `imm26` window cannot reach is the refusal,
+            // with the fix (the flag or the layout) named.
+            if !cfg.branch_islands {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "branch site {site:?} is out of arm64 branch range (±128 MiB) and \
+                         -no_branch_islands refuses the veneer that would fix it — \
+                         drop the flag or move the branch target closer"
                     ),
                 });
             }
@@ -1643,6 +1694,33 @@ pub fn layout(
             message: format!("{verdict} — {fix}"),
         });
     }
+    // M48: the dylib initializer is a dylib decision — `LC_ROUTINES_64`
+    // is the dylib command dyld's `hasInitializer` walk reads (an
+    // executable's initializer surface is `LC_MAIN`, its entry; a bundle
+    // dlopens without a dylib initializer; the relocatable output
+    // carries no load commands at all). The refusal rides here (not
+    // only on the driver surface and `link_reloc`) so every caller pays
+    // it: a silently dropped knob would claim a load-time initializer
+    // the output never carries.
+    if cfg.init_symbol.is_some() && cfg.filetype != OutputType::Dylib {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Execute => (
+                "-init names a load-time initializer dyld calls when the image                  loads, but this output is an executable",
+                "the executable's initializer surface is LC_MAIN (its entry): link a                  dylib (-dylib) or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-init names a load-time initializer dyld calls when the image                  loads, but this output is a bundle",
+                "bundles dlopen without a dylib initializer: link a dylib (-dylib)                  or drop the flag",
+            ),
+            _ => (
+                "-init names a load-time initializer dyld calls when the image                  loads, but the relocatable output carries no load commands",
+                "drop the flag or link a dylib",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
     // M26: the loader path is an executable decision —
     // `LC_LOAD_DYLINKER` is the main-executable command (the §8.2
     // loader-configuration adjacency, the contract M22's environment
@@ -1940,8 +2018,10 @@ pub fn layout(
             unwind_size,
         )?;
         resolve_all(objects, &mut state, res, interner, cfg, fold, &init_specs)?;
-        // M6 veneer scan: every out-of-range branch site plans one veneer.
-        let new_specs = scan_branch_overflow(objects, &state, &veneers)?;
+        // M6 veneer scan: every out-of-range branch site plans one veneer
+        // (M47: the -no_branch_islands suppression refuses the site
+        // instead).
+        let new_specs = scan_branch_overflow(objects, &state, &veneers, cfg)?;
         let mut slots: Vec<FixupSlot> = Vec::new();
         for fp in &state.flat {
             for (off, kind) in &fp.piece.fixup_slots {
@@ -2378,6 +2458,30 @@ pub fn layout(
         0
     };
 
+    // ---- M48: the dylib initializer (dylibs only; the re-check above
+    // refused every other kind) — the name resolves like the entry
+    // seam's, and the address rides `LC_ROUTINES_64`'s `init_address`
+    // (dyld's "address of initialization routine": the image-space
+    // vaddr, not a `__TEXT` offset like `LC_MAIN`'s `entryoff`).
+    let init_addr = match (cfg.init_symbol.as_deref(), cfg.filetype) {
+        (Some(name), OutputType::Dylib) => {
+            let init_id = interner.lookup(name.as_bytes()).ok_or(LinkError::Symbol {
+                name: name.to_string(),
+                message: format!("init symbol \"{name}\" is not defined by any input"),
+            })?;
+            let init_vaddr = state
+                .def_addr
+                .get(&init_id.0)
+                .copied()
+                .ok_or(LinkError::Symbol {
+                    name: name.to_string(),
+                    message: format!("init symbol \"{name}\" is not defined by any input"),
+                })?;
+            Some(init_vaddr)
+        }
+        _ => None,
+    };
+
     // ---- __LINKEDIT chunks + signature sizing --------------------------------------
     let fixup_payload_size = if fixups.slot_count > 0 && chains_enabled {
         fixups.payload.len()
@@ -2521,6 +2625,7 @@ pub fn layout(
         weak_defines: res.definitions().any(|(_, d)| d.weak) || cfg.dylibs.iter().any(|d| d.weak),
         has_reexports,
         dead_strippable: cfg.dead_strippable,
+        init_addr,
     };
     let (header_bytes, uuid_at, entryoff_at) =
         build_header(cfg, &state.segments, &state.sections, &header_inputs)?;
@@ -4923,6 +5028,9 @@ struct HeaderInputs {
     has_reexports: bool,
     /// M3 `-mark_dead_strippable_dylib`.
     dead_strippable: bool,
+    /// M48 `-init <symbol>`: the resolved initializer's image-space
+    /// vaddr (dylibs only; `None` keeps the pre-M48 command set).
+    init_addr: Option<u64>,
 }
 
 /// The exact `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB`/`LC_REEXPORT_DYLIB`
@@ -4989,6 +5097,7 @@ fn build_header(
         + u32::from(emit_dylinker)
         + u32::from(is_exec) // LC_MAIN
         + u32::from(hi.filetype == OutputType::Dylib) // LC_ID_DYLIB
+        + u32::from(hi.filetype == OutputType::Dylib && hi.init_addr.is_some()) // LC_ROUTINES_64 (M48)
         + 1 // LC_SYMTAB
         + 1 // LC_DYSYMTAB
         + u32::from(!matches!(fixup_lc, FixupLc::None))
@@ -5024,6 +5133,11 @@ fn build_header(
             + if is_exec { 24 } else { 0 } // LC_MAIN
             + if hi.filetype == OutputType::Dylib {
                 dylib_cmd_size(hi.install_name.as_deref().unwrap_or(""))
+            } else {
+                0
+            }
+            + if hi.filetype == OutputType::Dylib && hi.init_addr.is_some() {
+                72 // LC_ROUTINES_64 (M48)
             } else {
                 0
             }
@@ -5269,6 +5383,32 @@ fn build_header(
         buf[lc + 12..lc + 12 + n.len()].copy_from_slice(n.as_bytes());
         lc += cmdsize;
     }
+    // LC_ROUTINES_64 (M48): the dylib initializer rides the identity
+    // block's tail, right before the symbol tables — the resolved
+    // initializer's image-space vaddr in `init_address` (dyld's
+    // `hasInitializer` walk reads the command first, before the
+    // `__mod_init_func` sections). The 72-byte `routines_command_64`:
+    // the legacy module-table index and the six reserved words ride
+    // zero (a fixed-point layout has no module table — the zeros are
+    // written for the same reason the M6 streams write theirs).
+    if let Some(init_addr) = hi.init_addr {
+        debug_assert_eq!(
+            hi.filetype,
+            OutputType::Dylib,
+            "LC_ROUTINES_64 is a dylib command (the re-check refused the rest)"
+        );
+        w32(&mut buf, lc, pgr_format::consts::LC_ROUTINES_64);
+        w32(&mut buf, lc + 4, 72);
+        w64(&mut buf, lc + 8, init_addr);
+        w64(&mut buf, lc + 16, 0); // init_module
+        w64(&mut buf, lc + 24, 0); // reserved1
+        w64(&mut buf, lc + 32, 0); // reserved2
+        w64(&mut buf, lc + 40, 0); // reserved3
+        w64(&mut buf, lc + 48, 0); // reserved4
+        w64(&mut buf, lc + 56, 0); // reserved5
+        w64(&mut buf, lc + 64, 0); // reserved6
+        lc += 72;
+    }
     w32(&mut buf, lc, pgr_format::consts::LC_SYMTAB);
     w32(&mut buf, lc + 4, 24);
     w32(&mut buf, lc + 8, hi.sym_off as u32);
@@ -5401,6 +5541,7 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice
         + cfg.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
         + usize::from(cfg.source_version.is_some()) * 16 // LC_SOURCE_VERSION
         + usize::from(is_exec) * 24 // LC_MAIN
+        + usize::from(cfg.filetype == OutputType::Dylib && cfg.init_symbol.is_some()) * 72 // LC_ROUTINES_64 (M48)
         + 24 // LC_SYMTAB
         + 80 // LC_DYSYMTAB
         + usize::from(fixup_lc == FixupLc::Chained) * 16 // LC_DYLD_CHAINED_FIXUPS
