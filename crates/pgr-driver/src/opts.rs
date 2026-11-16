@@ -1724,6 +1724,14 @@ fn apply_flag(
             let v = next_value(args, i, arg)?;
             opts.config.init_symbol = Some(v);
         }
+        // M50: the weak-import refusal — ld64's `-no_weak_imports`
+        // turns the weak reference's runtime-lookup fallthrough into a
+        // typed refusal (the resolve's undefined walk reads the
+        // decision; a link-time resolution never refuses). The
+        // relocatable output never reads it — its undefineds stay open.
+        "-no_weak_imports" => {
+            opts.config.no_weak_imports = true;
+        }
         // M24: the symbol aliases. The same validation the core seam
         // pays runs here, so the refusal names the grammar; the output
         // kind conflict is `finish`'s (it sees the whole surface).
