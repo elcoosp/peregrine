@@ -5,6 +5,27 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M53)
+
+- **M53** — the section renames (`-rename_section <fromSeg> <fromSect> <toSeg> <toSect>`): ld64's
+  flag ("Renames section orgSegment/orgSection to newSegment/newSection") joins the surface as the
+  Pass-3 decision the section classification reads (`pgr_core::rename`): the first entry naming an
+  input section's `(segment, name)` pair renames it before grouping — the section groups with its
+  new name and lands in the new segment, the protections following the segment the way ld64's
+  reader-level rename does, and two sections renamed onto one pair coalesce (the grouping is by
+  name). The default (the empty map) keeps every pre-M53 link byte-identical — the classification
+  pair rides every link it always did. The decision is validated, not defaulted: every name within
+  the Mach-O 16-byte field width (ld64's own "segment name max 16 chars" check), a source named
+  once, and a source or target the house synthesizes (`__unwind_info`, `__chain_starts`,
+  `__init_offsets`, the type-merged `__common`) refuses — a renamed input joining a synthetic
+  bucket would corrupt the section the synthesis speaks for; the zero-fill type rule outranks the
+  map (S_ZEROFILL bytes always bucket `__common`), and a rename outside the M1 bucket trio refuses
+  at layout with the segment named. There is no output-kind conflict: every linked output's
+  sections ride the same buckets, and the relocatable output never reads the table (its section
+  table is the input's, verbatim — the M41/M43/M47 inert-for-relocatable shape). The daemon wire
+  v39 carries the map (a count-prefixed table, four names per entry, re-validated on decode); the
+  `rename_sections` bench and the `rename_sections_link` consumer example ride along.
+
 ### Added (M52)
 
 - **M52** — the dead-strip init/term roots (`-no_dead_strip_inits_and_terms`): ld64's flag ("The
