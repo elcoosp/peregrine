@@ -252,8 +252,8 @@ pub fn plan_reuse(
 /// [`LinkError::Symbol`] when the replay reaches the duplicate-strong
 /// error the full walk would reach, [`LinkError::Internal`] when a reused
 /// winner's slot points outside the relink parse (an invariant break —
-/// the caller falls back), or the undefined-policy error the full path
-/// lands on.
+/// the caller falls back), or the undefined-policy error (including the
+/// M50 `-no_weak_imports` refusal) the full path lands on.
 pub fn install_reused(
     plan: &ReusePlan,
     recorded: &ResolutionSnapshot,
@@ -263,6 +263,7 @@ pub fn install_reused(
     loader_exports: &[Vec<u8>],
     make_undefined: &[StringId],
     policy: UndefinedPolicy,
+    no_weak_imports: bool,
 ) -> Result<Resolution, LinkError> {
     let span = tracing::info_span!(
         "resolve_reuse_install",
@@ -381,6 +382,6 @@ pub fn install_reused(
         .filter_map(|name| interner.lookup(name))
         .collect();
     res.install_loader_exports(&loader_ids);
-    res.require_all_resolved(interner, objects, policy)?;
+    res.require_all_resolved(interner, objects, policy, no_weak_imports)?;
     Ok(res)
 }
