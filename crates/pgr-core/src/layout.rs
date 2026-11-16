@@ -598,6 +598,24 @@ pub struct LinkConfig {
     /// [`crate::link::link_reloc`] back the driver surface's earlier
     /// refusal).
     pub init_symbol: Option<String>,
+    /// M50 — the weak-import refusal: `-no_weak_imports` — ld64's flag
+    /// ("Don't allow weak imports"; the dylibs pass refuses every bind
+    /// whose target is a runtime lookup) is the Pass-2 decision the
+    /// resolve's undefined walk reads: a weak reference (`N_WEAK_REF`,
+    /// the referrer's symtab bit) that no input, no dylib and no loader
+    /// resolves — a bind dyld must look up at runtime — refuses the
+    /// link with the symbol named, under the `-undefined error` lane
+    /// (where weak imports used to fall to the lookup silently) and
+    /// under `-undefined dynamic_lookup` alike. The default (`false`)
+    /// keeps every pre-M50 link byte-identical: an unresolvable weak
+    /// reference rides dyld's runtime lookup exactly as it did. A weak
+    /// reference that *resolves at link time* — against an input
+    /// definition or a dylib export, weak-loaded or not — is not a
+    /// runtime lookup and never refuses: the knob prices the lookup,
+    /// not the weakness. The relocatable output never reads the
+    /// decision: its undefineds stay open, `-r` resolves nothing (the
+    /// M41/M43/M47 inert-for-relocatable shape).
+    pub no_weak_imports: bool,
 }
 
 impl Default for LinkConfig {
@@ -662,6 +680,7 @@ impl Default for LinkConfig {
             export_dynamic: false,
             branch_islands: true,
             init_symbol: None,
+            no_weak_imports: false,
         }
     }
 }
