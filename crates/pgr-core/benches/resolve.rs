@@ -207,7 +207,7 @@ fn bench_resolve(c: &mut Criterion) {
         let (interner, objects) = parse(&baseline);
         let mut res = Resolution::default();
         res.install(&objects).unwrap();
-        res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error)
+        res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error, false)
             .unwrap();
         let snapshot = ResolutionSnapshot::capture(&objects, &interner, &res, &[], &[]);
         let prev = section_digests(&objects);
@@ -246,6 +246,7 @@ fn bench_resolve(c: &mut Criterion) {
                         &relink_interner,
                         &relink_objects,
                         UndefinedPolicy::Error,
+                        false,
                     )
                     .unwrap();
                     r
@@ -267,6 +268,7 @@ fn bench_resolve(c: &mut Criterion) {
                         &[],
                         &[],
                         UndefinedPolicy::Error,
+                        false,
                     )
                     .unwrap()
                 });
