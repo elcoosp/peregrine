@@ -236,7 +236,7 @@ fn revindex_excludes_dead_atoms_when_the_live_set_is_active() {
     }
     let mut res = Resolution::default();
     res.install(&objects).unwrap();
-    res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error)
+    res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error, false)
         .unwrap();
     let cfg = LinkConfig {
         dead_strip: true,
