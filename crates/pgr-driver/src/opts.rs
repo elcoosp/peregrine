@@ -617,6 +617,20 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// An `-allow_stack_execute` surface conflict (M51):
+    /// `MH_ALLOW_STACK_EXECUTION` is an executable-only bit — the
+    /// kernel loads a dylib or a bundle itself, and the relocatable
+    /// output carries no loader semantics at all (the M27 PIE shape,
+    /// one flag word over). The verdict names the shape conflict; the
+    /// help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    StackExecConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -1328,6 +1342,15 @@ fn apply_flag(
         "-mark_dead_strippable_dylib" => opts.config.dead_strippable = true,
         "-dead_strip" => opts.config.dead_strip = true,
         "-no_dead_strip" => opts.config.dead_strip = false,
+        // M52: the dead-strip init/term roots — ld64's flag ("The linker
+        // never dead strips initialization and termination routines").
+        // A boolean knob with no output-kind conflict: without
+        // `-dead_strip` the decision never fires, and the relocatable
+        // output strips nothing (the M41/M43/M47 inert-for-relocatable
+        // shape).
+        "-no_dead_strip_inits_and_terms" => {
+            opts.config.no_dead_strip_inits_and_terms = true;
+        }
         "-icf" => {
             // ld64 separates flag and value: `-icf safe`. The attached form
             // (`-icf=safe`) is matched below.
@@ -1617,6 +1640,14 @@ fn apply_flag(
         // `finish`'s (it sees the whole surface).
         "-no_pie" => {
             opts.config.no_pie = true;
+        }
+        // M51: the stack-execution decision. ld64's flag ("Marks
+        // executable so that all stacks in the task will be given stack
+        // execution privilege") — a boolean knob like the M27 PIE
+        // decision, one flag word over; the output-kind conflict is
+        // `finish`'s (it sees the whole surface).
+        "-allow_stack_execute" => {
+            opts.config.allow_stack_execute = true;
         }
         // M30: the data-in-code suppression. The flag rode the surface
         // as an accepted no-op since M1; the carriage reads the
@@ -2260,6 +2291,29 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                         .into(),
                     fix: "MH_PIE is an executable-only bit — the kernel loads a dylib \
                           or a bundle itself: link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Execute => {}
+        }
+    }
+    // M51: the stack-execution decision is an executable decision —
+    // `MH_ALLOW_STACK_EXECUTION` is the executable-only bit (the kernel
+    // loads a dylib or a bundle itself), the same refusal shape as the
+    // M27 PIE decision above: an explicitly named knob that cannot
+    // apply is a refusal, never a silently dropped one.
+    if opts.config.allow_stack_execute {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Dylib | Ot::Bundle | Ot::Relocatable => {
+                return Err(OptsError::StackExecConflict {
+                    verdict: "-allow_stack_execute sets the executable's \
+                              MH_ALLOW_STACK_EXECUTION flag, but this output is \
+                              not an executable"
+                        .into(),
+                    fix: "MH_ALLOW_STACK_EXECUTION is an executable-only bit — the \
+                          kernel loads a dylib or a bundle itself: link an \
+                          executable or drop the flag"
                         .into(),
                 });
             }
