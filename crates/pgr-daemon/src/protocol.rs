@@ -190,8 +190,16 @@ use sha2::{Digest, Sha256};
 /// absence); **v36** appends the weak-import refusal (M50 — one byte
 /// naming whether a weak reference dyld must look up at runtime refuses
 /// the link; a resident relink carries the decision the client asked
-/// for, never the pre-M50 runtime-lookup fallthrough).
-pub const PROTO_VERSION: u32 = 36;
+/// for, never the pre-M50 runtime-lookup fallthrough); **v37** appends
+/// the stack-execution decision (M51 — one byte naming whether the
+/// executable's header word carries `MH_ALLOW_STACK_EXECUTION`; a
+/// resident relink carries the flag word the client asked for, never
+/// the pre-M51 bitless default); **v38** appends the dead-strip
+/// init/term roots (M52 — one byte naming whether the
+/// termination-pointer sections join the dead-strip roots; a resident
+/// relink strips the routines the client asked to keep, never the
+/// pre-M52 term-strip default).
+pub const PROTO_VERSION: u32 = 38;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -898,6 +906,16 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // initializer — one byte; a resident relink carries the decision the
     // client asked for, never the pre-M50 runtime-lookup fallthrough.
     put_u8(out, u8::from(cfg.no_weak_imports));
+    // M51 (v37 wire): the stack-execution decision rides the tail after
+    // the weak-import refusal — one byte; a resident relink carries the
+    // flag word the client asked for, never the pre-M51 bitless
+    // default.
+    put_u8(out, u8::from(cfg.allow_stack_execute));
+    // M52 (v38 wire): the dead-strip init/term roots ride the tail
+    // after the stack-execution decision — one byte; a resident relink
+    // strips the routines the client asked to keep, never the pre-M52
+    // term-strip default.
+    put_u8(out, u8::from(cfg.no_dead_strip_inits_and_terms));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1199,6 +1217,15 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // walk; the refusal is the core's typed Symbol error, a link-time
     // resolution never refuses).
     let no_weak_imports = r.u8()? != 0;
+    // M51 (v37 wire): the stack-execution decision — one byte, no
+    // validation beyond the bool (the flag-word assembly reads the
+    // decision; the output-kind conflicts the core re-checks refuse at
+    // link time).
+    let allow_stack_execute = r.u8()? != 0;
+    // M52 (v38 wire): the dead-strip init/term roots — one byte, no
+    // validation beyond the bool (the dead-strip root set reads the
+    // decision; without `-dead_strip` it never fires).
+    let no_dead_strip_inits_and_terms = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1272,6 +1299,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         branch_islands: !no_branch_islands,
         init_symbol,
         no_weak_imports,
+        allow_stack_execute,
+        no_dead_strip_inits_and_terms,
     })
 }
 
@@ -1583,6 +1612,12 @@ mod tests {
             // The v36 tail: the weak-import refusal rides the default
             // here — the round-trip test names the set decision.
             no_weak_imports: false,
+            // The v37 tail: the stack-execution decision rides the
+            // default here — the decision the round-trip test flips.
+            allow_stack_execute: false,
+            // The v38 tail: the dead-strip init/term roots ride the
+            // default here — the decision the round-trip test flips.
+            no_dead_strip_inits_and_terms: false,
             symbol_order: None,
         }
     }
@@ -2756,6 +2791,68 @@ mod tests {
         assert!(
             back.config.no_weak_imports,
             "the refusal decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_stack_execution_decision_round_trips() {
+        // v37: a non-default stack-execution decision must survive the
+        // round trip verbatim (a resident relink carries the flag word
+        // the client asked for, never the pre-M51 bitless default).
+        let mut cfg = rich_config();
+        assert!(!cfg.allow_stack_execute, "rich_config carries the default");
+        cfg.allow_stack_execute = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.allow_stack_execute,
+            "the flag word crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_dead_strip_inits_and_terms_decision_round_trips() {
+        // v38: a non-default dead-strip init/term roots decision must
+        // survive the round trip verbatim (a resident relink strips the
+        // routines the client asked to keep, never the pre-M52
+        // term-strip default).
+        let mut cfg = rich_config();
+        assert!(
+            !cfg.no_dead_strip_inits_and_terms,
+            "rich_config carries the default"
+        );
+        cfg.no_dead_strip_inits_and_terms = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.no_dead_strip_inits_and_terms,
+            "the root decision crosses byte-for-byte"
         );
     }
 
