@@ -515,6 +515,18 @@ pub enum OptsError {
         /// The core seam's refusal (the fix).
         message: String,
     },
+    /// A `-rename_section` value the core seam refuses (M53): every
+    /// name within the Mach-O 16-byte field width, no synthetic source
+    /// or target, a source named once. The seam's refusal rides the
+    /// help — the grammar the flag accepts, not just the verdict.
+    #[error("invalid value for -rename_section: {raw}")]
+    #[diagnostic(help("{message}"))]
+    RenameValue {
+        /// The refused value as written (the four names).
+        raw: String,
+        /// The core seam's refusal (the fix).
+        message: String,
+    },
     /// A `-sub_client` surface conflict (M21): the client list is a
     /// dylib's identity block — an executable's identity is `LC_MAIN` +
     /// `LC_LOAD_DYLINKER`, a bundle dlopens without sub commands, and
@@ -1350,6 +1362,33 @@ fn apply_flag(
         // shape).
         "-no_dead_strip_inits_and_terms" => {
             opts.config.no_dead_strip_inits_and_terms = true;
+        }
+        // M53: the section rename — ld64's flag ("Renames section
+        // orgSegment/orgSection to newSegment/newSection"). Four
+        // arguments, the `-segprot` shape; the same validation the core
+        // seam pays runs here (the 16-byte name field, the synthetic
+        // targets, the doubled source), so the refusal names the grammar;
+        // a rename outside the M1 bucket trio is the layout's (it sees
+        // the classification).
+        "-rename_section" => {
+            let from_seg = next_value(args, i, arg)?;
+            let from_sect = next_value(args, i, arg)?;
+            let to_seg = next_value(args, i, arg)?;
+            let to_sect = next_value(args, i, arg)?;
+            let rename = pgr_core::rename::SectionRename::from_flag(
+                &from_seg, &from_sect, &to_seg, &to_sect,
+            )
+            .map_err(|e| OptsError::RenameValue {
+                raw: format!("{from_seg} {from_sect} {to_seg} {to_sect}"),
+                message: e.to_string(),
+            })?;
+            opts.config
+                .renames
+                .push(rename)
+                .map_err(|e| OptsError::RenameValue {
+                    raw: format!("{from_seg} {from_sect} {to_seg} {to_sect}"),
+                    message: e.to_string(),
+                })?;
         }
         "-icf" => {
             // ld64 separates flag and value: `-icf safe`. The attached form
