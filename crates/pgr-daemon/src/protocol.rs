@@ -180,8 +180,15 @@ use sha2::{Digest, Sha256};
 /// **v33** appends the export-dynamic roots (M46 — one byte naming
 /// whether every global definition roots the dead-strip mark phase; a
 /// resident relink carries the `dlsym` decision the client asked for,
-/// never the pre-M46 entry-root default).
-pub const PROTO_VERSION: u32 = 33;
+/// never the pre-M46 entry-root default); **v34** appends the
+/// branch-island suppression (M47 — one byte naming whether the layout
+/// stops planning veneers for out-of-range branches; a resident relink
+/// carries the suppression decision the client asked for, never the
+/// pre-M47 islands-by-default); **v35** appends the dylib initializer
+/// (M48 — a present byte, then the `-init` symbol name; a resident
+/// relink carries the initializer the client named, never the pre-M48
+/// absence).
+pub const PROTO_VERSION: u32 = 35;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -867,6 +874,23 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // decision the client asked for, never the pre-M46 entry-root
     // default.
     put_u8(out, u8::from(cfg.export_dynamic));
+    // M47 (v34 wire): the branch-island suppression rides the tail after
+    // the roots — one byte naming whether the layout stops planning
+    // veneers (the default rides 0, the house convention the
+    // default-true knobs pay: uuid, function starts, compact unwind); a
+    // resident relink carries the suppression decision the client asked
+    // for, never the pre-M47 islands-by-default.
+    put_u8(out, u8::from(!cfg.branch_islands));
+    // M48 (v35 wire): the dylib initializer rides the tail after the
+    // islands — a present byte, then the `-init` symbol name; a resident
+    // relink carries the initializer the client named, never the pre-M48
+    // absence.
+    if let Some(name) = &cfg.init_symbol {
+        put_u8(out, 1);
+        put_str(out, name);
+    } else {
+        put_u8(out, 0);
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1152,6 +1176,17 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // beyond the bool (the roots widen the mark phase at link time; the
     // output-kind conflicts the core re-checks refuse at link time).
     let export_dynamic = r.u8()? != 0;
+    // M47 (v34 wire): the branch-island suppression — one byte, no
+    // validation beyond the bool (the fixed point reads the decision at
+    // link time; the out-of-range refusal is the layout's typed error).
+    // The byte is the suppression (the default rides 0), so the
+    // decision reconstructs negated.
+    let no_branch_islands = r.u8()? != 0;
+    // M48 (v35 wire): the dylib initializer — a present byte, then the
+    // name (the v17 dylinker shape); the name resolves at link time
+    // (the unresolved one is the core's Symbol refusal, the output-kind
+    // conflicts its re-check's).
+    let init_symbol = if r.u8()? != 0 { Some(r.str()?) } else { None };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1222,6 +1257,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         dead_strip_dylibs,
         objc,
         export_dynamic,
+        branch_islands: !no_branch_islands,
+        init_symbol,
     })
 }
 
@@ -1523,6 +1560,13 @@ mod tests {
             // The v33 tail: the export-dynamic roots ride the default
             // here — the decision the round-trip test flips.
             export_dynamic: false,
+            // The v34 tail: the branch-island suppression rides the
+            // default here — the decision the round-trip test flips
+            // (ld64's islands-by-default).
+            branch_islands: true,
+            // The v35 tail: the dylib initializer rides the default
+            // here — the name the round-trip test names.
+            init_symbol: None,
             symbol_order: None,
         }
     }
@@ -2732,6 +2776,66 @@ mod tests {
         assert!(
             back.config.export_dynamic,
             "the root-widening decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_branch_island_suppression_round_trips() {
+        // v34: a non-default branch-island decision must survive the
+        // round trip verbatim (a resident relink carries the suppression
+        // decision the client asked for, never the pre-M47
+        // islands-by-default).
+        let mut cfg = rich_config();
+        assert!(cfg.branch_islands, "rich_config carries the default");
+        cfg.branch_islands = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.branch_islands,
+            "the suppression crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_dylib_initializer_round_trips() {
+        // v35: a named `-init` must survive the round trip verbatim (a
+        // resident relink carries the initializer the client named,
+        // never the pre-M48 absence).
+        let mut cfg = rich_config();
+        assert!(cfg.init_symbol.is_none(), "rich_config carries the default");
+        cfg.init_symbol = Some("_my_init".into());
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.init_symbol.as_deref(),
+            Some("_my_init"),
+            "the initializer crosses byte-for-byte"
         );
     }
 
