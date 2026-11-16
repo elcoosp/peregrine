@@ -545,6 +545,18 @@ pub fn link_reloc(
                 .into(),
         });
     }
+    // M48: the dylib initializer is a dylib decision — the relocatable
+    // output carries no load commands at all, so a named `-init` has no
+    // command to land on. The re-check backs the driver surface's
+    // earlier refusal: no library caller can plan the shape either.
+    if cfg.init_symbol.is_some() {
+        return Err(LinkError::Layout {
+            message: "-init names a load-time initializer dyld calls when the image loads, \
+                      but the relocatable output carries no load commands — drop -init \
+                      or link a dylib"
+                .into(),
+        });
+    }
     let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None)?;
     let (objects, interner, _export_ids, _loader_ids) =
         pull_and_intern(objects, archives, cfg, parallel, None, false)?;
