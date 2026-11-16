@@ -198,8 +198,11 @@ use sha2::{Digest, Sha256};
 /// init/term roots (M52 — one byte naming whether the
 /// termination-pointer sections join the dead-strip roots; a resident
 /// relink strips the routines the client asked to keep, never the
-/// pre-M52 term-strip default).
-pub const PROTO_VERSION: u32 = 38;
+/// pre-M52 term-strip default); **v39** appends the section renames
+/// (M53 — a count-prefixed table, four names per entry, the source pair
+/// then the target pair; a resident relink renames the sections the
+/// client named, never the pre-M53 unnamed pairs).
+pub const PROTO_VERSION: u32 = 39;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -916,6 +919,18 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // strips the routines the client asked to keep, never the pre-M52
     // term-strip default.
     put_u8(out, u8::from(cfg.no_dead_strip_inits_and_terms));
+    // M53 (v39 wire): the section renames ride the tail after the
+    // init/term roots — a count-prefixed table, four names per entry
+    // (the source pair, then the target pair, each length-prefixed); a
+    // resident relink renames the sections the client named, never the
+    // pre-M53 unnamed pairs.
+    put_u32(out, cfg.renames.len() as u32);
+    for rename in cfg.renames.iter() {
+        put_str(out, rename.from_seg());
+        put_str(out, rename.from_sect());
+        put_str(out, rename.to_seg());
+        put_str(out, rename.to_sect());
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1226,6 +1241,28 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // validation beyond the bool (the dead-strip root set reads the
     // decision; without `-dead_strip` it never fires).
     let no_dead_strip_inits_and_terms = r.u8()? != 0;
+    // M53 (v39 wire): the section renames — a count-prefixed table, four
+    // names per entry (the source pair, then the target pair). The table
+    // re-validates on decode (the seam's grammar — field widths, the
+    // synthetic targets, the doubled source): a rename the seam refuses
+    // is a malformed frame, the wire never carries a decision the core
+    // would refuse at the classification.
+    let rename_count = r.u32()?;
+    let mut rename_entries = Vec::with_capacity(rename_count as usize);
+    for _ in 0..rename_count {
+        let from_seg = r.str()?;
+        let from_sect = r.str()?;
+        let to_seg = r.str()?;
+        let to_sect = r.str()?;
+        rename_entries.push((from_seg, from_sect, to_seg, to_sect));
+    }
+    let renames = pgr_core::rename::SectionRenames::new(
+        rename_entries
+            .iter()
+            .map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str()))
+            .collect(),
+    )
+    .map_err(|_| malformed())?;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1301,6 +1338,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         no_weak_imports,
         allow_stack_execute,
         no_dead_strip_inits_and_terms,
+        renames,
     })
 }
 
@@ -1618,6 +1656,37 @@ mod tests {
             // The v38 tail: the dead-strip init/term roots ride the
             // default here — the decision the round-trip test flips.
             no_dead_strip_inits_and_terms: false,
+            // The v39 tail: a non-default rename map must survive the
+            // round trip verbatim, in flag order (a resident relink
+            // renames the sections the client named, never the pre-M53
+            // unnamed pairs). The names stay off every other needle in
+            // these tests — the splice gates corrupt exactly one field.
+            renames: {
+                let mut renames = pgr_core::rename::SectionRenames::default();
+                renames
+                    .push(
+                        pgr_core::rename::SectionRename::from_flag(
+                            "__DATA",
+                            "__mydata",
+                            "__DATA",
+                            "__ro_data",
+                        )
+                        .expect("the rename validates"),
+                    )
+                    .expect("one decision per source");
+                renames
+                    .push(
+                        pgr_core::rename::SectionRename::from_flag(
+                            "__DATA",
+                            "__other",
+                            "__DATA",
+                            "__rw_data",
+                        )
+                        .expect("the rename validates"),
+                    )
+                    .expect("one decision per source");
+                renames
+            },
             symbol_order: None,
         }
     }
@@ -2854,6 +2923,99 @@ mod tests {
             back.config.no_dead_strip_inits_and_terms,
             "the root decision crosses byte-for-byte"
         );
+    }
+
+    #[test]
+    fn the_section_renames_round_trip() {
+        // v39: the rename map must survive the round trip verbatim, in
+        // flag order (a resident relink renames the sections the client
+        // named, never the pre-M53 unnamed pairs).
+        let cfg = rich_config();
+        assert_eq!(cfg.renames.len(), 2, "rich_config names two renames");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        let renames: Vec<(String, String, String, String)> = back
+            .config
+            .renames
+            .iter()
+            .map(|r| {
+                (
+                    r.from_seg().to_string(),
+                    r.from_sect().to_string(),
+                    r.to_seg().to_string(),
+                    r.to_sect().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            renames,
+            vec![
+                (
+                    "__DATA".to_string(),
+                    "__mydata".to_string(),
+                    "__DATA".to_string(),
+                    "__ro_data".to_string()
+                ),
+                (
+                    "__DATA".to_string(),
+                    "__other".to_string(),
+                    "__DATA".to_string(),
+                    "__rw_data".to_string()
+                ),
+            ],
+            "the rename map crosses byte-for-byte, in flag order"
+        );
+    }
+
+    #[test]
+    fn a_rename_the_seam_refuses_is_a_malformed_frame() {
+        // The decode re-validates the table (the seam's grammar): a
+        // synthetic source a hostile peer names is a malformed frame —
+        // the wire never carries a decision the core would refuse at
+        // the classification. The splice keeps every byte count: the
+        // first rename's source `__mydata` rewrites onto `__common`
+        // (the same 8 bytes), a synthetic source the seam refuses.
+        let body = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+        }
+        .encode();
+        let needle = b"__mydata";
+        let mut hits = Vec::new();
+        for i in 4..body.len().saturating_sub(needle.len()) {
+            if &body[i..i + needle.len()] == needle {
+                hits.push(i);
+            }
+        }
+        assert_eq!(
+            hits.len(),
+            1,
+            "the first rename rides its source exactly once"
+        );
+        let mut bad = body;
+        bad[hits[0]..hits[0] + needle.len()].copy_from_slice(b"__common");
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
 
     #[test]
