@@ -616,6 +616,37 @@ pub struct LinkConfig {
     /// decision: its undefineds stay open, `-r` resolves nothing (the
     /// M41/M43/M47 inert-for-relocatable shape).
     pub no_weak_imports: bool,
+    /// M51 — the stack-execution decision: `-allow_stack_execute` —
+    /// ld64's flag ("Marks executable so that all stacks in the task
+    /// will be given stack execution privilege", the pthread stacks
+    /// included) is the header decision the flag-word assembly reads:
+    /// the named decision ORs `MH_ALLOW_STACK_EXECUTION` into the
+    /// executable's header flags (the kernel maps the main thread's
+    /// and every pthread's stack executable). The default (`false`)
+    /// keeps every pre-M51 link byte-identical — the bit rides no
+    /// image. The knob is an executable decision — the kernel loads a
+    /// dylib or a bundle itself and the relocatable output carries no
+    /// loader semantics at all, so the non-executable outputs refuse
+    /// it with the fix (the layout's re-check backs the driver
+    /// surface's earlier refusal; the same shape the M27 PIE decision
+    /// rides, one flag word over).
+    pub allow_stack_execute: bool,
+    /// M52 — the dead-strip init/term roots: `-no_dead_strip_inits_and_terms`
+    /// — ld64's flag ("The linker never dead strips initialization and
+    /// termination routines") is the Pass-2 decision the dead-strip root
+    /// set reads (see [`crate::deadstrip`]): the termination-pointer
+    /// sections (`S_MOD_TERM_FUNC_POINTERS`) join the
+    /// initialization-pointer sections' whole-section root treatment, so
+    /// a term routine nothing references survives `-dead_strip`. The
+    /// default (`false`) keeps every pre-M52 link byte-identical — the
+    /// init half has been the house default since M5 (the
+    /// `__mod_init_func` sections are roots; the flag never changes
+    /// them), and an unreferenced term routine strips exactly as it did.
+    /// There is no output-kind conflict: without `-dead_strip` the
+    /// decision never fires (nothing strips either way), and the
+    /// relocatable output strips nothing (its symbol table is the
+    /// input's, verbatim — the M41/M43/M47 inert-for-relocatable shape).
+    pub no_dead_strip_inits_and_terms: bool,
 }
 
 impl Default for LinkConfig {
@@ -665,6 +696,8 @@ impl Default for LinkConfig {
             bundle_loader: None,
             dylinker: None,
             no_pie: false,
+            allow_stack_execute: false,
+            no_dead_strip_inits_and_terms: false,
             sect_aligns: crate::sect_align::SectAlignTable::default(),
             header_pad: None,
             data_in_code: true,
@@ -1827,6 +1860,39 @@ pub fn layout(
             _ => (
                 "-no_pie clears the executable's MH_PIE flag, but the relocatable \
                  output carries no loader semantics",
+                "drop the flag or link an executable",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M51: the stack-execution decision is an executable decision —
+    // `MH_ALLOW_STACK_EXECUTION` is the executable-only bit (a dylib or
+    // a bundle is loaded by the kernel itself, the relocatable output
+    // carries no loader semantics), so a named
+    // `-allow_stack_execute` has no stack to privilege elsewhere. The
+    // refusal rides here (not only on the driver surface) so every
+    // caller pays it: a silently dropped knob would claim an
+    // executable stack the caller did not ask for (the same shape the
+    // M27 PIE decision rides, one flag word over).
+    if cfg.allow_stack_execute && cfg.filetype != OutputType::Execute {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Dylib => (
+                "-allow_stack_execute sets the executable's MH_ALLOW_STACK_EXECUTION \
+                 flag, but this output is a dylib",
+                "the kernel loads a dylib itself — MH_ALLOW_STACK_EXECUTION is an \
+                 executable-only bit: link an executable or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-allow_stack_execute sets the executable's MH_ALLOW_STACK_EXECUTION \
+                 flag, but this output is a bundle",
+                "the kernel loads a bundle itself — MH_ALLOW_STACK_EXECUTION is an \
+                 executable-only bit: link an executable or drop the flag",
+            ),
+            _ => (
+                "-allow_stack_execute sets the executable's MH_ALLOW_STACK_EXECUTION \
+                 flag, but the relocatable output carries no loader semantics",
                 "drop the flag or link an executable",
             ),
         };
@@ -5195,6 +5261,14 @@ fn build_header(
     }
     if is_exec && !cfg.no_pie {
         flags |= pgr_format::consts::MH_PIE;
+    }
+    // M51: the stack-execution decision — the named flag ORs
+    // `MH_ALLOW_STACK_EXECUTION` into the executable's header word (the
+    // kernel maps the main thread's and every pthread's stack
+    // executable); the non-executable outputs refused the knob above,
+    // so the bit rides an executable or no image.
+    if is_exec && cfg.allow_stack_execute {
+        flags |= pgr_format::consts::MH_ALLOW_STACK_EXECUTION;
     }
     if hi.filetype == OutputType::Dylib && !hi.has_reexports {
         flags |= pgr_format::consts::MH_NO_REEXPORTED_DYLIBS;
