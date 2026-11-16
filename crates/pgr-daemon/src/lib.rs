@@ -145,8 +145,11 @@ mod tests {
         // init/term roots as a tail byte (M52,
         // `-no_dead_strip_inits_and_terms`): a resident relink strips
         // the routines the client asked to keep, never the pre-M52
-        // term-strip default.
-        assert_eq!(crate::PROTO_VERSION, 38);
+        // term-strip default — and the section renames as a
+        // count-prefixed tail table (M53, `-rename_section`): a
+        // resident relink renames the sections the client named, never
+        // the pre-M53 unnamed pairs.
+        assert_eq!(crate::PROTO_VERSION, 39);
     }
 
     #[test]
