@@ -5,6 +5,36 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M50)
+
+- **M50** — the weak-import refusal (`-no_weak_imports`): ld64's flag joins the surface as the
+  Pass-2 decision the resolve's undefined walk reads: a weak reference (`N_WEAK_REF`) that no
+  input, no dylib and no loader resolves — a bind dyld must look up at runtime — refuses the link
+  with the symbol named, under the `-undefined error` lane (where weak imports used to fall to the
+  lookup silently) and under `-undefined dynamic_lookup` alike. The default (`false`) keeps every
+  pre-M50 link byte-identical — an unresolvable weak reference rides dyld's runtime lookup exactly
+  as it did. A weak reference that *resolves at link time* — against an input definition or a dylib
+  export, weak-loaded or not — is not a runtime lookup and never refuses: the knob prices the
+  runtime lookup, not the weakness. The relocatable output never reads the decision (its
+  undefineds stay open — the M41/M43/M47 inert-for-relocatable shape). The daemon wire v36 carries
+  the decision; the `no_weak_imports` bench and the `no_weak_imports_link` consumer example ride
+  along.
+
+### Added (M49)
+
+- **M49** — the GCC-era ObjC symbols join the `-ObjC` pull: the ledger M43's module doc drew
+  closes at ld64's own matcher — the archive pull matches ranlib-index entries on the `.objc_c`
+  prefix (the ObjC1/GCC-era C symbols: `.objc_class_name_<Class>` classes and
+  `.objc_category_name_<Class>_<Category>` categories) beside `_OBJC_CLASS_$_` (ld64-609
+  `archive_file.cpp`), so `pgr_core::objc` widens: `classify_objc_metadata` names the family
+  (`ObjcFamily` — the modern class/metaclass/category forms beside the ObjC1/GCC-era pair), the
+  pull admits both families, and the exclusions stay named — the protocol list
+  (`_OBJC_PROTOCOL_$_` — a protocol is neither a class nor a category, and ld64's matcher reads
+  neither) and the pre-2.0 method-symbol form (a method rides its class or category's metadata
+  symbols). The default stays reference-driven — an unreferenced GCC-era member stays unparsed,
+  every pre-M49 link byte-identical; the `objc_pre2` bench and the `objc_pre2_link` consumer
+  example ride along.
+
 ### Added (M48)
 
 - **M48** — the dylib initializer (`-init <symbol>`): ld64's flag — *"Specifies the name of an
