@@ -5,6 +5,35 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M52)
+
+- **M52** — the dead-strip init/term roots (`-no_dead_strip_inits_and_terms`): ld64's flag ("The
+  linker never dead strips initialization and termination routines") joins the surface as the
+  Pass-2 decision the dead-strip root set reads: the termination-pointer sections
+  (`S_MOD_TERM_FUNC_POINTERS`) join the initialization-pointer sections' whole-section root
+  treatment, so a term routine nothing references survives `-dead_strip`. The default (`false`)
+  keeps every pre-M52 link byte-identical — the init half has been the house default since M5
+  (the flag never changes it), and an unreferenced term routine strips exactly as it did. There
+  is no output-kind conflict: without `-dead_strip` the decision never fires, and the relocatable
+  output strips nothing (its symbol table is the input's, verbatim — the M41/M43/M47
+  inert-for-relocatable shape). The daemon wire v38 carries the decision; the `dead_strip_inits`
+  bench and the `no_dead_strip_inits_link` consumer example ride along.
+
+### Added (M51)
+
+- **M51** — the stack-execution decision (`-allow_stack_execute`): ld64's flag ("Marks executable
+  so that all stacks in the task will be given stack execution privilege", the pthread stacks
+  included) joins the surface as the header decision the flag-word assembly reads: the named
+  decision ORs `MH_ALLOW_STACK_EXECUTION` into the executable's header flags — the kernel maps
+  the main thread's and every pthread's stack executable. The default (`false`) keeps every
+  pre-M51 link byte-identical — the bit rides no image. The knob is an executable decision (the
+  kernel loads a dylib or a bundle itself, the relocatable output carries no loader semantics),
+  so the non-executable outputs refuse it with the fix — the layout's re-check backs the driver
+  surface's refusal (the M27 `-no_pie` shape, one flag word over), and the verifier's structural
+  contract names the broken shape (the bit on a non-executable image — a hostile third-party
+  fixture the knob cannot plan). The daemon wire v37 carries the decision; the `stack_exec` bench
+  and the `allow_stack_execute_link` consumer example ride along.
+
 ### Added (M50)
 
 - **M50** — the weak-import refusal (`-no_weak_imports`): ld64's flag joins the surface as the
