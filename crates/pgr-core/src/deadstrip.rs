@@ -4,7 +4,10 @@
 //! ld64 semantics: dead code is data-flow from *roots* — the entry point,
 //! `-u` load symbols, every extern definition when the output exports
 //! (dylibs/bundles), `__mod_init_func` pointer sections, and every section
-//! carrying `S_ATTR_NO_DEAD_STRIP`. From the roots, the mark phase follows
+//! carrying `S_ATTR_NO_DEAD_STRIP` (the `-no_dead_strip_inits_and_terms`
+//! decision, M52, widens the same treatment to the `S_MOD_TERM_FUNC_POINTERS`
+//! sections — the termination routines never strip under the named flag).
+//! From the roots, the mark phase follows
 //! relocation edges: an atom referenced from a live atom is live. Dead
 //! atoms leave the layout entirely; the M4 copy-run coalescing then breaks
 //! runs exactly at the stripped pieces (perf doc §4.3's promise).
@@ -30,7 +33,9 @@ use crate::interner::Interner;
 use crate::layout::LinkConfig;
 use crate::object::{InputObject, RelocKind, RelocTarget};
 use crate::resolve::{Rank, Resolution};
-use pgr_format::consts::{S_ATTR_NO_DEAD_STRIP, S_MOD_INIT_FUNC_POINTERS, SECTION_TYPE_MASK};
+use pgr_format::consts::{
+    S_ATTR_NO_DEAD_STRIP, S_MOD_INIT_FUNC_POINTERS, S_MOD_TERM_FUNC_POINTERS, SECTION_TYPE_MASK,
+};
 
 /// The live set: per-file atom grids plus live commons. A pure function of
 /// the inputs (determinism policy §4.3).
@@ -244,10 +249,20 @@ pub fn compute(
         }
     }
     // `__mod_init_func` / `S_ATTR_NO_DEAD_STRIP` sections stay whole.
+    // M52: `-no_dead_strip_inits_and_terms` widens the same
+    // whole-section root treatment to the termination-pointer sections —
+    // ld64's "The linker never dead strips initialization and
+    // termination routines"; the init half has been the house default
+    // since M5, the term half joins on the named decision, and the
+    // default keeps every pre-M52 link byte-identical.
     for (fi, obj) in objects.iter().enumerate() {
         for (si, sect) in obj.sections.iter().enumerate() {
             let init_ptrs = sect.flags & SECTION_TYPE_MASK == S_MOD_INIT_FUNC_POINTERS;
-            if init_ptrs || sect.flags & S_ATTR_NO_DEAD_STRIP != 0 {
+            let term_ptrs = sect.flags & SECTION_TYPE_MASK == S_MOD_TERM_FUNC_POINTERS;
+            if init_ptrs
+                || (cfg.no_dead_strip_inits_and_terms && term_ptrs)
+                || sect.flags & S_ATTR_NO_DEAD_STRIP != 0
+            {
                 for atom in 0..live[fi][si].len() {
                     roots.push(Node {
                         file: fi as u32,
