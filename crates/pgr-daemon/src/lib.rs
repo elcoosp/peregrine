@@ -133,10 +133,13 @@ mod tests {
         // roots as a tail byte (M46, `-export_dynamic`): a resident
         // relink carries the dlsym decision the client asked for,
         // never the pre-M46 entry-root default — the branch-island
-        // suppression as a tail byte (M47, `-no_branch_islands`) and
-        // the dylib initializer as a present byte + name (M48,
-        // `-init <symbol>`).
-        assert_eq!(crate::PROTO_VERSION, 35);
+        // suppression as a tail byte (M47, `-no_branch_islands`), the
+        // dylib initializer as a present byte + name (M48,
+        // `-init <symbol>`) and the weak-import refusal as a tail byte
+        // (M50, `-no_weak_imports`): a resident relink carries the
+        // decision the client asked for, never the pre-M50
+        // runtime-lookup fallthrough.
+        assert_eq!(crate::PROTO_VERSION, 36);
     }
 
     #[test]
