@@ -63,6 +63,13 @@ pub enum LoadCommandKind {
     DyldEnvironment,
     /// `LC_MAIN`.
     Main,
+    /// `LC_ROUTINES`/`LC_ROUTINES_64` (M48): a dylib's load-time
+    /// initializer — the 64-bit image carries the 72-byte
+    /// `routines_command_64` (`init_address` at byte 8, opcode 0x1a),
+    /// the command dyld's `hasInitializer` walk reads first; the
+    /// 32-bit family (0x11) classifies beside it and has no place in a
+    /// 64-bit image.
+    Routines,
     /// `LC_BUILD_VERSION` (and the legacy `LC_VERSION_MIN_*` family).
     BuildVersion,
     /// `LC_UUID`.
@@ -108,6 +115,7 @@ impl LoadCommandKind {
             LC_LOAD_DYLINKER => Self::LoadDylinker,
             crate::consts::LC_DYLD_ENVIRONMENT => Self::DyldEnvironment,
             LC_MAIN => Self::Main,
+            crate::consts::LC_ROUTINES | crate::consts::LC_ROUTINES_64 => Self::Routines,
             LC_BUILD_VERSION
             | crate::consts::LC_VERSION_MIN_MACOSX
             | crate::consts::LC_VERSION_MIN_TVOS
@@ -319,6 +327,14 @@ mod tests {
             LoadCommandKind::LinkeditData(LC_CODE_SIGNATURE)
         );
         assert_eq!(LoadCommandKind::from_cmd(LC_MAIN), LoadCommandKind::Main);
+        assert_eq!(
+            LoadCommandKind::from_cmd(crate::consts::LC_ROUTINES),
+            LoadCommandKind::Routines
+        );
+        assert_eq!(
+            LoadCommandKind::from_cmd(crate::consts::LC_ROUTINES_64),
+            LoadCommandKind::Routines
+        );
         assert_eq!(
             LoadCommandKind::from_cmd(crate::consts::LC_SUB_UMBRELLA),
             LoadCommandKind::SubUmbrella
