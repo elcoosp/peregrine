@@ -319,5 +319,23 @@ harness = false
 name = "export_dynamic"
 harness = false
 
+# The M47 branch-islands bench: the link across the -no_branch_islands
+# decision (the islands-by-default fixed point, the suppressed scan) over
+# the same in-range 64-object corpus — a shape-parity gate, the decision
+# is one comparison per out-of-range candidate and an in-range corpus
+# plans none either way (the overflow lane's refusal is the observable).
+[[bench]]
+name = "branch_islands"
+harness = false
+
+# The M48 dylib-initializer bench: the link across the -init <symbol>
+# decision (the no-command default, the named LC_ROUTINES_64) over the
+# same 64-object dylib corpus — a shape-parity gate, the decision is one
+# 72-byte identity-block command and one interner lookup (the fixed
+# header delta the smoke gate pins).
+[[bench]]
+name = "dylib_init"
+harness = false
+
 [lints]
 workspace = true
