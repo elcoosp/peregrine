@@ -5,6 +5,35 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M48)
+
+- **M48** — the dylib initializer (`-init <symbol>`): ld64's flag — *"Specifies the name of an
+  initializer to be called by dyld when the image is loaded"* — joins the surface as the identity
+  decision the header assembly reads: the resolved initializer's image-space vaddr rides
+  `LC_ROUTINES_64` (the 72-byte `routines_command_64` `pgr-format` classifies beside the 32-bit
+  family; dyld's `hasInitializer` walk reads the command before the `__mod_init_func` sections),
+  and the name resolves like the entry seam's — an unresolved one refuses with the `Symbol`
+  error. The verifier's new routines contract gates the shapes the knob can break (a command off
+  a dylib, the 32-bit opcode in a 64-bit image, an undersized command, a duplicate, an
+  `init_address` naming no executable mapping). The default (`None`) keeps every pre-M48 link
+  byte-identical. The knob is a dylib decision — ld64: "-init can only be used with
+  -dynamiclib" — so an executable, a bundle and `-r` refuse it with the fix (the layout's
+  re-check and `link_reloc` back the driver surface's refusal). The daemon wire v35 carries the
+  name; the `dylib_init` bench and the `dylib_init_link` consumer example ride along.
+
+### Added (M47)
+
+- **M47** — the branch-island suppression (`-no_branch_islands`): ld64's knob
+  (`fAllowBranchIslands`, on by default) joins the surface as the Pass-3 decision the M6 veneer
+  fixed point reads: under the named suppression the layout stops planning a veneer for an
+  out-of-range `B`/`BL`, and a branch the ±128 MiB `imm26` window cannot reach refuses the link
+  with the site named — ld64 reports the same condition when islands are disabled. The default
+  (`true`) keeps every pre-M47 link byte-identical — the veneer set stays a pure function of the
+  placed addresses, and an in-range corpus plans identical bytes under both decisions. There is
+  no output-kind conflict: the relocatable output resolves no branches, so `-r` never reads the
+  decision (the M41/M43 inert-for-relocatable shape). The daemon wire v34 carries the decision;
+  the `branch_islands` bench and the `branch_islands_link` consumer example ride along.
+
 ### Added (M46)
 
 - **M46** — the export-dynamic roots (`-export_dynamic`): ld64's liveness rule — *"Preserves all
