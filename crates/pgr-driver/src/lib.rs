@@ -577,7 +577,10 @@ fn link_to_image_recorded(
     opts: &opts::Options,
 ) -> Result<(ImageAndPlan, Option<pgr_emit::incremental::LinkRecord>), DriverError> {
     let (mut prepared, cache) = prepare_link(opts)?;
-    let timing = opts.time || opts.time_json;
+    // M58/M61: the observed faces — the time report's and the timeline's
+    // collectors ride the one-shot pipeline (the resident lane is served
+    // on the wire; `finish` refuses `--trace` beside it at this rung).
+    let timing = opts.time || opts.time_json || opts.trace_path.is_some();
     if opts.resident {
         // M9 GA fusion rung: an `-incremental` cycle's full link asks the
         // daemon to capture the fresh record (§7.3 — the sidecar must stay
@@ -601,6 +604,10 @@ fn link_to_image_recorded(
         // M58/M59 (wire v40): a timed link asks the session to observe its
         // own pipeline and serve the report on the reply.
         job.request.time = timing;
+        // M61/M62 (wire v41): a trace-asking link asks the same of the
+        // session's timeline (the rendered document rides the reply's
+        // tail; the client writes it to `--trace`'s path verbatim).
+        job.request.trace = opts.trace_path.is_some();
         let socket = opts
             .resident_socket
             .clone()
@@ -620,6 +627,15 @@ fn link_to_image_recorded(
                             println!("{}", served.render_json());
                         }
                     }
+                }
+                // M62: the served timeline writes beside the resident link
+                // (the document rides the reply verbatim; the `-map`
+                // contract — the sidecar writes when the link completes).
+                if let (Some(path), Some(json)) = (&opts.trace_path, &img.trace_json) {
+                    std::fs::write(Path::new(path), json).map_err(|source| DriverError::Io {
+                        path: path.clone(),
+                        source,
+                    })?;
                 }
                 let record = img.record.and_then(|bytes| {
                     let decoded = pgr_emit::incremental::LinkRecord::decode(&bytes);
@@ -659,21 +675,45 @@ fn link_to_image_recorded(
     // hold it. The resident path above captures through the wire; this
     // half serves the one-shot path.
     prepared.config.record_resolution = opts.incremental;
-    // M58: `--time`/`--time-json` subscribe the collector to the M54
-    // observation seam — the same pipeline, observed (the parity gate is
-    // the seam's own contract: the report never moves a byte of the plan).
+    // M58/M61: `--time`/`--time-json`/`--trace` subscribe the collectors
+    // to the M54 observation seam — the same pipeline, observed (the
+    // parity gate is the seam's own contract: neither face moves a byte
+    // of the plan). Both faces read the one observed run; the
+    // [`pgr_core::ObserverPair`] serves them together when both ride.
     let started = std::time::Instant::now();
     let emit_elapsed: Option<std::time::Duration>;
-    let mut collector = pgr_core::TimeCollector::default();
+    let mut times = pgr_core::TimeCollector::default();
+    let mut traces = pgr_core::trace::TraceCollector::new();
     let result = if timing {
-        pgr_core::link_observed(
-            &prepared.inputs,
-            &prepared.archives,
-            &prepared.config,
-            pgr_core::Parallelism::Auto,
-            cache.as_ref(),
-            &mut collector,
-        )?
+        if opts.trace_path.is_some() && (opts.time || opts.time_json) {
+            let mut pair = pgr_core::ObserverPair::new(&mut times, &mut traces);
+            pgr_core::link_observed(
+                &prepared.inputs,
+                &prepared.archives,
+                &prepared.config,
+                pgr_core::Parallelism::Auto,
+                cache.as_ref(),
+                &mut pair,
+            )?
+        } else if opts.trace_path.is_some() {
+            pgr_core::link_observed(
+                &prepared.inputs,
+                &prepared.archives,
+                &prepared.config,
+                pgr_core::Parallelism::Auto,
+                cache.as_ref(),
+                &mut traces,
+            )?
+        } else {
+            pgr_core::link_observed(
+                &prepared.inputs,
+                &prepared.archives,
+                &prepared.config,
+                pgr_core::Parallelism::Auto,
+                cache.as_ref(),
+                &mut times,
+            )?
+        }
     } else {
         pgr_core::link_cached(
             &prepared.inputs,
@@ -766,10 +806,9 @@ fn link_to_image_recorded(
     }
     // M58: the per-pass wall report — the collector's phase rows plus
     // the emit and total bands, printed beside the link (the text face
-    // under `--time`, the interchange line under `--time-json`; both
-    // faces read the one observed run).
-    if timing {
-        let mut report = collector.report();
+    // under `--time`, the interchange line under `--time-json`).
+    if opts.time || opts.time_json {
+        let mut report = times.report();
         report.emit = emit_elapsed;
         report.total = Some(total);
         if opts.time {
@@ -778,6 +817,18 @@ fn link_to_image_recorded(
         if opts.time_json {
             println!("{}", report.render_json());
         }
+    }
+    // M61: the Chrome-trace timeline — the collector's spans rendered in
+    // the Trace Event Format's object form, written beside the link (the
+    // `-map` contract: the sidecar writes when the link completes).
+    if let Some(trace_path) = &opts.trace_path {
+        let timeline = traces.finish();
+        std::fs::write(Path::new(trace_path), timeline.render()).map_err(|source| {
+            DriverError::Io {
+                path: trace_path.clone(),
+                source,
+            }
+        })?;
     }
     let record = if opts.incremental {
         Some(pgr_emit::incremental::LinkRecord::record(
@@ -1420,21 +1471,42 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
 /// force-load resolution gate has no object shape (nothing must resolve).
 fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     let (prepared, _cache) = prepare_link(opts)?;
-    // M58: the observed reloc run — the object shape's own five phases
-    // ride the report; the emit band stays `None` (the `-r` Pass 4 is
-    // the object assembly, not the fused tile emit) and the total
-    // carries the front half's wall through the assembly.
-    let timing = opts.time || opts.time_json;
+    // M58/M61: the observed reloc run — the object shape's own five
+    // phases ride the report and the timeline; the report's emit band
+    // stays `None` (the `-r` Pass 4 is the object assembly, not the
+    // fused tile emit) and the total carries the front half's wall
+    // through the assembly.
+    let timing = opts.time || opts.time_json || opts.trace_path.is_some();
     let started = std::time::Instant::now();
-    let mut collector = pgr_core::TimeCollector::default();
+    let mut times = pgr_core::TimeCollector::default();
+    let mut traces = pgr_core::trace::TraceCollector::new();
     let linked = if timing {
-        pgr_core::link_reloc_observed(
-            &prepared.inputs,
-            &prepared.archives,
-            &prepared.config,
-            pgr_core::Parallelism::Auto,
-            &mut collector,
-        )?
+        if opts.trace_path.is_some() && (opts.time || opts.time_json) {
+            let mut pair = pgr_core::ObserverPair::new(&mut times, &mut traces);
+            pgr_core::link_reloc_observed(
+                &prepared.inputs,
+                &prepared.archives,
+                &prepared.config,
+                pgr_core::Parallelism::Auto,
+                &mut pair,
+            )?
+        } else if opts.trace_path.is_some() {
+            pgr_core::link_reloc_observed(
+                &prepared.inputs,
+                &prepared.archives,
+                &prepared.config,
+                pgr_core::Parallelism::Auto,
+                &mut traces,
+            )?
+        } else {
+            pgr_core::link_reloc_observed(
+                &prepared.inputs,
+                &prepared.archives,
+                &prepared.config,
+                pgr_core::Parallelism::Auto,
+                &mut times,
+            )?
+        }
     } else {
         pgr_core::link_reloc(
             &prepared.inputs,
@@ -1466,8 +1538,8 @@ fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     // M58: the per-pass wall report — the object shape's own run (no
     // fused-emit row: the `-r` Pass 4 is the object assembly, and the
     // total band carries the wall through it).
-    if timing {
-        let mut report = collector.report();
+    if opts.time || opts.time_json {
+        let mut report = times.report();
         report.total = Some(total);
         if opts.time {
             print!("{}", report.render());
@@ -1475,6 +1547,17 @@ fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
         if opts.time_json {
             println!("{}", report.render_json());
         }
+    }
+    // M61: the timeline — the object shape's own run, written beside the
+    // object (the `-map` contract).
+    if let Some(trace_path) = &opts.trace_path {
+        let timeline = traces.finish();
+        std::fs::write(Path::new(trace_path), timeline.render()).map_err(|source| {
+            DriverError::Io {
+                path: trace_path.clone(),
+                source,
+            }
+        })?;
     }
     Ok(LinkOutcome {
         output: opts.output.clone(),
