@@ -581,7 +581,11 @@ link's hot path", recorded honestly:**
   `link_64_objects/unobserved` vs `collector` (the M54 seam's near-parity gate, shared with
   the m54/m58 benches: one push per phase, seven per segmented link, regardless of the
   corpus size) beside the faces' price over a fixed eight-row report (`render_8_rows`,
-  `parse_8_rows` — O(rows), the rows are the pipeline's own count).
+  `parse_8_rows` — O(rows), the rows are the pipeline's own count). M63 rides the same
+  bench: the `collector` variant's parse now reports one task record per input (the M63
+  seam's honest price — one channel send per input beside the per-phase pushes), and the
+  task rows' faces join as `render_8_rows_64_tasks`/`parse_8_rows_64_tasks` (the 64-object
+  link's report shape — seven phase rows, 64 worker-lane task rows, one note).
 - `wire_trace` (`cargo bench -p pgr-daemon --bench wire_trace`, M62): the served timeline's
   wire-tail codec price over a served-shape document (the warm pipeline's six phase rows,
   the ladder's note instant) — `encode_trace/6_rows` and `decode_trace/6_rows` (one length
