@@ -554,6 +554,41 @@ impl ImageCheck for SignatureCheck {
     }
 }
 
+/// A consumer-side check slotting beside the built-in families (M67).
+///
+/// [`ImageCheck`] is the registry's shape, but its identity is a
+/// [`Check`] family key — closed over the eleven built-in families the
+/// selector names. A project policy is none of those: this trait is the
+/// consumer-side unit the registry's doc promised, same contract, own
+/// identity:
+///
+/// * total (never panics on malformed input) like every family;
+/// * self-gating on the image type it applies to (a no-op elsewhere);
+/// * declaring its codes up front ([`CustomCheck::codes`] is the
+///   machine-readable half of the promise) — a policy's own tokens ride
+///   [`Code::Custom`], outside the canonical table;
+/// * pushing issues into `context.report` (the run sorts them back).
+///
+/// The name and summary are metadata (tooling reads them the way the
+/// CLI's `--list-checks` reads the registry); names are not deduplicated
+/// and two same-named checks both run in caller order — the caller's
+/// slice is the registry. `verify_with_extra_checks` drives the units
+/// after the selected built-in families, into the same sorted report.
+pub trait CustomCheck: Sync {
+    /// The check's name (metadata; not a selector key).
+    fn name(&self) -> &'static str;
+
+    /// One-line summary (what the policy covers).
+    fn summary(&self) -> &'static str;
+
+    /// The issue codes this check may report (a policy's own tokens ride
+    /// [`Code::Custom`]).
+    fn codes(&self) -> &'static [Code];
+
+    /// Runs the check against the context.
+    fn run(&self, ctx: &mut CheckContext<'_>);
+}
+
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
 static IMAGE_CHECKS: [&'static dyn ImageCheck; 11] = [
