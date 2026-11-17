@@ -139,6 +139,61 @@ fn fixed_task_rows() -> Vec<TraceTask> {
 /// (the M64 names — the reader refuses a lane no `thread_name` names).
 const WORKER_LANES: usize = 3;
 
+/// The fixed report with the M65 rung rows riding (the edited relink's
+/// report shape): the eight-row base plus the §7.3 ladder's rungs —
+/// gate, plan, patch, audit — and the handover instant. The rungs start
+/// where the layout closed; the note lands after the audit.
+fn fixed_relink_report() -> pgr_core::trace::TraceReport {
+    let span =
+        |phase: Phase, detail: PhaseDetail, start: u64, dur: u64| pgr_core::trace::TraceSpan {
+            phase,
+            detail,
+            lane: 1,
+            start_us: start,
+            dur_us: dur,
+        };
+    let mut report = fixed_report();
+    report.spans.extend([
+        span(
+            Phase::RelinkGate,
+            PhaseDetail::Gate { pages: 16 },
+            1_364,
+            120,
+        ),
+        span(
+            Phase::RelinkPlan,
+            PhaseDetail::Plan { tiles: 8, dirty: 2 },
+            1_484,
+            340,
+        ),
+        span(
+            Phase::RelinkPatch,
+            PhaseDetail::Patch {
+                bytes: 32_768,
+                tiles: 2,
+            },
+            1_824,
+            900,
+        ),
+        span(
+            Phase::RelinkAudit,
+            PhaseDetail::Audit {
+                healed: false,
+                issues: 0,
+            },
+            2_724,
+            2_500,
+        ),
+    ]);
+    report.notes.push(pgr_core::trace::TraceNote {
+        kind: "relink_fallback",
+        reason: "the record's file list moved (the bench's fixed shape)".to_string(),
+        lane: 1,
+        at_us: 5_224,
+    });
+    report
+}
+
 /// The fixed report with the M63 task rows riding (the 64-object link's
 /// report shape): the eight-row base plus the worker lanes and their 64
 /// task spans.
@@ -210,6 +265,20 @@ fn bench_trace(c: &mut Criterion) {
         b.iter(|| {
             let parsed = parse_trace_json(black_box(&json)).expect("the fixed trace parses");
             black_box(parsed.tasks.len());
+        });
+    });
+    // The M65 rung rows' price: the §7.3 ladder's spans and the handover
+    // instant ride the same faces (one edited relink's report is the
+    // 12-row shape — the pipeline's rows, the four rungs, both notes).
+    group.bench_function("render_12_rows_relink", |b| {
+        let report = fixed_relink_report();
+        b.iter(|| black_box(black_box(&report).render()));
+    });
+    group.bench_function("parse_12_rows_relink", |b| {
+        let json = fixed_relink_report().render();
+        b.iter(|| {
+            let parsed = parse_trace_json(black_box(&json)).expect("the fixed trace parses");
+            black_box(parsed.spans.len());
         });
     });
     group.finish();
