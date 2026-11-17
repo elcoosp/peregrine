@@ -5,6 +5,36 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M60)
+
+- **M60** — the build-system dependency record (`pgr_core::dep_info`, the
+  `-dependency_info <path>` driver flag): ld64's sidecar artifact — the binary file Xcode's
+  incremental builds read to learn which files a link read and which one it wrote — rides
+  Peregrine in ld64's own format (`Options::writeDependencyInfo`, apple-oss-distributions ld64):
+  the linker-version row leads (opcode `0x00`, the tool's identity string, NUL-terminated),
+  every file the link read rides the `0x10` input family (ld64's
+  object/dylib/archive/filelist/section/bundle-loader/misc names are one opcode in the field —
+  objects, archives, resolved `-l`/`-framework` libraries, `-sectcreate` payloads, the
+  symbol-list files, the bundle loader, the order file), every probed-but-missing search
+  candidate rides `0x11` (ld64's `checkFileExists` records each miss — the search's own story,
+  even when a later candidate hits), and the output — the `-map` beside it — rides `0x40`. The
+  rows sort by `(opcode, path)` for build reproducibility (ld64's rdar://30750137 sort): two
+  links of one command line write byte-identical records, the insert path keeps the canonical
+  order with one `partition_point` memmove per row, and the strict reader restores the writer's
+  data exactly (the round-trip convention, gated) or refuses the broken shapes — a foreign
+  opcode, a truncated row, an empty path — with the byte position named. The record is the
+  link's read set, never a plan product: it rides every lane that actually reads the input files
+  (the resident lane writes it client-side from the request's own list — the daemon never
+  touches the filesystem) and refuses the one that does not (`-incremental`: the relink patches
+  the recorded plan and re-reads no input file, so a record naming them would misreport the
+  run). A recording link plans the identical image the plain link does (the parity gate — the
+  sidecar never moves a byte); non-absolute paths resolve through `canonicalize` at record time
+  (ld64's `realpath` shape, one helper so every read site records the same view of one file).
+  The `dep_info` bench pins the insert/render/decode prices; the `dependency_info_link` consumer
+  example walks the record beside a real link, round-trip gate included. Riding the same seam:
+  the `-l`/`-framework` not-found refusals name the directories they searched (the weak error
+  the record's probes made visible).
+
 ### Added (M58)
 
 - **M58** — the per-pass time report (`pgr_core::time_report`, the `--time` / `--time-json`
