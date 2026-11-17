@@ -83,6 +83,13 @@ pub struct ResidentImage {
     /// absent) or on the fallback path (the client's one-shot link
     /// reports through the driver instead).
     pub time_report: Option<pgr_core::time_report::TimeReport>,
+    /// The served Chrome-trace timeline (v41, M61/M62): `Some` when the
+    /// request asked for it — the rendered Trace Event Format document
+    /// (the session's own observed pipeline), the bytes the driver
+    /// writes to `--trace`'s path verbatim. `None` when unasked (the
+    /// tail rode absent) or on the fallback path (the client's one-shot
+    /// link writes the timeline itself).
+    pub trace_json: Option<String>,
     /// How the image tail crossed (v5): [`Transport::Full`] or the tile
     /// summary (what the benches and the driver's outcome line record).
     pub transport: Transport,
@@ -180,6 +187,7 @@ impl LinkJob {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         Self { request, blobs }
     }
@@ -385,6 +393,10 @@ impl DaemonClient {
                     // request asked (the session's own observed pipeline),
                     // absent otherwise.
                     let time_report = crate::protocol::decode_time_report(&mut r)?;
+                    // The v41 tail: the served timeline when the request
+                    // asked, absent otherwise (the JSON rides verbatim —
+                    // its own strict reader validates the document).
+                    let trace_json = crate::protocol::decode_trace(&mut r)?;
                     r.done()?;
                     return Ok(ResidentImage {
                         image,
@@ -397,6 +409,7 @@ impl DaemonClient {
                         audit,
                         tiles,
                         time_report,
+                        trace_json,
                         transport,
                     });
                 }
