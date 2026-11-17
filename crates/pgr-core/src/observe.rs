@@ -183,3 +183,34 @@ impl LinkObserver for TracingObserver {
         );
     }
 }
+
+/// Two observers behind one subscription (M61): the one-shot `--time` +
+/// `--trace` shape — both faces read the one observed run, so the seam
+/// hands each event to both collectors (the first a clone, the second
+/// the original; the event is a `Duration` and an enum, the copy is the
+/// seam's own price). The pair borrows its subscribers, so the caller's
+/// collectors stay where it put them.
+pub struct ObserverPair<'a, 'b> {
+    first: &'a mut dyn LinkObserver,
+    second: &'b mut dyn LinkObserver,
+}
+
+impl<'a, 'b> ObserverPair<'a, 'b> {
+    /// Pairs two subscribers behind one [`LinkObserver`].
+    #[must_use]
+    pub fn new(first: &'a mut dyn LinkObserver, second: &'b mut dyn LinkObserver) -> Self {
+        Self { first, second }
+    }
+}
+
+impl LinkObserver for ObserverPair<'_, '_> {
+    fn on_phase(&mut self, event: PhaseEvent) {
+        self.first.on_phase(event.clone());
+        self.second.on_phase(event);
+    }
+
+    fn on_note(&mut self, note: LinkNote) {
+        self.first.on_note(note.clone());
+        self.second.on_note(note);
+    }
+}
