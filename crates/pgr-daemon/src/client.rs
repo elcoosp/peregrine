@@ -77,6 +77,12 @@ pub struct ResidentImage {
     /// [`TilePatch::image_hash`](pgr_emit::incremental::TilePatch::image_hash)
     /// gates the result before anything is written.
     pub tiles: Option<pgr_emit::incremental::TilePatch>,
+    /// The served time report (v40, M58/M59): `Some` when the request
+    /// asked for it — the session's own observed pipeline, phases and
+    /// notes and measured bands. `None` when unasked (the tail rode
+    /// absent) or on the fallback path (the client's one-shot link
+    /// reports through the driver instead).
+    pub time_report: Option<pgr_core::time_report::TimeReport>,
     /// How the image tail crossed (v5): [`Transport::Full`] or the tile
     /// summary (what the benches and the driver's outcome line record).
     pub transport: Transport,
@@ -173,6 +179,7 @@ impl LinkJob {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         Self { request, blobs }
     }
@@ -374,6 +381,10 @@ impl DaemonClient {
                             Vec::new(),
                         )
                     };
+                    // The v40 tail: the served time report when the
+                    // request asked (the session's own observed pipeline),
+                    // absent otherwise.
+                    let time_report = crate::protocol::decode_time_report(&mut r)?;
                     r.done()?;
                     return Ok(ResidentImage {
                         image,
@@ -385,6 +396,7 @@ impl DaemonClient {
                         patch,
                         audit,
                         tiles,
+                        time_report,
                         transport,
                     });
                 }
