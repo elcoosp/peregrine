@@ -208,8 +208,15 @@ use sha2::{Digest, Sha256};
 /// tail carries the collected [`pgr_core::time_report::TimeReport`] —
 /// the phases the session's run reported, the notes the ladder named,
 /// the emit and total bands the session measured; a relink's Pass-4
-/// half is the in-memory patch, so its emit band rides absent).
-pub const PROTO_VERSION: u32 = 40;
+/// half is the in-memory patch, so its emit band rides absent);
+/// **v41** appends the Chrome-trace timeline (M61/M62 — the request's
+/// `trace` flag asks the session to observe its own pipeline through
+/// the M54 seam ([`pgr_core::trace::TraceCollector`], paired with the
+/// time collector when both faces ask), and the reply's IMAGE tail
+/// carries the rendered timeline — the same one-line Trace Event
+/// Format document the one-shot `--trace` writes, the strict reader
+/// (`pgr_core::trace::parse_trace_json`) is its own face).
+pub const PROTO_VERSION: u32 = 41;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -446,6 +453,13 @@ pub struct LinkRequest {
     /// row — the POIs are resident), the ladder's notes, the measured
     /// bands. An unasked report never crosses the wire.
     pub time: bool,
+    /// Whether the session must observe its own pipeline and serve the
+    /// Chrome-trace timeline (v41, M61/M62): the reply's IMAGE tail then
+    /// carries the rendered [`pgr_core::trace::TraceReport`] — the same
+    /// one-line Trace Event Format document the one-shot `--trace`
+    /// writes, spans and instants on the session's own run. An unasked
+    /// timeline never crosses the wire.
+    pub trace: bool,
 }
 
 impl LinkRequest {
@@ -505,6 +519,8 @@ impl LinkRequest {
         put_u8(&mut b, u8::from(self.tiles));
         // M58/M59 (v40): the time-report request flag.
         put_u8(&mut b, u8::from(self.time));
+        // M61/M62 (v41): the trace-timeline request flag.
+        put_u8(&mut b, u8::from(self.trace));
         b
     }
 
@@ -555,6 +571,8 @@ impl LinkRequest {
         let audit = r.u8()? != 0;
         let tiles = r.u8()? != 0;
         let time = r.u8()? != 0;
+        // M61/M62 (v41): the trace-timeline request flag.
+        let trace = r.u8()? != 0;
         r.done()?;
         Ok(Self {
             config,
@@ -567,6 +585,7 @@ impl LinkRequest {
             audit,
             tiles,
             time,
+            trace,
         })
     }
 }
@@ -759,7 +778,7 @@ pub(crate) fn decode_time_report(
 }
 
 /// Decodes the reply's time-report tail from a whole body (v40) — the
-/// byte-slice shape of [`decode_time_report`], for a consumer that
+/// byte-slice shape of the crate-private `decode_time_report`, for a consumer that
 /// reads the tail in isolation (the wire codec's round-trip gate; the
 /// client reads it inline after the image tail). Trailing bytes after
 /// the tail refuse, like every body.
@@ -774,6 +793,49 @@ pub fn decode_time_report_bytes(
     let report = decode_time_report(&mut r)?;
     r.done()?;
     Ok(report)
+}
+
+// ---- the v41 trace-timeline tail ----------------------------------------------
+
+/// Encodes the reply's trace-timeline tail (v41): a present byte, then —
+/// when the request asked — the rendered timeline as one length-prefixed
+/// UTF-8 string (the same one-line Trace Event Format document the
+/// one-shot `--trace` writes; the strict reader is the document's own
+/// face, so the wire carries the interchange bytes verbatim and never a
+/// re-shape). An unasked timeline rides the absent byte.
+pub fn encode_trace(out: &mut Vec<u8>, trace_json: Option<&str>) {
+    match trace_json {
+        Some(json) => {
+            put_u8(out, 1);
+            put_str(out, json);
+        }
+        None => put_u8(out, 0),
+    }
+}
+
+/// Decodes the reply's trace-timeline tail (v41; see [`encode_trace`]
+/// for the shape). The JSON rides verbatim — its own reader validates
+/// the document, the wire validates the frame.
+pub(crate) fn decode_trace(r: &mut Reader<'_>) -> Result<Option<String>, DecodeError> {
+    if r.u8()? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(r.str()?))
+}
+
+/// Decodes the reply's trace-timeline tail from a whole body (v41) — the
+/// byte-slice shape of the crate-private `decode_trace`, for a consumer that reads the
+/// tail in isolation (the wire codec's round-trip gate; the client
+/// reads it inline after the time-report tail). Trailing bytes after
+/// the tail refuse, like every body.
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation or trailing bytes.
+pub fn decode_trace_bytes(body: &[u8]) -> Result<Option<String>, DecodeError> {
+    let mut r = Reader::new(body);
+    let trace = decode_trace(&mut r)?;
+    r.done()?;
+    Ok(trace)
 }
 
 /// Encodes one export-filter pattern (M14, wire v7): a kind byte (the
@@ -1571,11 +1633,13 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
 mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, TAG_LINK,
-        content_hash, decode_time_report, encode_time_report, put_u8, put_u32, put_u64,
+        content_hash, decode_time_report, decode_trace_bytes, encode_time_report, encode_trace,
+        put_u8, put_u32, put_u64,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
     use pgr_core::layout::LinkConfig;
+    use pgr_core::observe::LinkObserver;
     use pgr_core::resolve::Dylib;
 
     /// A representative config: every field set, dylibs included.
@@ -1934,6 +1998,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -1957,6 +2022,7 @@ mod tests {
             audit: true,
             tiles: true,
             time: false,
+            trace: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -1979,6 +2045,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2005,6 +2072,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -2030,6 +2098,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2054,6 +2123,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let back = LinkRequest::decode(&bare.encode()).unwrap();
         assert_eq!(back, bare);
@@ -2089,6 +2159,7 @@ mod tests {
             audit: false,
             tiles: true,
             time: false,
+            trace: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert!(back.tiles, "the flag rides the wire");
@@ -2116,6 +2187,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let body = req.encode();
         // The distinctive vmsize appears exactly once (every other field
@@ -2163,6 +2235,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the decisions cross byte-for-byte");
@@ -2195,6 +2268,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The segment name rides as a length-prefixed string exactly
@@ -2234,6 +2308,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the reserve crosses byte-for-byte");
@@ -2276,6 +2351,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The reserve rides as a present-byte + u64 exactly once (the
@@ -2315,6 +2391,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the base crosses byte-for-byte");
@@ -2347,6 +2424,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The base rides as a present-byte + u64 exactly once (the
@@ -2397,6 +2475,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2430,6 +2509,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The member rides as (kind byte, u32 len, name bytes) exactly
@@ -2476,6 +2556,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2508,6 +2589,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The client rides as (u32 len, name bytes) exactly once; the
@@ -2552,6 +2634,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2585,6 +2668,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The pair rides as (u32 len, pair bytes) exactly once; the
@@ -2629,6 +2713,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2663,6 +2748,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2708,6 +2794,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2752,6 +2839,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2786,6 +2874,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2816,6 +2905,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2846,6 +2936,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2873,6 +2964,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2904,6 +2996,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2935,6 +3028,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2963,6 +3057,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -2995,6 +3090,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3025,6 +3121,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3053,6 +3150,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3084,6 +3182,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3112,6 +3211,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3142,6 +3242,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3176,6 +3277,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3205,6 +3307,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3261,6 +3364,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         let needle = b"__mydata";
@@ -3306,6 +3410,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3339,6 +3444,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3370,6 +3476,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3400,6 +3507,7 @@ mod tests {
                 audit: false,
                 tiles: false,
                 time: false,
+                trace: false,
             }
             .encode(),
         )
@@ -3427,6 +3535,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The marks are the wire tail's last section: the count rides
@@ -3458,6 +3567,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The floor rides the config tail as (present byte, u64); the
@@ -3495,6 +3605,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The last floor byte is `__TEXT,__text`'s exponent (12); the
@@ -3534,6 +3645,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         // The path rides as (u32 len, path bytes) exactly once; the
@@ -3564,6 +3676,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         }
         .encode();
         let rel_path = b"bin/dyld";
@@ -3597,6 +3710,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: true,
+            trace: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -3604,6 +3718,32 @@ mod tests {
         // The flag flips cleanly over the wire.
         req.time = false;
         assert_ne!(LinkRequest::decode(&req.encode()).unwrap(), back);
+    }
+
+    #[test]
+    fn the_trace_flag_round_trips_byte_shape() {
+        let mut req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: true,
+        };
+        let body = req.encode();
+        let back = LinkRequest::decode(&body).unwrap();
+        assert_eq!(back, req, "the trace flag rides its own byte (v41)");
+        req.trace = false;
+        assert_ne!(LinkRequest::decode(&req.encode()).unwrap(), back);
+        // Both faces ask together (the paired collectors' shape).
+        req.time = true;
+        req.trace = true;
+        assert!(LinkRequest::decode(&req.encode()).unwrap().trace);
     }
 
     /// A representative served report: the warm pipeline's phases, an
@@ -3685,5 +3825,66 @@ mod tests {
         put_u64(&mut body, 1);
         let mut r = Reader::new(&body);
         assert!(decode_time_report(&mut r).is_err());
+    }
+
+    /// A representative served timeline: the session's rendered
+    /// document, byte-for-byte what the one-shot `--trace` writes.
+    fn served_trace() -> String {
+        use pgr_core::observe::{Phase, PhaseDetail};
+        let mut c = pgr_core::trace::TraceCollector::new();
+        c.on_phase(pgr_core::observe::PhaseEvent {
+            phase: Phase::ArchivePull,
+            detail: PhaseDetail::Members { pulled: 3 },
+            elapsed: std::time::Duration::from_micros(42),
+        });
+        c.on_phase(pgr_core::observe::PhaseEvent {
+            phase: Phase::Resolve,
+            detail: PhaseDetail::Winners { reused: true },
+            elapsed: std::time::Duration::from_micros(23),
+        });
+        c.on_note(pgr_core::observe::LinkNote::ResolveReuseFallback {
+            reason: "the seed's file list moved \"(the escape rides)\"".to_string(),
+        });
+        c.finish().render()
+    }
+
+    #[test]
+    fn the_trace_tail_round_trips() {
+        let json = served_trace();
+        // The rendered document is the strict reader's own face — the
+        // wire never re-shapes it.
+        assert!(
+            pgr_core::trace::parse_trace_json(&json).is_ok(),
+            "the served timeline is a valid interchange document"
+        );
+        let mut body = Vec::new();
+        encode_trace(&mut body, Some(&json));
+        let back = decode_trace_bytes(&body).unwrap();
+        assert_eq!(
+            back.as_deref(),
+            Some(json.as_str()),
+            "the bytes ride verbatim"
+        );
+    }
+
+    #[test]
+    fn the_trace_tail_rides_absent() {
+        let mut body = Vec::new();
+        encode_trace(&mut body, None);
+        assert_eq!(decode_trace_bytes(&body).unwrap(), None, "one byte");
+        assert_eq!(body.len(), 1, "an unasked timeline never crosses");
+    }
+
+    #[test]
+    fn the_trace_tail_refuses_truncation_and_trailing_bytes() {
+        let mut body = Vec::new();
+        encode_trace(&mut body, Some("{\"traceEvents\":[]}"));
+        // The length prefix names more bytes than the body carries.
+        let truncated = &body[..body.len() - 1];
+        assert!(decode_trace_bytes(truncated).is_err());
+        // A byte past the tail refuses (the strict-frame rule).
+        let mut trailing = body.clone();
+        trailing.push(0);
+        assert!(decode_trace_bytes(&trailing).is_err());
     }
 }
