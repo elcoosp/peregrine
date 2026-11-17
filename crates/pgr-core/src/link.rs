@@ -22,10 +22,12 @@ use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
 use crate::layout::{Layout, LinkConfig, layout};
 use crate::object::InputObject;
+use crate::observe::{LinkNote, LinkObserver, Phase, PhaseDetail, PhaseEvent};
 use crate::pool;
 use crate::resolve::Resolution;
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 /// Pass 1 scheduling policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -145,12 +147,56 @@ pub fn link_cached(
     parallel: Parallelism,
     cache: Option<&crate::cache::PoiCache>,
 ) -> Result<LinkResult, LinkError> {
+    link_cached_inner(inputs, archives, cfg, parallel, cache, None)
+}
+
+/// Runs Passes 1–3 under an observer (M54): the same pipeline
+/// [`link_cached`] runs — an observed link plans the identical layout
+/// (the parity gate is the seam's own contract, `tests/m54_observer.rs`)
+/// — with each phase's completion and the ladder's silent-correct rungs
+/// reported to `observer`. The zero-config consumer installs
+/// [`TracingObserver`] (the events ride the house tracing seam, inert
+/// until a subscriber joins).
+///
+/// # Errors
+/// [`LinkError`] on malformed inputs, unresolvable/duplicate symbols, or
+/// layout contract violations.
+pub fn link_observed(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    cache: Option<&crate::cache::PoiCache>,
+    observer: &mut dyn LinkObserver,
+) -> Result<LinkResult, LinkError> {
+    link_cached_inner(inputs, archives, cfg, parallel, cache, Some(observer))
+}
+
+/// The Passes 1–3 body both link entries share; `observer` carries the
+/// M54 seam (`None` = silence, the historical shape).
+fn link_cached_inner(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    cache: Option<&crate::cache::PoiCache>,
+    mut observer: Option<&mut dyn LinkObserver>,
+) -> Result<LinkResult, LinkError> {
     // ---- Pass 1: parse & collect names for the interner --------------------
     // M11: an order file ranks symbols — the atom split feeds it the same
     // way dead-strip does (and rides the same cache-key flag).
     let split_symbols = cfg.dead_strip || cfg.symbol_order.is_some();
+    let parse_started = Instant::now();
     let objects = parse_inputs(inputs, parallel, split_symbols, cache)?;
-    link_from_objects(objects, archives, cfg, parallel, cache)
+    emit_phase(
+        &mut observer,
+        Phase::Parse,
+        PhaseDetail::Objects {
+            inputs: objects.len(),
+        },
+        parse_started.elapsed(),
+    );
+    link_from_objects_observed(objects, archives, cfg, parallel, cache, observer)
 }
 
 /// Runs Passes 1b–3 over **already-parsed** direct inputs (M8): the resident
@@ -174,8 +220,31 @@ pub fn link_from_objects(
     parallel: Parallelism,
     cache: Option<&crate::cache::PoiCache>,
 ) -> Result<LinkResult, LinkError> {
+    link_from_objects_observed(objects, archives, cfg, parallel, cache, None)
+}
+
+/// Runs Passes 1b–3 under an observer over **already-parsed** direct
+/// inputs (M54): the [`link_from_objects`] contract — a pre-parsed link
+/// produces the identical layout (the M8 gate) — with the observation
+/// seam of [`link_observed`]. The resident server's session can subscribe
+/// to its warm relinks without re-parsing anything.
+///
+/// `objects` must be parsed, atomized ([`InputObject::compute_atoms`]) and
+/// carry their command-line [`FileId`]s.
+///
+/// # Errors
+/// [`LinkError`] on malformed archive members, unresolvable/duplicate
+/// symbols, or layout contract violations.
+pub fn link_from_objects_observed(
+    objects: Vec<InputObject>,
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    cache: Option<&crate::cache::PoiCache>,
+    mut observer: Option<&mut dyn LinkObserver>,
+) -> Result<LinkResult, LinkError> {
     let (objects, interner, export_ids, loader_ids) =
-        pull_and_intern(objects, archives, cfg, parallel, cache, true)?;
+        pull_and_intern(objects, archives, cfg, parallel, cache, true, &mut observer)?;
 
     // ---- M39: the make-undefined marks ---------------------------------------
     // The names resolve against the finished interner batch (object
@@ -198,6 +267,7 @@ pub fn link_from_objects(
         .bundle_loader
         .as_ref()
         .map_or_else(Vec::new, |l| l.exports().to_vec());
+    let resolve_started = Instant::now();
     let reused = cfg.resolve_reuse.as_ref().and_then(|seed| {
         match crate::resolve_reuse::plan_reuse(
             &seed.snapshot,
@@ -224,11 +294,19 @@ pub fn link_from_objects(
                     // invariant — a distinct cause from a shape move, and
                     // it used to vanish into the fallback. The ladder's
                     // bottom rung stays silent-correct, not silent-blind:
-                    // the refusal names itself on the tracing seam.
+                    // the refusal names itself on the tracing seam (and
+                    // on the M54 observer, the typed face of the same
+                    // convention).
                     Err(e) => {
                         tracing::debug!(
                             error = %e,
                             "the resolve-reuse install refused; falling back to the full resolve"
+                        );
+                        emit_note(
+                            &mut observer,
+                            LinkNote::ResolveReuseFallback {
+                                reason: e.to_string(),
+                            },
                         );
                         None
                     }
@@ -239,10 +317,17 @@ pub fn link_from_objects(
                     fallback = %fallback,
                     "the resolve-reuse plan refused; falling back to the full resolve"
                 );
+                emit_note(
+                    &mut observer,
+                    LinkNote::ResolveReuseFallback {
+                        reason: fallback.to_string(),
+                    },
+                );
                 None
             }
         }
     });
+    let replayed = reused.is_some();
     let mut res = if let Some(reused) = reused {
         reused
     } else {
@@ -259,6 +344,12 @@ pub fn link_from_objects(
         )?;
         full
     };
+    emit_phase(
+        &mut observer,
+        Phase::Resolve,
+        PhaseDetail::Winners { reused: replayed },
+        resolve_started.elapsed(),
+    );
     // M42: the unused-dylib drop (`-dead_strip_dylibs`) — the Pass-2
     // decision the kept command list reads. The compaction rides both
     // resolve paths (the full install and the reuse replay): the
@@ -294,11 +385,39 @@ pub fn link_from_objects(
     });
 
     // ---- M5/D12 liveness, then M6 ICF over the live text atoms --------------
+    let live_started = Instant::now();
     let live = crate::deadstrip::compute(&objects, &res, &interner, cfg);
+    emit_phase(
+        &mut observer,
+        Phase::Liveness,
+        PhaseDetail::Live {
+            active: live.is_active(),
+        },
+        live_started.elapsed(),
+    );
+    let fold_started = Instant::now();
     let fold = crate::icf::fold(&objects, &res, cfg, &live)?;
+    emit_phase(
+        &mut observer,
+        Phase::Fold,
+        PhaseDetail::Folded {
+            folded: fold.folded_count,
+        },
+        fold_started.elapsed(),
+    );
 
     // ---- Pass 3: layout -------------------------------------------------------
+    let layout_started = Instant::now();
     let layout = layout(&objects, &res, &interner, cfg, &live, &fold)?;
+    emit_phase(
+        &mut observer,
+        Phase::Layout,
+        PhaseDetail::Planned {
+            segments: layout.segments.len(),
+            sections: layout.sections.len(),
+        },
+        layout_started.elapsed(),
+    );
     Ok(LinkResult {
         layout,
         objects,
@@ -348,12 +467,23 @@ fn pull_and_intern(
     parallel: Parallelism,
     cache: Option<&crate::cache::PoiCache>,
     intern_header_symbol: bool,
+    observer: &mut Option<&mut dyn LinkObserver>,
 ) -> Result<(Vec<InputObject>, Interner, Vec<StringId>, Vec<StringId>), LinkError> {
     // ---- S7 archive liveness (M5): pull only referenced members ------------
+    let pull_started = Instant::now();
     let pulled = pull_archive_members(&objects, archives, cfg, cache)?;
+    let pulled_count = pulled.len();
     for obj in pulled {
         objects.push(obj);
     }
+    emit_phase(
+        observer,
+        Phase::ArchivePull,
+        PhaseDetail::Members {
+            pulled: pulled_count,
+        },
+        pull_started.elapsed(),
+    );
 
     let mut names: Vec<Vec<u8>> = Vec::new();
     for obj in &mut objects {
@@ -398,6 +528,7 @@ fn pull_and_intern(
         names.push(b"__mh_execute_header".to_vec());
     }
 
+    let intern_started = Instant::now();
     let (interner, ids) = Interner::build_with(&names, parallel.is_parallel());
     let mut cursor = 0usize;
     for obj in &mut objects {
@@ -410,6 +541,14 @@ fn pull_and_intern(
         obj.finish(&ids[cursor..cursor + take])?;
         cursor += take;
     }
+    emit_phase(
+        observer,
+        Phase::Intern,
+        PhaseDetail::Names {
+            interned: names.len(),
+        },
+        intern_started.elapsed(),
+    );
     let export_ids: Vec<StringId> = ids[cursor..cursor + dylib_export_count].to_vec();
     cursor += dylib_export_count;
     let loader_ids: Vec<StringId> = ids[cursor..cursor + loader_export_count].to_vec();
@@ -447,8 +586,39 @@ pub fn link_reloc(
     cfg: &LinkConfig,
     parallel: Parallelism,
 ) -> Result<RelocLink, LinkError> {
+    link_reloc_inner(inputs, archives, cfg, parallel, None)
+}
+
+/// Runs the `-r` relocatable Passes 1–2 under an observer (M54): the
+/// [`link_reloc`] contract — the same parse and resolution as
+/// [`link_cached`], stopping before the segment-shaped Pass 3 — with the
+/// observation seam of [`link_observed`]. The object shape reports its
+/// own run (`Parse → ArchivePull → Intern → Resolve → Reloc`).
+///
+/// # Errors
+/// [`LinkError`] on malformed inputs or unresolvable duplicate symbols.
+pub fn link_reloc_observed(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    observer: &mut dyn LinkObserver,
+) -> Result<RelocLink, LinkError> {
+    link_reloc_inner(inputs, archives, cfg, parallel, Some(observer))
+}
+
+/// The relocatable front half both `-r` entries share; `observer` carries
+/// the M54 seam (`None` = silence, the historical shape).
+fn link_reloc_inner(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    mut observer: Option<&mut dyn LinkObserver>,
+) -> Result<RelocLink, LinkError> {
     let span = tracing::info_span!("link_reloc", inputs = inputs.len());
     let _entered = span.enter();
+    let reloc_started = Instant::now();
     if cfg.bundle_loader.is_some() {
         return Err(LinkError::Layout {
             message: "-bundle_loader binds a bundle against its host process, but the \
@@ -563,11 +733,35 @@ pub fn link_reloc(
                 .into(),
         });
     }
+    let parse_started = Instant::now();
     let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None)?;
+    emit_phase(
+        &mut observer,
+        Phase::Parse,
+        PhaseDetail::Objects {
+            inputs: objects.len(),
+        },
+        parse_started.elapsed(),
+    );
     let (objects, interner, _export_ids, _loader_ids) =
-        pull_and_intern(objects, archives, cfg, parallel, None, false)?;
+        pull_and_intern(objects, archives, cfg, parallel, None, false, &mut observer)?;
+    let resolve_started = Instant::now();
     let mut res = Resolution::default();
     res.install(&objects)?;
+    emit_phase(
+        &mut observer,
+        Phase::Resolve,
+        PhaseDetail::Winners { reused: false },
+        resolve_started.elapsed(),
+    );
+    emit_phase(
+        &mut observer,
+        Phase::Reloc,
+        PhaseDetail::Reloc {
+            inputs: inputs.len(),
+        },
+        reloc_started.elapsed(),
+    );
     tracing::debug!(
         objects = objects.len(),
         "the relocatable front half finished (undefineds stay open)"
@@ -577,6 +771,31 @@ pub fn link_reloc(
         interner,
         resolution: res,
     })
+}
+
+/// Emits one phase completion through the observer slot (`None` = the
+/// historical silence — the seam costs nothing when nobody subscribes).
+fn emit_phase(
+    observer: &mut Option<&mut dyn LinkObserver>,
+    phase: Phase,
+    detail: PhaseDetail,
+    elapsed: Duration,
+) {
+    if let Some(obs) = observer.as_deref_mut() {
+        obs.on_phase(PhaseEvent {
+            phase,
+            detail,
+            elapsed,
+        });
+    }
+}
+
+/// Emits one pipeline note through the observer slot (the ladder's
+/// silent-correct rungs, made visible).
+fn emit_note(observer: &mut Option<&mut dyn LinkObserver>, note: LinkNote) {
+    if let Some(obs) = observer.as_deref_mut() {
+        obs.on_note(note);
+    }
 }
 
 /// Pass 1 over the input files. `Auto` schedules **LPT** (longest input
