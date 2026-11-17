@@ -23,7 +23,8 @@
 
 use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
-    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
+    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_time_report, put_bytes, put_hash, put_str, put_u8,
+    put_u32, put_u64,
 };
 use crate::session::ResidentSession;
 use std::io::{Read, Write};
@@ -318,6 +319,9 @@ fn serve_link(
                 put_u64(&mut b, served.image.len() as u64);
                 b.extend_from_slice(&served.image);
             }
+            // The v40 tail: the time report when the request asked (the
+            // session's own observed pipeline), absent otherwise.
+            encode_time_report(&mut b, served.time_report.as_ref());
             write_frame(stream, TAG_IMAGE, &b)
         }
         Err(e) => {
