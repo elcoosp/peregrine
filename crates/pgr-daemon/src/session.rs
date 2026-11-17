@@ -451,6 +451,35 @@ impl ResidentSession {
         })
     }
 
+    /// Reports one ladder rung through the watching faces (M66): the same
+    /// event shape the pipeline's phases carry, delivered to each
+    /// subscribed collector — the `serve_relink` body reads the request's
+    /// flags once here, not at every rung.
+    fn report_rung(
+        req: &crate::protocol::LinkRequest,
+        time_collector: &mut pgr_core::TimeCollector,
+        traces: &mut pgr_core::trace::TraceCollector,
+        phase: pgr_core::observe::Phase,
+        detail: pgr_core::observe::PhaseDetail,
+        elapsed: std::time::Duration,
+    ) {
+        use pgr_core::observe::LinkObserver as _;
+        if !req.time && !req.trace {
+            return;
+        }
+        let event = pgr_core::observe::PhaseEvent {
+            phase,
+            detail,
+            elapsed,
+        };
+        if req.time {
+            time_collector.on_phase(event.clone());
+        }
+        if req.trace {
+            traces.on_phase(event);
+        }
+    }
+
     /// The §7.3 ladder inside the session (v3 fusion): gate the previous
     /// output, derive the anchored relink config from the record (the
     /// mirror of the driver's in-process assembly), run the pipeline warm
@@ -465,16 +494,8 @@ impl ResidentSession {
         archives: &[pgr_core::LinkArchive],
     ) -> Result<ServedLink, RelinkDecline> {
         use pgr_core::Parallelism;
-        // The integrity gate: the transferred bytes must still be the
-        // recorded state (a stale previous output is the §7.3
-        // OutputChanged shape — the full link owns it).
-        match pgr_emit::incremental::output_integrity(prev, record) {
-            Ok(pgr_emit::incremental::Integrity::Match) => {}
-            Ok(pgr_emit::incremental::Integrity::Mismatch { .. }) => {
-                return Err(RelinkDecline::Fallback);
-            }
-            Err(_) => return Err(RelinkDecline::Fallback),
-        }
+        // The integrity gate rides the timed block below (M66: the gate is
+        // real work and reports beside the other rungs when a face asks).
         // The anchored relink config: exactly the assembly the driver's
         // in-process relink runs (slack anchors, stable imports, signature
         // boundary, resolve-reuse seed) — the layout the patch plan
@@ -504,10 +525,35 @@ impl ResidentSession {
         // collectors subscribed (paired when both faces ask). The emit
         // band rides absent (the relink's Pass-4 half is the in-memory
         // patch, not the fused tile emit); the total carries the ladder
-        // wall through the patched image.
+        // wall through the patched image. M66 (v42 in service): the
+        // ladder's own rungs ride the same faces — the integrity gate
+        // (real work: the record's page-hash sample hashed against the
+        // transferred bytes), the patch plan, the in-memory patch and the
+        // audit report beside the pipeline's rows, and an untouched
+        // relink's plan row names an empty dirty set with no patch row.
         let started = std::time::Instant::now();
         let mut time_collector = pgr_core::TimeCollector::default();
         let mut traces = pgr_core::trace::TraceCollector::new();
+        let gate_started = std::time::Instant::now();
+        let gate = pgr_emit::incremental::output_integrity(prev, record);
+        match gate {
+            Ok(pgr_emit::incremental::Integrity::Match) => {
+                Self::report_rung(
+                    req,
+                    &mut time_collector,
+                    &mut traces,
+                    pgr_core::observe::Phase::RelinkGate,
+                    pgr_core::observe::PhaseDetail::Gate {
+                        pages: usize::try_from(record.hashed_pages()).unwrap_or(usize::MAX),
+                    },
+                    gate_started.elapsed(),
+                );
+            }
+            Ok(pgr_emit::incremental::Integrity::Mismatch { .. }) => {
+                return Err(RelinkDecline::Fallback);
+            }
+            Err(_) => return Err(RelinkDecline::Fallback),
+        }
         let result = if req.time && req.trace {
             let mut pair = pgr_core::ObserverPair::new(&mut time_collector, &mut traces);
             pgr_core::link_from_objects_observed(
@@ -545,6 +591,7 @@ impl ResidentSession {
         };
         pgr_core::check_load_symbols(&result, &req.force_load)
             .map_err(|e| RelinkDecline::Error(e.into()))?;
+        let plan_started = std::time::Instant::now();
         let decision = pgr_emit::incremental::plan_patch(
             record,
             &result.layout,
@@ -558,6 +605,17 @@ impl ResidentSession {
                 return Err(RelinkDecline::Fallback);
             }
         };
+        Self::report_rung(
+            req,
+            &mut time_collector,
+            &mut traces,
+            pgr_core::observe::Phase::RelinkPlan,
+            pgr_core::observe::PhaseDetail::Plan {
+                tiles: usize::try_from(plan.total_tiles).unwrap_or(usize::MAX),
+                dirty: plan.dirty_tiles.len(),
+            },
+            plan_started.elapsed(),
+        );
         // Nothing changed: the previous output rides back untouched and
         // the record is renewed verbatim (the driver's untouched shape).
         // No audit: its subject — the patch — never exists here (parity
@@ -593,6 +651,7 @@ impl ResidentSession {
                 trace_json,
             });
         }
+        let patch_started = std::time::Instant::now();
         let (mut outcome, mut new_record, mut image) = pgr_emit::incremental::apply_patch_bytes(
             prev,
             record,
@@ -605,6 +664,17 @@ impl ResidentSession {
             pgr_emit::incremental::PatchError::Fallback(_) => RelinkDecline::Fallback,
             other => RelinkDecline::Error(other.into()),
         })?;
+        Self::report_rung(
+            req,
+            &mut time_collector,
+            &mut traces,
+            pgr_core::observe::Phase::RelinkPatch,
+            pgr_core::observe::PhaseDetail::Patch {
+                bytes: outcome.bytes_patched,
+                tiles: usize::try_from(outcome.dirty_tiles).unwrap_or(usize::MAX),
+            },
+            patch_started.elapsed(),
+        );
         let _span = tracing::info_span!(
             "daemon_relink",
             bytes_patched = outcome.bytes_patched,
@@ -619,6 +689,7 @@ impl ResidentSession {
         // crosses the wire. The client still owns the file: a failing
         // verdict ships nothing (§7.2 crash-safety unchanged).
         let audit = if req.audit {
+            let audit_started = std::time::Instant::now();
             let reference = pgr_emit::build_image_fused(&result.layout, &result.objects)
                 .map_err(SessionError::Emit)
                 .map_err(RelinkDecline::Error)?;
@@ -648,6 +719,17 @@ impl ResidentSession {
                 healed,
                 blocking = verify_blocking.len(),
                 "the daemon's audit finished"
+            );
+            Self::report_rung(
+                req,
+                &mut time_collector,
+                &mut traces,
+                pgr_core::observe::Phase::RelinkAudit,
+                pgr_core::observe::PhaseDetail::Audit {
+                    healed,
+                    issues: verify_blocking.len(),
+                },
+                audit_started.elapsed(),
             );
             Some(AuditOutcome {
                 identity_ok,
@@ -1069,7 +1151,9 @@ mod tests {
 #[cfg(test)]
 mod fusion_tests {
     use super::ResidentSession;
-    use crate::protocol::{InputEntry, LinkRequest, content_hash};
+    use crate::protocol::{
+        InputEntry, LinkRequest, Reader, content_hash, decode_time_report, encode_time_report,
+    };
     use pgr_core::layout::{LinkConfig, OutputType};
     use pgr_core::link::{LinkInput, Parallelism, link_cached};
     use pgr_core::slack::SlackAnchor;
@@ -1511,6 +1595,175 @@ mod fusion_tests {
         assert_eq!(
             reference, served.image,
             "the audited image is the reference"
+        );
+    }
+
+    /// M66 (v42 in service): the session's ladder reports its rungs beside
+    /// the warm pipeline — a time- and trace-asking relink's served report
+    /// carries the gate, the plan, the patch and the audit in ladder order,
+    /// the served timeline parses back through the strict reader with the
+    /// rung rows riding it (the round-trip convention), and the report
+    /// restores exactly through the v42 wire tail.
+    #[test]
+    fn the_ladder_rungs_ride_the_served_faces() {
+        use pgr_core::observe::{Phase, PhaseDetail};
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+        let record_bytes = cold.record.clone().expect("cold capture");
+        let prev_output = cold.image.clone();
+
+        let edited_hello = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited_hello, &greet_bytes);
+        relink.record = Some(record_bytes.clone());
+        relink.prev_output = Some(content_hash(&prev_output));
+        relink.time = true;
+        relink.trace = true;
+        relink.audit = true;
+        session
+            .store_blob(&content_hash(&prev_output), prev_output.clone())
+            .unwrap();
+        session
+            .store_blob(&content_hash(&edited_hello), edited_hello.clone())
+            .unwrap();
+
+        let served = session.link(&relink).unwrap();
+        assert!(served.patch.expect("the relink patches").dirty_tiles > 0);
+        let report = served.time_report.expect("the served report rides");
+        let phases: Vec<Phase> = report.phases.iter().map(|e| e.phase).collect();
+        let pos = |rung: Phase, names: &[Phase]| {
+            names
+                .iter()
+                .position(|p| *p == rung)
+                .unwrap_or_else(|| panic!("the {rung:?} row rides the served report: {names:?}"))
+        };
+        let gate = pos(Phase::RelinkGate, &phases);
+        let plan = pos(Phase::RelinkPlan, &phases);
+        let patch = pos(Phase::RelinkPatch, &phases);
+        let audit = pos(Phase::RelinkAudit, &phases);
+        assert!(
+            gate < plan && plan < patch && patch < audit,
+            "the rungs ride in ladder order: {phases:?}"
+        );
+        // The warm pipeline's rows ride between the gate and the plan —
+        // and no Parse row rides the session's run (the parse was paid
+        // when the edited blob arrived; the M59 served-report shape).
+        assert!(phases.contains(&Phase::Layout) && !phases.contains(&Phase::Parse));
+        // The audit row names its verdict (the clean patch's shape).
+        assert!(matches!(
+            report.phases[audit].detail,
+            PhaseDetail::Audit {
+                healed: false,
+                issues: 0
+            }
+        ));
+        // The served timeline is the strict reader's own face: it restores
+        // exactly, the rung rows riding it.
+        let json = served.trace_json.as_deref().expect("the timeline rides");
+        let parsed = pgr_core::trace::parse_trace_json(json).expect("the served timeline parses");
+        assert!(parsed.spans.iter().any(|s| s.phase == Phase::RelinkPatch));
+        assert_eq!(
+            pgr_core::trace::parse_trace_json(&parsed.render()).expect("the round trip parses"),
+            parsed,
+            "the round trip restores the data exactly"
+        );
+        // The report restores exactly through the v42 wire tail (the rung
+        // vocabulary the codec registered at M65).
+        let mut body = Vec::new();
+        encode_time_report(&mut body, Some(&report));
+        let mut r = Reader::new(&body);
+        let back = decode_time_report(&mut r).expect("the tail decodes");
+        r.done().expect("no trailing bytes");
+        // The tail carries whole microseconds (the v40 shape): the
+        // expected report is the served one with its walls floored to µs.
+        let floor = |d: std::time::Duration| {
+            std::time::Duration::from_micros(
+                u64::try_from(d.as_nanos() / 1_000).unwrap_or(u64::MAX),
+            )
+        };
+        let expected = pgr_core::time_report::TimeReport {
+            phases: report
+                .phases
+                .iter()
+                .map(|e| pgr_core::observe::PhaseEvent {
+                    phase: e.phase,
+                    detail: e.detail.clone(),
+                    elapsed: floor(e.elapsed),
+                })
+                .collect(),
+            emit: None,
+            total: report.total.map(floor),
+            notes: report.notes.clone(),
+        };
+        assert_eq!(back, Some(expected), "the tail restores the rungs exactly");
+    }
+
+    /// M66: an untouched relink's served report ends at the plan — no
+    /// patch row rides a relink that patched nothing (the plan row names
+    /// the empty dirty set).
+    #[test]
+    fn the_untouched_relinks_served_report_names_no_patch_row() {
+        use pgr_core::observe::Phase;
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+        let record_bytes = cold.record.clone().expect("cold capture");
+        let prev_output = cold.image.clone();
+
+        // No edit: the same inputs relink to the same plan.
+        let (mut relink, _) = request(&link_config(), &hello_bytes, &greet_bytes);
+        relink.record = Some(record_bytes.clone());
+        relink.prev_output = Some(content_hash(&prev_output));
+        relink.time = true;
+        relink.trace = true;
+        session
+            .store_blob(&content_hash(&prev_output), prev_output.clone())
+            .unwrap();
+
+        let served = session.link(&relink).unwrap();
+        assert!(
+            served
+                .patch
+                .expect("the untouched relink answers")
+                .untouched
+        );
+        let report = served.time_report.expect("the served report rides");
+        let phases: Vec<Phase> = report.phases.iter().map(|e| e.phase).collect();
+        assert!(
+            phases.contains(&Phase::RelinkGate) && phases.contains(&Phase::RelinkPlan),
+            "the gate and the plan ride: {phases:?}"
+        );
+        assert!(
+            !phases.contains(&Phase::RelinkPatch),
+            "no patch row rides a relink that patched nothing: {phases:?}"
+        );
+        let json = served.trace_json.as_deref().expect("the timeline rides");
+        let parsed = pgr_core::trace::parse_trace_json(json).expect("the served timeline parses");
+        assert!(
+            !parsed.spans.iter().any(|s| s.phase == Phase::RelinkPatch),
+            "no patch span rides the untouched timeline"
         );
     }
 
