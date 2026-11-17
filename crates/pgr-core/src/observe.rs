@@ -7,7 +7,11 @@
 //! resolve-reuse fallback) as explicit [`LinkNote`]s. The observer is
 //! read-only: subscribing never changes the plan (the parity gate lives in
 //! `tests/m54_observer.rs`), and the trait's default methods keep an
-//! observer that subscribes to nothing cost-free.
+//! observer that subscribes to nothing cost-free. The M63 rung adds the
+//! intra-phase face: the parse pool's per-input parses ride the seam as
+//! [`TaskEvent`]s, each naming the thread that ran it and its own arrival
+//! clock — the facts the timeline's worker lanes read
+//! (`tests/m63_task_spans.rs` gates the shape and the parity).
 //!
 //! The seam follows the house observability convention: [`TracingObserver`]
 //! bridges every event onto the `tracing` debug level, inert until a
@@ -17,7 +21,8 @@
 //! wants the events *as data* — a build-system progress bar, a phase-time
 //! report — without scraping formatted spans.
 
-use std::time::Duration;
+use std::thread::ThreadId;
+use std::time::{Duration, Instant};
 
 /// The pipeline phases the observer sees, in link order (the same pass
 /// structure the tracing spans name: `link_reloc`, `objc_pull`,
@@ -129,6 +134,30 @@ pub struct PhaseEvent {
     pub elapsed: Duration,
 }
 
+/// One intra-phase task a worker thread carried (M63): the parse pool's
+/// per-input parse, reported by the thread that ran it. The event rides
+/// the same read-only contract as [`PhaseEvent`] — reporting never moves
+/// a byte — and carries the two facts the phase event cannot: the thread
+/// the task ran on (the timeline's lane registry keys on it — the worker
+/// lanes the §9.4 toolbox reads) and the task's own arrival clock (the
+/// collector reconstructs the span's start from it; a drain that forwards
+/// the event after the phase completed must not re-stamp the arrival —
+/// every worker's span would end at the drain).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskEvent {
+    /// The phase the task rode in (today the parse pool's `Parse`).
+    pub phase: Phase,
+    /// The task's own label — the input's command-line name for a parse.
+    pub label: String,
+    /// The wall time the task took.
+    pub elapsed: Duration,
+    /// The task's completion instant, on the thread that ran it (the
+    /// event's own clock — the collector's epoch math reads it).
+    pub at: Instant,
+    /// The thread that ran the task (the lane registry's key).
+    pub thread: ThreadId,
+}
+
 /// A pipeline note: a rung the ladder answered on the consumer's behalf.
 /// A note never changes the plan — it names the decision the "silent-correct,
 /// not silent-blind" contract already made (the same wording the tracing
@@ -151,6 +180,10 @@ pub enum LinkNote {
 pub trait LinkObserver {
     /// A phase completed (`event.elapsed` names its wall time).
     fn on_phase(&mut self, _event: PhaseEvent) {}
+    /// An intra-phase task completed on a worker thread (`task.elapsed`
+    /// names its wall time, `task.thread` the lane that ran it) — the
+    /// M63 task seam the parse pool reports through.
+    fn on_task(&mut self, _task: TaskEvent) {}
     /// A pipeline note (a fallback the ladder answered itself).
     fn on_note(&mut self, _note: LinkNote) {}
 }
@@ -169,6 +202,15 @@ impl LinkObserver for TracingObserver {
             phase = event.phase.as_str(),
             elapsed_us = event.elapsed.as_micros() as u64,
             "the link phase completed"
+        );
+    }
+
+    fn on_task(&mut self, task: TaskEvent) {
+        tracing::debug!(
+            phase = task.phase.as_str(),
+            label = %task.label,
+            elapsed_us = task.elapsed.as_micros() as u64,
+            "the phase task completed on its worker"
         );
     }
 
@@ -207,6 +249,11 @@ impl LinkObserver for ObserverPair<'_, '_> {
     fn on_phase(&mut self, event: PhaseEvent) {
         self.first.on_phase(event.clone());
         self.second.on_phase(event);
+    }
+
+    fn on_task(&mut self, task: TaskEvent) {
+        self.first.on_task(task.clone());
+        self.second.on_task(task);
     }
 
     fn on_note(&mut self, note: LinkNote) {
