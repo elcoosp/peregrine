@@ -114,7 +114,8 @@ pub use objc::{
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use observe::{
-    LinkNote, LinkObserver, ObserverPair, Phase, PhaseDetail, PhaseEvent, TracingObserver,
+    LinkNote, LinkObserver, ObserverPair, Phase, PhaseDetail, PhaseEvent, TaskEvent,
+    TracingObserver,
 };
 pub use pagezero::PageZero;
 pub use platform::FixupEncoding;
@@ -134,7 +135,7 @@ pub use stable_imports::{StableImport, StableImports};
 pub use stack_size::StackSize;
 pub use sub_client::{SubClient, SubClientEntry, SubClientError};
 pub use time_report::{TimeCollector, TimeReport};
-pub use trace::{TraceCollector, TraceJsonError, TraceReport};
+pub use trace::{TraceCollector, TraceJsonError, TraceLane, TraceReport, TraceTask};
 pub use trie::{Export, ExportInfo};
 pub use umbrella::{Umbrella, UmbrellaError, UmbrellaKind, UmbrellaMember};
 pub use unwind::{
