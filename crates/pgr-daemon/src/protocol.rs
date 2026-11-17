@@ -201,8 +201,15 @@ use sha2::{Digest, Sha256};
 /// pre-M52 term-strip default); **v39** appends the section renames
 /// (M53 — a count-prefixed table, four names per entry, the source pair
 /// then the target pair; a resident relink renames the sections the
-/// client named, never the pre-M53 unnamed pairs).
-pub const PROTO_VERSION: u32 = 39;
+/// client named, never the pre-M53 unnamed pairs); **v40** appends the
+/// per-pass time report (M58/M59 — the request's `time` flag asks the
+/// session to observe its own pipeline through the M54 seam
+/// ([`pgr_core::time_report::TimeCollector`]), and the reply's IMAGE
+/// tail carries the collected [`pgr_core::time_report::TimeReport`] —
+/// the phases the session's run reported, the notes the ladder named,
+/// the emit and total bands the session measured; a relink's Pass-4
+/// half is the in-memory patch, so its emit band rides absent).
+pub const PROTO_VERSION: u32 = 40;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -432,6 +439,13 @@ pub struct LinkRequest {
     /// serves tiles only to a flag-carrying request; a full link or a
     /// v4-shaped client receives the image as before.
     pub tiles: bool,
+    /// Whether the session must observe its own pipeline and serve the
+    /// per-pass time report (v40, M58/M59): the reply's IMAGE tail then
+    /// carries the collected [`pgr_core::time_report::TimeReport`] — the
+    /// phases the session's run reported (a warm relink has no `Parse`
+    /// row — the POIs are resident), the ladder's notes, the measured
+    /// bands. An unasked report never crosses the wire.
+    pub time: bool,
 }
 
 impl LinkRequest {
@@ -489,6 +503,8 @@ impl LinkRequest {
         put_u8(&mut b, u8::from(self.audit));
         // M9 output-residency rung (v5): the tile-replay capability.
         put_u8(&mut b, u8::from(self.tiles));
+        // M58/M59 (v40): the time-report request flag.
+        put_u8(&mut b, u8::from(self.time));
         b
     }
 
@@ -538,6 +554,7 @@ impl LinkRequest {
         };
         let audit = r.u8()? != 0;
         let tiles = r.u8()? != 0;
+        let time = r.u8()? != 0;
         r.done()?;
         Ok(Self {
             config,
@@ -549,8 +566,214 @@ impl LinkRequest {
             prev_output,
             audit,
             tiles,
+            time,
         })
     }
+}
+
+// ---- the v40 time-report tail ------------------------------------------------
+
+/// The phase's wire token (the variant's ordinal in the seam's own
+/// declaration order — `Parse` … `Reloc`).
+fn phase_token(phase: pgr_core::observe::Phase) -> u8 {
+    match phase {
+        pgr_core::observe::Phase::Parse => 0,
+        pgr_core::observe::Phase::ArchivePull => 1,
+        pgr_core::observe::Phase::Intern => 2,
+        pgr_core::observe::Phase::Resolve => 3,
+        pgr_core::observe::Phase::Liveness => 4,
+        pgr_core::observe::Phase::Fold => 5,
+        pgr_core::observe::Phase::Layout => 6,
+        pgr_core::observe::Phase::Reloc => 7,
+    }
+}
+
+fn phase_from_token(token: u8) -> Result<pgr_core::observe::Phase, DecodeError> {
+    Ok(match token {
+        0 => pgr_core::observe::Phase::Parse,
+        1 => pgr_core::observe::Phase::ArchivePull,
+        2 => pgr_core::observe::Phase::Intern,
+        3 => pgr_core::observe::Phase::Resolve,
+        4 => pgr_core::observe::Phase::Liveness,
+        5 => pgr_core::observe::Phase::Fold,
+        6 => pgr_core::observe::Phase::Layout,
+        7 => pgr_core::observe::Phase::Reloc,
+        _ => {
+            return Err(DecodeError::Malformed(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the time report names an unknown phase",
+            )));
+        }
+    })
+}
+
+/// Encodes the reply's time-report tail (v40): a present byte, then —
+/// when the request asked and the session observed — the phase rows
+/// (count-prefixed; per row the phase token, the detail kind byte with
+/// its payload, the wall in whole microseconds), the notes
+/// (count-prefixed, length-prefixed strings), and the emit/total bands
+/// (a present byte + u64 µs each). A report the client did not ask for
+/// rides absent — the tail is one byte.
+pub fn encode_time_report(out: &mut Vec<u8>, report: Option<&pgr_core::time_report::TimeReport>) {
+    let Some(report) = report else {
+        put_u8(out, 0);
+        return;
+    };
+    put_u8(out, 1);
+    put_u32(out, report.phases.len() as u32);
+    for event in &report.phases {
+        put_u8(out, phase_token(event.phase));
+        match &event.detail {
+            pgr_core::observe::PhaseDetail::Objects { inputs } => {
+                put_u8(out, 0);
+                put_u64(out, u64::try_from(*inputs).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Members { pulled } => {
+                put_u8(out, 1);
+                put_u64(out, u64::try_from(*pulled).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Names { interned } => {
+                put_u8(out, 2);
+                put_u64(out, u64::try_from(*interned).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Winners { reused } => {
+                put_u8(out, 3);
+                put_u8(out, u8::from(*reused));
+            }
+            pgr_core::observe::PhaseDetail::Live { active } => {
+                put_u8(out, 4);
+                put_u8(out, u8::from(*active));
+            }
+            pgr_core::observe::PhaseDetail::Folded { folded } => {
+                put_u8(out, 5);
+                put_u64(out, u64::try_from(*folded).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Planned { segments, sections } => {
+                put_u8(out, 6);
+                put_u64(out, u64::try_from(*segments).unwrap_or(u64::MAX));
+                put_u64(out, u64::try_from(*sections).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Reloc { inputs } => {
+                put_u8(out, 7);
+                put_u64(out, u64::try_from(*inputs).unwrap_or(u64::MAX));
+            }
+        }
+        put_u64(
+            out,
+            u64::try_from(event.elapsed.as_nanos() / 1_000).unwrap_or(u64::MAX),
+        );
+    }
+    put_u32(out, report.notes.len() as u32);
+    for note in &report.notes {
+        put_str(out, note);
+    }
+    match report.emit {
+        Some(d) => {
+            put_u8(out, 1);
+            put_u64(out, u64::try_from(d.as_nanos() / 1_000).unwrap_or(u64::MAX));
+        }
+        None => put_u8(out, 0),
+    }
+    match report.total {
+        Some(d) => {
+            put_u8(out, 1);
+            put_u64(out, u64::try_from(d.as_nanos() / 1_000).unwrap_or(u64::MAX));
+        }
+        None => put_u8(out, 0),
+    }
+}
+
+/// Decodes the reply's time-report tail (v40; see
+/// [`encode_time_report`] for the shape). An unknown phase token or
+/// detail kind is a malformed body — a refusal, never a silently
+/// dropped row.
+pub(crate) fn decode_time_report(
+    r: &mut Reader<'_>,
+) -> Result<Option<pgr_core::time_report::TimeReport>, DecodeError> {
+    if r.u8()? == 0 {
+        return Ok(None);
+    }
+    let phases = (0..r.u32()?)
+        .map(|_| {
+            let phase = phase_from_token(r.u8()?)?;
+            let detail = match r.u8()? {
+                0 => pgr_core::observe::PhaseDetail::Objects {
+                    inputs: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                1 => pgr_core::observe::PhaseDetail::Members {
+                    pulled: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                2 => pgr_core::observe::PhaseDetail::Names {
+                    interned: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                3 => pgr_core::observe::PhaseDetail::Winners {
+                    reused: r.u8()? != 0,
+                },
+                4 => pgr_core::observe::PhaseDetail::Live {
+                    active: r.u8()? != 0,
+                },
+                5 => pgr_core::observe::PhaseDetail::Folded {
+                    folded: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                6 => pgr_core::observe::PhaseDetail::Planned {
+                    segments: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                    sections: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                7 => pgr_core::observe::PhaseDetail::Reloc {
+                    inputs: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                _ => {
+                    return Err(DecodeError::Malformed(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the time report carries an unknown detail kind",
+                    )));
+                }
+            };
+            let elapsed_us = r.u64()?;
+            Ok(pgr_core::observe::PhaseEvent {
+                phase,
+                detail,
+                elapsed: std::time::Duration::from_micros(elapsed_us),
+            })
+        })
+        .collect::<Result<Vec<_>, DecodeError>>()?;
+    let notes = (0..r.u32()?)
+        .map(|_| r.str())
+        .collect::<Result<Vec<_>, DecodeError>>()?;
+    let emit = if r.u8()? == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_micros(r.u64()?))
+    };
+    let total = if r.u8()? == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_micros(r.u64()?))
+    };
+    Ok(Some(pgr_core::time_report::TimeReport {
+        phases,
+        emit,
+        total,
+        notes,
+    }))
+}
+
+/// Decodes the reply's time-report tail from a whole body (v40) — the
+/// byte-slice shape of [`decode_time_report`], for a consumer that
+/// reads the tail in isolation (the wire codec's round-trip gate; the
+/// client reads it inline after the image tail). Trailing bytes after
+/// the tail refuse, like every body.
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation, trailing bytes, an unknown
+/// phase token or an unknown detail kind.
+pub fn decode_time_report_bytes(
+    body: &[u8],
+) -> Result<Option<pgr_core::time_report::TimeReport>, DecodeError> {
+    let mut r = Reader::new(body);
+    let report = decode_time_report(&mut r)?;
+    r.done()?;
+    Ok(report)
 }
 
 /// Encodes one export-filter pattern (M14, wire v7): a kind byte (the
@@ -1348,7 +1571,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
 mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, TAG_LINK,
-        content_hash, put_u32,
+        content_hash, decode_time_report, encode_time_report, put_u8, put_u32, put_u64,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
@@ -1710,6 +1933,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -1732,6 +1956,7 @@ mod tests {
             prev_output: Some(content_hash(b"prev")),
             audit: true,
             tiles: true,
+            time: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -1753,6 +1978,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -1778,6 +2004,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -1802,6 +2029,7 @@ mod tests {
             prev_output: Some(content_hash(b"previous output")),
             audit: false,
             tiles: false,
+            time: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -1825,6 +2053,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let back = LinkRequest::decode(&bare.encode()).unwrap();
         assert_eq!(back, bare);
@@ -1859,6 +2088,7 @@ mod tests {
             prev_output: Some(content_hash(b"prev")),
             audit: false,
             tiles: true,
+            time: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert!(back.tiles, "the flag rides the wire");
@@ -1885,6 +2115,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let body = req.encode();
         // The distinctive vmsize appears exactly once (every other field
@@ -1931,6 +2162,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the decisions cross byte-for-byte");
@@ -1962,6 +2194,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The segment name rides as a length-prefixed string exactly
@@ -2000,6 +2233,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the reserve crosses byte-for-byte");
@@ -2041,6 +2275,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The reserve rides as a present-byte + u64 exactly once (the
@@ -2079,6 +2314,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the base crosses byte-for-byte");
@@ -2110,6 +2346,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The base rides as a present-byte + u64 exactly once (the
@@ -2159,6 +2396,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2191,6 +2429,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The member rides as (kind byte, u32 len, name bytes) exactly
@@ -2236,6 +2475,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2267,6 +2507,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The client rides as (u32 len, name bytes) exactly once; the
@@ -2310,6 +2551,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2342,6 +2584,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The pair rides as (u32 len, pair bytes) exactly once; the
@@ -2385,6 +2628,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2418,6 +2662,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2462,6 +2707,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2505,6 +2751,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2538,6 +2785,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2567,6 +2815,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2596,6 +2845,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2622,6 +2872,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2652,6 +2903,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2682,6 +2934,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2709,6 +2962,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2740,6 +2994,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2769,6 +3024,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2796,6 +3052,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2826,6 +3083,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2853,6 +3111,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2882,6 +3141,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2915,6 +3175,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2943,6 +3204,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -2998,6 +3260,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         let needle = b"__mydata";
@@ -3042,6 +3305,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -3074,6 +3338,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -3104,6 +3369,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -3133,6 +3399,7 @@ mod tests {
                 prev_output: None,
                 audit: false,
                 tiles: false,
+                time: false,
             }
             .encode(),
         )
@@ -3159,6 +3426,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The marks are the wire tail's last section: the count rides
@@ -3189,6 +3457,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The floor rides the config tail as (present byte, u64); the
@@ -3225,6 +3494,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The last floor byte is `__TEXT,__text`'s exponent (12); the
@@ -3263,6 +3533,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         // The path rides as (u32 len, path bytes) exactly once; the
@@ -3292,6 +3563,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         }
         .encode();
         let rel_path = b"bin/dyld";
@@ -3310,5 +3582,108 @@ mod tests {
         rel = fixed;
         let err = LinkRequest::decode(&rel).unwrap_err();
         assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_time_flag_round_trips_byte_shape() {
+        let mut req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: true,
+        };
+        let body = req.encode();
+        let back = LinkRequest::decode(&body).unwrap();
+        assert_eq!(back, req);
+        // The flag flips cleanly over the wire.
+        req.time = false;
+        assert_ne!(LinkRequest::decode(&req.encode()).unwrap(), back);
+    }
+
+    /// A representative served report: the warm pipeline's phases, an
+    /// absent emit band (the relink's Pass-4 half is the in-memory
+    /// patch), a measured total, and a note carrying the escape-worthy
+    /// punctuation.
+    fn served_report() -> pgr_core::time_report::TimeReport {
+        use pgr_core::observe::{Phase, PhaseDetail, PhaseEvent};
+        use std::time::Duration;
+        let row = |phase: Phase, detail: PhaseDetail, us: u64| PhaseEvent {
+            phase,
+            detail,
+            elapsed: Duration::from_micros(us),
+        };
+        pgr_core::time_report::TimeReport {
+            phases: vec![
+                row(Phase::ArchivePull, PhaseDetail::Members { pulled: 3 }, 42),
+                row(Phase::Intern, PhaseDetail::Names { interned: 9 }, 17),
+                row(Phase::Resolve, PhaseDetail::Winners { reused: true }, 23),
+                row(
+                    Phase::Layout,
+                    PhaseDetail::Planned {
+                        segments: 4,
+                        sections: 9,
+                    },
+                    210,
+                ),
+            ],
+            emit: None,
+            total: Some(Duration::from_micros(1_234)),
+            notes: vec![
+                "the resolve-reuse replay fell back to the full resolve (a \"moved\" shape)"
+                    .to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_time_report_tail_round_trips() {
+        let report = served_report();
+        let mut body = Vec::new();
+        encode_time_report(&mut body, Some(&report));
+        let mut r = Reader::new(&body);
+        let back = decode_time_report(&mut r).expect("the tail decodes");
+        r.done().expect("the tail carries no trailing bytes");
+        assert_eq!(back.as_ref(), Some(&report), "the report restores exactly");
+    }
+
+    #[test]
+    fn the_time_report_tail_rides_absent() {
+        let mut body = Vec::new();
+        encode_time_report(&mut body, None);
+        let mut r = Reader::new(&body);
+        let back = decode_time_report(&mut r).expect("the absence decodes");
+        r.done().expect("no trailing bytes");
+        assert_eq!(back, None, "an unasked report rides absent");
+    }
+
+    #[test]
+    fn the_report_tail_refuses_an_unknown_phase_byte() {
+        // A hand-built tail: present, one row, an unknown phase token —
+        // a malformed body is a refusal, never a silently dropped row.
+        let mut body = Vec::new();
+        put_u8(&mut body, 1);
+        put_u32(&mut body, 1);
+        put_u8(&mut body, 99);
+        let mut r = Reader::new(&body);
+        assert!(decode_time_report(&mut r).is_err());
+    }
+
+    #[test]
+    fn the_report_tail_refuses_an_unknown_detail_kind() {
+        let mut body = Vec::new();
+        put_u8(&mut body, 1);
+        put_u32(&mut body, 1);
+        put_u8(&mut body, 0); // parse
+        put_u8(&mut body, 88); // an unknown detail kind
+        put_u64(&mut body, 1);
+        put_u64(&mut body, 1);
+        let mut r = Reader::new(&body);
+        assert!(decode_time_report(&mut r).is_err());
     }
 }
