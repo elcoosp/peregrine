@@ -433,6 +433,7 @@ dependencies = [
 name = "pgr-daemon"
 version = "0.22.0"
 dependencies = [
+ "criterion",
  "pgr-core",
  "pgr-emit",
  "pgr-fixtures",
