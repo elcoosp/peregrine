@@ -577,6 +577,16 @@ link's hot path", recorded honestly:**
   codec price over a served-shape report (the warm pipeline's six rows, the ladder's note, the
   total band) — `encode_report/6_rows` and `decode_report/6_rows`; the tail rides an IMAGE reply
   that carries pages, so the honest expectation is noise beside the transfer.
+- `trace` (`cargo bench -p pgr-core --bench trace`, M61): the timeline's own price —
+  `link_64_objects/unobserved` vs `collector` (the M54 seam's near-parity gate, shared with
+  the m54/m58 benches: one push per phase, seven per segmented link, regardless of the
+  corpus size) beside the faces' price over a fixed eight-row report (`render_8_rows`,
+  `parse_8_rows` — O(rows), the rows are the pipeline's own count).
+- `wire_trace` (`cargo bench -p pgr-daemon --bench wire_trace`, M62): the served timeline's
+  wire-tail codec price over a served-shape document (the warm pipeline's six phase rows,
+  the ladder's note instant) — `encode_trace/6_rows` and `decode_trace/6_rows` (one length
+  prefix, one string push; the JSON rides verbatim). The tail rides an IMAGE reply that
+  carries pages, so the honest expectation is noise beside the transfer.
 - `dep_info` (`cargo bench -p pgr-core --bench dep_info`, M60): the dependency record's own price
   over records sized like real build-system links (8, 64 and 512 rows) — `render` (the version
   row plus one NUL-terminated row per entry) and `parse` (the strict reader's decode), linear in
