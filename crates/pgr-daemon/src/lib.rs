@@ -148,8 +148,10 @@ mod tests {
         // term-strip default — and the section renames as a
         // count-prefixed tail table (M53, `-rename_section`): a
         // resident relink renames the sections the client named, never
-        // the pre-M53 unnamed pairs.
-        assert_eq!(crate::PROTO_VERSION, 39);
+        // the pre-M53 unnamed pairs — and the served time report (M58/M59,
+        // `--time`): the request's flag asks the session to observe its own
+        // pipeline, the reply's tail carries the report.
+        assert_eq!(crate::PROTO_VERSION, 40);
     }
 
     #[test]
@@ -165,6 +167,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
