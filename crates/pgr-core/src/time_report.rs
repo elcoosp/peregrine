@@ -251,8 +251,10 @@ impl TimeReport {
 }
 
 /// The detail's interchange shape (the counts ride their own keys — the
-/// M54 event's fields, verbatim).
-fn detail_json(detail: &PhaseDetail) -> String {
+/// M54 event's fields, verbatim). The crate's one copy of the shape: the
+/// M61 trace's `args` object reuses it (the trace's `args` are the same
+/// detail under Chrome's envelope), never a third copy.
+pub(crate) fn detail_json(detail: &PhaseDetail) -> String {
     match detail {
         PhaseDetail::Objects { inputs } => format!("{{\"kind\":\"objects\",\"inputs\":{inputs}}}"),
         PhaseDetail::Members { pulled } => format!("{{\"kind\":\"members\",\"pulled\":{pulled}}}"),
