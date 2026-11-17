@@ -419,3 +419,12 @@ harness = false
 [[bench]]
 name = "time_report"
 harness = false
+
+# The M60 dependency-record bench: the sidecar's own price — the
+# eager-sorted insert, the render (the version row plus one
+# NUL-terminated row per entry) and the strict reader's decode over
+# records sized like real build-system links — a shape gate, the record
+# rides Pass 0 (one row per read file), never the pipeline.
+[[bench]]
+name = "dep_info"
+harness = false
