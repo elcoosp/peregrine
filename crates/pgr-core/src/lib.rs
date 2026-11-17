@@ -56,6 +56,7 @@ pub mod make_undefined;
 pub mod map;
 pub mod objc;
 pub mod object;
+pub mod observe;
 pub mod order;
 pub mod pagezero;
 pub mod platform;
@@ -84,7 +85,7 @@ pub use dyld_info::DyldInfoPlan;
 pub use dylinker::{Dylinker, DylinkerError};
 pub use export_filter::{SymbolMatcher, SymbolPattern, SymbolPatternError, is_export_visible};
 pub use fixups::{
-    FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page, pack_page_strided,
+    FixupKind, FixupPlan, FixupPointerFormat, MAX_CHAIN_STRIDE_BYTES, pack_page_strided,
 };
 pub use header_pad::HeaderPad;
 pub use ids::{FileId, StringId};
@@ -97,14 +98,17 @@ pub use layout::{
 };
 pub use link::{
     LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, RelocLink,
-    check_load_symbols, link, link_cached, link_from_objects, link_reloc, link_with,
+    check_load_symbols, link, link_cached, link_from_objects, link_from_objects_observed,
+    link_observed, link_reloc, link_reloc_observed, link_with,
 };
 pub use make_undefined::{MakeUndefined, MakeUndefinedError, MakeUndefinedName};
+pub use map::MapJsonError;
 pub use objc::{
     OBJC_METADATA_PREFIXES, OBJC1_METADATA_PREFIXES, ObjcFamily, classify_objc_metadata,
     defines_objc_metadata,
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
+pub use observe::{LinkNote, LinkObserver, Phase, PhaseDetail, PhaseEvent, TracingObserver};
 pub use pagezero::PageZero;
 pub use platform::FixupEncoding;
 pub use propagate::{PropagationScope, SectionDigest};
