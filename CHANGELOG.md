@@ -5,6 +5,44 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M58)
+
+- **M58** — the per-pass time report (`pgr_core::time_report`, the `--time` / `--time-json`
+  driver flags): the TDD's instrumentation spec ("`--time` prints a per-pass table: parse,
+  intern, resolve, layout, emit/fixups, hashes, flush") and the roadmap §9.3 budgets
+  ("enforced from `--time` JSON output") name the measurement surface the M54 observation seam
+  serves the raw material for — the collector (`TimeCollector`, an `LinkObserver` impl)
+  subscribes to the observed pipeline (`link_observed` / `link_reloc_observed`) and
+  `TimeReport::render` renders the deterministic text table (phase token, the phase's own
+  shape, the wall time, the permille share — integer math, no float rounding; µs below a
+  millisecond, seconds beyond), `render_json` the compact interchange line (fixed key order,
+  one line, the report-JSON escape rules, walls in whole microseconds). The emit band and the
+  total are the caller's measurement (the driver times the fused tile emit and the pipeline
+  wall); the ladder's silent-correct rungs ride the report as notes — a phase table that hid
+  the resolve-reuse fallback would misread the resolve row's price. The report is a
+  measurement, not a layout product: collecting never moves a byte (the parity gate is the
+  seam's own contract, re-gated through the collector), the `-r` shape reports its own five
+  phases with no fused-emit row, and the lane contract refuses where the observer does not
+  watch (`-incremental`; the resident lane joins at M59). The `time_report` bench pins the
+  collector's near-parity with the unobserved link (one push per phase — seven per segmented
+  link) and the faces' O(rows) render price; the `time_report` consumer example renders the
+  driver faces beside the library face.
+
+### Added (M59)
+
+- **M59** — the resident lane's served time report (wire v40): the session observes its own
+  pipeline — a time-asking request (`--time` beside `-resident`) subscribes the same
+  `TimeCollector` to the warm run the §7.3 ladder serves (`link_from_objects_observed` on
+  both the full link and the relink), and the reply's IMAGE tail carries the collected
+  report (count-prefixed phase rows — phase token, detail kind, µs — the notes, the
+  present-byte + µs bands). The served table names the phases the session's run actually
+  executed (no `Parse` row — the POIs are resident, the parse was paid when the blobs
+  arrived); the relink's Pass-4 half is the in-memory patch, so its emit band rides absent;
+  an unasked report never crosses (the tail is one byte); a client whose daemon falls back
+  prints the one-shot link's own report — either way the run is observed, and the daemon
+  still never touches the filesystem. The `wire_time` bench pins the tail's encode/decode
+  price; the driver's resident cycle walks the served face end to end.
+
 ### Added (M56)
 
 - **M56** — the symbol-reference provenance query (`pgr_core::provenance`, the
