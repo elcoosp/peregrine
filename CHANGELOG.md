@@ -5,6 +5,49 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M61)
+
+- **M61** — the Chrome-trace timeline (`pgr_core::trace`, the `--trace <path>` driver
+  flag): the roadmap §9.4 profiling toolbox ("`--trace` — Chrome-trace-format timeline
+  per thread, so stragglers and idle gaps are visible") names the measurement surface the
+  M54 observation seam already serves the raw material for — the collector
+  (`TraceCollector`, an `impl LinkObserver`) subscribes to the observed pipelines
+  (`link_observed` / `link_reloc_observed` / the session's warm run) and keeps every phase
+  event as a span and every ladder note as an instant; `TraceReport::render` writes the
+  Chrome Trace Event Format's object form (`{"traceEvents":[…]}`, one line, deterministic —
+  the `process_name`/`thread_name` metadata rows lead, the spans and instants ride `ts`
+  order with the arrival order stable on the ties, integer-microsecond bounds, the
+  report-JSON escape rules) and `parse_trace_json` is the strict reader: it restores the
+  writer's data exactly (the round-trip convention, gated) or refuses the broken shapes —
+  an unknown `ph`, an unknown phase or detail token, a float timestamp, a missing or
+  duplicate key, a lane no `thread_name` declared — with the byte position named. A span's
+  start is the arrival clock minus the event's own wall (one emit-call behind the clock;
+  saturating, never negative); the collector's lane registry keeps one lane per distinct
+  arrival thread (today's pipeline renders one `pgr link` lane — a worker-span seam rides
+  the same shape with more lanes). The timeline is a measurement, not a layout product: a
+  traced link plans the identical image the plain link does (the parity gate), the `-r`
+  shape traces its own five-phase run, and the incremental lane refuses the flag (the
+  engine's ladder runs where the observer does not). The `ObserverPair` seam serves the
+  time and trace faces behind one subscription when both flags ride (one event stream,
+  both faces). The `trace` bench pins the seam's near-parity and the faces' O(rows)
+  render/parse prices; the `trace_timeline` consumer example writes the file beside a real
+  link and reads it back through the strict reader.
+
+### Added (M62)
+
+- **M62** — the resident lane's served timeline (wire v41): a trace-asking request
+  (`--trace` beside `-resident`) subscribes the same `TraceCollector` to the session's own
+  warm run — paired with the time collector when both faces ask — and the reply's IMAGE
+  tail carries the rendered document verbatim (the same one-line Trace Event Format file
+  the one-shot `--trace` writes; the strict reader is the document's own face, the wire
+  never re-shapes it): the served timeline names the phases the session's run actually
+  executed (no `Parse` row — the POIs are resident, the parse was paid when the blobs
+  arrived; the relink's Pass-4 half is the in-memory patch), and an unasked timeline never
+  crosses (the tail is one byte). The client writes the served document to `--trace`'s
+  path — either lane writes the same face, so the driver's resident refusal flips to
+  service. The `wire_trace` bench pins the tail's encode/decode price (one length prefix,
+  one string push).
+
 ### Added (M60)
 
 - **M60** — the build-system dependency record (`pgr_core::dep_info`, the
