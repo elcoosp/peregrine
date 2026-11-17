@@ -186,8 +186,10 @@ pub struct Options {
     /// the TDD's instrumentation table (`pgr_core::time_report`). The
     /// default (`false`) prints nothing. The resident lane serves the
     /// same report from the session's own observed pipeline (wire v40,
-    /// M59); the incremental lane refuses the flag (`finish` — the
-    /// engine's ladder runs where the observer does not).
+    /// M59); the incremental lane rides since M65 — the §7.3 ladder's
+    /// rungs joined the seam's vocabulary — and the fusion lane
+    /// (`-resident -incremental`) serves the session's observed ladder
+    /// since M66 (wire v42 in service).
     pub time: bool,
     /// M58 `--time-json`: the same measurement rendered as the compact
     /// JSON interchange line (`TimeReport::render_json` — the M55/M56
@@ -201,9 +203,10 @@ pub struct Options {
     /// `chrome://tracing` and Perfetto UIs open. The default (`None`)
     /// writes nothing. The resident lane serves the same timeline from
     /// the session's own observed pipeline (wire v41, M62 — the client
-    /// writes the served document verbatim); the incremental lane
-    /// refuses the flag (`finish` — the engine's ladder runs where the
-    /// observer does not).
+    /// writes the served document verbatim); the incremental lane rides
+    /// since M65 — the §7.3 ladder's rungs joined the seam's vocabulary
+    /// — and the fusion lane (`-resident -incremental`) serves the
+    /// session's observed ladder since M66 (wire v42 in service).
     pub trace_path: Option<String>,
     /// M60 `-dependency_info <path>`: after a successful link, write the
     /// build-system dependency record — ld64's sidecar artifact, the
@@ -469,21 +472,6 @@ pub enum OptsError {
         /// The fix — the house convention.
         fix: String,
     },
-    /// A `--time` surface conflict (M58): the per-pass report reads the
-    /// pipeline's phases (the M54 observation seam's events), and the
-    /// incremental engine's patched relink runs where the observer does
-    /// not — the ladder's phases are the engine's, its Pass-4 half is
-    /// the in-memory patch (the resident lane serves its own observed
-    /// pipeline since wire v40). The verdict names the lane; the help
-    /// is the fix.
-    #[error("{verdict}")]
-    #[diagnostic(help("{fix}"))]
-    TimeConflict {
-        /// What conflicts with what.
-        verdict: String,
-        /// The fix — the house convention.
-        fix: String,
-    },
     /// A `--trace` value refusal (M61): an empty path writes the
     /// timeline nowhere — the same honest refusal `-dependency_info`
     /// pays (the file is the surface's whole point).
@@ -492,22 +480,6 @@ pub enum OptsError {
     TraceValue {
         /// The refused value (the empty string, verbatim).
         value: String,
-    },
-    /// A `--trace` surface conflict (M61): the timeline reads the
-    /// pipeline's phases (the M54 observation seam's events), and the
-    /// incremental engine's patched relink runs where the observer does
-    /// not — the ladder's phases are the engine's, its Pass-4 half is
-    /// the in-memory patch. The resident lane's served timeline rides
-    /// wire v41 (the M62 rung); until that rung the one-shot pipeline
-    /// is the only observer the timeline names. The verdict names the
-    /// lane; the help is the fix.
-    #[error("{verdict}")]
-    #[diagnostic(help("{fix}"))]
-    TraceConflict {
-        /// What conflicts with what.
-        verdict: String,
-        /// The fix — the house convention.
-        fix: String,
     },
     /// A `-dependency_info` surface conflict (M60): the dependency record
     /// names the files the link *read* — the incremental engine's relink
@@ -2928,51 +2900,6 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                      across the wire and never returns the parsed arena the query reads"
                 ),
                 fix: format!("drop {lanes} or -resident"),
-            });
-        }
-    }
-    // M58: the per-pass time report reads the pipeline's phases — the
-    // same lane contract as the provenance queries: a refusal where the
-    // lane never carries the product, never a table that misreports
-    // which pipeline it timed. M59 (wire v40) serves the resident lane:
-    // the session observes its own pipeline and the reply carries the
-    // report, so `-resident` rides; the incremental ladder still runs
-    // where the observer does not (its Pass-4 half is the patch, and
-    // the ladder's phases are the engine's — the one-shot observer
-    // would misreport the run).
-    if opts.time || opts.time_json {
-        let lane = if opts.time && opts.time_json {
-            "--time, --time-json"
-        } else if opts.time_json {
-            "--time-json"
-        } else {
-            "--time"
-        };
-        if opts.incremental {
-            return Err(OptsError::TimeConflict {
-                verdict: format!(
-                    "{lane} times the one-shot link's passes; -incremental's relink patches \
-                     the recorded plan inside the engine's ladder"
-                ),
-                fix: format!("drop {lane} or -incremental"),
-            });
-        }
-    }
-    // M61: the Chrome-trace timeline reads the pipeline's phases — the
-    // same lane contract as `--time` (a refusal where the lane never
-    // carries the product, never a timeline that misreports which
-    // pipeline it traced). The incremental lane refuses (the engine's
-    // ladder runs where the observer does not); the resident lane rides
-    // since wire v41 (M62) — the session observes its own pipeline and
-    // the reply carries the rendered document.
-    if let Some(path) = &opts.trace_path {
-        if opts.incremental {
-            return Err(OptsError::TraceConflict {
-                verdict: format!(
-                    "--trace {path} traces the one-shot link's passes; -incremental's relink \
-                     patches the recorded plan inside the engine's ladder"
-                ),
-                fix: "drop --trace or -incremental".to_string(),
             });
         }
     }
