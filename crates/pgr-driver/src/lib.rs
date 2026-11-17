@@ -543,7 +543,7 @@ pub fn resolve_framework(
 /// # Errors
 /// [`DriverError`] on option, link, emit, tbd or I/O failures.
 pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> {
-    Ok(link_to_image_recorded(opts)?.0)
+    Ok(link_to_image_recorded(opts, None)?.0)
 }
 
 /// The M56 `-why_export` answers (the driver's consumer face): one text
@@ -573,8 +573,15 @@ fn print_why_export(
 /// daemon's refreshed record (M9 GA fusion rung: the wire carries both
 /// halves, so a resident full link re-records the state and the
 /// incremental cycle survives daemon fallbacks).
+///
+/// `seed` is the M65 handover note: when the in-place ladder fell back to
+/// this full link with a timing face riding, the note leads the report
+/// (the collectors carry it into the table's note lines and the
+/// timeline's instants — one report per run, the handover named where the
+/// output actually came from). `None` on every other caller.
 fn link_to_image_recorded(
     opts: &opts::Options,
+    seed: Option<&pgr_core::observe::LinkNote>,
 ) -> Result<(ImageAndPlan, Option<pgr_emit::incremental::LinkRecord>), DriverError> {
     let (mut prepared, cache) = prepare_link(opts)?;
     // M58/M61: the observed faces — the time report's and the timeline's
@@ -684,6 +691,15 @@ fn link_to_image_recorded(
     let emit_elapsed: Option<std::time::Duration>;
     let mut times = pgr_core::TimeCollector::default();
     let mut traces = pgr_core::trace::TraceCollector::new();
+    // M65: the ladder's handover note leads the report — the collectors
+    // carry it into the run that actually produced the output (a table
+    // that hid the fallback would misread the run; the same convention
+    // that names the resolve-reuse fallback on the one-shot report).
+    if let Some(note) = seed {
+        use pgr_core::observe::LinkObserver as _;
+        times.on_note(note.clone());
+        traces.on_note(note.clone());
+    }
     let result = if timing {
         if opts.trace_path.is_some() && (opts.time || opts.time_json) {
             let mut pair = pgr_core::ObserverPair::new(&mut times, &mut traces);
@@ -1425,27 +1441,91 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
             }
         }
     }
+    // M65: the timing flags ride the ladder. The collectors own the whole
+    // run here — the ladder's rungs report through the observer (the warm
+    // pipeline's Passes 1–3 included), and a successful ladder prints the
+    // faces it collected (the emit band absent: the relink's Pass-4 half
+    // is the in-memory patch, the session's own convention). A fallback
+    // seeds its note into the full link's report below — the run that
+    // produced the output names the handover (one report per run, never
+    // two).
+    let mut handover_note: Option<pgr_core::observe::LinkNote> = None;
     if opts.incremental {
-        match incremental_relink(opts) {
-            Ok(outcome) => return Ok(outcome),
-            Err(RelinkAttempt::Error(e)) => return Err(e),
-            Err(RelinkAttempt::Fallback(reason)) => {
-                if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
-                    eprintln!("pgr: incremental fallback: {reason}");
+        let timing = opts.time || opts.time_json || opts.trace_path.is_some();
+        let ladder = if timing {
+            let started = std::time::Instant::now();
+            let mut times = pgr_core::TimeCollector::default();
+            let mut traces = pgr_core::trace::TraceCollector::new();
+            let relink = if opts.trace_path.is_some() && (opts.time || opts.time_json) {
+                let mut pair = pgr_core::ObserverPair::new(&mut times, &mut traces);
+                incremental_relink(opts, Some(&mut pair))
+            } else if opts.trace_path.is_some() {
+                incremental_relink(opts, Some(&mut traces))
+            } else {
+                incremental_relink(opts, Some(&mut times))
+            };
+            match relink {
+                Ok(outcome) => {
+                    let total = started.elapsed();
+                    let mut report = times.report();
+                    report.total = Some(total);
+                    if opts.time {
+                        print!("{}", report.render());
+                    }
+                    if opts.time_json {
+                        println!("{}", report.render_json());
+                    }
+                    if let Some(trace_path) = &opts.trace_path {
+                        let timeline = traces.finish();
+                        std::fs::write(Path::new(trace_path), timeline.render()).map_err(
+                            |source| DriverError::Io {
+                                path: trace_path.clone(),
+                                source,
+                            },
+                        )?;
+                    }
+                    Some(Ok(outcome))
+                }
+                Err(RelinkAttempt::Error(e)) => Some(Err(e)),
+                Err(RelinkAttempt::Fallback(reason)) => {
+                    if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
+                        eprintln!("pgr: incremental fallback: {reason}");
+                    }
+                    handover_note = Some(pgr_core::observe::LinkNote::RelinkFallback {
+                        reason: reason.to_string(),
+                    });
+                    None
                 }
             }
+        } else {
+            match incremental_relink(opts, None) {
+                Ok(outcome) => Some(Ok(outcome)),
+                Err(RelinkAttempt::Error(e)) => Some(Err(e)),
+                Err(RelinkAttempt::Fallback(reason)) => {
+                    if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
+                        eprintln!("pgr: incremental fallback: {reason}");
+                    }
+                    None
+                }
+            }
+        };
+        if let Some(res) = ladder {
+            return res;
         }
     }
     // §7.3 "layout stability": the in-place tier stands on slack anchors,
     // so `-incremental` implies slack layout for the whole link cycle —
     // the cold full link reserves the same padding its record describes,
-    // and the first edited relink can patch in place.
+    // and the first edited relink can patch in place. M65: the ladder's
+    // handover note leads the full link's report (the collectors seed it
+    // before the pipeline runs — the note names why the rungs stop, the
+    // rows name the run that produced the output).
     let (linked, record) = if opts.incremental && opts.config.layout_slack.is_none() {
         let mut slacked = opts.clone();
         slacked.config.layout_slack = Some(pgr_core::slack::SlackPolicy::default());
-        link_to_image_recorded(&slacked)?
+        link_to_image_recorded(&slacked, handover_note.as_ref())?
     } else {
-        link_to_image_recorded(opts)?
+        link_to_image_recorded(opts, handover_note.as_ref())?
     };
     write_image(&linked.image, Path::new(&opts.output))?;
     if let Some(record) = record {
@@ -1679,6 +1759,13 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
     // `-incremental-verify` is on — the daemon's ladder serves the
     // bytes-level audit and the verdict crosses the wire.
     job.request.audit = opts.incremental_verify;
+    // M66 (v42 in service): the timing faces ride the fusion relink —
+    // the session's ladder reports its rungs beside the warm pipeline
+    // (wire v42 registered the vocabulary at M65) and the reply's tails
+    // carry both faces.
+    let timing = opts.time || opts.time_json || opts.trace_path.is_some();
+    job.request.time = timing;
+    job.request.trace = opts.trace_path.is_some();
     let socket = opts
         .resident_socket
         .clone()
@@ -1764,6 +1851,26 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
     } else if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
         eprintln!("pgr: the daemon's relink returned no record; keeping the old one");
     }
+    // M66 (v42 in service): the served faces print/write beside the
+    // fusion relink — the report is the session's observed ladder run (no
+    // Parse row: the POIs are resident), the timeline the same document
+    // the one-shot lane writes. Either lane, one observed run.
+    if timing {
+        if let Some(report) = &served.time_report {
+            if opts.time {
+                print!("{}", report.render());
+            }
+            if opts.time_json {
+                println!("{}", report.render_json());
+            }
+        }
+        if let (Some(path), Some(json)) = (&opts.trace_path, &served.trace_json) {
+            std::fs::write(Path::new(path), json).map_err(|source| DriverError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        }
+    }
     Ok(LinkOutcome {
         output: opts.output.clone(),
         // A tiles reply carries no image bytes — the size is the stream's
@@ -1785,25 +1892,58 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
 /// anchors, plan the patch, clone-and-patch the output, re-sign the dirty
 /// pages and rename. Returns the patch outcome plus the refreshed record
 /// (written here so the *next* relink starts from the new state).
-fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt> {
+///
+/// M65: the ladder reports its rungs through the observation seam — the
+/// integrity gate, the patch plan, the clone-and-patch and the
+/// `-incremental-verify` audit ride the seam as
+/// [`pgr_core::observe::Phase`]s (the warm pipeline's Passes 1–3 report
+/// through [`pgr_core::link_observed`]), and every fallback rung names
+/// itself as a [`pgr_core::observe::LinkNote::RelinkFallback`] before the
+/// handover (the full link follows; the note says why the ladder's rungs
+/// stop where they do). `None` = the historical silence — the seam costs
+/// nothing when nobody subscribes.
+fn incremental_relink(
+    opts: &opts::Options,
+    mut observer: Option<&mut dyn pgr_core::observe::LinkObserver>,
+) -> Result<LinkOutcome, RelinkAttempt> {
     let record_bytes = std::fs::read(record_path(opts))
         .map_err(|_| RelinkAttempt::Fallback(pgr_emit::incremental::FallbackReason::NoRecord))?;
     let Some(record) = pgr_emit::incremental::LinkRecord::decode(&record_bytes) else {
+        emit_relink_fallback(
+            &mut observer,
+            &pgr_emit::incremental::FallbackReason::RecordUnreadable,
+        );
         return Err(pgr_emit::incremental::FallbackReason::RecordUnreadable.into());
     };
     let output = Path::new(&opts.output);
     // Any integrity-gate failure — missing, resized, corrupt — falls back:
-    // the full link never needs the previous output.
-    match pgr_emit::incremental::check_output(output, &record) {
-        Ok(pgr_emit::incremental::Integrity::Match) => {}
+    // the full link never needs the previous output. The gate is real work
+    // (the record's page-hash sample hashed against the output) and rides
+    // the seam when someone subscribes (M65).
+    let gate_started = std::time::Instant::now();
+    let gate = pgr_emit::incremental::check_output(output, &record);
+    match gate {
+        Ok(pgr_emit::incremental::Integrity::Match) => {
+            emit_relink_phase(
+                &mut observer,
+                pgr_core::observe::Phase::RelinkGate,
+                pgr_core::observe::PhaseDetail::Gate {
+                    pages: usize::try_from(record.hashed_pages()).unwrap_or(usize::MAX),
+                },
+                gate_started.elapsed(),
+            );
+        }
         Ok(pgr_emit::incremental::Integrity::Mismatch { detail }) => {
-            return Err(pgr_emit::incremental::FallbackReason::OutputChanged { detail }.into());
+            let reason = pgr_emit::incremental::FallbackReason::OutputChanged { detail };
+            emit_relink_fallback(&mut observer, &reason);
+            return Err(reason.into());
         }
         Err(e) => {
-            return Err(pgr_emit::incremental::FallbackReason::OutputChanged {
+            let reason = pgr_emit::incremental::FallbackReason::OutputChanged {
                 detail: e.to_string(),
-            }
-            .into());
+            };
+            emit_relink_fallback(&mut observer, &reason);
+            return Err(reason.into());
         }
     }
 
@@ -1844,16 +1984,31 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
             digests: record.section_digests.clone(),
         });
     }
-    let result = pgr_core::link_cached(
-        &prepared.inputs,
-        &prepared.archives,
-        &cfg,
-        pgr_core::Parallelism::Auto,
-        cache.as_ref(),
-    )
+    // M65: the relink's warm pipeline rides the observation seam when a
+    // subscriber watches (the same entry the one-shot path uses — the
+    // Passes 1–3 events land in the caller's collectors; a link through
+    // the POI cache is still a parse the consumer waited on).
+    let result = match observer.as_deref_mut() {
+        Some(obs) => pgr_core::link_observed(
+            &prepared.inputs,
+            &prepared.archives,
+            &cfg,
+            pgr_core::Parallelism::Auto,
+            cache.as_ref(),
+            obs,
+        ),
+        None => pgr_core::link_cached(
+            &prepared.inputs,
+            &prepared.archives,
+            &cfg,
+            pgr_core::Parallelism::Auto,
+            cache.as_ref(),
+        ),
+    }
     .map_err(|e| RelinkAttempt::Error(e.into()))?;
     check_force_load(&result, &prepared.force_load).map_err(RelinkAttempt::Error)?;
 
+    let plan_started = std::time::Instant::now();
     let decision = pgr_emit::incremental::plan_patch(
         &record,
         &result.layout,
@@ -1864,9 +2019,19 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
     let plan = match decision {
         pgr_emit::incremental::PatchDecision::InPlace(plan) => plan,
         pgr_emit::incremental::PatchDecision::Fallback(reason) => {
+            emit_relink_fallback(&mut observer, &reason);
             return Err(RelinkAttempt::Fallback(reason));
         }
     };
+    emit_relink_phase(
+        &mut observer,
+        pgr_core::observe::Phase::RelinkPlan,
+        pgr_core::observe::PhaseDetail::Plan {
+            tiles: usize::try_from(plan.total_tiles).unwrap_or(usize::MAX),
+            dirty: plan.dirty_tiles.len(),
+        },
+        plan_started.elapsed(),
+    );
     // Nothing changed: leave the output byte-for-byte alone (§7.3 — the
     // relink's job is done), refresh the record, report the no-op.
     if plan.is_untouched() {
@@ -1886,6 +2051,7 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
             transport: None,
         });
     }
+    let patch_started = std::time::Instant::now();
     let (mut outcome, new_record) = pgr_emit::incremental::apply_patch(
         output,
         &record,
@@ -1896,9 +2062,21 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
         result.resolve_snapshot.clone(),
     )
     .map_err(|e| match e {
-        pgr_emit::incremental::PatchError::Fallback(reason) => RelinkAttempt::Fallback(reason),
+        pgr_emit::incremental::PatchError::Fallback(reason) => {
+            emit_relink_fallback(&mut observer, &reason);
+            RelinkAttempt::Fallback(reason)
+        }
         other => RelinkAttempt::Error(other.into()),
     })?;
+    emit_relink_phase(
+        &mut observer,
+        pgr_core::observe::Phase::RelinkPatch,
+        pgr_core::observe::PhaseDetail::Patch {
+            bytes: outcome.bytes_patched,
+            tiles: usize::try_from(outcome.dirty_tiles).unwrap_or(usize::MAX),
+        },
+        patch_started.elapsed(),
+    );
 
     // `-incremental-verify` (§7.3): the audit gate, through the engine's
     // audit twin (the same implementation the daemon serves on the wire).
@@ -1908,6 +2086,7 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
     // bytes (with the deliberate-unsigned carve-out for `-no_adhoc`).
     let mut audit_summary = None;
     if opts.incremental_verify {
+        let audit_started = std::time::Instant::now();
         let full = pgr_emit::build_image_fused(&result.layout, &result.objects)
             .map_err(|e| RelinkAttempt::Error(e.into()))?;
         let patched = std::fs::read(output)
@@ -1945,6 +2124,18 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
         // shape is the config's own choice — the carve-out lives in the
         // twin; everything else gates at full strictness.
         let blocking = pgr_emit::incremental::audit::audit_image(&final_bytes, !cfg.adhoc);
+        // The audit is real work (the reference emit rebuilt, the strict
+        // verifier walked) and rides the seam whether it ships or refuses
+        // (a blocking issue count is the audit's own finding — M65).
+        emit_relink_phase(
+            &mut observer,
+            pgr_core::observe::Phase::RelinkAudit,
+            pgr_core::observe::PhaseDetail::Audit {
+                healed,
+                issues: blocking.len(),
+            },
+            audit_started.elapsed(),
+        );
         if !blocking.is_empty() {
             let detail = pgr_emit::incremental::audit::AuditRefusal { issues: blocking }.render();
             return Err(RelinkAttempt::Error(DriverError::Audit {
@@ -1971,6 +2162,39 @@ fn incremental_relink(opts: &opts::Options) -> Result<LinkOutcome, RelinkAttempt
         audit: audit_summary,
         transport: None,
     })
+}
+
+/// Emits one ladder rung through the observer slot (M65 — `None` = the
+/// historical silence, the seam costs nothing when nobody subscribes; the
+/// same shape the core pipeline's own `emit_phase` carries).
+fn emit_relink_phase(
+    observer: &mut Option<&mut dyn pgr_core::observe::LinkObserver>,
+    phase: pgr_core::observe::Phase,
+    detail: pgr_core::observe::PhaseDetail,
+    elapsed: std::time::Duration,
+) {
+    if let Some(obs) = observer.as_deref_mut() {
+        obs.on_phase(pgr_core::observe::PhaseEvent {
+            phase,
+            detail,
+            elapsed,
+        });
+    }
+}
+
+/// Names a fallback rung on the observer slot before the handover (M65):
+/// the full link follows, and the note says why the ladder's rungs stop
+/// where they do — the same "silent-correct, not silent-blind" wording
+/// the `PGR_INCREMENTAL_DEBUG` line carries.
+fn emit_relink_fallback(
+    observer: &mut Option<&mut dyn pgr_core::observe::LinkObserver>,
+    reason: &pgr_emit::incremental::FallbackReason,
+) {
+    if let Some(obs) = observer.as_deref_mut() {
+        obs.on_note(pgr_core::observe::LinkNote::RelinkFallback {
+            reason: reason.to_string(),
+        });
+    }
 }
 
 /// Best-effort record store (a failed write only costs the next link a
