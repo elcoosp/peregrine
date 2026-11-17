@@ -1,6 +1,6 @@
 # Peregrine Benchmarks — Recorded Baselines
 
-**Status: M0–M57 surfaces recorded on the dev sandbox** (M47–M52 as shape-parity gates — initial runs noted inline). These numbers exist to (a) prove the
+**Status: M0–M67 surfaces recorded on the dev sandbox** (M47–M52 as shape-parity gates — initial runs noted inline). These numbers exist to (a) prove the
 harness works end-to-end from day one and (b) give each pass a regression anchor.
 
 > [!WARNING]
@@ -97,7 +97,6 @@ cargo bench -p pgr-driver --bench platform
 cargo bench -p pgr-emit --bench emit
 cargo bench -p pgr-emit --bench object
 cargo bench -p pgr-emit --bench propagate
-cargo bench -p pgr-emit --bench emit
 cargo bench -p pgr-emit --bench record_summary
 # core: trie + the knob-parity family
 cargo bench -p pgr-core --bench trie
@@ -144,8 +143,14 @@ cargo bench -p pgr-core --bench objc_pre2
 cargo bench -p pgr-core --bench no_weak_imports
 cargo bench -p pgr-core --bench stack_exec
 cargo bench -p pgr-core --bench rename_sections
+cargo bench -p pgr-core --bench dead_strip_inits
 cargo bench -p pgr-core --bench observer
+cargo bench -p pgr-core --bench time_report
+cargo bench -p pgr-core --bench trace
 cargo bench -p pgr-driver --bench final_output
+# daemon: the served tails' codec price
+cargo bench -p pgr-daemon --bench wire_time
+cargo bench -p pgr-daemon --bench wire_trace
 # verify
 cargo bench -p pgr-verify --bench platform
 cargo bench -p pgr-verify --bench arm64e
@@ -601,6 +606,13 @@ link's hot path", recorded honestly:**
   the rows the link read, beside `record_512` (the `partition_point` insert path Pass 0 fills the
   record with, one memmove per row). The record rides Pass 0, never the pipeline — a shape gate
   on the sidecar's cost, not a link-cost knob.
+- `checks`' extension groups (`cargo bench -p pgr-verify --bench checks`, M67): the
+  consumer-side policy check riding the selection surface — `verify_extra/full+policy` beside
+  `verify_checks/full` (the extension is one `&dyn` call after the families, not a re-verify:
+  initial dev-sandbox run 21.05 µs beside 20.90 µs, inside the run-to-run span — parity is the
+  honest expectation) and `verify_extra/policy-only` beside the parse pre-pass (342 ns — the
+  extension alone prices the unit's own read; the group pins the shape, the hardware gates own
+  the comparable numbers).
 
 ## Pending measurements
 
