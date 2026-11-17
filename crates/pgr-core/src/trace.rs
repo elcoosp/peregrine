@@ -61,19 +61,25 @@ const LANE_NAME: &str = "pgr link";
 const LANE_WORKER_PREFIX: &str = "pgr parse pool ";
 
 /// The note's stable token — the `name` the instant event carries and
-/// the reader restores. `LinkNote` is a one-variant enum today; the
-/// collector's destructure (and this acceptance set) stop compiling when
-/// a later rung joins as a new variant — the timeline must name the new
-/// rung's own token (an arm, not a skip).
+/// the reader restores. The acceptance set mirrors the collector's
+/// destructure (one entry per `LinkNote` variant): a later rung joining
+/// [`LinkNote`] adds its own token here and its own collector arm.
 const RESOLVE_REUSE_FALLBACK: &str = "resolve_reuse_fallback";
+
+/// The relink ladder's fallback token (M65): the instant the timeline
+/// writes when the §7.3 in-place ladder handed the link over to the full
+/// link (the reason rides `args.reason`, the resolve-reuse fallback's
+/// shape).
+const RELINK_FALLBACK: &str = "relink_fallback";
 
 /// The note kinds the reader accepts (the mirror of the collector's
 /// destructure — one entry per `LinkNote` variant).
-const NOTE_KINDS: [&str; 1] = [RESOLVE_REUSE_FALLBACK];
+const NOTE_KINDS: [&str; 2] = [RESOLVE_REUSE_FALLBACK, RELINK_FALLBACK];
 
 /// The phase tokens the reader accepts, in link order (the mirror of
-/// [`Phase::as_str`] — the writer's name set).
-const PHASES: [Phase; 8] = [
+/// [`Phase::as_str`] — the writer's name set; the M65 rung tokens ride
+/// beside the pipeline's passes, in the seam's declaration order).
+const PHASES: [Phase; 12] = [
     Phase::Parse,
     Phase::ArchivePull,
     Phase::Intern,
@@ -82,6 +88,10 @@ const PHASES: [Phase; 8] = [
     Phase::Fold,
     Phase::Layout,
     Phase::Reloc,
+    Phase::RelinkGate,
+    Phase::RelinkPlan,
+    Phase::RelinkPatch,
+    Phase::RelinkAudit,
 ];
 
 /// The phase a timeline row's name restores (the token → phase lookup).
@@ -331,12 +341,15 @@ impl LinkObserver for TraceCollector {
         }
         let lane = self.lane_of(thread);
         let at_us = self.us_since_base(Instant::now());
-        // `LinkNote` is a one-variant enum today; this destructure keeps
-        // a later rung from riding silently (the bridge's convention —
-        // the new variant adds its own arm and its own token).
-        let LinkNote::ResolveReuseFallback { reason } = note;
+        // Each variant names its own token (an arm, not a skip): a new
+        // `LinkNote` rung stops compiling here until the timeline speaks
+        // it — and its token joins `NOTE_KINDS` for the reader.
+        let (kind, reason) = match note {
+            LinkNote::ResolveReuseFallback { reason } => (RESOLVE_REUSE_FALLBACK, reason),
+            LinkNote::RelinkFallback { reason } => (RELINK_FALLBACK, reason),
+        };
         self.notes.push(TraceNote {
-            kind: RESOLVE_REUSE_FALLBACK,
+            kind,
             reason,
             lane,
             at_us,
@@ -875,14 +888,18 @@ impl TraceJsonReader<'_> {
                     if dur.is_some() {
                         return Self::field("dur", "the instant row carries no duration");
                     }
-                    if !NOTE_KINDS.contains(&name.as_str()) {
+                    // Validated here, once: the assembled row carries the
+                    // schema's own token (no re-validation, no panic path
+                    // in the reader).
+                    let Some(kind) = NOTE_KINDS.iter().find(|k| **k == name.as_str()).copied()
+                    else {
                         return Self::field("name", format!("unknown note kind `{name}`"));
-                    }
+                    };
                     let ArgsRow::Reason(reason) = args else {
                         return Self::field("args", "the instant's args carry the reason");
                     };
                     Ok(EventRow::Note {
-                        kind: name,
+                        kind,
                         reason,
                         ts,
                         tid,
@@ -910,6 +927,12 @@ impl TraceJsonReader<'_> {
         let mut folded: Option<u64> = None;
         let mut segments: Option<u64> = None;
         let mut sections: Option<u64> = None;
+        let mut pages: Option<u64> = None;
+        let mut tiles: Option<u64> = None;
+        let mut dirty: Option<u64> = None;
+        let mut bytes: Option<u64> = None;
+        let mut healed: Option<bool> = None;
+        let mut issues: Option<u64> = None;
         let mut first = true;
         while let Some(key) = self.next_key(first)? {
             first = false;
@@ -925,6 +948,12 @@ impl TraceJsonReader<'_> {
                 "folded" => Self::set(&mut folded, "folded", self.u64_field("folded")?)?,
                 "segments" => Self::set(&mut segments, "segments", self.u64_field("segments")?)?,
                 "sections" => Self::set(&mut sections, "sections", self.u64_field("sections")?)?,
+                "pages" => Self::set(&mut pages, "pages", self.u64_field("pages")?)?,
+                "tiles" => Self::set(&mut tiles, "tiles", self.u64_field("tiles")?)?,
+                "dirty" => Self::set(&mut dirty, "dirty", self.u64_field("dirty")?)?,
+                "bytes" => Self::set(&mut bytes, "bytes", self.u64_field("bytes")?)?,
+                "healed" => Self::set(&mut healed, "healed", self.bool_field("healed")?)?,
+                "issues" => Self::set(&mut issues, "issues", self.u64_field("issues")?)?,
                 other => return Self::field(other, "unknown key in the trace args"),
             }
         }
@@ -941,6 +970,12 @@ impl TraceJsonReader<'_> {
                     || folded.is_some()
                     || segments.is_some()
                     || sections.is_some()
+                    || pages.is_some()
+                    || tiles.is_some()
+                    || dirty.is_some()
+                    || bytes.is_some()
+                    || healed.is_some()
+                    || issues.is_some()
                 {
                     return Self::field("args", "the task args carry the kind and the label");
                 }
@@ -978,6 +1013,21 @@ impl TraceJsonReader<'_> {
                 },
                 "reloc" => PhaseDetail::Reloc {
                     inputs: usize::try_from(Self::require(inputs, "inputs")?).unwrap_or(usize::MAX),
+                },
+                "gate" => PhaseDetail::Gate {
+                    pages: usize::try_from(Self::require(pages, "pages")?).unwrap_or(usize::MAX),
+                },
+                "plan" => PhaseDetail::Plan {
+                    tiles: usize::try_from(Self::require(tiles, "tiles")?).unwrap_or(usize::MAX),
+                    dirty: usize::try_from(Self::require(dirty, "dirty")?).unwrap_or(usize::MAX),
+                },
+                "patch" => PhaseDetail::Patch {
+                    bytes: Self::require(bytes, "bytes")?,
+                    tiles: usize::try_from(Self::require(tiles, "tiles")?).unwrap_or(usize::MAX),
+                },
+                "audit" => PhaseDetail::Audit {
+                    healed: Self::require(healed, "healed")?,
+                    issues: usize::try_from(Self::require(issues, "issues")?).unwrap_or(usize::MAX),
                 },
                 other => {
                     return Self::field("kind", format!("unknown detail kind `{other}`"));
@@ -1078,11 +1128,7 @@ impl TraceJsonReader<'_> {
                         );
                     }
                     notes.push(TraceNote {
-                        kind: NOTE_KINDS
-                            .iter()
-                            .find(|k| **k == kind.as_str())
-                            .copied()
-                            .expect("the kind was validated at the event"),
+                        kind,
                         reason,
                         lane: tid,
                         at_us: ts,
@@ -1140,8 +1186,8 @@ enum EventRow {
     },
     /// A note instant (`ph: "i"`).
     Note {
-        /// The note kind token.
-        kind: String,
+        /// The note's token from the schema's own acceptance set.
+        kind: &'static str,
         /// The note's reason.
         reason: String,
         /// The µs instant.
