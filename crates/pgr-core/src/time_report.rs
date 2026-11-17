@@ -50,11 +50,14 @@ impl LinkObserver for TimeCollector {
     }
 
     fn on_note(&mut self, note: LinkNote) {
-        // `LinkNote` is a one-variant enum today; when a later rung joins
-        // as a new variant, this destructure stops compiling — the report
-        // must name the new rung's own note (a match arm, not a skip).
-        let LinkNote::ResolveReuseFallback { reason } = note;
-        self.notes.push(reason);
+        // The report carries every note's own wording, verbatim (the arm
+        // names both variants — a new `LinkNote` rung stops compiling
+        // here until the report speaks it, the bridge's convention).
+        match note {
+            LinkNote::ResolveReuseFallback { reason } | LinkNote::RelinkFallback { reason } => {
+                self.notes.push(reason);
+            }
+        }
     }
 }
 
@@ -113,6 +116,10 @@ fn detail_text(detail: &PhaseDetail) -> String {
             format!("segments={segments}, sections={sections}")
         }
         PhaseDetail::Reloc { inputs } => format!("reloc inputs={inputs}"),
+        PhaseDetail::Gate { pages } => format!("pages={pages} hashed"),
+        PhaseDetail::Plan { tiles, dirty } => format!("tiles={tiles}, dirty={dirty}"),
+        PhaseDetail::Patch { bytes, tiles } => format!("bytes={bytes}, tiles={tiles}"),
+        PhaseDetail::Audit { healed, issues } => format!("healed={healed}, issues={issues}"),
     }
 }
 
@@ -268,5 +275,15 @@ pub(crate) fn detail_json(detail: &PhaseDetail) -> String {
             format!("{{\"kind\":\"planned\",\"segments\":{segments},\"sections\":{sections}}}")
         }
         PhaseDetail::Reloc { inputs } => format!("{{\"kind\":\"reloc\",\"inputs\":{inputs}}}"),
+        PhaseDetail::Gate { pages } => format!("{{\"kind\":\"gate\",\"pages\":{pages}}}"),
+        PhaseDetail::Plan { tiles, dirty } => {
+            format!("{{\"kind\":\"plan\",\"tiles\":{tiles},\"dirty\":{dirty}}}")
+        }
+        PhaseDetail::Patch { bytes, tiles } => {
+            format!("{{\"kind\":\"patch\",\"bytes\":{bytes},\"tiles\":{tiles}}}")
+        }
+        PhaseDetail::Audit { healed, issues } => {
+            format!("{{\"kind\":\"audit\",\"healed\":{healed},\"issues\":{issues}}}")
+        }
     }
 }
