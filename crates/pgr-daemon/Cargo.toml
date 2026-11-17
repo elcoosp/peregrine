@@ -21,9 +21,18 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 pgr-fixtures = { workspace = true }
 pgr-verify = { workspace = true }
+criterion = { workspace = true }
 
 [lints]
 workspace = true
+
+# The M59 wire-tail bench: the time report's encode/decode price over a
+# served-shape report (the warm pipeline's phases, the notes, the bands) —
+# a shape gate, the tail is a handful of scalars beside an image that
+# carries pages.
+[[bench]]
+name = "wire_time"
+harness = false
 
 [[bin]]
 name = "pgrd"
