@@ -194,6 +194,17 @@ pub struct Options {
     /// escape rules). Composes with `--time`; both faces read the one
     /// observed run. The lane contract mirrors `--time`.
     pub time_json: bool,
+    /// M61 `--trace <path>`: after a link, write the link's
+    /// Chrome-trace timeline — the M54 observation seam's phase events
+    /// collected into the Trace Event Format's object form
+    /// (`pgr_core::trace`; the reader is the same seam), the file the
+    /// `chrome://tracing` and Perfetto UIs open. The default (`None`)
+    /// writes nothing. The resident lane serves the same timeline from
+    /// the session's own observed pipeline (wire v41, M62 — the client
+    /// writes the served document verbatim); the incremental lane
+    /// refuses the flag (`finish` — the engine's ladder runs where the
+    /// observer does not).
+    pub trace_path: Option<String>,
     /// M60 `-dependency_info <path>`: after a successful link, write the
     /// build-system dependency record — ld64's sidecar artifact, the
     /// binary file Xcode's incremental builds read (`pgr_core::dep_info`
@@ -292,6 +303,7 @@ impl Default for Options {
             why_load: false,
             time: false,
             time_json: false,
+            trace_path: None,
             dependency_info: None,
             pagezero_explicit: false,
             init_offsets_flag: None,
@@ -467,6 +479,31 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     TimeConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The fix — the house convention.
+        fix: String,
+    },
+    /// A `--trace` value refusal (M61): an empty path writes the
+    /// timeline nowhere — the same honest refusal `-dependency_info`
+    /// pays (the file is the surface's whole point).
+    #[error("--trace: the timeline's path is empty")]
+    #[diagnostic(help("name the file the timeline writes to: --trace <path>"))]
+    TraceValue {
+        /// The refused value (the empty string, verbatim).
+        value: String,
+    },
+    /// A `--trace` surface conflict (M61): the timeline reads the
+    /// pipeline's phases (the M54 observation seam's events), and the
+    /// incremental engine's patched relink runs where the observer does
+    /// not — the ladder's phases are the engine's, its Pass-4 half is
+    /// the in-memory patch. The resident lane's served timeline rides
+    /// wire v41 (the M62 rung); until that rung the one-shot pipeline
+    /// is the only observer the timeline names. The verdict names the
+    /// lane; the help is the fix.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    TraceConflict {
         /// What conflicts with what.
         verdict: String,
         /// The fix — the house convention.
@@ -1611,6 +1648,17 @@ fn apply_flag(
         }
         "--time-json" => {
             opts.time_json = true;
+        }
+        // M61: the Chrome-trace timeline (the roadmap §9.4 toolbox's
+        // `--trace`). The path rides verbatim — paths are free-form; an
+        // empty one refuses here (a timeline with no name writes
+        // nowhere), the lane conflicts are `finish`'s.
+        "--trace" => {
+            let v = next_value(args, i, arg)?;
+            if v.is_empty() {
+                return Err(OptsError::TraceValue { value: v });
+            }
+            opts.trace_path = Some(v);
         }
         // M60: the build-system dependency record (ld64's
         // `-dependency_info`). The path rides verbatim — paths are
@@ -2907,6 +2955,24 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                      the recorded plan inside the engine's ladder"
                 ),
                 fix: format!("drop {lane} or -incremental"),
+            });
+        }
+    }
+    // M61: the Chrome-trace timeline reads the pipeline's phases — the
+    // same lane contract as `--time` (a refusal where the lane never
+    // carries the product, never a timeline that misreports which
+    // pipeline it traced). The incremental lane refuses (the engine's
+    // ladder runs where the observer does not); the resident lane rides
+    // since wire v41 (M62) — the session observes its own pipeline and
+    // the reply carries the rendered document.
+    if let Some(path) = &opts.trace_path {
+        if opts.incremental {
+            return Err(OptsError::TraceConflict {
+                verdict: format!(
+                    "--trace {path} traces the one-shot link's passes; -incremental's relink \
+                     patches the recorded plan inside the engine's ladder"
+                ),
+                fix: "drop --trace or -incremental".to_string(),
             });
         }
     }
