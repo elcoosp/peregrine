@@ -115,14 +115,23 @@ fn the_flags_parse_and_default_off() {
     assert!(both.time && both.time_json, "the two faces compose");
 }
 
+/// M65: the in-process incremental ladder rides the report — the §7.3
+/// rungs joined the observation seam's vocabulary (the run gate lives in
+/// `m65_relink_timeline.rs`). M66: the fusion lane rides too — the
+/// session's ladder reports its own rungs beside the warm pipeline and
+/// the reply's tail carries the report (wire v42 in service).
 #[test]
-fn the_report_refuses_the_incremental_lane() {
+fn the_report_rides_the_ladder_and_the_fusion_lane() {
     let dir = scratch("json");
-    let err = parse(&dir, &["--time-json", "-incremental"]).expect_err("the lane refuses");
-    let rendered = err.to_string();
+    let o = parse(&dir, &["--time-json", "-incremental"]).expect("the ladder rides");
     assert!(
-        rendered.contains("--time-json") && rendered.contains("-incremental"),
-        "the conflict names both flags: {rendered}"
+        o.time_json && o.incremental,
+        "--time-json rides beside -incremental"
+    );
+    let f = parse(&dir, &["--time", "-resident", "-incremental"]).expect("the fusion lane rides");
+    assert!(
+        f.time && f.resident && f.incremental,
+        "--time rides beside -resident -incremental"
     );
 }
 
