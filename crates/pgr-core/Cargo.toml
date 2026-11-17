@@ -393,3 +393,20 @@ harness = false
 
 [lints]
 workspace = true
+
+# The M56 provenance bench: the -why_export query's price — the M8-a
+# reverse index's once-per-link build and the query's own read against
+# the built index — over the resolve bench's 64-object corpus. A shape
+# gate (the seam re-derives nothing; the site records are the corpus's
+# own edges), not a link-cost knob.
+[[bench]]
+name = "provenance"
+harness = false
+
+# The M57 load-provenance bench: the S7 pull with the -why_load record
+# riding (the reference-driven lazy pull beside the eager family) and
+# the report render's own price — a shape gate, the record is one entry
+# per pulled member from data the pull already had.
+[[bench]]
+name = "why_load"
+harness = false
