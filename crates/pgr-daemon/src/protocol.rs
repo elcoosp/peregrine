@@ -215,8 +215,14 @@ use sha2::{Digest, Sha256};
 /// time collector when both faces ask), and the reply's IMAGE tail
 /// carries the rendered timeline — the same one-line Trace Event
 /// Format document the one-shot `--trace` writes, the strict reader
-/// (`pgr_core::trace::parse_trace_json`) is its own face).
-pub const PROTO_VERSION: u32 = 41;
+/// (`pgr_core::trace::parse_trace_json`) is its own face); **v42**
+/// registers the §7.3 ladder's rung vocabulary in the time-report tail
+/// (M65 — the phase tokens `relink_gate`/`relink_plan`/`relink_patch`/
+/// `relink_audit` and their detail payloads ride the tail's own shape,
+/// so a captured tail carrying them restores exactly; the session's own
+/// ladder reports through the seam at the next rung — a warm run's
+/// report today carries the pipeline phases alone).
+pub const PROTO_VERSION: u32 = 42;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -593,7 +599,8 @@ impl LinkRequest {
 // ---- the v40 time-report tail ------------------------------------------------
 
 /// The phase's wire token (the variant's ordinal in the seam's own
-/// declaration order — `Parse` … `Reloc`).
+/// declaration order — `Parse` … `Reloc`, the M65 ladder rungs beside
+/// them).
 fn phase_token(phase: pgr_core::observe::Phase) -> u8 {
     match phase {
         pgr_core::observe::Phase::Parse => 0,
@@ -604,6 +611,10 @@ fn phase_token(phase: pgr_core::observe::Phase) -> u8 {
         pgr_core::observe::Phase::Fold => 5,
         pgr_core::observe::Phase::Layout => 6,
         pgr_core::observe::Phase::Reloc => 7,
+        pgr_core::observe::Phase::RelinkGate => 8,
+        pgr_core::observe::Phase::RelinkPlan => 9,
+        pgr_core::observe::Phase::RelinkPatch => 10,
+        pgr_core::observe::Phase::RelinkAudit => 11,
     }
 }
 
@@ -617,6 +628,10 @@ fn phase_from_token(token: u8) -> Result<pgr_core::observe::Phase, DecodeError> 
         5 => pgr_core::observe::Phase::Fold,
         6 => pgr_core::observe::Phase::Layout,
         7 => pgr_core::observe::Phase::Reloc,
+        8 => pgr_core::observe::Phase::RelinkGate,
+        9 => pgr_core::observe::Phase::RelinkPlan,
+        10 => pgr_core::observe::Phase::RelinkPatch,
+        11 => pgr_core::observe::Phase::RelinkAudit,
         _ => {
             return Err(DecodeError::Malformed(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -675,6 +690,25 @@ pub fn encode_time_report(out: &mut Vec<u8>, report: Option<&pgr_core::time_repo
             pgr_core::observe::PhaseDetail::Reloc { inputs } => {
                 put_u8(out, 7);
                 put_u64(out, u64::try_from(*inputs).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Gate { pages } => {
+                put_u8(out, 8);
+                put_u64(out, u64::try_from(*pages).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Plan { tiles, dirty } => {
+                put_u8(out, 9);
+                put_u64(out, u64::try_from(*tiles).unwrap_or(u64::MAX));
+                put_u64(out, u64::try_from(*dirty).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Patch { bytes, tiles } => {
+                put_u8(out, 10);
+                put_u64(out, *bytes);
+                put_u64(out, u64::try_from(*tiles).unwrap_or(u64::MAX));
+            }
+            pgr_core::observe::PhaseDetail::Audit { healed, issues } => {
+                put_u8(out, 11);
+                put_u8(out, u8::from(*healed));
+                put_u64(out, u64::try_from(*issues).unwrap_or(u64::MAX));
             }
         }
         put_u64(
@@ -740,6 +774,21 @@ pub(crate) fn decode_time_report(
                 },
                 7 => pgr_core::observe::PhaseDetail::Reloc {
                     inputs: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                8 => pgr_core::observe::PhaseDetail::Gate {
+                    pages: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                9 => pgr_core::observe::PhaseDetail::Plan {
+                    tiles: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                    dirty: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                10 => pgr_core::observe::PhaseDetail::Patch {
+                    bytes: r.u64()?,
+                    tiles: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                11 => pgr_core::observe::PhaseDetail::Audit {
+                    healed: r.u8()? != 0,
+                    issues: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
                 },
                 _ => {
                     return Err(DecodeError::Malformed(std::io::Error::new(
@@ -3790,6 +3839,56 @@ mod tests {
         let back = decode_time_report(&mut r).expect("the tail decodes");
         r.done().expect("the tail carries no trailing bytes");
         assert_eq!(back.as_ref(), Some(&report), "the report restores exactly");
+    }
+
+    #[test]
+    fn the_time_report_tail_round_trips_the_ladder_rungs() {
+        // M65 (v42): the §7.3 rung vocabulary rides the tail's own shape —
+        // a captured tail carrying the ladder's rows restores exactly (the
+        // session's own ladder reports through the seam at the next rung;
+        // the vocabulary is the tail's, not the session's yet).
+        use pgr_core::observe::{Phase, PhaseDetail, PhaseEvent};
+        use std::time::Duration;
+        let row = |phase: Phase, detail: PhaseDetail, us: u64| PhaseEvent {
+            phase,
+            detail,
+            elapsed: Duration::from_micros(us),
+        };
+        let report = pgr_core::time_report::TimeReport {
+            phases: vec![
+                row(Phase::RelinkGate, PhaseDetail::Gate { pages: 16 }, 120),
+                row(
+                    Phase::RelinkPlan,
+                    PhaseDetail::Plan { tiles: 8, dirty: 2 },
+                    340,
+                ),
+                row(
+                    Phase::RelinkPatch,
+                    PhaseDetail::Patch {
+                        bytes: 32_768,
+                        tiles: 2,
+                    },
+                    900,
+                ),
+                row(
+                    Phase::RelinkAudit,
+                    PhaseDetail::Audit {
+                        healed: false,
+                        issues: 0,
+                    },
+                    2_500,
+                ),
+            ],
+            emit: None,
+            total: Some(Duration::from_micros(4_000)),
+            notes: vec!["no record for this output yet".to_string()],
+        };
+        let mut body = Vec::new();
+        encode_time_report(&mut body, Some(&report));
+        let mut r = Reader::new(&body);
+        let back = decode_time_report(&mut r).expect("the rung rows decode");
+        r.done().expect("no trailing bytes");
+        assert_eq!(back, Some(report), "the ladder rungs restore exactly");
     }
 
     #[test]
