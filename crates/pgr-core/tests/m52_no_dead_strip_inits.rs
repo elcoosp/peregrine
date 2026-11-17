@@ -199,3 +199,100 @@ fn the_decision_links_deterministically() {
     });
     assert_eq!(a, b, "the double link is stable");
 }
+
+/// routines2.o: the head atom the mark drops — `_dead_fn` at value 0,
+/// nothing references it — with the init and term routines *after* it.
+/// The `atom_or_section_addr` containment walks the live atoms' starts;
+/// a dead head definition's value sits before the first live start.
+fn routines_object_with_dead_head() -> ObjectBuilder {
+    let mut b = ObjectBuilder::new("routines2.o").set_subsections_via_symbols(true);
+    let text = b.add_section(ObjectSection::text(
+        "__text",
+        [0xC0u8, 0x03, 0x5F, 0xD6].repeat(3),
+        vec![],
+    ));
+    let dead_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_dead_fn".into(),
+        section_index: text,
+        value: 0,
+        weak: false,
+    });
+    let init_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_init_fn".into(),
+        section_index: text,
+        value: 4,
+        weak: false,
+    });
+    let term_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_term_fn".into(),
+        section_index: text,
+        value: 8,
+        weak: false,
+    });
+    let _ = dead_sym;
+    let modinit = b.add_section(ObjectSection::data(
+        "__mod_init_func",
+        vec![0u8; 8],
+        vec![ObjectReloc::unsigned(init_sym as u32).at(0)],
+    ));
+    b.section_mut(modinit).flags = pgr_format::consts::S_MOD_INIT_FUNC_POINTERS;
+    let modterm = b.add_section(ObjectSection::data(
+        "__mod_term_func",
+        vec![0u8; 8],
+        vec![ObjectReloc::unsigned(term_sym as u32).at(0)],
+    ));
+    b.section_mut(modterm).flags = pgr_format::consts::S_MOD_TERM_FUNC_POINTERS;
+    b
+}
+
+#[test]
+fn the_dead_head_def_resolves_without_overflow() {
+    // The rooted decision is the field shape (the M52 `dead_strip_inits`
+    // bench was the reproduction — CI compiles benches, the `--benches`
+    // gate *runs* them): the term pointer keeps its routine alive, the
+    // unreferenced head atom strips, and `resolve_all` still walks every
+    // definition (`res.definitions()` — the parse's own doc: "dead atoms
+    // carry no entry — nothing live references them"). The containment
+    // must refuse the delta it cannot vouch for — never overflow.
+    let inputs = [
+        LinkInput {
+            name: "main.o".to_string(),
+            bytes: main_object().build().expect("the fixture object builds"),
+        },
+        LinkInput {
+            name: "routines2.o".to_string(),
+            bytes: routines_object_with_dead_head()
+                .build()
+                .expect("the fixture object builds"),
+        },
+    ];
+    let cfg = LinkConfig {
+        ident: "deadhead".into(),
+        dead_strip: true,
+        no_dead_strip_inits_and_terms: true,
+        ..LinkConfig::default()
+    };
+    let result = link_with(&inputs, &[], &cfg, Parallelism::Auto).expect("the rooted link plans");
+
+    let names: Vec<Vec<u8>> = result
+        .layout
+        .symbols
+        .iter()
+        .map(|s| result.interner.bytes(s.name).to_vec())
+        .collect();
+    assert!(
+        !names.contains(&b"_dead_fn".to_vec()),
+        "the dead head definition keeps no symtab row: {names:?}"
+    );
+    assert!(
+        names.contains(&b"_term_fn".to_vec()),
+        "the rooted term routine survives: {names:?}"
+    );
+
+    // The determinism lock rides the regression too.
+    let again = link_with(&inputs, &[], &cfg, Parallelism::Auto).expect("the corpus links");
+    assert_eq!(
+        result.layout.file_size, again.layout.file_size,
+        "the double plan is identical"
+    );
+}
