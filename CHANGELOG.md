@@ -5,6 +5,56 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M64)
+
+- **M64** — the lane registry's names: the M63 worker lanes made the timeline
+  multi-lane, and every `thread_name` metadata row still carried the one hard-coded
+  `pgr link` label — a viewer could not tell the pipeline's lane from the pool's
+  workers, and the §9.4 toolbox reads the timeline by its lane names.
+  `TraceReport::lanes` becomes the named registry (`pgr_core::trace::TraceLane { id,
+  name }`): the collector names the pipeline's thread (the first phase/note arrival)
+  `pgr link` and the pool's workers `pgr parse pool N` (1-based, registration order
+  among the workers — a serial-path task on the calling thread is the pipeline lane,
+  not a worker; a feed with no phase or note events names every lane a worker), the
+  render writes each lane's own label in its `thread_name` row, and the strict reader
+  restores the labels exactly (the round-trip convention, gated on a multi-lane
+  report; a foreign writer names its lanes its own way — the reader restores the
+  document's labels, and the registry's own gates stay: one row per lane, ascending
+  tids, non-empty labels). The `m64_named_lanes.rs` gate matrix pins the naming, the
+  serial-task and pure-task-feed shapes, the render/round-trip and the refusals; the
+  `trace_tasks` consumer example prints the lanes with their names.
+
+### Added (M63)
+
+- **M63** — the parse pool's worker-lane task spans: the M61 module doc named the future
+  seam ("a worker-span seam rides the same shape with more lanes") and the §9.4 toolbox's
+  per-thread goal names the reader — the parse pool's per-input parses (the M4 LPT
+  schedule) ride the M54 observation seam as `pgr_core::observe::TaskEvent`s (a new
+  default-no-op `LinkObserver::on_task`, the same inert-until-subscriber convention; a
+  cache hit included — the load is the work the consumer waited on), each carrying the
+  phase it rode in, the input's command-line name as its label, its wall time, and the
+  two facts the phase event cannot carry: the thread that ran it (the timeline's lane
+  registry keys on it) and the task's own arrival clock (the span's start is that clock
+  minus the wall — a drain-time re-stamp would end every worker's span at the drain). The
+  pool threads cannot borrow the caller's observer slot, so the parallel parse reports
+  through an mpsc channel opened only when a subscriber rides (the unsubscribed link
+  allocates nothing) and the caller forwards the records once the pool returns; the
+  serial path reports on its own thread, and the `-r` shape rides the same `parse_inputs`
+  wire-up. `TraceCollector` keeps the records as `TraceTask` spans on the workers' own
+  lanes (today's `pgr link` lane beside the pool's worker lanes — the stragglers and
+  idle gaps the toolbox reads), `TraceReport::finish` presents them in the timeline's
+  canonical `ts` order (the drain interleaves the workers — the render's document and
+  the strict reader's restore must agree; the round-trip convention, caught by the
+  example's own gate and pinned in `tests/m63_task_spans.rs`), the render writes the
+  task rows beside the phase spans (`ph: "X"`, the phase token, `args: {"kind":"task",
+  "name":…}`) and `parse_trace_json`'s args union grows the task member beside the phase
+  detail, the metadata name and the instant's reason (a mix refuses, the field named).
+  The seam stays read-only: an observed-with-tasks link plans the identical image the
+  unobserved one does (the parity gate, re-gated in the m63 matrix). The `trace` bench's
+  collector variant carries the one-record-per-input price and the 64-task report joins
+  as `render_8_rows_64_tasks`/`parse_8_rows_64_tasks`; the `trace_tasks` consumer example
+  walks the worker lanes beside a twelve-object link, round-trip gate included.
+
 ### Added (M61)
 
 - **M61** — the Chrome-trace timeline (`pgr_core::trace`, the `--trace <path>` driver
