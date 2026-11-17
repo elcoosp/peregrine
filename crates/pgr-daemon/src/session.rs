@@ -116,6 +116,13 @@ pub struct ServedLink {
     /// Pass-4 half is the in-memory patch, so its emit band rides
     /// `None`; a full link measures the fused emit.
     pub time_report: Option<pgr_core::time_report::TimeReport>,
+    /// The served Chrome-trace timeline (v41, M61/M62): `Some` when the
+    /// request asked for it — the rendered Trace Event Format document
+    /// (the M54 observation seam,
+    /// [`pgr_core::trace::TraceCollector`] subscribed — paired with the
+    /// time collector when both faces ask). The wire carries the
+    /// document verbatim; the strict reader is its own face.
+    pub trace_json: Option<String>,
 }
 
 /// Why the session's §7.3 ladder declined: the caller (the link entry)
@@ -349,22 +356,44 @@ impl ResidentSession {
                 }
             }
         }
-        // M58/M59 (v40): a time-asking request observes the session's own
-        // pipeline — the same warm run, the [`pgr_core::time_report::TimeCollector`]
-        // subscribed (the report never moves a byte of the plan — the M54
-        // parity gate is the seam's own contract). The warm pipeline has
-        // no `Parse` row: the POIs are resident, the parse was paid when
-        // the blobs arrived.
+        // M58/M59/M61/M62 (v40/v41): a time- or trace-asking request
+        // observes the session's own pipeline — the same warm run, the
+        // [`pgr_core::time_report::TimeCollector`] and the
+        // [`pgr_core::trace::TraceCollector`] subscribed (paired when
+        // both faces ask; the report and the timeline never move a byte
+        // of the plan — the M54 parity gate is the seam's own contract).
+        // The warm pipeline has no `Parse` row: the POIs are resident,
+        // the parse was paid when the blobs arrived.
         let started = std::time::Instant::now();
-        let mut collector = pgr_core::TimeCollector::default();
-        let result = if req.time {
+        let mut time_collector = pgr_core::TimeCollector::default();
+        let mut traces = pgr_core::trace::TraceCollector::new();
+        let result = if req.time && req.trace {
+            let mut pair = pgr_core::ObserverPair::new(&mut time_collector, &mut traces);
             pgr_core::link_from_objects_observed(
                 objects,
                 &archives,
                 &req.config,
                 Parallelism::Auto,
                 None,
-                Some(&mut collector),
+                Some(&mut pair),
+            )?
+        } else if req.trace {
+            pgr_core::link_from_objects_observed(
+                objects,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                None,
+                Some(&mut traces),
+            )?
+        } else if req.time {
+            pgr_core::link_from_objects_observed(
+                objects,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                None,
+                Some(&mut time_collector),
             )?
         } else {
             pgr_core::link_from_objects(objects, &archives, &req.config, Parallelism::Auto, None)?
@@ -384,11 +413,12 @@ impl ResidentSession {
         };
         let total = req.time.then(|| started.elapsed());
         let time_report = req.time.then(|| {
-            let mut report = collector.report();
+            let mut report = time_collector.report();
             report.emit = emit;
             report.total = total;
             report
         });
+        let trace_json = req.trace.then(|| traces.finish().render());
         let image = self.scratch.clone();
         // The §7.2 rung: the full link's image is the first cycle's
         // resident output state — the next relink's previous output is
@@ -417,6 +447,7 @@ impl ResidentSession {
             audit: None,
             tiles: None,
             time_report,
+            trace_json,
         })
     }
 
@@ -468,21 +499,44 @@ impl ResidentSession {
                 digests: record.section_digests.clone(),
             });
         }
-        // M58/M59 (v40): a time-asking relink observes the ladder's warm
-        // pipeline — the same run, the collector subscribed. The emit
+        // M58/M59/M61/M62 (v40/v41): a time- or trace-asking relink
+        // observes the ladder's warm pipeline — the same run, the
+        // collectors subscribed (paired when both faces ask). The emit
         // band rides absent (the relink's Pass-4 half is the in-memory
         // patch, not the fused tile emit); the total carries the ladder
         // wall through the patched image.
         let started = std::time::Instant::now();
-        let mut collector = pgr_core::TimeCollector::default();
-        let result = if req.time {
+        let mut time_collector = pgr_core::TimeCollector::default();
+        let mut traces = pgr_core::trace::TraceCollector::new();
+        let result = if req.time && req.trace {
+            let mut pair = pgr_core::ObserverPair::new(&mut time_collector, &mut traces);
             pgr_core::link_from_objects_observed(
                 objects.to_vec(),
                 archives,
                 &cfg,
                 Parallelism::Auto,
                 None,
-                Some(&mut collector),
+                Some(&mut pair),
+            )
+            .map_err(|e| RelinkDecline::Error(e.into()))?
+        } else if req.trace {
+            pgr_core::link_from_objects_observed(
+                objects.to_vec(),
+                archives,
+                &cfg,
+                Parallelism::Auto,
+                None,
+                Some(&mut traces),
+            )
+            .map_err(|e| RelinkDecline::Error(e.into()))?
+        } else if req.time {
+            pgr_core::link_from_objects_observed(
+                objects.to_vec(),
+                archives,
+                &cfg,
+                Parallelism::Auto,
+                None,
+                Some(&mut time_collector),
             )
             .map_err(|e| RelinkDecline::Error(e.into()))?
         } else {
@@ -517,10 +571,11 @@ impl ResidentSession {
                 image_hash: Sha256::digest(prev).into(),
             });
             let time_report = req.time.then(|| {
-                let mut report = collector.report();
+                let mut report = time_collector.report();
                 report.total = Some(started.elapsed());
                 report
             });
+            let trace_json = req.trace.then(|| traces.finish().render());
             return Ok(ServedLink {
                 image: prev.to_vec(),
                 entryoff: result.layout.entryoff,
@@ -535,6 +590,7 @@ impl ResidentSession {
                 audit: None,
                 tiles,
                 time_report,
+                trace_json,
             });
         }
         let (mut outcome, mut new_record, mut image) = pgr_emit::incremental::apply_patch_bytes(
@@ -611,10 +667,11 @@ impl ResidentSession {
             .tiles
             .then(|| pgr_emit::incremental::diff_tiles(prev, &image));
         let time_report = req.time.then(|| {
-            let mut report = collector.report();
+            let mut report = time_collector.report();
             report.total = Some(started.elapsed());
             report
         });
+        let trace_json = req.trace.then(|| traces.finish().render());
         Ok(ServedLink {
             image,
             entryoff: result.layout.entryoff,
@@ -624,6 +681,7 @@ impl ResidentSession {
             audit,
             tiles,
             time_report,
+            trace_json,
         })
     }
 
@@ -756,6 +814,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -954,6 +1013,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1120,6 +1180,7 @@ mod fusion_tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         let hashes = req.blob_hashes();
         (req, hashes)
