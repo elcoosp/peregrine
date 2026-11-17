@@ -29,7 +29,7 @@ pgr-daemon = { path = "crates/pgr-daemon" }
 bytemuck = { version = "1", features = ["derive"] }
 thiserror = "2"
 sha2 = "0.10"
-object = { version = "0.37", default-features = false, features = ["read"] }
+object = { version = "0.41", default-features = false, features = ["read"] }
 proptest = "1"
 criterion = { version = "0.7", default-features = false, features = [
     "html_reports",
