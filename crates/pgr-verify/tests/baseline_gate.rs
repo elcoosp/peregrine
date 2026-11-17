@@ -169,7 +169,7 @@ fn malformed_json_names_the_offense_never_panics() {
         "not json at all",
         "{\"issues\": 12}",
         "{\"issues\": [{\"severity\": \"fatal\", \"code\": \"suspicious\", \"message\": \"x\", \"offset\": null}]}",
-        "{\"issues\": [{\"severity\": \"error\", \"code\": \"not_a_code\", \"message\": \"x\", \"offset\": null}]}",
+        "{\"issues\": [{\"severity\": \"error\", \"code\": \"Not_A_Code!\", \"message\": \"x\", \"offset\": null}]}",
         "{\"issues\": [{\"severity\": \"error\", \"code\": \"suspicious\", \"message\": null, \"offset\": null}]}",
         "{\"issues\": [{\"severity\": \"error\", \"code\": \"suspicious\", \"message\": \"x\", \"offset\": -4}]}",
         "{\"issues\": [{\"severity\": \"error\", \"code\": \"suspicious\", \"message\": \"x\", \"offset\": 1.5}]}",
