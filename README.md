@@ -96,7 +96,7 @@ same pipeline in a resident session for warm relinks.
 | `pgr-core` | Passes 1–3: interning, resolution, layout, ICF, dead-strip, thunks, fixup planning, caches, reverse reference index, slack policy, the validated image-knob decisions |
 | `pgr-emit` | Passes 4–5: fused tile emit, ad-hoc signing, writer pool — plus the incremental engine (record, plan, clone-and-patch) and `-r` object assembly |
 | `pgr-verify` | the read-side verifier: library + CLI, selectable checks, JSON reports, baseline diffs |
-| `pgr-daemon` | `pgrd`: versioned wire protocol (v39), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit |
+| `pgr-daemon` | `pgrd`: versioned wire protocol (v40), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit, the served per-pass time report |
 | `pgr-fixtures` | deterministic Mach-O object/archive builders shared by tests, benches and the fuzz corpus |
 
 ## Fast edit loops
@@ -207,7 +207,7 @@ Not-yet-supported surface (LTO execution) is **rejected with a clear message**.
 | Linkedit metadata | `-no_function_starts` (suppress `LC_FUNCTION_STARTS`), `-no_data_in_code` (suppress the carried data-in-code stream), `-no_compact_unwind` (suppress the synthesized `__unwind_info` section — the parse still validates the table), `-no_exported_symbols` (suppress `LC_DYLD_EXPORTS_TRIE` — executables only; a dylib's trie is its two-level contract), `-no_deduplicate` (turn the `__cstring` merge off — every input literal rides verbatim) |
 | Dyld environment | `-dyld_env DYLD_<var>=<value>` (main executable only) |
 | Fast paths | `-cache`/`-no_cache`/`-cache_max`, `-resident`/`-no_resident`/`-resident_socket`, `-incremental`/`-no_incremental`/`-incremental-verify` |
-| Queries | `--print-record`, `--print-fixup-encoding`, `-why_export <symbol>` (repeatable; the definition and every reference site, text or JSON), `-why_load` (why each archive member rode — and each dylib's carriage under `-dead_strip_dylibs`); `pgr-verify --strict --json --checks --list-checks --baseline --fail-on` |
+| Queries | `--print-record`, `--print-fixup-encoding`, `-why_export <symbol>` (repeatable; the definition and every reference site, text or JSON), `-why_load` (why each archive member rode — and each dylib's carriage under `-dead_strip_dylibs`), `--time` / `--time-json` (the per-pass wall report, M58; the resident lane serves its own observed run — wire v40, M59); `pgr-verify --strict --json --checks --list-checks --baseline --fail-on` |
 | Daemon | `pgrd --socket --idle-secs --shutdown` |
 
 Every knob refuses the combinations it cannot serve — `-order_file` × `-resident`, `-map` ×
@@ -316,9 +316,11 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 | **M55** | The link-map JSON interchange: `pgr_core::map` — the build-system-facing report ld64's `-map` serves, already a pure function of the plan (the report and the bytes cannot disagree) — gains the machine face: `LinkMap::render_json` is the deterministic compact interchange (fixed key order, one line, the report-JSON escape rules) and `parse_link_map_json` the strict reader — a rigid schema (unknown or duplicate keys refuse, integer-only numbers, no trailing commas, byte-positioned `MapJsonError`s) with the data model's own structural gate (a section's `seg_name` must name the segment it rode in on). The reader restores the writer's data exactly (the `to_json`/`parse_report_json` round-trip convention, gated), so a build system ships the map to any JSON tooling without a custom parser; the `link_map_json` bench group rides the map bench and the `map_json` consumer example renders both faces (text and JSON) beside each other |
 | **M56** | The symbol-reference provenance query (`-why_export <symbol>`): ld64's flag — previously unknown on the surface — is the reporting seam the M8-a reverse reference index always served but no consumer could reach (`pgr_core::provenance`): a query names the definition the Pass-2 resolution installed — the input file and section (direct object or pulled member, the rank and weak mark riding), the dylib export whose two-level bind serves it, or the loader's dynamic lookup — and every reference site the link saw, `(file, section, offset)` in the index's own ascending order, one record per site; `RefExplanation::render` is the diffable text face, `render_json` the deterministic interchange (the M55 escape rules), a vacuous query refuses with the misspelling named (the C-underscore hint the fix). The seam is read-only — the query consumes the link's own Pass-2 product (`LinkResult` carries the resolution since M56) and re-derives nothing, a queried link plans the identical layout — the resident and incremental lanes refuse the flag (the product never crosses the wire, the daemon wire stays v39); the `provenance` bench pins the index build and the query price, and the `why_export_link` consumer example renders both faces beside the vacuous refusal |
 | **M57** | The load-provenance report (`-why_load`): ld64's flag (*"Print why each archive member or dylib was loaded"*) is the pull's own record made nameable (`pgr_core::provenance::LoadReport`, carried on the link result): every archive member the S7 fixpoint admitted names its decision — the reference whose round reached it (the seed named), the `-all_load`/`-force_load` eager family, the `-ObjC` metadata pull — beside the member's own symbol surface (its definitions and the undefineds its pull opened, the next fixpoint round's food), in pull order; a member nothing reached rides nowhere (the "why not" half of the question). Under `-dead_strip_dylibs` every input dylib carries its carriage (kept binds, dropped doesn't); without the knob the dylib rows ride empty — every dylib rides because the command line names it. The pull records from data it already had (one entry per pulled member), the report and the bytes cannot disagree, the record never changes the plan (the parity gate), and the same lane contract as `-why_export` holds (the wire stays v39); the `why_load` bench pins the pull-record and render prices, and the `why_load_link` consumer example walks the lazy pull, the eager pull and both faces |
+| **M58** | The per-pass time report (`--time` / `--time-json`): the TDD's instrumentation spec (*"`--time` prints a per-pass table"* — parse, intern, resolve, layout, emit) and the roadmap §9.3 budgets ("enforced from `--time` JSON output") name the measurement surface the M54 observation seam serves the raw material for — `pgr_core::time_report` is the consumer that turns the seam's typed `PhaseEvent`s *as data* into the report: `TimeCollector` subscribes to the observed pipeline (`link_observed` / `link_reloc_observed`), `TimeReport::render` is the deterministic text table (phase token, the phase's own shape, the wall time, the permille share — integer math, no float rounding; µs below a millisecond, seconds beyond) and `render_json` the compact interchange line (fixed key order, the M55/M56/M57 escape rules, walls in whole microseconds). The emit band and the total are the caller's measurement; the ladder's silent-correct rungs ride the report as notes — a phase table that hid the resolve-reuse fallback would misread the resolve row's price. The report is a measurement, not a layout product: collecting never moves a byte (the parity gate re-gated through the collector), the `-r` shape reports its own five phases with no fused-emit row, and the fast-path lanes refuse where the observer does not watch; the `time_report` bench pins the collector's near-parity and the faces' O(rows) render price, and the `time_report` consumer example renders both faces beside the library face |
+| **M59** | The resident lane's served time report (wire v40): the session observes its own pipeline — a time-asking request (`--time` beside `-resident`) subscribes the same `TimeCollector` to the warm run the §7.3 ladder serves, and the reply's IMAGE tail carries the collected report (`pgr_core::time_report::TimeReport` crossing the wire count-prefixed, phase token + detail kind + µs per row, the notes, the bands): the served table names the phases the session's run actually executed (no `Parse` row — the POIs are resident, the parse was paid when the blobs arrived), the relink's Pass-4 half is the in-memory patch so its emit band rides absent, and an unasked report never crosses (the tail is one byte); a client whose daemon falls back prints the one-shot link's own report — either way the run is observed, and the daemon still never touches the filesystem. The `wire_time` bench pins the tail's encode/decode price, and the `time_report` example plus the driver's resident cycle walk the served face |
 
 Every knob ships the same way: a validated decision in the library, verifier gates for the
-shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v39)
+shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v40)
 
 **Still on the roadmap:** the Apple Silicon hardware gates · LTO object execution ·
 ObjC/Swift semantics beyond section pass-through (the protocol list and the
@@ -327,8 +329,9 @@ GCC-era class/category C symbols pull under `-ObjC` since M49).
 
 <details><summary><b>Consumer examples (one per milestone surface)</b></summary>
 
-Each ships in its crate's `examples/` with a matching bench — run with
-`cargo run -p <crate> --example <name>`:
+Each ships in its crate's `examples/` — the milestone surfaces carry a matching bench,
+the tail of the list is the support examples (the fixture emitters, the daemon session
+walks, the library faces); run with `cargo run -p <crate> --example <name>`:
 
 `relocatable_link` · `platform_matrix` · `platform_floor` · `encoding_query` ·
 `arm64e_producer` · `fixup_chains_auth` · `arm64e_pair` · `chain_format_floor` ·
@@ -343,7 +346,10 @@ Each ships in its crate's `examples/` with a matching bench — run with
 `no_weak_imports_link` · `allow_stack_execute_link` ·
 `no_dead_strip_inits_link` · `rename_sections_link` · `selective_checks` ·
 `baseline_gate` · `record_summary` ·
-`phase_observer` · `map_json` · `cache_poi` · `why_export_link` · `why_load_link`
+`phase_observer` · `map_json` · `cache_poi` · `why_export_link` · `why_load_link` ·
+`time_report` · `phase_timing` · `incremental_resolve` · `record_patch_tiles` ·
+`resident_output_tiles` · `fusion_audit_session` · `record_summary` · `verify_report` ·
+`walk_image` · `emit_corpus` · `emit_link_inputs`
 
 </details>
 
