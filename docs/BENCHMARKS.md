@@ -568,6 +568,15 @@ link's hot path", recorded honestly:**
   riding — `pull` (the full reference-driven pull over a 16- and a 64-member archive, one row per
   admitted member) and `render` (the text and JSON renders, 17.6 µs at 64 members). The shape gate
   asserts the report carries exactly the pulled members, each decision a `Reference` seed.
+- `time_report` (`cargo bench -p pgr-core --bench time_report`, M58): the per-pass report's own
+  price — `link_64_objects/unobserved` vs `collector` (the M54 seam's near-parity gate: one push
+  per phase, seven per segmented link, regardless of the corpus size) beside the faces' render
+  price over a fixed eight-row report (`render_8_rows`, `render_json_8_rows` — O(rows), the rows
+  are the pipeline's own count).
+- `wire_time` (`cargo bench -p pgr-daemon --bench wire_time`, M59): the served report's wire-tail
+  codec price over a served-shape report (the warm pipeline's six rows, the ladder's note, the
+  total band) — `encode_report/6_rows` and `decode_report/6_rows`; the tail rides an IMAGE reply
+  that carries pages, so the honest expectation is noise beside the transfer.
 
 ## Pending measurements
 
