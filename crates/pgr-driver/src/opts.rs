@@ -181,6 +181,19 @@ pub struct Options {
     /// `-why_export`: the resident and incremental lanes refuse the
     /// report (the pull's record never crosses the wire).
     pub why_load: bool,
+    /// M58 `--time`: after a one-shot link, print the per-pass wall
+    /// report — the M54 observation seam's phase events collected into
+    /// the TDD's instrumentation table (`pgr_core::time_report`). The
+    /// default (`false`) prints nothing. The resident lane serves the
+    /// same report from the session's own observed pipeline (wire v40,
+    /// M59); the incremental lane refuses the flag (`finish` — the
+    /// engine's ladder runs where the observer does not).
+    pub time: bool,
+    /// M58 `--time-json`: the same measurement rendered as the compact
+    /// JSON interchange line (`TimeReport::render_json` — the M55/M56
+    /// escape rules). Composes with `--time`; both faces read the one
+    /// observed run. The lane contract mirrors `--time`.
+    pub time_json: bool,
     /// M15: `-pagezero_size` was passed explicitly. The default (`false`)
     /// keeps the seam's own default on every non-executable output — the
     /// flag only applies to executables, and an explicitly named knob
@@ -266,6 +279,8 @@ impl Default for Options {
             map_path: None,
             why_export: Vec::new(),
             why_load: false,
+            time: false,
+            time_json: false,
             pagezero_explicit: false,
             init_offsets_flag: None,
             seg_prot_stage: Vec::new(),
@@ -425,6 +440,21 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     WhyExportConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The fix — the house convention.
+        fix: String,
+    },
+    /// A `--time` surface conflict (M58): the per-pass report reads the
+    /// pipeline's phases (the M54 observation seam's events), and the
+    /// incremental engine's patched relink runs where the observer does
+    /// not — the ladder's phases are the engine's, its Pass-4 half is
+    /// the in-memory patch (the resident lane serves its own observed
+    /// pipeline since wire v40). The verdict names the lane; the help
+    /// is the fix.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    TimeConflict {
         /// What conflicts with what.
         verdict: String,
         /// The fix — the house convention.
@@ -1536,6 +1566,16 @@ fn apply_flag(
         // conflicts are `finish`'s.
         "-why_load" => {
             opts.why_load = true;
+        }
+        // M58: the per-pass time report (the M54 observation seam's
+        // phase events, collected into the TDD's instrumentation table).
+        // The lane conflicts are `finish`'s — both faces read the
+        // one-shot pipeline's phases.
+        "--time" => {
+            opts.time = true;
+        }
+        "--time-json" => {
+            opts.time_json = true;
         }
         // M15: the image base (the `__PAGEZERO` vmsize an executable
         // plans with). The same validation the core seam pays runs here,
@@ -2770,27 +2810,57 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     // M57: the load report rides the same contract (the pull's record
     // is the one-shot pipeline's, never the wire's).
     if !opts.why_export.is_empty() || opts.why_load {
-        let lane = if opts.why_export.is_empty() {
-            "-why_load"
-        } else {
-            "-why_export"
+        // The refusal names every flag the run carried — a run asking
+        // both questions is refused for both, not for whichever came
+        // first (the label rides the comma, the fix names both).
+        let lanes = match (opts.why_export.is_empty(), opts.why_load) {
+            (false, false) => "-why_export, -why_load",
+            (false, true) => "-why_export",
+            (true, _) => "-why_load",
         };
         if opts.incremental {
             return Err(OptsError::WhyExportConflict {
                 verdict: format!(
-                    "{lane} reads the one-shot link's Pass-2 product; -incremental's relink \
+                    "{lanes} reads the one-shot link's Pass-2 product; -incremental's relink \
                      patches the recorded plan inside the engine's ladder"
                 ),
-                fix: format!("drop {lane} or -incremental"),
+                fix: format!("drop {lanes} or -incremental"),
             });
         }
         if opts.resident {
             return Err(OptsError::WhyExportConflict {
                 verdict: format!(
-                    "{lane} reads the one-shot link's Pass-2 product; -resident relinks \
+                    "{lanes} reads the one-shot link's Pass-2 product; -resident relinks \
                      across the wire and never returns the parsed arena the query reads"
                 ),
-                fix: format!("drop {lane} or -resident"),
+                fix: format!("drop {lanes} or -resident"),
+            });
+        }
+    }
+    // M58: the per-pass time report reads the pipeline's phases — the
+    // same lane contract as the provenance queries: a refusal where the
+    // lane never carries the product, never a table that misreports
+    // which pipeline it timed. M59 (wire v40) serves the resident lane:
+    // the session observes its own pipeline and the reply carries the
+    // report, so `-resident` rides; the incremental ladder still runs
+    // where the observer does not (its Pass-4 half is the patch, and
+    // the ladder's phases are the engine's — the one-shot observer
+    // would misreport the run).
+    if opts.time || opts.time_json {
+        let lane = if opts.time && opts.time_json {
+            "--time, --time-json"
+        } else if opts.time_json {
+            "--time-json"
+        } else {
+            "--time"
+        };
+        if opts.incremental {
+            return Err(OptsError::TimeConflict {
+                verdict: format!(
+                    "{lane} times the one-shot link's passes; -incremental's relink patches \
+                     the recorded plan inside the engine's ladder"
+                ),
+                fix: format!("drop {lane} or -incremental"),
             });
         }
     }
