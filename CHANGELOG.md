@@ -5,6 +5,28 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M67)
+
+- **M67** — the verifier's check registry opens to consumer-side checks: the `ImageCheck`
+  doc promised "a future consumer-side check can slot into the same shape", and the slot
+  now exists. A project policy implements `CustomCheck` (`pgr_verify::checks`) — the
+  family contract without the family key (total like every family, self-gating on the
+  image type, declaring its codes; names are metadata, not selector keys, and two
+  same-named checks both run in caller order) — its own tokens ride the new
+  `Code::Custom(&'static str)` outside the canonical table, and `verify_with_extra_checks`
+  drives the selected built-in families first and the custom units after them into the
+  same sorted report (the stats contract is the whole-report one: an error zeroes the
+  fixup-slot count, a family's or the policy's alike). The M13 interchange keeps its
+  one-writer/one-reader shape: a well-formed snake_case token outside the table restores
+  as a custom code (interned once per distinct token), anything else is refused with the
+  fix named — the round-trip gate covers the extension. The `verify_extra` bench groups
+  pin the ride's price beside the full pass (~21 µs vs ~20.9 µs on the checks-bench
+  fixture — the extension is a `&dyn` call, not a re-verify), the `custom_check` example
+  walks the policy (the m51 stack-exec decision read from the consumer side), and
+  `m67_custom_checks.rs` pins the gate matrix. The driver's `-sectcreate` name refusal
+  rides its typed `SynthError` (`DriverError::SectionCreate`) instead of a fabricated
+  `.tbd` parse failure
+
 ### Added (M66)
 
 - **M66** — the fusion lane's ladder joins the seam (wire v42 in service): the session's
