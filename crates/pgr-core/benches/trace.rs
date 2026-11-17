@@ -1,12 +1,12 @@
-//! The trace bench (M61): the observation seam's cost with the
-//! [`TraceCollector`] subscribed (beside the unobserved link — the
-//! parity shape the m54/m58 benches pin), the timeline's render price
-//! and the strict reader's parse price over a fixed report. The seam
-//! emits one event per phase — seven per segmented link, regardless of
-//! the corpus size — so the collector's honest expectation is
-//! near-parity with the unobserved link (a handful of pushes per link);
-//! the render and the parse are O(rows), the rows are the pipeline's
-//! own count.
+//! The trace bench (M61, the M63 task rows): the observation seam's cost
+//! with the [`TraceCollector`] subscribed (beside the unobserved link —
+//! the parity shape the m54/m58 benches pin), the timeline's render price
+//! and the strict reader's parse price over fixed reports. The seam emits
+//! one event per phase — seven per segmented link — plus the M63 parse
+//! tasks (one per input when the pool path runs), so the collector's
+//! honest expectation is near-parity: a recording observer pushes a
+//! handful of structs and one task record per input per link; the render
+//! and the parse are O(rows), the rows are the pipeline's own count.
 //!
 //! Baseline note (docs/BENCHMARKS.md): recorded as a shape gate on the
 //! dev sandbox.
@@ -17,7 +17,7 @@ use std::hint::black_box;
 use pgr_core::layout::LinkConfig;
 use pgr_core::link::{LinkInput, link, link_observed};
 use pgr_core::observe::{Phase, PhaseDetail};
-use pgr_core::trace::{TraceCollector, parse_trace_json};
+use pgr_core::trace::{TraceCollector, TraceLane, TraceTask, parse_trace_json};
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
 const OBJECTS: usize = 64;
@@ -105,14 +105,54 @@ fn fixed_report() -> pgr_core::trace::TraceReport {
                 210,
             ),
         ],
+        tasks: Vec::new(),
         notes: vec![pgr_core::trace::TraceNote {
             kind: "resolve_reuse_fallback",
             reason: "the seed's file list moved (the bench's fixed shape)".to_string(),
             lane: 1,
             at_us: 1_364,
         }],
-        lanes: vec![1],
+        lanes: vec![TraceLane {
+            id: 1,
+            name: "pgr link".to_string(),
+        }],
     }
+}
+
+/// The fixed eight-row timeline's task rows (the M63 shape): the parse
+/// pool's per-input spans riding the three worker lanes the task report
+/// declares (`fixed_task_report` — the pipeline's lane 1 stays the
+/// phase spans').
+fn fixed_task_rows() -> Vec<TraceTask> {
+    (0..OBJECTS)
+        .map(|i| TraceTask {
+            phase: Phase::Parse,
+            label: format!("obj_{i:03}.o"),
+            lane: u64::try_from(i % WORKER_LANES + 2).unwrap_or(2),
+            start_us: u64::try_from(i * 14).unwrap_or(u64::MAX),
+            dur_us: 12,
+        })
+        .collect()
+}
+
+/// The worker lanes a 64-task report declares beside the pipeline's own
+/// (the M64 names — the reader refuses a lane no `thread_name` names).
+const WORKER_LANES: usize = 3;
+
+/// The fixed report with the M63 task rows riding (the 64-object link's
+/// report shape): the eight-row base plus the worker lanes and their 64
+/// task spans.
+fn fixed_task_report() -> pgr_core::trace::TraceReport {
+    let mut report = fixed_report();
+    report.tasks = fixed_task_rows();
+    for w in 0..WORKER_LANES {
+        let id = u64::try_from(w + 2).unwrap_or(u64::MAX);
+        report.lanes.push(TraceLane {
+            id,
+            name: format!("pgr parse pool {}", w + 1),
+        });
+    }
+    report
 }
 
 fn bench_trace(c: &mut Criterion) {
@@ -156,6 +196,20 @@ fn bench_trace(c: &mut Criterion) {
         b.iter(|| {
             let parsed = parse_trace_json(black_box(&json)).expect("the fixed trace parses");
             black_box(parsed.spans.len());
+        });
+    });
+    // The M63 task rows' price: the pool's per-input spans ride the
+    // render's `ts` sort and the reader's arg union beside the 8-row
+    // report (one 64-task report is the 64-object link's shape).
+    group.bench_function("render_8_rows_64_tasks", |b| {
+        let report = fixed_task_report();
+        b.iter(|| black_box(black_box(&report).render()));
+    });
+    group.bench_function("parse_8_rows_64_tasks", |b| {
+        let json = fixed_task_report().render();
+        b.iter(|| {
+            let parsed = parse_trace_json(black_box(&json)).expect("the fixed trace parses");
+            black_box(parsed.tasks.len());
         });
     });
     group.finish();
