@@ -207,7 +207,14 @@ fn the_timeline_writes_beside_the_link_and_round_trips() {
         ],
         "the real link's seven phases ride the timeline"
     );
-    assert_eq!(report.lanes, vec![1], "one lane (the pipeline thread)");
+    assert_eq!(
+        report.lanes,
+        vec![pgr_core::trace::TraceLane {
+            id: 1,
+            name: "pgr link".to_string(),
+        }],
+        "one lane (the pipeline thread)"
+    );
     // The starts never move backwards (the seam's arrival order).
     for pair in report.spans.windows(2) {
         assert!(pair[0].start_us <= pair[1].start_us, "the ts order rides");
