@@ -150,8 +150,12 @@ mod tests {
         // resident relink renames the sections the client named, never
         // the pre-M53 unnamed pairs — and the served time report (M58/M59,
         // `--time`): the request's flag asks the session to observe its own
-        // pipeline, the reply's tail carries the report.
-        assert_eq!(crate::PROTO_VERSION, 40);
+        // pipeline, the reply's tail carries the report — and the served
+        // Chrome-trace timeline (M61/M62, `--trace`): the request's flag
+        // asks the same of the session's timeline (the collectors pair
+        // when both faces ride), the reply's tail carries the rendered
+        // document verbatim.
+        assert_eq!(crate::PROTO_VERSION, 41);
     }
 
     #[test]
@@ -168,6 +172,7 @@ mod tests {
             audit: false,
             tiles: false,
             time: false,
+            trace: false,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
