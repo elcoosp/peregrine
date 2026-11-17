@@ -23,7 +23,9 @@
 //! control characters, no dependency on a JSON crate (the workspace
 //! carries none).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::sync::{Mutex, OnceLock};
 
 use crate::{Code, Issue, Report, Severity, Stats};
 
@@ -172,13 +174,16 @@ fn escape(s: &str) -> String {
 /// the format can grow without breaking old baselines. Required: the
 /// `issues` array (each item's `severity`, `code`, `message`); `offset`
 /// defaults to null and `stats` to the zero report when absent, so a
-/// hand-authored baseline stays readable.
+/// hand-authored baseline stays readable. A `code` outside the canonical
+/// table restores as a custom code when it is a `snake_case` token (the
+/// M67 consumer-side surface); anything else is refused with the fix
+/// named.
 ///
 /// # Errors
 /// [`ReportJsonError::Syntax`] with the byte offset for structural
 /// damage; [`ReportJsonError::Field`] naming the field for wrong types,
-/// unknown codes, or out-of-range counters. The parser is total — it
-/// never panics on any input (the workspace's reader contract).
+/// malformed code tokens, or out-of-range counters. The parser is total
+/// — it never panics on any input (the workspace's reader contract).
 pub fn parse_report_json(s: &str) -> Result<Report, ReportJsonError> {
     let mut p = Parser {
         b: s.as_bytes(),
@@ -194,9 +199,52 @@ pub fn parse_report_json(s: &str) -> Result<Report, ReportJsonError> {
     Ok(report)
 }
 
+/// Restores a consumer-side check's code token (M67): a token outside
+/// the canonical table that is still a `snake_case` identifier restores
+/// as [`Code::Custom`]; anything else is refused with the fix named.
+/// The token interns once per distinct value (the `&'static str` a
+/// [`Code::Custom`] carries is leaked from the parsed input) — the
+/// bound is the custom-code vocabulary a process parses, not the parse
+/// count.
+fn intern_custom_code(token: &str) -> Result<Code, ReportJsonError> {
+    let well_formed = !token.is_empty()
+        && token.len() <= 64
+        && token.starts_with(|c: char| c.is_ascii_lowercase())
+        && token
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !well_formed {
+        return Err(ReportJsonError::Field {
+            name: "code",
+            detail: format!(
+                "`{token}` names no issue code (a custom code is a snake_case token of at most 64 characters)"
+            ),
+        });
+    }
+    let interned = INTERNED.get_or_init(|| Mutex::new(HashSet::new()));
+    // The reader is total: a poisoned table (a panicking writer) still
+    // carries its data, and the parse proceeds with it.
+    let mut table = match interned.lock() {
+        Ok(table) => table,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(found) = table.get(token) {
+        return Ok(Code::Custom(found));
+    }
+    let leaked: &'static str = Box::leak(token.to_owned().into_boxed_str());
+    table.insert(leaked);
+    Ok(Code::Custom(leaked))
+}
+
 /// Recursion cap for nested containers (a hostile baseline cannot blow
 /// the stack — the reader must survive arbitrary input).
 const MAX_DEPTH: usize = 64;
+
+/// The interned custom-code tokens (M67): the `&'static str` a
+/// [`Code::Custom`] carries is leaked from the parsed input once per
+/// distinct token, so repeated parses of the same baseline share one
+/// allocation.
+static INTERNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
 
 struct Parser<'a> {
     b: &'a [u8],
@@ -356,15 +404,10 @@ impl Parser<'_> {
                 }
                 "code" => {
                     let s = self.parse_string()?;
-                    code = Some(
-                        Code::ALL
-                            .iter()
-                            .copied()
-                            .find(|c| c.as_str() == s)
-                            .ok_or_else(|| {
-                                Self::field("code", format!("`{s}` names no issue code"))
-                            })?,
-                    );
+                    code = Some(match Code::ALL.iter().copied().find(|c| c.as_str() == s) {
+                        Some(canonical) => canonical,
+                        None => intern_custom_code(&s)?,
+                    });
                 }
                 "message" => message = Some(self.parse_string()?),
                 "offset" => offset = self.parse_opt_u64("offset")?,
@@ -383,7 +426,7 @@ impl Parser<'_> {
         self.leave();
         let severity =
             severity.ok_or_else(|| Self::field("severity", "required (`error` or `warning`)"))?;
-        let code = code.ok_or_else(|| Self::field("code", "required (a canonical code)"))?;
+        let code = code.ok_or_else(|| Self::field("code", "required (an issue code)"))?;
         let message = message.ok_or_else(|| Self::field("message", "required (the human text)"))?;
         Ok(Issue {
             severity,
