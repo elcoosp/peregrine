@@ -577,6 +577,12 @@ link's hot path", recorded honestly:**
   codec price over a served-shape report (the warm pipeline's six rows, the ladder's note, the
   total band) — `encode_report/6_rows` and `decode_report/6_rows`; the tail rides an IMAGE reply
   that carries pages, so the honest expectation is noise beside the transfer.
+- `dep_info` (`cargo bench -p pgr-core --bench dep_info`, M60): the dependency record's own price
+  over records sized like real build-system links (8, 64 and 512 rows) — `render` (the version
+  row plus one NUL-terminated row per entry) and `parse` (the strict reader's decode), linear in
+  the rows the link read, beside `record_512` (the `partition_point` insert path Pass 0 fills the
+  record with, one memmove per row). The record rides Pass 0, never the pipeline — a shape gate
+  on the sidecar's cost, not a link-cost knob.
 
 ## Pending measurements
 
