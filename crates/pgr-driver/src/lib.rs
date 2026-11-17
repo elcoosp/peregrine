@@ -166,6 +166,11 @@ pub enum DriverError {
     /// C-underscore hint is the fix (`pgr_core::provenance`).
     #[error("{0}")]
     WhyExport(#[from] pgr_core::provenance::ProvenanceError),
+    /// The M60 dependency record refused a row (a NUL or an empty path —
+    /// the format is NUL-terminated): the seam's typed error, the row
+    /// named.
+    #[error("dependency record: {0}")]
+    DepInfo(#[from] pgr_core::dep_info::DepInfoError),
     /// A `.pgr-inc` sidecar could not be read as a link record (M13
     /// rung 2, the `--print-record` query): the frame layer that
     /// refused — size, magic, length, checksum, version or body — and
@@ -456,13 +461,17 @@ pub fn scan_loader_executable(path: &str, bytes: &[u8]) -> Result<BundleLoader, 
 /// `-syslibroot`-reshaped, defaults included — see
 /// [`opts::effective_lib_dirs`]) to a `.tbd` stub, a Mach-O dylib binary, or
 /// — M5 — a static archive (dylib candidates win, matching ld64's search
-/// order).
+/// order). Every probed-but-missing candidate lands in `not_found` (the
+/// M60 dependency record's `0x11` rows — ld64's `checkFileExists` records
+/// each miss; a `-syslibroot`-prefixed candidate keeps its prefixed form,
+/// the path the search actually probed).
 ///
 /// # Errors
 /// [`DriverError::Io`] when the file exists but cannot be read.
 pub fn resolve_lib(
     name: &str,
     lib_dirs: &[String],
+    not_found: &mut Vec<String>,
 ) -> Result<Option<(String, Vec<u8>)>, DriverError> {
     let candidates = [
         "lib".to_owned() + name + ".tbd",
@@ -482,6 +491,7 @@ pub fn resolve_lib(
                 })?;
                 return Ok(Some((p.display().to_string(), bytes)));
             }
+            not_found.push(p.display().to_string());
         }
     }
     Ok(None)
@@ -490,13 +500,15 @@ pub fn resolve_lib(
 /// Resolves `-framework <name>` against the given search dirs (already
 /// ld64-effective: `-syslibroot`-reshaped, defaults included — see
 /// [`opts::effective_framework_dirs`]): `<dir>/<Name>.framework/<Name>`
-/// (+ `.tbd`).
+/// (+ `.tbd`). Every probed-but-missing candidate lands in `not_found`
+/// (the M60 dependency record's `0x11` rows — the `-l` search's shape).
 ///
 /// # Errors
 /// [`DriverError::Io`] when the file exists but cannot be read.
 pub fn resolve_framework(
     name: &str,
     framework_dirs: &[String],
+    not_found: &mut Vec<String>,
 ) -> Result<Option<(String, Vec<u8>)>, DriverError> {
     let stems = [
         format!("{name}.framework/{name}.tbd"),
@@ -512,6 +524,7 @@ pub fn resolve_framework(
                 })?;
                 return Ok(Some((p.display().to_string(), bytes)));
             }
+            not_found.push(p.display().to_string());
         }
     }
     Ok(None)
@@ -619,6 +632,11 @@ fn link_to_image_recorded(
                     }
                     decoded
                 });
+                // M60: the dependency record is the client-side read set
+                // (the request's own input list — Pass 0 mapped it before
+                // the wire), so the served link writes it too; the daemon
+                // never touches the filesystem, the client does.
+                write_dependency_record(opts, &prepared.deps)?;
                 return Ok((
                     ImageAndPlan {
                         image: img.image,
@@ -728,6 +746,10 @@ fn link_to_image_recorded(
             source,
         })?;
     }
+    // M60: the dependency record — the link's read set plus the output
+    // (and the map beside it), written once the link succeeded (ld64
+    // writes the file when the link completes).
+    write_dependency_record(opts, &prepared.deps)?;
     // M56: the provenance queries — one text report per queried name,
     // in flag order, over the link's own Pass-2 product (a vacuous
     // query refuses the run: the misspelling is named, never empty).
@@ -806,6 +828,13 @@ pub struct PreparedLink {
     pub config: pgr_core::layout::LinkConfig,
     /// `-u` names (the daemon runs the same gate).
     pub force_load: Vec<Vec<u8>>,
+    /// The M60 dependency record Pass 0 built: every file the mapping
+    /// read (objects, archives, resolved libraries, `-sectcreate`
+    /// payloads, list files, the bundle loader, the order file) and
+    /// every probed-but-missing `-l`/`-framework` candidate — the link's
+    /// read set, recorded while the reads happen. The output rows join
+    /// at the write site (the consumer knows the flag's path).
+    pub deps: pgr_core::dep_info::DependencyRecord,
 }
 
 /// Runs Passes 0–3 for the option inputs and returns the emit plan (the
@@ -845,6 +874,10 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     // M7: the directory is size-bounded (oldest-mtime LRU eviction) —
     // `-cache_max <bytes>` / `PGR_CACHE_MAX`, default 2 GiB; `0` = unbounded.
     const DEFAULT_CACHE_MAX: u64 = 2 * 1024 * 1024 * 1024;
+    // M60: the dependency record opens with the tool's version row and
+    // fills while Pass 0 reads (each read site records its own row — the
+    // record is the link's read set, never a post-hoc reconstruction).
+    let mut deps = pgr_core::dep_info::DependencyRecord::new(&version_line())?;
     let cache_max = opts.cache_max.or_else(|| {
         std::env::var("PGR_CACHE_MAX")
             .ok()
@@ -898,6 +931,7 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             None,
             opts,
             cache.as_ref(),
+            &mut deps,
             &mut inputs,
             &mut archives,
             &mut dylibs,
@@ -909,6 +943,7 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             Some(i),
             opts,
             cache.as_ref(),
+            &mut deps,
             &mut inputs,
             &mut archives,
             &mut dylibs,
@@ -919,37 +954,47 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     // dirs — `-syslibroot`-reshaped, defaults appended.
     let lib_dirs = opts::effective_lib_dirs(&opts.lib_dirs, &opts.syslibroots);
     for name in &opts.libs {
-        match resolve_lib(name, &lib_dirs)? {
-            Some((path, bytes)) => {
-                if looks_like_tbd(&bytes) {
-                    dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
-                } else if pgr_format::MachHeader64::parse(&bytes)
-                    .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
-                {
-                    dylibs.push(scan_dylib(&path, &bytes)?);
-                } else if pgr_format::is_archive(&bytes) {
-                    push_archive(&mut archives, &path, bytes, opts)?;
-                } else if is_llvm_bitcode(&bytes) {
-                    return Err(DriverError::LtoObject { path });
-                } else {
-                    return Err(DriverError::Tbd {
-                        path,
-                        source: pgr_format::FormatError::Malformed {
-                            what: "not a .tbd stub, Mach-O dylib or static archive".into(),
-                        },
-                    });
-                }
-            }
-            None => {
-                return Err(DriverError::Tbd {
-                    path: format!("lib{name}.tbd"),
-                    source: pgr_format::FormatError::Malformed {
-                        what: "library not found (searched the -L dirs and /usr/lib, each \
-                               -syslibroot-prefixed as ld64 does)"
-                            .into(),
-                    },
-                });
-            }
+        // M60: the search's probes and hits ride the dependency record —
+        // ld64's `checkFileExists` records every probed-but-missing
+        // candidate (the consumer learns where the search looked), and
+        // the resolved file rides an input row.
+        let mut probes = Vec::new();
+        let found = resolve_lib(name, &lib_dirs, &mut probes)?;
+        // The misses ride the record whether or not a later candidate
+        // hit — ld64 records them at stat time, the search's own story.
+        for probe in &probes {
+            deps.record_not_found(&dep_path(probe))?;
+        }
+        let Some((path, bytes)) = found else {
+            return Err(DriverError::Tbd {
+                path: format!("lib{name}.tbd"),
+                source: pgr_format::FormatError::Malformed {
+                    what: format!(
+                        "library not found (searched: {} — each -syslibroot-prefixed \
+                         as ld64 does)",
+                        lib_dirs.join(", ")
+                    ),
+                },
+            });
+        };
+        deps.record_input(&dep_path(&path))?;
+        if looks_like_tbd(&bytes) {
+            dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
+        } else if pgr_format::MachHeader64::parse(&bytes)
+            .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
+        {
+            dylibs.push(scan_dylib(&path, &bytes)?);
+        } else if pgr_format::is_archive(&bytes) {
+            push_archive(&mut archives, &path, bytes, opts)?;
+        } else if is_llvm_bitcode(&bytes) {
+            return Err(DriverError::LtoObject { path });
+        } else {
+            return Err(DriverError::Tbd {
+                path,
+                source: pgr_format::FormatError::Malformed {
+                    what: "not a .tbd stub, Mach-O dylib or static archive".into(),
+                },
+            });
         }
     }
     // M5 `-framework` search (M7: ld64-effective `-F` dirs + defaults).
@@ -980,38 +1025,45 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
                 .map(|n| (n, DylibKind::Upward)),
         )
     {
-        match resolve_framework(name, &framework_dirs)? {
-            Some((path, bytes)) => {
-                let mut dylib = if looks_like_tbd(&bytes) {
-                    tbd_to_dylib_cached(&path, &bytes, kind == DylibKind::Weak, cache.as_ref())?
-                } else if pgr_format::MachHeader64::parse(&bytes)
-                    .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
-                {
-                    let mut scanned = scan_dylib(&path, &bytes)?;
-                    scanned.weak = kind == DylibKind::Weak;
-                    scanned
-                } else {
-                    return Err(DriverError::Tbd {
-                        path,
-                        source: pgr_format::FormatError::Malformed {
-                            what: "framework payload is not a .tbd stub or Mach-O dylib".into(),
-                        },
-                    });
-                };
-                dylib.lazy = kind == DylibKind::Lazy;
-                dylib.reexport = kind == DylibKind::Reexport;
-                dylib.upward = kind == DylibKind::Upward;
-                dylibs.push(dylib);
-            }
-            None => {
-                return Err(DriverError::Tbd {
-                    path: format!("{name}.framework/{name}"),
-                    source: pgr_format::FormatError::Malformed {
-                        what: "framework not found (searched -F dirs)".into(),
-                    },
-                });
-            }
+        // M60: the framework search rides the record like the `-l`
+        // search (the probes and the resolved payload).
+        let mut probes = Vec::new();
+        let found = resolve_framework(name, &framework_dirs, &mut probes)?;
+        for probe in &probes {
+            deps.record_not_found(&dep_path(probe))?;
         }
+        let Some((path, bytes)) = found else {
+            return Err(DriverError::Tbd {
+                path: format!("{name}.framework/{name}"),
+                source: pgr_format::FormatError::Malformed {
+                    what: format!(
+                        "framework not found (searched: {})",
+                        framework_dirs.join(", ")
+                    ),
+                },
+            });
+        };
+        deps.record_input(&dep_path(&path))?;
+        let mut dylib = if looks_like_tbd(&bytes) {
+            tbd_to_dylib_cached(&path, &bytes, kind == DylibKind::Weak, cache.as_ref())?
+        } else if pgr_format::MachHeader64::parse(&bytes)
+            .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
+        {
+            let mut scanned = scan_dylib(&path, &bytes)?;
+            scanned.weak = kind == DylibKind::Weak;
+            scanned
+        } else {
+            return Err(DriverError::Tbd {
+                path,
+                source: pgr_format::FormatError::Malformed {
+                    what: "framework payload is not a .tbd stub or Mach-O dylib".into(),
+                },
+            });
+        };
+        dylib.lazy = kind == DylibKind::Lazy;
+        dylib.reexport = kind == DylibKind::Reexport;
+        dylib.upward = kind == DylibKind::Upward;
+        dylibs.push(dylib);
     }
     // M5 `-sectcreate`: section contents from a file, carried as a synthetic
     // single-section object (no symbols — placed by the bucketing pass).
@@ -1020,6 +1072,9 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             path: file.clone(),
             source,
         })?;
+        // M60: the section payload rides the record (ld64's `depSection`
+        // — an input-family row like every other read file).
+        deps.record_input(&dep_path(file))?;
         let obj = synth::section_object(seg, sect, &data).map_err(|message| DriverError::Tbd {
             path: file.clone(),
             source: pgr_format::FormatError::Malformed { what: message },
@@ -1040,6 +1095,8 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             path: path.clone(),
             source,
         })?;
+        // M60: the host file rides the record (ld64's `depBundleLoader`).
+        deps.record_input(&dep_path(path))?;
         config.bundle_loader = Some(scan_loader_executable(path, &bytes)?);
     }
     config.load_symbols = opts
@@ -1065,9 +1122,13 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     // M3 export filters, M14 glob-widened (the patterns ride the config;
     // the wire mirrors them — protocol v7).
     if let Some(path) = &opts.exported_list_path {
+        // M60: the symbol lists ride the record (ld64's `depMisc` rows —
+        // the files the link read to shape the export surface).
+        deps.record_input(&dep_path(path))?;
         config.exported_only = Some(read_symbol_patterns("-exported_symbols_list", path)?);
     }
     if let Some(path) = &opts.unexported_list_path {
+        deps.record_input(&dep_path(path))?;
         config.unexported = read_symbol_patterns("-unexported_symbols_list", path)?;
     }
     // M11: the order file — read, parse (typed, line-tagged refusals),
@@ -1079,6 +1140,9 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             path: path.clone(),
             source,
         })?;
+        // M60: the order file rides the record (a file the link read —
+        // the rank table is as much a build input as any object).
+        deps.record_input(&dep_path(path))?;
         let file =
             pgr_core::order::OrderFile::parse(&text).map_err(|e| DriverError::OrderFile {
                 path: path.clone(),
@@ -1097,6 +1161,7 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             archives,
             config,
             force_load,
+            deps,
         },
         cache,
     ))
@@ -1109,6 +1174,42 @@ pub fn is_llvm_bitcode(bytes: &[u8]) -> bool {
     bytes.starts_with(b"BC\xC0\xDE") || bytes.starts_with(&[0xDE, 0xC0, 0x17, 0x0B])
 }
 
+/// The path the M60 dependency record carries: ld64's `addDependency`
+/// runs non-absolute paths through `realpath()` at record time (the
+/// resolved file is what the build system tracks) and keeps the path as
+/// written when the resolution fails — the same shape here, one helper
+/// so every read site records the same view of one file.
+fn dep_path(path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_owned();
+    }
+    std::fs::canonicalize(path).map_or_else(|_| path.to_owned(), |p| p.display().to_string())
+}
+
+/// Writes the M60 dependency record beside the link: the output (and the
+/// `-map` beside it — ld64's own shape) join the record Pass 0 built,
+/// and the bytes land at the flag's path. The write happens once per
+/// successful link, after the image is in hand (ld64 writes the file
+/// when the link completes); a failure to write it is a real I/O error,
+/// never a silent skip — the map write's own contract.
+fn write_dependency_record(
+    opts: &opts::Options,
+    deps: &pgr_core::dep_info::DependencyRecord,
+) -> Result<(), DriverError> {
+    if let Some(path) = &opts.dependency_info {
+        let mut record = deps.clone();
+        record.record_output(&opts.output)?;
+        if let Some(map) = &opts.map_path {
+            record.record_output(map)?;
+        }
+        std::fs::write(Path::new(path), record.render()).map_err(|source| DriverError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
 /// Classifies and maps one input path: `.tbd`/dylib → [`Dylib`], archive →
 /// [`LinkArchive`] (lazy members), anything else → a [`LinkInput`] object.
 /// `opts_index` carries the `-weak_library`/`-reexport_library` marker index
@@ -1118,6 +1219,7 @@ fn map_input(
     opts_index: Option<usize>,
     opts: &opts::Options,
     cache: Option<&pgr_core::cache::PoiCache>,
+    deps: &mut pgr_core::dep_info::DependencyRecord,
     inputs: &mut Vec<LinkInput>,
     archives: &mut Vec<LinkArchive>,
     dylibs: &mut Vec<Dylib>,
@@ -1126,6 +1228,10 @@ fn map_input(
         path: path.to_string(),
         source,
     })?;
+    // M60: the mapped input rides the record whichever kind it turns out
+    // to be (ld64's object/dylib/archive rows are one input-family opcode
+    // in the field) — the file the link read is the row, not its class.
+    deps.record_input(&dep_path(path))?;
     if looks_like_tbd(&bytes) {
         let weak = opts_index.is_some_and(|i| opts.weak_library_inputs.contains(&i));
         let mut dylib = tbd_to_dylib_cached(path, &bytes, weak, cache)?;
@@ -1340,6 +1446,10 @@ fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     let image = pgr_emit::build_object_image(&linked, &prepared.config)?;
     let total = started.elapsed();
     write_image(&image, Path::new(&opts.output))?;
+    // M60: the relocatable link reads its inputs exactly as the image
+    // pipeline does — the record names them (ld64 serves the file for
+    // every link kind).
+    write_dependency_record(opts, &prepared.deps)?;
     // M56: the provenance queries ride the relocatable shape too — the
     // object's Pass-2 product is the same arena the query reads.
     print_why_export(
@@ -1989,6 +2099,15 @@ pub fn usage() -> String {
     s.push_str("                               JSON interchange line (one line, the\n");
     s.push_str("                               report-JSON escape rules; walls in\n");
     s.push_str("                               microseconds) (M58)\n");
+    s.push_str("  -dependency_info <path>      after a successful link, write the\n");
+    s.push_str("                               build-system dependency record —\n");
+    s.push_str("                               ld64's sidecar artifact: the linker\n");
+    s.push_str("                               version, every file the link read\n");
+    s.push_str("                               (objects, archives, libraries,\n");
+    s.push_str("                               payloads, list files), the probed\n");
+    s.push_str("                               misses, the output (M60; refused\n");
+    s.push_str("                               with -incremental — the relink\n");
+    s.push_str("                               re-reads no input file)\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
