@@ -161,6 +161,11 @@ pub enum DriverError {
         /// The parse refusal (line-tagged).
         message: String,
     },
+    /// A `-why_export` query named a symbol nothing interned (M56): the
+    /// vacuous query refuses the run — the misspelling is named, the
+    /// C-underscore hint is the fix (`pgr_core::provenance`).
+    #[error("{0}")]
+    WhyExport(#[from] pgr_core::provenance::ProvenanceError),
     /// A `.pgr-inc` sidecar could not be read as a link record (M13
     /// rung 2, the `--print-record` query): the frame layer that
     /// refused — size, magic, length, checksum, version or body — and
@@ -528,6 +533,27 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
     Ok(link_to_image_recorded(opts)?.0)
 }
 
+/// The M56 `-why_export` answers (the driver's consumer face): one text
+/// report per queried name, in flag order — the definition the
+/// resolution installed and every reference site the M8-a reverse index
+/// recorded (`pgr_core::provenance` renders both faces; the driver
+/// prints the text one). The index builds once per link, the queries
+/// read it; a vacuous query refuses the run (the misspelling named — a
+/// question the link cannot answer is never silently empty).
+fn print_why_export(
+    objects: &[pgr_core::object::InputObject],
+    resolution: &pgr_core::resolve::Resolution,
+    interner: &pgr_core::interner::Interner,
+    queries: &[String],
+) -> Result<(), DriverError> {
+    let index = pgr_core::ReverseIndex::build_all(objects);
+    for name in queries {
+        let answer = pgr_core::explain_export(&index, objects, resolution, interner, name)?;
+        print!("{}", answer.render());
+    }
+    Ok(())
+}
+
 /// [`link_to_image`] plus the M9 record: when `-incremental` is active and
 /// the one-shot pipeline produced the image, the link's record is built in
 /// the same pass (no pipeline re-run). The resident daemon path returns the
@@ -657,6 +683,20 @@ fn link_to_image_recorded(
             path: map_path.clone(),
             source,
         })?;
+    }
+    // M56: the provenance queries — one text report per queried name,
+    // in flag order, over the link's own Pass-2 product (a vacuous
+    // query refuses the run: the misspelling is named, never empty).
+    print_why_export(
+        &result.objects,
+        &result.resolution,
+        &result.interner,
+        &opts.why_export,
+    )?;
+    // M57: the load report — why each archive member rode the pull
+    // (and, under `-dead_strip_dylibs`, every input dylib's carriage).
+    if opts.why_load {
+        print!("{}", result.loads.render());
     }
     let record = if opts.incremental {
         Some(pgr_emit::incremental::LinkRecord::record(
@@ -1223,6 +1263,19 @@ fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     )?;
     let image = pgr_emit::build_object_image(&linked, &prepared.config)?;
     write_image(&image, Path::new(&opts.output))?;
+    // M56: the provenance queries ride the relocatable shape too — the
+    // object's Pass-2 product is the same arena the query reads.
+    print_why_export(
+        &linked.objects,
+        &linked.resolution,
+        &linked.interner,
+        &opts.why_export,
+    )?;
+    // M57: the load report (the pull's members; the dylib rows ride
+    // empty — `-r` refuses the `-dead_strip_dylibs` knob).
+    if opts.why_load {
+        print!("{}", linked.loads.render());
+    }
     Ok(LinkOutcome {
         output: opts.output.clone(),
         file_size: image.len() as u64,
@@ -1817,6 +1870,21 @@ pub fn usage() -> String {
     s.push_str("                               counts the last -incremental\n");
     s.push_str("                               link recorded — the what-will-\n");
     s.push_str("                               the-relink-patch query\n");
+    s.push_str("  -why_export <symbol>         after the link, answer *why is\n");
+    s.push_str("                               this symbol exported?* — the\n");
+    s.push_str("                               definition the resolution\n");
+    s.push_str("                               installed and every reference\n");
+    s.push_str("                               site the reverse index\n");
+    s.push_str("                               recorded (M56; repeatable; the\n");
+    s.push_str("                               name is the C symbol, underscore\n");
+    s.push_str("                               included)\n");
+    s.push_str("  -why_load                    after the link, report why each\n");
+    s.push_str("                               archive member was loaded (the\n");
+    s.push_str("                               pull's decision: the reference\n");
+    s.push_str("                               that reached it, -all_load,\n");
+    s.push_str("                               -ObjC) and — under\n");
+    s.push_str("                               -dead_strip_dylibs — every input\n");
+    s.push_str("                               dylib's carriage (M57)\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
