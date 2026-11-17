@@ -5,6 +5,42 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M66)
+
+- **M66** — the fusion lane's ladder joins the seam (wire v42 in service): the session's
+  ladder reports its rungs beside the warm pipeline it already observes (`serve_relink`
+  reports the integrity gate over the transferred bytes, the patch plan, the in-memory
+  patch and the audit through the same collectors), so `-resident -incremental
+  --time/--trace` stops refusing — the client prints the served table and writes the
+  served timeline verbatim (either lane, one observed run; an untouched relink's served
+  report ends at the plan, no patch row riding a relink that patched nothing). The
+  vocabulary crossed no new wire: v42 registered the rung tokens at M65; the session
+  reports them now. The `served_timing_session` example walks the ladder face beside the
+  round-trip gate, and the driver's fusion cycle gates it end to end
+  (`m65_relink_timeline.rs::the_fusion_lane_serves_the_ladder_faces`).
+
+### Added (M65)
+
+- **M65** — the relink ladder rides the observation seam (`--time`/`--trace` beside
+  `-incremental`): the §7.3 ladder's engine rungs — the integrity gate (`RelinkGate`, the
+  record's page-hash sample hashed against the previous output), the patch plan
+  (`RelinkPlan`, the total and dirty tiles), the clone-and-patch (`RelinkPatch`, the bytes
+  and tiles actually written) and the `-incremental-verify` audit (`RelinkAudit`, the heal
+  and the blocking-issue count) — join the M54 seam's phase vocabulary beside the
+  pipeline's passes, and the ladder's fallback rungs join the note vocabulary
+  (`LinkNote::RelinkFallback` — the full link the ladder handed over to names itself on
+  the report and the timeline; one report per run: a successful ladder prints the rungs it
+  ran — the warm pipeline's Passes 1–3 riding through the same `link_observed` entry the
+  one-shot path uses — and a handover prints the full link's phases with the note
+  leading). The M58/M61 lane refusals flip to service beside `-incremental` (the fusion
+  lane `-resident -incremental` still refuses until the session's ladder joins the seam),
+  and wire v42 registers the rung vocabulary in the time-report tail (the decode side
+  restores a captured tail carrying the rungs; the session reports them at the next
+  rung). The observation is read-only — the parity gate re-gated through the ladder (the
+  observed relink patches the full link's bytes); the `trace` bench's relink groups pin
+  the rung rows' render/parse price, and the `relink_timeline` consumer example walks the
+  cycle (record, untouched relink, edit, patched relink) beside the round-trip gate.
+
 ### Added (M64)
 
 - **M64** — the lane registry's names: the M63 worker lanes made the timeline
