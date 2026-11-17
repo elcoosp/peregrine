@@ -133,13 +133,26 @@ fn the_flag_parses_and_defaults_off() {
 }
 
 #[test]
-fn the_timeline_refuses_the_engine_lane_and_rides_the_resident_lane() {
+fn the_timeline_rides_the_engine_lane_and_the_resident_lane() {
     let dir = scratch("lanes");
-    let err = parse(&dir, &["--trace", "t.json", "-incremental"]).expect_err("the lane refuses");
-    let rendered = err.to_string();
+    // M65: the in-process incremental ladder rides the timeline — the
+    // §7.3 rungs joined the seam's vocabulary, so `--trace` beside
+    // `-incremental` no longer refuses (the run gate lives in
+    // `m65_relink_timeline.rs`).
+    let ladder = parse(&dir, &["--trace", "t.json", "-incremental"]).expect("the lane rides");
     assert!(
-        rendered.contains("--trace") && rendered.contains("-incremental"),
-        "the conflict names both flags: {rendered}"
+        ladder.trace_path.is_some() && ladder.incremental,
+        "--trace rides beside -incremental"
+    );
+    // M66: the fusion lane rides too — the session's ladder reports its
+    // rungs beside the warm pipeline and the reply's tail carries the
+    // rendered document (wire v42 in service; the run gate lives in
+    // `m65_relink_timeline.rs`).
+    let fusion = parse(&dir, &["--trace", "t.json", "-resident", "-incremental"])
+        .expect("the fusion lane rides");
+    assert!(
+        fusion.trace_path.is_some() && fusion.resident && fusion.incremental,
+        "--trace rides beside -resident -incremental"
     );
     // M62 (wire v41): the resident lane carries the timeline — the
     // session observes its own pipeline and the reply's tail serves the
