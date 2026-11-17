@@ -12,24 +12,46 @@ use pgr_format::consts::{
     CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_SEGMENT_64, LC_SYMTAB, MH_MAGIC_64, MH_OBJECT,
 };
 
+/// A `section_object` refusal (the M67 typed surface): the names must
+/// fit the 16-byte Mach-O fields, and the message carries the fix, not
+/// just the verdict (the house error convention — it stopped riding the
+/// `.tbd` variant it was misfiled under).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SynthError {
+    /// The segment or section name exceeds the 16-byte Mach-O field.
+    #[error(
+        "{kind} name {raw:?} exceeds the 16-byte Mach-O field — the fix is a shorter {kind} name"
+    )]
+    NameTooLong {
+        /// Which name (`segment` or `section`).
+        kind: &'static str,
+        /// The offending name.
+        raw: String,
+    },
+}
+
 /// Builds a minimal single-section `MH_OBJECT` carrying `data` as
 /// `<seg>,<sect>` (the `-sectcreate` payload).
 ///
 /// # Errors
-/// A `String` diagnostic when the names do not fit the 16-byte Mach-O
-/// fields (naming rules identical to `pgr-fixtures`' object builder).
-pub fn section_object(seg: &str, sect: &str, data: &[u8]) -> Result<Vec<u8>, String> {
-    let pad16 = |name: &str| -> Result<[u8; 16], String> {
+/// [`SynthError::NameTooLong`] when the names do not fit the 16-byte
+/// Mach-O fields (naming rules identical to `pgr-fixtures`' object
+/// builder).
+pub fn section_object(seg: &str, sect: &str, data: &[u8]) -> Result<Vec<u8>, SynthError> {
+    let pad16 = |kind: &'static str, name: &str| -> Result<[u8; 16], SynthError> {
         let bytes = name.as_bytes();
         if bytes.len() > 16 {
-            return Err(format!("section/segment name {name:?} exceeds 16 bytes"));
+            return Err(SynthError::NameTooLong {
+                kind,
+                raw: name.to_owned(),
+            });
         }
         let mut out = [0u8; 16];
         out[..bytes.len()].copy_from_slice(bytes);
         Ok(out)
     };
-    let seg_name = pad16(seg)?;
-    let sect_name = pad16(sect)?;
+    let seg_name = pad16("segment", seg)?;
+    let sect_name = pad16("section", sect)?;
 
     // Layout: header (32) | LC_SEGMENT_64 (72 + 80) | LC_SYMTAB (24) | data
     // | strtab (1 byte, the standard leading NUL).
@@ -92,7 +114,7 @@ pub fn section_object(seg: &str, sect: &str, data: &[u8]) -> Result<Vec<u8>, Str
 
 #[cfg(test)]
 mod tests {
-    use super::section_object;
+    use super::{SynthError, section_object};
 
     #[test]
     fn section_object_parses_back() {
@@ -123,6 +145,34 @@ mod tests {
 
     #[test]
     fn oversized_names_error() {
-        assert!(section_object("__WAY_TOO_LONG_SEGMENT_NAME_XYZ", "__ok", b"").is_err());
+        let err = section_object("__WAY_TOO_LONG_SEGMENT_NAME_XYZ", "__ok", b"")
+            .expect_err("the long segment name is refused");
+        assert!(
+            matches!(
+                err,
+                SynthError::NameTooLong {
+                    kind: "segment",
+                    ..
+                }
+            ),
+            "the refusal names the name kind: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("the fix is a shorter segment name"),
+            "the refusal names the fix: {err}"
+        );
+        let section_err =
+            section_object("__ok", "__ALSO_WAY_TOO_LONG_SECTION", b"").expect_err("refused");
+        assert!(
+            matches!(
+                section_err,
+                SynthError::NameTooLong {
+                    kind: "section",
+                    ..
+                }
+            ),
+            "the section kind is named too: {section_err}"
+        );
     }
 }
