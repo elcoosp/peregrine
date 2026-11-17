@@ -62,6 +62,7 @@ pub mod pagezero;
 pub mod platform;
 pub mod pool;
 pub mod propagate;
+pub mod provenance;
 pub mod rename;
 pub mod resolve;
 pub mod resolve_reuse;
@@ -112,6 +113,10 @@ pub use observe::{LinkNote, LinkObserver, Phase, PhaseDetail, PhaseEvent, Tracin
 pub use pagezero::PageZero;
 pub use platform::FixupEncoding;
 pub use propagate::{PropagationScope, SectionDigest};
+pub use provenance::{
+    DefinitionSource, DylibExplanation, LoadDecision, LoadExplanation, LoadReport, ProvenanceError,
+    RefExplanation, RefSiteReport, explain_export,
+};
 pub use rename::{RenameError, SectionRename, SectionRenames};
 pub use resolve::{Def, Rank, Resolution};
 pub use resolve_reuse::{ResolveReuseSeed, ReuseFallback, ReusePlan, install_reused, plan_reuse};
