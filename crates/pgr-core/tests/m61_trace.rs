@@ -320,7 +320,13 @@ fn the_reader_accepts_the_schema_any_writer_produces() {
     assert_eq!(parsed.spans[0].start_us, 5);
     assert_eq!(parsed.spans[0].dur_us, 7);
     assert_eq!(parsed.spans[0].detail, PhaseDetail::Objects { inputs: 3 });
-    assert_eq!(parsed.lanes, vec![2]);
+    assert_eq!(
+        parsed.lanes,
+        vec![pgr_core::trace::TraceLane {
+            id: 2,
+            name: "pgr link".to_string(),
+        }]
+    );
 }
 
 // ---- the refusals -------------------------------------------------------------
