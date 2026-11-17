@@ -123,12 +123,17 @@ measurement as a one-line JSON interchange. It is Peregrine-specific (ld64
 has no counterpart): a measurement for build systems and CI budgets, read
 off the M54 observation seam, never a layout product — a timed link plans
 byte-identical output to an untimed one. The resident lane serves the same
-report from the daemon's own observed pipeline (wire v40); the incremental
-lane refuses the flag (the ladder runs where the observer does not).
+report from the daemon's own observed pipeline (wire v40); the in-process
+incremental ladder rides since M65 — the §7.3 rungs (the integrity gate,
+the patch plan, the clone-and-patch, the audit) join the seam's vocabulary
+and the table names them beside the pipeline's rows; the fusion lane
+`-resident -incremental` serves the session's observed ladder since M66
+(wire v42 in service — the daemon reports its rungs across the wire).
 
 ```sh
 pgr -o app main.o -lgreet -L libs --time         # the table beside the link
 pgr -o app main.o -lgreet -L libs --time-json    # the interchange line
+pgr -o app main.o -lgreet -L libs -incremental --time   # the ladder's rungs
 ```
 
 ## Peregrine-specific: the Chrome-trace timeline
@@ -144,12 +149,15 @@ output to an untraced one. The file opens in `chrome://tracing` or the
 Perfetto UI, and `pgr_core::trace::parse_trace_json` is the strict reader
 (the round trip is gated). The resident lane serves the same timeline
 from the daemon's own observed pipeline (wire v41 — the client writes the
-served document verbatim); the incremental lane refuses the flag (the
-ladder runs where the observer does not).
+served document verbatim); the in-process incremental ladder rides since
+M65 — the §7.3 rungs ride the timeline as spans beside the pipeline's —
+and the fusion lane serves the session's observed ladder since M66 (wire
+v42 in service).
 
 ```sh
 pgr -o app main.o -lgreet -L libs --trace t.json   # the timeline beside the link
 pgr -o app main.o -lgreet -L libs -resident --trace t.json   # the served timeline
+pgr -o app main.o -lgreet -L libs -incremental --trace t.json   # the ladder's rungs
 ```
 
 ## Rejected with an actionable message
