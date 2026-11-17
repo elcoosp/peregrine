@@ -74,6 +74,7 @@ pub mod stable_imports;
 pub mod stack_size;
 pub mod sub_client;
 pub mod thunks;
+pub mod time_report;
 pub mod trie;
 pub mod umbrella;
 pub mod unwind;
@@ -127,6 +128,7 @@ pub use slack::{LayoutFallback, SlackPolicy};
 pub use stable_imports::{StableImport, StableImports};
 pub use stack_size::StackSize;
 pub use sub_client::{SubClient, SubClientEntry, SubClientError};
+pub use time_report::{TimeCollector, TimeReport};
 pub use trie::{Export, ExportInfo};
 pub use umbrella::{Umbrella, UmbrellaError, UmbrellaKind, UmbrellaMember};
 pub use unwind::{
