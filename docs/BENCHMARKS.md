@@ -585,7 +585,11 @@ link's hot path", recorded honestly:**
   bench: the `collector` variant's parse now reports one task record per input (the M63
   seam's honest price — one channel send per input beside the per-phase pushes), and the
   task rows' faces join as `render_8_rows_64_tasks`/`parse_8_rows_64_tasks` (the 64-object
-  link's report shape — seven phase rows, 64 worker-lane task rows, one note).
+  link's report shape — seven phase rows, 64 worker-lane task rows, one note). M65 rides
+  the same bench: the §7.3 ladder's rung rows join as
+  `render_12_rows_relink`/`parse_12_rows_relink` (the edited relink's report shape — the
+  pipeline's rows, the four rungs, both notes; the ladder's events are four pushes beside
+  the pipeline's own, so the honest expectation stays near-parity).
 - `wire_trace` (`cargo bench -p pgr-daemon --bench wire_trace`, M62): the served timeline's
   wire-tail codec price over a served-shape document (the warm pipeline's six phase rows,
   the ladder's note instant) — `encode_trace/6_rows` and `decode_trace/6_rows` (one length
