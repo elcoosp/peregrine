@@ -131,6 +131,27 @@ pgr -o app main.o -lgreet -L libs --time         # the table beside the link
 pgr -o app main.o -lgreet -L libs --time-json    # the interchange line
 ```
 
+## Peregrine-specific: the Chrome-trace timeline
+
+`--trace <path>` writes the link's Chrome Trace Event Format timeline
+(the `{"traceEvents":[…]}` object form) after the link — the pipeline's
+phase spans on a µs axis, each with its own shape, and the ladder's notes
+as instants; the gaps between the spans are the idle stretch the
+profiling toolbox reads. It is Peregrine-specific (ld64 has no
+counterpart): a measurement off the same M54 observation seam the time
+report reads, never a layout product — a traced link plans byte-identical
+output to an untraced one. The file opens in `chrome://tracing` or the
+Perfetto UI, and `pgr_core::trace::parse_trace_json` is the strict reader
+(the round trip is gated). The resident lane serves the same timeline
+from the daemon's own observed pipeline (wire v41 — the client writes the
+served document verbatim); the incremental lane refuses the flag (the
+ladder runs where the observer does not).
+
+```sh
+pgr -o app main.o -lgreet -L libs --trace t.json   # the timeline beside the link
+pgr -o app main.o -lgreet -L libs -resident --trace t.json   # the served timeline
+```
+
 ## Rejected with an actionable message
 
 A linker that silently drops a flag it does not implement is worse than one
