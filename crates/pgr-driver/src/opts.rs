@@ -165,6 +165,22 @@ pub struct Options {
     /// segments/sections/symbols, rendered by [`pgr_core::map`]) next to
     /// the link. `None` (the default) writes no map.
     pub map_path: Option<String>,
+    /// M56 `-why_export <symbol>` (repeatable): after a one-shot link,
+    /// answer *why is this symbol exported?* — the definition the
+    /// resolution installed and every reference site the M8-a reverse
+    /// index recorded (`pgr_core::provenance`). The default (the empty
+    /// list) queries nothing. The query rides the one-shot link's own
+    /// Pass-2 product, so the resident and incremental lanes refuse it
+    /// (`finish` — a served relink's resolution never crosses the wire).
+    pub why_export: Vec<String>,
+    /// M57 `-why_load`: after a one-shot link, report why each archive
+    /// member was loaded (the S7 pull's per-member decision) and — under
+    /// `-dead_strip_dylibs` — every input dylib's carriage
+    /// (`pgr_core::provenance::LoadReport`, carried on the link result).
+    /// The default (`false`) reports nothing. The lane contract mirrors
+    /// `-why_export`: the resident and incremental lanes refuse the
+    /// report (the pull's record never crosses the wire).
+    pub why_load: bool,
     /// M15: `-pagezero_size` was passed explicitly. The default (`false`)
     /// keeps the seam's own default on every non-executable output — the
     /// flag only applies to executables, and an explicitly named knob
@@ -248,6 +264,8 @@ impl Default for Options {
             chain_word_format_explicit: false,
             order_file: None,
             map_path: None,
+            why_export: Vec::new(),
+            why_load: false,
             pagezero_explicit: false,
             init_offsets_flag: None,
             seg_prot_stage: Vec::new(),
@@ -398,6 +416,29 @@ pub enum OptsError {
         verdict: String,
         /// The imperative tail naming the flags to change.
         fix: String,
+    },
+    /// A `-why_export` surface conflict (M56): the query reads the
+    /// one-shot link's own Pass-2 product (the parsed arena and the
+    /// resolution), and neither the resident session's relink nor the
+    /// incremental engine's patched relink carries that product across
+    /// its lane. The verdict names the lane; the help is the fix.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    WhyExportConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The fix — the house convention.
+        fix: String,
+    },
+    /// A `-why_export` value the grammar refuses (M56): an empty symbol
+    /// name — the query is the C symbol, underscore included.
+    #[error("invalid value for -why_export: {value}")]
+    #[diagnostic(help(
+        "the name is the C symbol, the leading underscore included — e.g. -why_export _greet"
+    ))]
+    WhyExportValue {
+        /// The refused value as written.
+        value: String,
     },
     /// A `-headerpad` value the grammar refuses (M29): the floor is
     /// non-zero (zero names the absence of the knob), a multiple of 8
@@ -1479,6 +1520,22 @@ fn apply_flag(
         "-map" => {
             let v = next_value(args, i, arg)?;
             opts.map_path = Some(v);
+        }
+        // M56: the symbol-reference provenance query. The names ride
+        // verbatim (C symbols carry the leading underscore); an empty
+        // name refuses here, the lane conflicts are `finish`'s.
+        "-why_export" => {
+            let v = next_value(args, i, arg)?;
+            if v.is_empty() {
+                return Err(OptsError::WhyExportValue { value: v });
+            }
+            opts.why_export.push(v);
+        }
+        // M57: the load-provenance report (the S7 pull's per-member
+        // decision, the `-dead_strip_dylibs` carriage). The lane
+        // conflicts are `finish`'s.
+        "-why_load" => {
+            opts.why_load = true;
         }
         // M15: the image base (the `__PAGEZERO` vmsize an executable
         // plans with). The same validation the core seam pays runs here,
@@ -2624,7 +2681,7 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     // family no image will ever carry is a silently dropped knob, which
     // this surface refuses to do. The unnamed default keeps the silent
     // fallback. The decision reads the same consumer seam the encoding
-    // query answers from (one table, three readers — never a
+    // query answers from (one table, four readers since M16 — never a
     // re-derivation); after the output-kind match so `-r` keeps its
     // tighter refusal wording.
     if opts.chain_word_format_explicit && opts.config.fixup_chains {
@@ -2704,6 +2761,36 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                           which does not carry the order-file rank table"
                     .into(),
                 fix: "drop -resident or -order_file".into(),
+            });
+        }
+    }
+    // M56: the provenance query reads the one-shot link's own Pass-2
+    // product — a refusal where the lane never carries it, never a
+    // silently unanswered question (the surface's contract).
+    // M57: the load report rides the same contract (the pull's record
+    // is the one-shot pipeline's, never the wire's).
+    if !opts.why_export.is_empty() || opts.why_load {
+        let lane = if opts.why_export.is_empty() {
+            "-why_load"
+        } else {
+            "-why_export"
+        };
+        if opts.incremental {
+            return Err(OptsError::WhyExportConflict {
+                verdict: format!(
+                    "{lane} reads the one-shot link's Pass-2 product; -incremental's relink \
+                     patches the recorded plan inside the engine's ladder"
+                ),
+                fix: format!("drop {lane} or -incremental"),
+            });
+        }
+        if opts.resident {
+            return Err(OptsError::WhyExportConflict {
+                verdict: format!(
+                    "{lane} reads the one-shot link's Pass-2 product; -resident relinks \
+                     across the wire and never returns the parsed arena the query reads"
+                ),
+                fix: format!("drop {lane} or -resident"),
             });
         }
     }
