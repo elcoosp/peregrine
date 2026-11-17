@@ -22,7 +22,7 @@ use crate::ids::{FileId, StringId};
 use crate::interner::Interner;
 use crate::layout::{Layout, LinkConfig, layout};
 use crate::object::InputObject;
-use crate::observe::{LinkNote, LinkObserver, Phase, PhaseDetail, PhaseEvent};
+use crate::observe::{LinkNote, LinkObserver, Phase, PhaseDetail, PhaseEvent, TaskEvent};
 use crate::pool;
 use crate::provenance::{LoadDecision, LoadExplanation};
 use crate::resolve::Resolution;
@@ -200,7 +200,7 @@ fn link_cached_inner(
     // way dead-strip does (and rides the same cache-key flag).
     let split_symbols = cfg.dead_strip || cfg.symbol_order.is_some();
     let parse_started = Instant::now();
-    let objects = parse_inputs(inputs, parallel, split_symbols, cache)?;
+    let objects = parse_inputs(inputs, parallel, split_symbols, cache, &mut observer)?;
     emit_phase(
         &mut observer,
         Phase::Parse,
@@ -777,7 +777,7 @@ fn link_reloc_inner(
         });
     }
     let parse_started = Instant::now();
-    let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None)?;
+    let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None, &mut observer)?;
     emit_phase(
         &mut observer,
         Phase::Parse,
@@ -842,15 +842,36 @@ fn emit_note(observer: &mut Option<&mut dyn LinkObserver>, note: LinkNote) {
     }
 }
 
+/// Emits one intra-phase task through the observer slot (the M63 task
+/// seam — the parse pool's per-input work, reported by the thread that
+/// ran it; `None` = the historical silence, the seam costs nothing when
+/// nobody subscribes).
+fn emit_task(observer: &mut Option<&mut dyn LinkObserver>, task: TaskEvent) {
+    if let Some(obs) = observer.as_deref_mut() {
+        obs.on_task(task);
+    }
+}
+
 /// Pass 1 over the input files. `Auto` schedules **LPT** (longest input
 /// first — perf doc §4.1) on the shared pool; the results land at their
 /// command-line indices either way, and errors surface in command-line
 /// order, so the schedule never changes the outcome.
+///
+/// M63: each input's parse rides the task seam — one [`TaskEvent`] per
+/// input when an observer subscribes (a cache hit is still a completed
+/// task: the load is the work the consumer waited on). The pool threads
+/// cannot borrow the caller's observer slot, so the parallel path reports
+/// through a channel (opened only when a subscriber rides) and the caller
+/// forwards the records once the pool returns; each record carries its own
+/// arrival clock and thread, so the timeline's lane registry and µs bounds
+/// stay the worker's own (a drain-time re-stamp would end every worker's
+/// span at the drain).
 fn parse_inputs(
     inputs: &[LinkInput],
     parallel: Parallelism,
     split_symbols: bool,
     cache: Option<&crate::cache::PoiCache>,
+    observer: &mut Option<&mut dyn LinkObserver>,
 ) -> Result<Vec<InputObject>, LinkError> {
     // M6 Stage A: the cache key is per-input content + the parse flag.
     let keys: Vec<[u8; 32]> = inputs
@@ -868,54 +889,90 @@ fn parse_inputs(
                 .cmp(&inputs[a].bytes.len())
                 .then(a.cmp(&b))
         });
+        let mut task_tx: Option<std::sync::mpsc::Sender<TaskEvent>> = None;
+        let mut task_rx: Option<std::sync::mpsc::Receiver<TaskEvent>> = None;
+        if observer.is_some() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            task_tx = Some(tx);
+            task_rx = Some(rx);
+        }
         let parsed: Vec<Result<InputObject, LinkError>> = pool::compute_pool().install(|| {
             order
                 .par_iter()
                 .map(|&i| {
-                    if let Some(cache) = cache
+                    let started = Instant::now();
+                    let obj = if let Some(cache) = cache
                         && let Some(hit) = cache.load(
                             &keys[i],
                             FileId(i as u32),
                             &inputs[i].name,
                             inputs[i].bytes.clone(),
                             split_symbols,
-                        )
-                    {
-                        return Ok(hit);
-                    }
-                    let obj = InputObject::parse(
-                        FileId(i as u32),
-                        &inputs[i].name,
-                        inputs[i].bytes.clone(),
-                    )?;
-                    if let Some(cache) = cache {
-                        cache.store(&keys[i], &obj, split_symbols);
+                        ) {
+                        hit
+                    } else {
+                        let parsed = InputObject::parse(
+                            FileId(i as u32),
+                            &inputs[i].name,
+                            inputs[i].bytes.clone(),
+                        )?;
+                        if let Some(cache) = cache {
+                            cache.store(&keys[i], &parsed, split_symbols);
+                        }
+                        parsed
+                    };
+                    if let Some(tx) = task_tx.as_ref() {
+                        let _ = tx.send(TaskEvent {
+                            phase: Phase::Parse,
+                            label: inputs[i].name.clone(),
+                            elapsed: started.elapsed(),
+                            at: Instant::now(),
+                            thread: std::thread::current().id(),
+                        });
                     }
                     Ok(obj)
                 })
                 .collect()
         });
+        if let Some(rx) = task_rx {
+            drop(task_tx);
+            for task in rx {
+                emit_task(observer, task);
+            }
+        }
         for (slot, obj) in order.iter().zip(parsed) {
             objects[*slot] = Some(obj?);
         }
     } else {
         for (i, input) in inputs.iter().enumerate() {
-            if let Some(cache) = cache
+            let started = Instant::now();
+            let obj = if let Some(cache) = cache
                 && let Some(hit) = cache.load(
                     &keys[i],
                     FileId(i as u32),
                     &input.name,
                     input.bytes.clone(),
                     split_symbols,
-                )
-            {
-                objects[i] = Some(hit);
-                continue;
-            }
-            let obj = InputObject::parse(FileId(i as u32), &input.name, input.bytes.clone())?;
-            if let Some(cache) = cache {
-                cache.store(&keys[i], &obj, split_symbols);
-            }
+                ) {
+                hit
+            } else {
+                let parsed =
+                    InputObject::parse(FileId(i as u32), &input.name, input.bytes.clone())?;
+                if let Some(cache) = cache {
+                    cache.store(&keys[i], &parsed, split_symbols);
+                }
+                parsed
+            };
+            emit_task(
+                observer,
+                TaskEvent {
+                    phase: Phase::Parse,
+                    label: input.name.clone(),
+                    elapsed: started.elapsed(),
+                    at: Instant::now(),
+                    thread: std::thread::current().id(),
+                },
+            );
             objects[i] = Some(obj);
         }
     }
