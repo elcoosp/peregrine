@@ -263,8 +263,10 @@ impl LinkMap {
 
 /// JSON string escaping (the report-JSON rules): quotes, backslashes and
 /// control characters ride `\"` `\\` `\n` `\r` `\t` and `\uXXXX`;
-/// everything else — the multibyte UTF-8 included — verbatim.
-fn escape_json(s: &str) -> String {
+/// everything else — the multibyte UTF-8 included — verbatim. The house
+/// writer's escape: the M56 provenance interchange shares it (one
+/// escape table per crate, never a third copy).
+pub(crate) fn escape_json(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
