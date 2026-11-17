@@ -5,6 +5,66 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Fixed
+
+- **fix(layout)** — the dead head-def resolution: `atom_or_section_addr`'s
+  containment walked `partition_point(...).saturating_sub(1)` and subtracted
+  the matched atom's start from a value that could sit *before every live
+  atom's start* — a definition the dead-strip mark dropped (the section's
+  head atom stripped, live atoms after it). Under overflow checks the
+  subtraction panicked ("dead atoms carry no entry — nothing live references
+  them" is the parse's own contract, and the containment must refuse the
+  delta it cannot vouch for, not wrap); under release arithmetic it silently
+  wrapped into a garbage address. The `M52 dead_strip_inits` bench's rooted
+  variant was the field reproduction (CI compiles benches — `cargo bench
+  --no-run` — the `cargo test --benches` gate *runs* them). The fix returns
+  `None` for the unvouched delta (the caller's existing contract), the
+  regression gate rides `tests/m52_no_dead_strip_inits.rs`
+  (`the_dead_head_def_resolves_without_overflow`), and every pre-fix link
+  that planned is byte-identical under the fix (live definitions always
+  match an atom at or before their value — the `idx == 0` arm is dead-def
+  only, and dead defs never reached the output).
+
+### Added (M55)
+
+- **M55** — the link-map JSON interchange (`pgr_core::map`): the build-system-facing
+  report ld64's `-map` serves — already a pure function of the plan (the report and the
+  bytes cannot disagree) — gains the machine face: `LinkMap::render_json` renders the
+  deterministic compact interchange (fixed key order, one line, the report-JSON escape
+  rules — the house writer `pgr-verify`'s `report_json` rides) and `parse_link_map_json`
+  is the strict reader: a rigid schema (unknown or duplicate keys refuse,
+  integer-only numbers, no trailing commas, byte-positioned `MapJsonError`s) with the
+  data model's own structural gate (a section's `seg_name` must name the segment it
+  rode in on — `build_link_map` groups sections by their owning segment, so a foreign
+  document that misfiles one refuses typed). The reader restores the writer's data
+  exactly — the `to_json`/`parse_report_json` round-trip convention, gated in
+  `tests/m55_map_json.rs` and the module's own tests — so a build system ships the map
+  to any JSON tooling (a size dashboard, a diff gate) without a custom parser. The
+  `link_map_json` bench group (write / write-read round trip) rides the map bench; the
+  `map_json` consumer example renders both faces beside each other.
+
+### Added (M54)
+
+- **M54** — the link-pipeline observation seam (`pgr_core::observe`): the pass structure
+  Passes 1–3 already name on the tracing span seam becomes a typed surface a library
+  consumer subscribes to — `pgr_core::link_observed`, `link_from_objects_observed` and
+  `link_reloc_observed` run the exact pipeline `link_cached`/`link_from_objects`/
+  `link_reloc` run (an observed link plans the identical layout — the parity gate is the
+  seam's own contract in `tests/m54_observer.rs`) with each phase's completion arriving
+  in link order (`Parse → ArchivePull → Intern → Resolve → Liveness → Fold → Layout`,
+  the `-r` object shape its own run) as a `PhaseEvent`: the phase's own `PhaseDetail`
+  (the parse's input count, the pulled archive members, the interned names, the
+  resolve's reuse split, the dead-strip engagement, the fold count, the planned
+  segment/section shape — the counts the pass already had in hand, never re-derived)
+  plus its wall time. The §7.3 ladder's silent-correct rungs arrive as notes
+  (`LinkNote::ResolveReuseFallback` names the resolve-reuse plan/install refusal with
+  its own wording — the same message the tracing seam's debug events carry). Both trait
+  methods default to subscribing to nothing (the pipeline pays nothing for the silence),
+  `TracingObserver` bridges every event onto the house tracing convention (inert until a
+  subscriber installs), the `observer` bench pins the shape (one event per phase — seven
+  per segmented link — regardless of corpus size), and the `phase_observer` consumer
+  example ships the recorder face.
+
 ### Added (M53)
 
 - **M53** — the section renames (`-rename_section <fromSeg> <fromSect> <toSeg> <toSect>`): ld64's
