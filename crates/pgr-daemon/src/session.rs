@@ -109,6 +109,13 @@ pub struct ServedLink {
     /// (patched or untouched) — a full link has no previous state to
     /// stream against, and the server then ships `image` as before.
     pub tiles: Option<pgr_emit::incremental::TilePatch>,
+    /// The served time report (v40, M58/M59): `Some` when the request
+    /// asked for it — the phases the session's own pipeline reported
+    /// (the M54 observation seam, [`pgr_core::time_report::TimeCollector`]
+    /// subscribed), the ladder's notes, the measured bands. A relink's
+    /// Pass-4 half is the in-memory patch, so its emit band rides
+    /// `None`; a full link measures the fused emit.
+    pub time_report: Option<pgr_core::time_report::TimeReport>,
 }
 
 /// Why the session's §7.3 ladder declined: the caller (the link entry)
@@ -342,12 +349,46 @@ impl ResidentSession {
                 }
             }
         }
-        let result =
-            pgr_core::link_from_objects(objects, &archives, &req.config, Parallelism::Auto, None)?;
+        // M58/M59 (v40): a time-asking request observes the session's own
+        // pipeline — the same warm run, the [`pgr_core::time_report::TimeCollector`]
+        // subscribed (the report never moves a byte of the plan — the M54
+        // parity gate is the seam's own contract). The warm pipeline has
+        // no `Parse` row: the POIs are resident, the parse was paid when
+        // the blobs arrived.
+        let started = std::time::Instant::now();
+        let mut collector = pgr_core::TimeCollector::default();
+        let result = if req.time {
+            pgr_core::link_from_objects_observed(
+                objects,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                None,
+                Some(&mut collector),
+            )?
+        } else {
+            pgr_core::link_from_objects(objects, &archives, &req.config, Parallelism::Auto, None)?
+        };
         pgr_core::check_load_symbols(&result, &req.force_load)?;
         let entryoff = result.layout.entryoff;
         let fixup_slots = result.layout.fixups.slot_count;
+        // The emit band: the fused tile emit the session ran (the report's
+        // Passes-4–5 half, measured here so the served table names the
+        // pipeline's second half).
+        let emit_started = std::time::Instant::now();
         pgr_emit::build_image_fused_into(&mut self.scratch, &result.layout, &result.objects)?;
+        let emit = if req.time {
+            Some(emit_started.elapsed())
+        } else {
+            None
+        };
+        let total = req.time.then(|| started.elapsed());
+        let time_report = req.time.then(|| {
+            let mut report = collector.report();
+            report.emit = emit;
+            report.total = total;
+            report
+        });
         let image = self.scratch.clone();
         // The §7.2 rung: the full link's image is the first cycle's
         // resident output state — the next relink's previous output is
@@ -375,6 +416,7 @@ impl ResidentSession {
             patch: None,
             audit: None,
             tiles: None,
+            time_report,
         })
     }
 
@@ -426,9 +468,27 @@ impl ResidentSession {
                 digests: record.section_digests.clone(),
             });
         }
-        let result =
+        // M58/M59 (v40): a time-asking relink observes the ladder's warm
+        // pipeline — the same run, the collector subscribed. The emit
+        // band rides absent (the relink's Pass-4 half is the in-memory
+        // patch, not the fused tile emit); the total carries the ladder
+        // wall through the patched image.
+        let started = std::time::Instant::now();
+        let mut collector = pgr_core::TimeCollector::default();
+        let result = if req.time {
+            pgr_core::link_from_objects_observed(
+                objects.to_vec(),
+                archives,
+                &cfg,
+                Parallelism::Auto,
+                None,
+                Some(&mut collector),
+            )
+            .map_err(|e| RelinkDecline::Error(e.into()))?
+        } else {
             pgr_core::link_from_objects(objects.to_vec(), archives, &cfg, Parallelism::Auto, None)
-                .map_err(|e| RelinkDecline::Error(e.into()))?;
+                .map_err(|e| RelinkDecline::Error(e.into()))?
+        };
         pgr_core::check_load_symbols(&result, &req.force_load)
             .map_err(|e| RelinkDecline::Error(e.into()))?;
         let decision = pgr_emit::incremental::plan_patch(
@@ -456,6 +516,11 @@ impl ResidentSession {
                 tiles: Vec::new(),
                 image_hash: Sha256::digest(prev).into(),
             });
+            let time_report = req.time.then(|| {
+                let mut report = collector.report();
+                report.total = Some(started.elapsed());
+                report
+            });
             return Ok(ServedLink {
                 image: prev.to_vec(),
                 entryoff: result.layout.entryoff,
@@ -469,6 +534,7 @@ impl ResidentSession {
                 }),
                 audit: None,
                 tiles,
+                time_report,
             });
         }
         let (mut outcome, mut new_record, mut image) = pgr_emit::incremental::apply_patch_bytes(
@@ -544,6 +610,11 @@ impl ResidentSession {
         let tiles = req
             .tiles
             .then(|| pgr_emit::incremental::diff_tiles(prev, &image));
+        let time_report = req.time.then(|| {
+            let mut report = collector.report();
+            report.total = Some(started.elapsed());
+            report
+        });
         Ok(ServedLink {
             image,
             entryoff: result.layout.entryoff,
@@ -552,6 +623,7 @@ impl ResidentSession {
             patch: Some(outcome),
             audit,
             tiles,
+            time_report,
         })
     }
 
@@ -683,6 +755,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -880,6 +953,7 @@ mod tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1045,6 +1119,7 @@ mod fusion_tests {
             prev_output: None,
             audit: false,
             tiles: false,
+            time: false,
         };
         let hashes = req.blob_hashes();
         (req, hashes)
@@ -1578,5 +1653,111 @@ mod fusion_tests {
         let served = session.link(&relink).unwrap();
         assert!(served.patch.is_some());
         assert!(served.tiles.is_none(), "no flag, no stream");
+    }
+
+    /// M59 (wire v40): a time-asking request observes the session's own
+    /// pipeline — the report names the phases the warm run actually
+    /// executed (no `Parse` row: the session's POIs are resident, the
+    /// parse was paid when the blobs arrived) and carries the measured
+    /// emit/total bands.
+    #[test]
+    fn the_served_report_names_the_warm_pipeline() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        req.time = true;
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes, greet_bytes])
+                .collect::<Vec<_>>(),
+        );
+        let served = session.link(&req).unwrap();
+        let report = served
+            .time_report
+            .as_ref()
+            .expect("the time-asking request is served a report");
+        let phases: Vec<pgr_core::observe::Phase> = report.phases.iter().map(|e| e.phase).collect();
+        assert_eq!(
+            phases,
+            vec![
+                pgr_core::observe::Phase::ArchivePull,
+                pgr_core::observe::Phase::Intern,
+                pgr_core::observe::Phase::Resolve,
+                pgr_core::observe::Phase::Liveness,
+                pgr_core::observe::Phase::Fold,
+                pgr_core::observe::Phase::Layout,
+            ],
+            "the warm pipeline reports its own run — no parse row, the POIs are resident"
+        );
+        assert!(report.emit.is_some(), "the fused emit band is measured");
+        assert!(report.total.is_some(), "the pipeline wall is measured");
+    }
+
+    /// Without the flag the reply carries no report — the v39 client
+    /// shape is unchanged.
+    #[test]
+    fn the_report_absent_when_not_asked() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes, greet_bytes])
+                .collect::<Vec<_>>(),
+        );
+        let served = session.link(&req).unwrap();
+        assert!(served.time_report.is_none(), "no flag, no report");
+    }
+
+    /// The relink's report: the ladder's warm pipeline rides the same
+    /// rows; the emit band stays absent — the relink's Pass-4 half is
+    /// the in-memory patch, not the fused tile emit (the `-r` shape:
+    /// phases plus total, the emit band `None`).
+    #[test]
+    fn the_relink_report_names_the_ladder() {
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        req.record_resolution = true;
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+        let cold = session.link(&req).unwrap();
+
+        let edited = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited, &greet_bytes.clone());
+        relink.record = Some(cold.record.unwrap());
+        relink.prev_output = Some(content_hash(&cold.image));
+        relink.time = true;
+        session.store_blob(&content_hash(&edited), edited).unwrap();
+        let served = session.link(&relink).unwrap();
+        assert!(served.patch.is_some(), "the relink patched");
+        let report = served
+            .time_report
+            .as_ref()
+            .expect("the time-asking relink is served a report");
+        assert!(
+            report
+                .phases
+                .iter()
+                .any(|e| e.phase == pgr_core::observe::Phase::Resolve),
+            "the ladder's warm pipeline reports its resolve"
+        );
+        assert!(
+            report.emit.is_none(),
+            "the relink's Pass-4 half is the patch — no fused-emit band"
+        );
+        assert!(report.total.is_some(), "the ladder wall is measured");
     }
 }
