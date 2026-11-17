@@ -112,7 +112,7 @@ The flags that look like no-ops but actually shape the link (the default
 behavior already matches what they request on arm64) are mapped in the
 tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 `-no_fixup_chains`, `-fixup_chains_format`, `-flat_namespace`, `-undefined`,
-`-rpath`, `-source_version`, `-arch arm64`, `-platform_version`.
+`-rpath`, `-source_version`, `-arch arm64`, `-platform_version`. The provenance queries (`-why_export <symbol>`, `-why_load`, M56/M57) ride the same driver surface: the definition and reference sites a symbol carries, the decision that admitted each archive member — reports beside the link, the one-shot lanes only.
 
 ## Rejected with an actionable message
 
