@@ -24,6 +24,7 @@ use crate::layout::{Layout, LinkConfig, layout};
 use crate::object::InputObject;
 use crate::observe::{LinkNote, LinkObserver, Phase, PhaseDetail, PhaseEvent};
 use crate::pool;
+use crate::provenance::{LoadDecision, LoadExplanation};
 use crate::resolve::Resolution;
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -88,7 +89,9 @@ pub struct LinkArchive {
 }
 
 /// The full Pass 1–3 product: the emit plan plus the parsed input arena
-/// (Pass 4 needs the input bytes for the section copies).
+/// (Pass 4 needs the input bytes for the section copies) and the Pass-2
+/// resolution (the M56 provenance query's input — the `-why_export`
+/// seam reads the winners and the reverse index over the same arena).
 #[derive(Debug)]
 pub struct LinkResult {
     /// The layout plan (Pass 3).
@@ -97,6 +100,16 @@ pub struct LinkResult {
     pub objects: Vec<InputObject>,
     /// The interner (name diagnostics for driver-side checks).
     pub interner: Interner,
+    /// The Pass-2 winners ([`crate::resolve::Resolution`]): the
+    /// provenance query's input — [`crate::provenance::explain_export`]
+    /// reads the definition it installed against the same arena.
+    pub resolution: Resolution,
+    /// The M57 load-provenance record: every archive member the S7
+    /// pull rode (the decision that admitted it) and, under
+    /// `-dead_strip_dylibs`, every input dylib's carriage. The pull
+    /// records it from data it already had; the report and the bytes
+    /// cannot disagree.
+    pub loads: crate::provenance::LoadReport,
     /// The Pass-2 snapshot ([`crate::resolve::ResolutionSnapshot`])
     /// captured when [`LinkConfig::record_resolution`] is set — the
     /// record-side half of the M9 resolve wiring (the link record's v5
@@ -155,7 +168,7 @@ pub fn link_cached(
 /// (the parity gate is the seam's own contract, `tests/m54_observer.rs`)
 /// — with each phase's completion and the ladder's silent-correct rungs
 /// reported to `observer`. The zero-config consumer installs
-/// [`TracingObserver`] (the events ride the house tracing seam, inert
+/// [`crate::observe::TracingObserver`] (the events ride the house tracing seam, inert
 /// until a subscriber joins).
 ///
 /// # Errors
@@ -243,7 +256,7 @@ pub fn link_from_objects_observed(
     cache: Option<&crate::cache::PoiCache>,
     mut observer: Option<&mut dyn LinkObserver>,
 ) -> Result<LinkResult, LinkError> {
-    let (objects, interner, export_ids, loader_ids) =
+    let (objects, interner, export_ids, loader_ids, mut loads) =
         pull_and_intern(objects, archives, cfg, parallel, cache, true, &mut observer)?;
 
     // ---- M39: the make-undefined marks ---------------------------------------
@@ -362,6 +375,20 @@ pub fn link_from_objects_observed(
     let cfg_owned;
     let cfg: &LinkConfig = if cfg.dead_strip_dylibs {
         let kept = res.dead_strip_dylibs();
+        // M57: the load story's dylib half — one carriage row per input
+        // dylib (the kept list is the compacted subset; the dropped ride
+        // named). Without the knob the rows stay empty: every dylib
+        // rides because the command line names it.
+        let kept_names: std::collections::HashSet<&str> =
+            kept.iter().map(|d| d.install_name.as_str()).collect();
+        loads.dylibs = cfg
+            .dylibs
+            .iter()
+            .map(|d| crate::provenance::DylibExplanation {
+                install_name: d.install_name.clone(),
+                kept: kept_names.contains(d.install_name.as_str()),
+            })
+            .collect();
         cfg_owned = {
             let mut c = cfg.clone();
             c.dylibs = kept;
@@ -422,6 +449,8 @@ pub fn link_from_objects_observed(
         layout,
         objects,
         interner,
+        resolution: res,
+        loads,
         resolve_snapshot,
     })
 }
@@ -468,10 +497,19 @@ fn pull_and_intern(
     cache: Option<&crate::cache::PoiCache>,
     intern_header_symbol: bool,
     observer: &mut Option<&mut dyn LinkObserver>,
-) -> Result<(Vec<InputObject>, Interner, Vec<StringId>, Vec<StringId>), LinkError> {
+) -> Result<
+    (
+        Vec<InputObject>,
+        Interner,
+        Vec<StringId>,
+        Vec<StringId>,
+        crate::provenance::LoadReport,
+    ),
+    LinkError,
+> {
     // ---- S7 archive liveness (M5): pull only referenced members ------------
     let pull_started = Instant::now();
-    let pulled = pull_archive_members(&objects, archives, cfg, cache)?;
+    let (pulled, loads) = pull_archive_members(&objects, archives, cfg, cache)?;
     let pulled_count = pulled.len();
     for obj in pulled {
         objects.push(obj);
@@ -552,7 +590,7 @@ fn pull_and_intern(
     let export_ids: Vec<StringId> = ids[cursor..cursor + dylib_export_count].to_vec();
     cursor += dylib_export_count;
     let loader_ids: Vec<StringId> = ids[cursor..cursor + loader_export_count].to_vec();
-    Ok((objects, interner, export_ids, loader_ids))
+    Ok((objects, interner, export_ids, loader_ids, loads))
 }
 
 /// The Pass 1–2 product a `-r` output consumes (M10 rung 1): the parsed
@@ -569,6 +607,11 @@ pub struct RelocLink {
     pub interner: Interner,
     /// The Pass-2 winners (`Resolution::def` per interned name).
     pub resolution: Resolution,
+    /// The M57 load-provenance record (the pull's members; the dylib
+    /// rows ride empty — the relocatable output refuses
+    /// `-dead_strip_dylibs`, every dylib rides because the command line
+    /// names it).
+    pub loads: crate::provenance::LoadReport,
 }
 
 /// Runs Passes 1–2 for a `-r` relocatable output (M10 rung 1): the same
@@ -743,7 +786,7 @@ fn link_reloc_inner(
         },
         parse_started.elapsed(),
     );
-    let (objects, interner, _export_ids, _loader_ids) =
+    let (objects, interner, _export_ids, _loader_ids, loads) =
         pull_and_intern(objects, archives, cfg, parallel, None, false, &mut observer)?;
     let resolve_started = Instant::now();
     let mut res = Resolution::default();
@@ -770,6 +813,7 @@ fn link_reloc_inner(
         objects,
         interner,
         resolution: res,
+        loads,
     })
 }
 
@@ -896,9 +940,10 @@ fn pull_archive_members(
     archives: &[LinkArchive],
     cfg: &LinkConfig,
     cache: Option<&crate::cache::PoiCache>,
-) -> Result<Vec<InputObject>, LinkError> {
+) -> Result<(Vec<InputObject>, crate::provenance::LoadReport), LinkError> {
+    let mut loads = crate::provenance::LoadReport::default();
     if archives.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), loads));
     }
     let mut defined: HashSet<Vec<u8>> = HashSet::new();
     let mut undefined: HashSet<Vec<u8>> = HashSet::new();
@@ -945,6 +990,9 @@ fn pull_archive_members(
                 cache,
             )?;
             record_names(&obj, &mut defined, &mut undefined);
+            loads
+                .members
+                .push(member_row(arch, member, &obj, LoadDecision::AllLoad));
             pulled.push(obj);
         }
     }
@@ -1001,6 +1049,9 @@ fn pull_archive_members(
                     cache,
                 )?;
                 record_names(&obj, &mut defined, &mut undefined);
+                loads
+                    .members
+                    .push(member_row(arch, member, &obj, LoadDecision::ObjcMetadata));
                 pulled.push(obj);
             }
             tracing::debug!(
@@ -1041,13 +1092,57 @@ fn pull_archive_members(
                     cache,
                 )?;
                 record_names(&obj, &mut defined, &mut undefined);
+                loads.members.push(member_row(
+                    arch,
+                    member,
+                    &obj,
+                    LoadDecision::Reference {
+                        seed: String::from_utf8_lossy(name).into_owned(),
+                    },
+                ));
                 pulled.push(obj);
                 changed = true;
             }
         }
         if !changed {
-            return Ok(pulled);
+            return Ok((pulled, loads));
         }
+    }
+}
+
+/// The M57 load-provenance row for one pulled member: the decision that
+/// admitted it plus the symbol surface its own symtab already carried —
+/// the pass computed both on its way to `record_names`; the record
+/// re-derives nothing.
+fn member_row(
+    arch: &LinkArchive,
+    member: &LinkArchiveMember,
+    obj: &InputObject,
+    decision: LoadDecision,
+) -> LoadExplanation {
+    let names = obj.peek_symbol_names();
+    let mut definitions = Vec::new();
+    let mut opened = Vec::new();
+    for (i, sym) in obj.symbols.iter().enumerate() {
+        if sym.stab || !sym.external {
+            continue;
+        }
+        let Some(name) = names.get(i) else {
+            continue;
+        };
+        let name = String::from_utf8_lossy(name).into_owned();
+        if sym.is_defined() || sym.is_common() {
+            definitions.push(name);
+        } else if sym.is_undefined() {
+            opened.push(name);
+        }
+    }
+    LoadExplanation {
+        archive: arch.name.clone(),
+        member: member.name.clone(),
+        decision,
+        definitions,
+        opened,
     }
 }
 
