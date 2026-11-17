@@ -564,12 +564,13 @@ fn link_to_image_recorded(
     opts: &opts::Options,
 ) -> Result<(ImageAndPlan, Option<pgr_emit::incremental::LinkRecord>), DriverError> {
     let (mut prepared, cache) = prepare_link(opts)?;
+    let timing = opts.time || opts.time_json;
     if opts.resident {
         // M9 GA fusion rung: an `-incremental` cycle's full link asks the
         // daemon to capture the fresh record (§7.3 — the sidecar must stay
         // fresh across resident links, or the next relink falls back
         // forever); a plain `-resident` link links clean as before.
-        let job = if opts.incremental {
+        let mut job = if opts.incremental {
             pgr_daemon::LinkJob::build_capturing(
                 &prepared.config,
                 &prepared.force_load,
@@ -584,6 +585,9 @@ fn link_to_image_recorded(
                 &prepared.archives,
             )
         };
+        // M58/M59 (wire v40): a timed link asks the session to observe its
+        // own pipeline and serve the report on the reply.
+        job.request.time = timing;
         let socket = opts
             .resident_socket
             .clone()
@@ -591,6 +595,19 @@ fn link_to_image_recorded(
         let exe_hint = std::env::current_exe().ok();
         match pgr_daemon::link_via_daemon(&socket, exe_hint.as_deref(), &job) {
             Ok(img) => {
+                // The served report prints beside the resident link (the
+                // session's own observed pipeline); the fallback below
+                // prints the one-shot's — either way the run is observed.
+                if timing {
+                    if let Some(served) = &img.time_report {
+                        if opts.time {
+                            print!("{}", served.render());
+                        }
+                        if opts.time_json {
+                            println!("{}", served.render_json());
+                        }
+                    }
+                }
                 let record = img.record.and_then(|bytes| {
                     let decoded = pgr_emit::incremental::LinkRecord::decode(&bytes);
                     if decoded.is_none() {
@@ -624,13 +641,30 @@ fn link_to_image_recorded(
     // hold it. The resident path above captures through the wire; this
     // half serves the one-shot path.
     prepared.config.record_resolution = opts.incremental;
-    let result = pgr_core::link_cached(
-        &prepared.inputs,
-        &prepared.archives,
-        &prepared.config,
-        pgr_core::Parallelism::Auto,
-        cache.as_ref(),
-    )?;
+    // M58: `--time`/`--time-json` subscribe the collector to the M54
+    // observation seam — the same pipeline, observed (the parity gate is
+    // the seam's own contract: the report never moves a byte of the plan).
+    let started = std::time::Instant::now();
+    let emit_elapsed: Option<std::time::Duration>;
+    let mut collector = pgr_core::TimeCollector::default();
+    let result = if timing {
+        pgr_core::link_observed(
+            &prepared.inputs,
+            &prepared.archives,
+            &prepared.config,
+            pgr_core::Parallelism::Auto,
+            cache.as_ref(),
+            &mut collector,
+        )?
+    } else {
+        pgr_core::link_cached(
+            &prepared.inputs,
+            &prepared.archives,
+            &prepared.config,
+            pgr_core::Parallelism::Auto,
+            cache.as_ref(),
+        )?
+    };
     check_force_load(&result, &prepared.force_load)?;
     // M11: the ld64-style advisory — an order-file entry that ranked no
     // placed piece is a typo, not an error (the layout plans what the
@@ -674,7 +708,17 @@ fn link_to_image_recorded(
             }
         }
     }
-    let image = pgr_emit::build_image_fused(&result.layout, &result.objects)?;
+    // M58: the emit band — the fused tile emit (Passes 4–5's own wall),
+    // measured here so the report's row names the pipeline's second
+    // half; the total rides right after it (the pipeline wall through
+    // the emit — the reports print beside the link, not inside it).
+    let image = {
+        let emit_started = std::time::Instant::now();
+        let image = pgr_emit::build_image_fused(&result.layout, &result.objects)?;
+        emit_elapsed = Some(emit_started.elapsed());
+        image
+    };
+    let total = started.elapsed();
     // M11: the link map — the plan's own segments/sections/symbols,
     // rendered deterministically and written beside the link.
     if let Some(map_path) = &opts.map_path {
@@ -697,6 +741,21 @@ fn link_to_image_recorded(
     // (and, under `-dead_strip_dylibs`, every input dylib's carriage).
     if opts.why_load {
         print!("{}", result.loads.render());
+    }
+    // M58: the per-pass wall report — the collector's phase rows plus
+    // the emit and total bands, printed beside the link (the text face
+    // under `--time`, the interchange line under `--time-json`; both
+    // faces read the one observed run).
+    if timing {
+        let mut report = collector.report();
+        report.emit = emit_elapsed;
+        report.total = Some(total);
+        if opts.time {
+            print!("{}", report.render());
+        }
+        if opts.time_json {
+            println!("{}", report.render_json());
+        }
     }
     let record = if opts.incremental {
         Some(pgr_emit::incremental::LinkRecord::record(
@@ -1255,13 +1314,31 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
 /// force-load resolution gate has no object shape (nothing must resolve).
 fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     let (prepared, _cache) = prepare_link(opts)?;
-    let linked = pgr_core::link_reloc(
-        &prepared.inputs,
-        &prepared.archives,
-        &prepared.config,
-        pgr_core::Parallelism::Auto,
-    )?;
+    // M58: the observed reloc run — the object shape's own five phases
+    // ride the report; the emit band stays `None` (the `-r` Pass 4 is
+    // the object assembly, not the fused tile emit) and the total
+    // carries the front half's wall through the assembly.
+    let timing = opts.time || opts.time_json;
+    let started = std::time::Instant::now();
+    let mut collector = pgr_core::TimeCollector::default();
+    let linked = if timing {
+        pgr_core::link_reloc_observed(
+            &prepared.inputs,
+            &prepared.archives,
+            &prepared.config,
+            pgr_core::Parallelism::Auto,
+            &mut collector,
+        )?
+    } else {
+        pgr_core::link_reloc(
+            &prepared.inputs,
+            &prepared.archives,
+            &prepared.config,
+            pgr_core::Parallelism::Auto,
+        )?
+    };
     let image = pgr_emit::build_object_image(&linked, &prepared.config)?;
+    let total = started.elapsed();
     write_image(&image, Path::new(&opts.output))?;
     // M56: the provenance queries ride the relocatable shape too — the
     // object's Pass-2 product is the same arena the query reads.
@@ -1275,6 +1352,19 @@ fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     // empty — `-r` refuses the `-dead_strip_dylibs` knob).
     if opts.why_load {
         print!("{}", linked.loads.render());
+    }
+    // M58: the per-pass wall report — the object shape's own run (no
+    // fused-emit row: the `-r` Pass 4 is the object assembly, and the
+    // total band carries the wall through it).
+    if timing {
+        let mut report = collector.report();
+        report.total = Some(total);
+        if opts.time {
+            print!("{}", report.render());
+        }
+        if opts.time_json {
+            println!("{}", report.render_json());
+        }
     }
     Ok(LinkOutcome {
         output: opts.output.clone(),
@@ -1885,6 +1975,20 @@ pub fn usage() -> String {
     s.push_str("                               -ObjC) and — under\n");
     s.push_str("                               -dead_strip_dylibs — every input\n");
     s.push_str("                               dylib's carriage (M57)\n");
+    s.push_str("  --time                       after the link, print the per-pass\n");
+    s.push_str("                               wall report — the passes the pipeline\n");
+    s.push_str("                               ran (parse through layout), each\n");
+    s.push_str("                               with its own shape and wall time,\n");
+    s.push_str("                               the fused emit and the pipeline's\n");
+    s.push_str("                               total (M58; the resident lane serves\n");
+    s.push_str("                               its own observed run — wire v40,\n");
+    s.push_str("                               M59; refused with -incremental —\n");
+    s.push_str("                               the ladder runs where the observer\n");
+    s.push_str("                               does not)\n");
+    s.push_str("  --time-json                  the same measurement as the compact\n");
+    s.push_str("                               JSON interchange line (one line, the\n");
+    s.push_str("                               report-JSON escape rules; walls in\n");
+    s.push_str("                               microseconds) (M58)\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
