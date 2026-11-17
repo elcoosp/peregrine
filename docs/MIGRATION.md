@@ -114,6 +114,23 @@ tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 `-no_fixup_chains`, `-fixup_chains_format`, `-flat_namespace`, `-undefined`,
 `-rpath`, `-source_version`, `-arch arm64`, `-platform_version`. The provenance queries (`-why_export <symbol>`, `-why_load`, M56/M57) ride the same driver surface: the definition and reference sites a symbol carries, the decision that admitted each archive member — reports beside the link, the one-shot lanes only.
 
+## Peregrine-specific: the per-pass time report
+
+`--time` prints the per-pass wall table after the link — the passes the
+pipeline ran (parse through layout), each with its own shape and wall time,
+the fused emit band and the pipeline's total; `--time-json` prints the same
+measurement as a one-line JSON interchange. It is Peregrine-specific (ld64
+has no counterpart): a measurement for build systems and CI budgets, read
+off the M54 observation seam, never a layout product — a timed link plans
+byte-identical output to an untimed one. The resident lane serves the same
+report from the daemon's own observed pipeline (wire v40); the incremental
+lane refuses the flag (the ladder runs where the observer does not).
+
+```sh
+pgr -o app main.o -lgreet -L libs --time         # the table beside the link
+pgr -o app main.o -lgreet -L libs --time-json    # the interchange line
+```
+
 ## Rejected with an actionable message
 
 A linker that silently drops a flag it does not implement is worse than one
