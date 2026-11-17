@@ -15,7 +15,7 @@
 //! encoding half of the same gate: the verifier reads the per-platform
 //! chained-fixups floor (`pgr_format::consts::chained_fixups_floor`, the
 //! canonical table the layout and `pgr_core::platform::FixupEncoding`
-//! encode — one table, three readers), so chained words below the
+//! encode — one table, four readers since M16), so chained words below the
 //! declared platform's floor are a named `fixups_floor` error with the
 //! fix in the message.
 //!
