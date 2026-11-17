@@ -11,7 +11,14 @@
 //! intra-phase face: the parse pool's per-input parses ride the seam as
 //! [`TaskEvent`]s, each naming the thread that ran it and its own arrival
 //! clock — the facts the timeline's worker lanes read
-//! (`tests/m63_task_spans.rs` gates the shape and the parity).
+//! (`tests/m63_task_spans.rs` gates the shape and the parity). The M65
+//! rung adds the §7.3 relink ladder's own rungs: the integrity gate, the
+//! patch plan, the clone-and-patch and the `-incremental-verify` audit
+//! ride the seam as [`Phase`]s (`RelinkGate`, `RelinkPlan`, `RelinkPatch`,
+//! `RelinkAudit` — the ladder's engine phases, named beside the pipeline's
+//! passes), and the ladder's fallback rungs join [`LinkNote`]
+//! (`RelinkFallback` — the full link the ladder handed over to, named the
+//! way the resolve-reuse fallback already names itself).
 //!
 //! The seam follows the house observability convention: [`TracingObserver`]
 //! bridges every event onto the `tracing` debug level, inert until a
@@ -52,6 +59,24 @@ pub enum Phase {
     /// The `-r` relocatable shape's completion (Passes 1–2, no segment
     /// plan — the object bytes are `pgr-emit`'s `build_object_image`).
     Reloc,
+    /// The §7.3 ladder's integrity gate (M65): the previous output hashed
+    /// against the record's page-hash table (the sampled gate the in-place
+    /// tier stands on — a mismatch falls back and names itself on
+    /// [`LinkNote::RelinkFallback`]).
+    RelinkGate,
+    /// The §7.3 ladder's patch plan (M65): the span diff over the relinked
+    /// layout, the dirty tiles it names (an empty set is the untouched
+    /// relink — the ladder's job is done and the patch phase never runs).
+    RelinkPlan,
+    /// The §7.3 ladder's clone-and-patch (M65): the dirty tiles patched
+    /// into the copy-on-write clone, re-signed at the (possibly moved)
+    /// signature boundary.
+    RelinkPatch,
+    /// The §7.3 ladder's audit (M65): the `-incremental-verify` gate —
+    /// byte-identity against the full fused emit of the same plan, then
+    /// the strict verifier on the final bytes (a divergence is healed, a
+    /// blocking issue never ships).
+    RelinkAudit,
 }
 
 impl Phase {
@@ -69,6 +94,10 @@ impl Phase {
             Self::Fold => "fold",
             Self::Layout => "layout",
             Self::Reloc => "reloc",
+            Self::RelinkGate => "relink_gate",
+            Self::RelinkPlan => "relink_plan",
+            Self::RelinkPatch => "relink_patch",
+            Self::RelinkAudit => "relink_audit",
         }
     }
 }
@@ -119,6 +148,35 @@ pub enum PhaseDetail {
     Reloc {
         /// The input count the object-shape run consumed.
         inputs: usize,
+    },
+    /// The ladder's integrity gate (M65): the record's page-hash table
+    /// hashed against the previous output's bytes.
+    Gate {
+        /// The hashed page count (the record's own sample).
+        pages: usize,
+    },
+    /// The ladder's patch plan (M65): the tiles the relink dirtied.
+    Plan {
+        /// The total tiles in the image.
+        tiles: usize,
+        /// The dirty tiles the plan names (zero = the untouched relink).
+        dirty: usize,
+    },
+    /// The ladder's clone-and-patch (M65): the patch's measured effect.
+    Patch {
+        /// The bytes `pwrite`d into the clone (dirty tiles + page 0 +
+        /// signature).
+        bytes: u64,
+        /// The dirty tiles actually emitted.
+        tiles: usize,
+    },
+    /// The ladder's audit (M65): the `-incremental-verify` verdict.
+    Audit {
+        /// The patch diverged and was healed from the reference emit.
+        healed: bool,
+        /// The strict verifier's blocking-issue count (the audit refuses
+        /// the ship when it is nonzero — the event rode anyway).
+        issues: usize,
     },
 }
 
@@ -171,6 +229,16 @@ pub enum LinkNote {
         /// The refusal's own wording.
         reason: String,
     },
+    /// The §7.3 in-place ladder handed the link over to the full link
+    /// (M65): `reason` names the rung that refused (no record, the
+    /// integrity gate's mismatch, the planner's fallback — the
+    /// [`crate::resolve_reuse`]-style always-available bottom rung). The
+    /// full link follows and produces the outcome; a report that names the
+    /// note names why the ladder's rungs stop where they do.
+    RelinkFallback {
+        /// The refusal's own wording (the fallback reason's render).
+        reason: String,
+    },
 }
 
 /// The link-pipeline observer: subscribes to the passes a link runs. Both
@@ -215,14 +283,18 @@ impl LinkObserver for TracingObserver {
     }
 
     fn on_note(&mut self, note: LinkNote) {
-        // `LinkNote` is a one-variant enum today; when a later rung joins
-        // as a new variant, this destructure stops compiling — the bridge
-        // must name the new note's own event (a `match` arm, not a skip).
-        let LinkNote::ResolveReuseFallback { reason } = note;
-        tracing::debug!(
-            fallback = %reason,
-            "the resolve-reuse replay fell back to the full resolve"
-        );
+        // Each variant names its own event (an arm, not a skip): a new
+        // `LinkNote` rung stops compiling here until the bridge speaks it.
+        match note {
+            LinkNote::ResolveReuseFallback { reason } => tracing::debug!(
+                fallback = %reason,
+                "the resolve-reuse replay fell back to the full resolve"
+            ),
+            LinkNote::RelinkFallback { reason } => tracing::debug!(
+                fallback = %reason,
+                "the in-place ladder fell back to the full link"
+            ),
+        }
     }
 }
 
