@@ -1,6 +1,6 @@
 # Peregrine Benchmarks — Recorded Baselines
 
-**Status: M0–M53 surfaces recorded on the dev sandbox** (M47–M52 as shape-parity gates — initial runs noted inline). These numbers exist to (a) prove the
+**Status: M0–M55 surfaces recorded on the dev sandbox** (M47–M52 as shape-parity gates — initial runs noted inline). These numbers exist to (a) prove the
 harness works end-to-end from day one and (b) give each pass a regression anchor.
 
 > [!WARNING]
@@ -144,6 +144,7 @@ cargo bench -p pgr-core --bench objc_pre2
 cargo bench -p pgr-core --bench no_weak_imports
 cargo bench -p pgr-core --bench stack_exec
 cargo bench -p pgr-core --bench rename_sections
+cargo bench -p pgr-core --bench observer
 cargo bench -p pgr-driver --bench final_output
 # verify
 cargo bench -p pgr-verify --bench platform
@@ -503,7 +504,7 @@ Nanoseconds per name against a millisecond-scale Pass 3 — off the hot path by 
 magnitude. Hundreds of globs over hundreds of thousands of names is the shape that would need
 a prefix index; this bench is where that decision lives.
 
-## Knob parity (M10–M53)
+## Knob parity (M10–M53) · reporting seams (M54–M55)
 
 **Shared reading for every row below**: parity within the sandbox's run-to-run spread (up to
 ±20 %; criterion change-detection non-significant where a p-value is shown). Each released knob
@@ -546,6 +547,18 @@ the encoding decision is one integer compare in Pass 3:
 ~2.5 % span — a wash by design; the floor selects the _encoding_, never the fixups
 (`m10_platform::*` byte-tests the fallback per platform). _M23's framework re-export rides the
 M3 `LC_REEXPORT_DYLIB` path; no separate bench recorded._
+
+**The reporting seams (M54–M55) ride the same gate shape — "reporting never regresses into the
+link's hot path", recorded honestly:**
+
+- `observer` (`cargo bench -p pgr-core --bench observer`): the pipeline's cost with and without a
+  subscribed observer over the 64-object corpus — the seam emits one event per phase (seven per
+  segmented link, a handful of structs), so the honest expectation is near-parity across the
+  `unobserved` / `tracing_bridge` / `recording` variants; the unobserved link's shape is the gate.
+- `link_map_json` (rides `cargo bench -p pgr-core --bench map`): the M55 JSON interchange beside
+  the text render over the same 12×256-symbol corpus — `write` (the compact render, escape rules
+  included) and `write_read` (the strict reader's round trip), the cost pinned to the symbol count
+  the map carries.
 
 ## Pending measurements
 
