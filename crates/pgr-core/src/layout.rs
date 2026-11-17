@@ -1538,9 +1538,11 @@ pub const CHAINED_FIXUPS_MIN_MINOS: u32 = 0x000C_0000;
 /// fallback changes the encoding, never the fixups. The canonical table
 /// lives beside the `PLATFORM_*` constants it reads
 /// ([`pgr_format::consts::chained_fixups_floor`], M10 rung 3 slice 2 —
-/// one table, three readers: this layout gate, the consumer seam
-/// [`crate::platform::FixupEncoding`] and the verifier's `fixups_floor`
-/// gate); this reader delegates, so the documented path stays stable.
+/// one table, four readers since M16: this layout gate, the consumer
+/// seam [`crate::platform::FixupEncoding`], the verifier's
+/// `fixups_floor` gate and the initializer-offsets decision
+/// ([`crate::init_offsets`])); this reader delegates, so the documented
+/// path stays stable.
 #[must_use]
 pub fn chained_fixups_min_minos(platform: u32) -> u32 {
     pgr_format::consts::chained_fixups_floor(platform)
