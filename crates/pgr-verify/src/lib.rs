@@ -34,6 +34,9 @@
 //! * [`checks`] — the M12 selective surface: named check families, the
 //!   [`CheckSet`] selector and the [`ImageCheck`] registry seam
 //!   (`verify_with_checks` drives a subset; `verify` is the full set),
+//!   plus the M67 consumer-side extension ([`CustomCheck`] — a project
+//!   policy slots into the same run shape under its own
+//!   `Code::Custom` token, driven by `verify_with_extra_checks`),
 //! * [`report_json`] — the M13 report interchange shape (one writer,
 //!   one reader, a round-trip gate; the CLI's `--json` output is the
 //!   same form the library renders),
@@ -58,7 +61,9 @@ pub mod tlv;
 pub mod unwind;
 
 pub use baseline::{BaselineDelta, CodeIdentity, IssueIdentity, IssueKey, OffsetIdentity};
-pub use checks::{Check, CheckContext, CheckSet, CheckSetError, ImageCheck, image_checks};
+pub use checks::{
+    Check, CheckContext, CheckSet, CheckSetError, CustomCheck, ImageCheck, image_checks,
+};
 pub use report_json::{
     ReportJsonError, parse_report_json, to_json, to_json_with_baseline, to_json_with_file,
 };
@@ -139,12 +144,20 @@ pub enum Code {
     Tlv,
     /// Suspicious but non-fatal condition.
     Suspicious,
+    /// A consumer-side check's own code (M67): the token a
+    /// [`CustomCheck`] declared, carried verbatim (`"no_stack_execute"`
+    ///…). Not canonical — [`Code::ALL`] and the CLI's `--list-checks`
+    /// name only the built-in codes; the JSON reader restores the token
+    /// from the report shape.
+    Custom(&'static str),
 }
 
 impl Code {
-    /// Every issue code, in declaration order (the `report_json` reader
-    /// matches canonical names against this table; tooling can enumerate
-    /// the surface the way `Check::ALL` enumerates the families).
+    /// Every built-in issue code, in declaration order (the
+    /// `report_json` reader matches canonical names against this table;
+    /// tooling can enumerate the surface the way `Check::ALL` enumerates
+    /// the families). A consumer-side check's own tokens ride
+    /// [`Code::Custom`] outside this table.
     pub const ALL: [Code; 21] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
@@ -194,7 +207,20 @@ impl Code {
             Code::UnwindInfo => "unwind_info",
             Code::Tlv => "tlv",
             Code::Suspicious => "suspicious",
+            Code::Custom(token) => token,
         }
+    }
+
+    /// The report-sort rank: the built-ins keep their declaration order
+    /// (what the `as`-cast tiebreaker keyed on before a custom code
+    /// could ride the report), and a custom code sorts after every
+    /// built-in at the same anchor — equal ranks keep their insertion
+    /// order (the sort is stable).
+    pub(crate) fn sort_rank(self) -> u8 {
+        Code::ALL
+            .iter()
+            .position(|c| *c == self)
+            .map_or(u8::MAX, |idx| idx as u8)
     }
 }
 
@@ -275,8 +301,13 @@ impl Report {
     }
 
     fn sort(&mut self) {
-        self.issues
-            .sort_by_key(|i| (i.offset.unwrap_or(u64::MAX), i.severity as u8, i.code as u8));
+        self.issues.sort_by_key(|i| {
+            (
+                i.offset.unwrap_or(u64::MAX),
+                i.severity as u8,
+                i.code.sort_rank(),
+            )
+        });
     }
 }
 
@@ -297,16 +328,50 @@ pub fn verify(bytes: &[u8], opts: &Options) -> Report {
 /// The parse pre-pass always runs (every family reads its product, and
 /// a fatal parse short-circuits into the same single-issue report as
 /// `verify`); selection then runs only the chosen [`ImageCheck`] units
-/// from [`image_checks`], in canonical order. The stats contract is the
-/// whole-image one: parse-derived counters always land, and the
-/// fixup-slot count zeroes whenever any error-severity issue was
-/// reported by the selected families.
+/// from [`image_checks`], in canonical order — exactly
+/// [`verify_with_extra_checks`] with an empty extension. The stats
+/// contract is the whole-image one: parse-derived counters always land,
+/// and the fixup-slot count zeroes whenever any error-severity issue
+/// was reported by the selected families.
 ///
 /// The selection also rides the tracing seam (inert until a subscriber
 /// installs — the workspace convention): one `debug` event names the
 /// selected set.
 #[must_use]
 pub fn verify_with_checks(bytes: &[u8], opts: &Options, checks: &CheckSet) -> Report {
+    verify_with_extra_checks(bytes, opts, checks, &[])
+}
+
+/// Verifies a selected subset of the check families plus consumer-side
+/// policy checks (`checks`, M67).
+///
+/// The parse pre-pass always runs (a fatal parse short-circuits into the
+/// same single-issue report as `verify`); the selected [`ImageCheck`]
+/// families then run in canonical order, and the [`CustomCheck`] units
+/// run after them in caller order — one context each, issues landing in
+/// the same sorted [`Report`]. The stats contract is the whole-report
+/// one: parse-derived counters always land, and the fixup-slot count
+/// zeroes whenever any error-severity issue was reported — a family's
+/// or a custom check's alike (a refused image's fixup-slot count is
+/// moot either way).
+///
+/// A custom check answers for its own name and codes: the metadata is
+/// readable (the way `--list-checks` reads the registry), but names are
+/// not selector keys and not deduplicated — two same-named checks both
+/// run, in caller order. A custom check is total like every family: it
+/// never panics on malformed input and self-gates on the image type it
+/// applies to.
+///
+/// The extension rides the tracing seam (inert until a subscriber
+/// installs — the workspace convention): one `debug` event names the
+/// selected set and the extension count.
+#[must_use]
+pub fn verify_with_extra_checks(
+    bytes: &[u8],
+    opts: &Options,
+    checks: &CheckSet,
+    extra: &[&dyn CustomCheck],
+) -> Report {
     let mut report = Report::default();
     let parsed = match structural::parse_image(bytes) {
         Ok(p) => p,
@@ -322,7 +387,7 @@ pub fn verify_with_checks(bytes: &[u8], opts: &Options, checks: &CheckSet) -> Re
 
     // The selection names itself on the tracing seam (inert until a
     // subscriber installs — the house convention).
-    tracing::debug!(selected = %checks, "verify-check selection");
+    tracing::debug!(selected = %checks, extra = extra.len(), "verify-check selection");
 
     for unit in image_checks() {
         if checks.contains(unit.check()) {
@@ -334,6 +399,15 @@ pub fn verify_with_checks(bytes: &[u8], opts: &Options, checks: &CheckSet) -> Re
             };
             unit.run(&mut ctx);
         }
+    }
+    for unit in extra {
+        let mut ctx = CheckContext {
+            bytes,
+            parsed: &parsed,
+            opts,
+            report: &mut report,
+        };
+        unit.run(&mut ctx);
     }
 
     if report.issues.iter().any(|i| i.severity == Severity::Error) {
