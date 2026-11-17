@@ -32,24 +32,6 @@ use pgr_format::load_command::{LoadCommandIter, LoadCommandKind};
 use pgr_format::reloc::RelocationInfo;
 use pgr_format::segment::{Section64, SegmentCommand64};
 
-/// Decodes a symbol-table range on the pool (exposed `doc(hidden)` for the
-/// giant-object mechanism tests and benches; production code goes through
-/// [`InputObject::parse`]).
-///
-/// # Errors
-/// [`LinkError::Parse`] on malformed symbol table entries.
-#[doc(hidden)]
-pub fn decode_symbol_range_for_test<F: Fn(String) -> LinkError + Sync>(
-    bytes: &[u8],
-    st: &pgr_format::SymtabCommand,
-    strtab: &[u8],
-    sections: &[InputSection],
-    range: core::ops::Range<usize>,
-    fail: &F,
-) -> Result<(Vec<InputSymbol>, Vec<Vec<u8>>), LinkError> {
-    InputObject::decode_symbols(bytes, st, strtab, sections, range, fail)
-}
-
 /// The decoded relocation kinds the emit path can apply (TDD §3.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelocKind {
@@ -1170,15 +1152,9 @@ mod tests {
         };
 
         // Serial reference over the whole table.
-        let (all_syms, all_names) = super::decode_symbol_range_for_test(
-            &bytes,
-            &st,
-            strtab,
-            &obj.sections,
-            0..nsyms,
-            &fail,
-        )
-        .unwrap();
+        let (all_syms, all_names) =
+            InputObject::decode_symbols(&bytes, &st, strtab, &obj.sections, 0..nsyms, &fail)
+                .unwrap();
         assert_eq!(all_syms.len(), nsyms);
         assert_eq!(all_names.len(), nsyms);
 
@@ -1188,15 +1164,9 @@ mod tests {
         let mut chunk_names = Vec::new();
         let mut lo = 0usize;
         for hi in [777usize, 1501, 4321, nsyms] {
-            let (mut s, mut n) = super::decode_symbol_range_for_test(
-                &bytes,
-                &st,
-                strtab,
-                &obj.sections,
-                lo..hi,
-                &fail,
-            )
-            .unwrap();
+            let (mut s, mut n) =
+                InputObject::decode_symbols(&bytes, &st, strtab, &obj.sections, lo..hi, &fail)
+                    .unwrap();
             chunk_syms.append(&mut s);
             chunk_names.append(&mut n);
             lo = hi;
