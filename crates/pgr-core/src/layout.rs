@@ -4146,10 +4146,17 @@ fn atom_or_section_addr(
     if let Some(atoms) = atom_addr.get(&(file, sect)) {
         // Containment with clamping (references into padding keep the tail
         // atom alive — the same rule the mark phase applies).
-        let idx = atoms
-            .partition_point(|(start, _)| *start <= value)
-            .saturating_sub(1);
-        let (start, out) = atoms.get(idx).copied()?;
+        let idx = atoms.partition_point(|(start, _)| *start <= value);
+        if idx == 0 {
+            // The value sits before every live atom's start: a definition
+            // the mark dropped (the head atom's bytes left — "dead atoms
+            // carry no entry — nothing live references them"). No live
+            // placement vouches for the delta, so the def carries no
+            // address (the caller's None contract) — the wrapped
+            // subtraction the old fallthrough computed never existed.
+            return None;
+        }
+        let (start, out) = atoms.get(idx - 1).copied()?;
         return Some(out + (value - start));
     }
     addr_of.get(&(file, sect)).map(|base| base + value)
