@@ -105,6 +105,11 @@ pub enum DriverError {
         /// The parse failure.
         source: pgr_format::FormatError,
     },
+    /// A `-sectcreate` payload could not become a synthetic object: the
+    /// section or segment name exceeds the 16-byte Mach-O field (M67 —
+    /// the typed refusal, no longer misfiled under the `.tbd` variant).
+    #[error("-sectcreate {0}")]
+    SectionCreate(#[from] crate::synth::SynthError),
     /// A `-u` force-load symbol did not resolve to an in-image definition.
     #[error("-u {symbol}: {message}")]
     ForceLoad {
@@ -1142,10 +1147,9 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         // M60: the section payload rides the record (ld64's `depSection`
         // — an input-family row like every other read file).
         deps.record_input(&dep_path(file))?;
-        let obj = synth::section_object(seg, sect, &data).map_err(|message| DriverError::Tbd {
-            path: file.clone(),
-            source: pgr_format::FormatError::Malformed { what: message },
-        })?;
+        // M67: the name-length refusal rides its typed `SynthError` (it
+        // stopped masquerading as a `.tbd` parse failure).
+        let obj = synth::section_object(seg, sect, &data)?;
         inputs.push(LinkInput {
             name: format!("-sectcreate {seg},{sect} ({file})"),
             bytes: obj,
