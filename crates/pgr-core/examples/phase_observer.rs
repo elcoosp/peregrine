@@ -41,14 +41,33 @@ impl LinkObserver for PhaseTable {
             pgr_core::observe::PhaseDetail::Planned { segments, sections } => {
                 format!("{segments} segments, {sections} sections")
             }
+            // The §7.3 ladder's rungs ride the same vocabulary (M65) —
+            // a pipeline observer sees them whenever a relink runs
+            // observed.
+            pgr_core::observe::PhaseDetail::Gate { pages } => format!("{pages} pages hashed"),
+            pgr_core::observe::PhaseDetail::Plan { tiles, dirty } => {
+                format!("{tiles} tiles, {dirty} dirty")
+            }
+            pgr_core::observe::PhaseDetail::Patch { bytes, tiles } => {
+                format!("{bytes} bytes, {tiles} tiles")
+            }
+            pgr_core::observe::PhaseDetail::Audit { healed, issues } => {
+                format!("healed={healed}, issues={issues}")
+            }
         };
         self.rows
             .push((event.phase.as_str().to_string(), detail, event.elapsed));
     }
 
     fn on_note(&mut self, note: LinkNote) {
-        let LinkNote::ResolveReuseFallback { reason } = note;
-        self.notes.push(reason);
+        // Every rung names its own wording (the arm names both variants —
+        // a new `LinkNote` rung stops compiling here until the consumer
+        // speaks it).
+        match note {
+            LinkNote::ResolveReuseFallback { reason } | LinkNote::RelinkFallback { reason } => {
+                self.notes.push(reason);
+            }
+        }
     }
 }
 
