@@ -200,6 +200,15 @@ fn main() {
     let warm = session.link(&relink).expect("the warm relink serves");
     let warm_report = warm.time_report.as_ref().expect("the warm time face rides");
     print_report("the warm relink's served report", warm_report);
+    // M66 (v42 in service): the ladder's rungs ride the served report —
+    // the gate, the plan and the patch beside the pipeline's rows (the
+    // audit only beside an audited relink).
+    for rung in ["relink_gate", "relink_plan", "relink_patch"] {
+        assert!(
+            warm_report.phases.iter().any(|p| p.phase.as_str() == rung),
+            "the {rung} row rides the warm relink's served report"
+        );
+    }
     assert!(
         warm_report
             .phases
