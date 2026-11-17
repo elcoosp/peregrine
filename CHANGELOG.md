@@ -5,6 +5,45 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M56)
+
+- **M56** — the symbol-reference provenance query (`pgr_core::provenance`, the
+  `-why_export <symbol>` driver flag): the M8-a reverse reference index the propagation
+  planner keeps private becomes a nameable, typed answer a library consumer and the driver
+  can read. A query names the definition the Pass-2 resolution installed — the input file
+  and section it came from (direct object or pulled archive member, the rank and weak mark
+  riding), the dylib export whose two-level bind serves it (the provider named through the
+  resolution's ordinal map), or the loader's dynamic lookup — and every reference site the
+  link saw: `(file, section, offset)` in the index's own ascending order, one record per
+  site. `RefExplanation::render` is the diffable text face, `render_json` the deterministic
+  interchange (fixed key order, one line, the report-JSON escape rules, shared with the M55
+  map writer), a vacuous query refuses with the misspelling named (the C-underscore hint is
+  the fix). The seam is read-only — the query consumes the link's own Pass-2 product
+  (`LinkResult` carries the resolution since M56) and re-derives nothing; a queried link
+  plans the identical layout (the parity gate is the seam's own contract); the resident and
+  incremental lanes refuse the flag (the product never crosses the wire — the daemon wire
+  stays v39). The `provenance` bench pins the index build (16.0 µs at 64 objects) and the
+  query price (234 ns); the `why_export_link` consumer example renders both faces beside
+  the vacuous refusal.
+
+### Added (M57)
+
+- **M57** — the load-provenance report (`pgr_core::provenance::LoadReport`, the
+  `-why_load` driver flag): the S7 archive pull's per-member decision made nameable — every
+  member the fixpoint admitted names why it rode: the reference whose round reached it (the
+  seed named), the `-all_load`/`-force_load` eager family, the `-ObjC` metadata pull —
+  beside the member's own symbol surface (its definitions and the undefineds its pull
+  opened, the next fixpoint round's food), in pull order; a member nothing reached rides
+  nowhere (the "why not" half of the question). Under `-dead_strip_dylibs` every input
+  dylib carries its carriage (kept binds, dropped doesn't); without the knob the dylib rows
+  ride empty — every dylib rides because the command line names it. The pull records from
+  data it already had (one entry per pulled member — the pass re-derives nothing), the
+  report and the bytes cannot disagree, the record never changes the plan (the parity gate
+  is the seam's own contract), and the same lane contract as `-why_export` holds (the wire
+  stays v39). The `why_load` bench pins the pull-record and render prices (17.6 µs at 64
+  members); the `why_load_link` consumer example walks the lazy pull, the eager pull and
+  both faces.
+
 ### Fixed
 
 - **fix(layout)** — the dead head-def resolution: `atom_or_section_addr`'s
