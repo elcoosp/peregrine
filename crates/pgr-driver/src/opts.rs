@@ -194,6 +194,17 @@ pub struct Options {
     /// escape rules). Composes with `--time`; both faces read the one
     /// observed run. The lane contract mirrors `--time`.
     pub time_json: bool,
+    /// M60 `-dependency_info <path>`: after a successful link, write the
+    /// build-system dependency record — ld64's sidecar artifact, the
+    /// binary file Xcode's incremental builds read (`pgr_core::dep_info`
+    /// validates and renders it; the reader is the same seam). The
+    /// default (`None`) writes nothing. The record is the link's read set
+    /// — never plan-derived — so it rides every lane that actually reads
+    /// the input files (the resident lane writes it client-side from the
+    /// request's own list; the daemon never touches the filesystem) and
+    /// refuses the one that does not (`-incremental`: the relink patches
+    /// the recorded plan and re-reads no input file).
+    pub dependency_info: Option<String>,
     /// M15: `-pagezero_size` was passed explicitly. The default (`false`)
     /// keeps the seam's own default on every non-executable output — the
     /// flag only applies to executables, and an explicitly named knob
@@ -281,6 +292,7 @@ impl Default for Options {
             why_load: false,
             time: false,
             time_json: false,
+            dependency_info: None,
             pagezero_explicit: false,
             init_offsets_flag: None,
             seg_prot_stage: Vec::new(),
@@ -459,6 +471,29 @@ pub enum OptsError {
         verdict: String,
         /// The fix — the house convention.
         fix: String,
+    },
+    /// A `-dependency_info` surface conflict (M60): the dependency record
+    /// names the files the link *read* — the incremental engine's relink
+    /// patches the recorded plan inside the ladder and re-reads no input
+    /// file, so a record beside it would misreport the run (the record is
+    /// read-set-derived; the `-map` conflict is plan-derived, the same
+    /// honest-refusal shape). The verdict names the lane; the help is
+    /// the fix.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    DependencyInfoConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The fix — the house convention.
+        fix: String,
+    },
+    /// A `-dependency_info` value the grammar refuses (M60): an empty
+    /// path — the record is a file the build system reads back.
+    #[error("invalid value for -dependency_info: {value}")]
+    #[diagnostic(help("the record's path — e.g. -dependency_info build/app.deps"))]
+    DependencyInfoValue {
+        /// The refused value as written.
+        value: String,
     },
     /// A `-why_export` value the grammar refuses (M56): an empty symbol
     /// name — the query is the C symbol, underscore included.
@@ -1576,6 +1611,17 @@ fn apply_flag(
         }
         "--time-json" => {
             opts.time_json = true;
+        }
+        // M60: the build-system dependency record (ld64's
+        // `-dependency_info`). The path rides verbatim — paths are
+        // free-form; an empty one refuses here (a record with no name
+        // writes nowhere), the lane conflict is `finish`'s.
+        "-dependency_info" => {
+            let v = next_value(args, i, arg)?;
+            if v.is_empty() {
+                return Err(OptsError::DependencyInfoValue { value: v });
+            }
+            opts.dependency_info = Some(v);
         }
         // M15: the image base (the `__PAGEZERO` vmsize an executable
         // plans with). The same validation the core seam pays runs here,
@@ -2863,6 +2909,21 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 fix: format!("drop {lane} or -incremental"),
             });
         }
+    }
+    // M60: the dependency record names the files the link read — the
+    // incremental engine's relink patches the recorded plan and re-reads
+    // no input file, so a record beside the ladder would misreport the
+    // run. The one-shot, relocatable and resident lanes all read the
+    // files (the resident client writes the record from its own request
+    // list; the daemon never touches the filesystem), so they ride.
+    if opts.dependency_info.is_some() && opts.incremental {
+        return Err(OptsError::DependencyInfoConflict {
+            verdict: "-dependency_info names the files the link read; -incremental's relink \
+                      patches the recorded plan inside the engine's ladder and re-reads none \
+                      of them (the record would misreport the run)"
+                .into(),
+            fix: "drop -dependency_info or -incremental".into(),
+        });
     }
     Ok(opts.clone())
 }
