@@ -7,8 +7,9 @@
 //! duplication drift this seam closes. [`FixupEncoding::for_target`]
 //! names the decision for a (`-platform_version` platform, deployment
 //! target) pair from the *same* table the layout encodes — one table,
-//! three readers since slice 2 (the layout, this seam, and the
-//! verifier's `fixups_floor` gate; the canonical copy lives beside the
+//! four readers since M16 (the layout, this seam, the verifier's
+//! `fixups_floor` gate and the initializer-offsets decision; the
+//! canonical copy lives beside the
 //! platform constants, `pgr_format::consts::chained_fixups_floor`, and
 //! the driver query `--print-fixup-encoding` puts the answer on the
 //! CLI) — so build systems, incremental planners and doc
