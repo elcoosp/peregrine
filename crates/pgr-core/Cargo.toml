@@ -428,3 +428,15 @@ harness = false
 [[bench]]
 name = "dep_info"
 harness = false
+
+# The M61/M63/M64 trace bench: the timeline's own price — the seam's
+# near-parity over the 64-object corpus (the phase pushes plus the M63
+# per-input task records) and the faces' O(rows) render/parse price over
+# the fixed eight-row and 64-task reports. (The bench file predates its
+# [[bench]] entry: auto-discovery compiled it under the libtest harness,
+# whose generated main shadowed the criterion one — the bench compiled,
+# "passed" and measured nothing. The explicit entry names the file the
+# docs inventory always carried — the M34 entry's pathology, healed.)
+[[bench]]
+name = "trace"
+harness = false
