@@ -154,8 +154,9 @@ mod tests {
         // Chrome-trace timeline (M61/M62, `--trace`): the request's flag
         // asks the same of the session's timeline (the collectors pair
         // when both faces ride), the reply's tail carries the rendered
-        // document verbatim.
-        assert_eq!(crate::PROTO_VERSION, 41);
+        // document verbatim — and v42 registers the §7.3 ladder's rung
+        // vocabulary in the time-report tail (M65).
+        assert_eq!(crate::PROTO_VERSION, 42);
     }
 
     #[test]
