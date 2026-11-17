@@ -7,7 +7,7 @@
 | **Codename** | Peregrine (binary: `pgr`) |
 | **Target** | arm64-apple-darwin executables, dylibs, bundles (macOS 12+ default path) |
 | **Host** | Linux (primary development sandbox); macOS (deployment as an `ld` replacement) |
-| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay); M10 rides the same seams at both ends — rung 1 stops Passes 1–2 short for the `-r` relocatable output (`pgr_core::link_reloc`, `pgr_emit::build_object_image`, the object contract in the verifier), rung 2 makes the fixup-encoding gate per-platform (`chained_fixups_min_minos`, the `-platform_version` surface, the verifier's declared-platform gate) — and rung 3 lands the consumer seam: `pgr_core::platform::FixupEncoding` names the encoding decision before the link runs (slice 1), `pgr --print-fixup-encoding` / `pgr_driver::fixup_encoding_report` put it on the driver surface and the verifier's `fixups_floor` gate reads the same canonical table (`pgr_format::consts::chained_fixups_floor` — one table, three readers; slice 2) — rung 4 opens the arm64e word family on both sides of the image: slice 1 the read side (`ChainWordArm64e`, the fixtures' pointer-format knob, the verifier's walk), slice 2 the unauth producer (`plan_fixups_with_format`, the `-fixup_chains_format` surface, the v6 wire tail byte), slice 3 the authenticated producer (`FixupAuth` policies, the 32-bit runtime offset, the auth bind's addend-split exception with the anchor appending) — §15 is the M10 design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
+| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay); M10 rides the same seams at both ends — rung 1 stops Passes 1–2 short for the `-r` relocatable output (`pgr_core::link_reloc`, `pgr_emit::build_object_image`, the object contract in the verifier), rung 2 makes the fixup-encoding gate per-platform (`chained_fixups_min_minos`, the `-platform_version` surface, the verifier's declared-platform gate) — and rung 3 lands the consumer seam: `pgr_core::platform::FixupEncoding` names the encoding decision before the link runs (slice 1), `pgr --print-fixup-encoding` / `pgr_driver::fixup_encoding_report` put it on the driver surface and the verifier's `fixups_floor` gate reads the same canonical table (`pgr_format::consts::chained_fixups_floor` — one table, four readers since M16 — the layout, the seam, the verifier gate and the `pgr_core::init_offsets` decision; slice 2) — rung 4 opens the arm64e word family on both sides of the image: slice 1 the read side (`ChainWordArm64e`, the fixtures' pointer-format knob, the verifier's walk), slice 2 the unauth producer (`plan_fixups_with_format`, the `-fixup_chains_format` surface, the v6 wire tail byte), slice 3 the authenticated producer (`FixupAuth` policies, the 32-bit runtime offset, the auth bind's addend-split exception with the anchor appending) — §15 is the M10 design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
 | **Date** | 2026-11-09 |
 | **Companion diagrams** | `assets/pipeline.png`, `assets/output-map.png`, `assets/alignment.png`, `assets/fixup-chain.png` |
 
@@ -1259,6 +1259,62 @@ the linked-plan round trip, the hostile-string escapes, the refusal shapes), the
 bench (the shape gate) beside the `link_map_json` groups, and the `phase_observer`,
 `map_json` and `cache_poi` consumer examples (the last one closing the Stage-A library API's
 missing consumer face).
+
+### 15.x The provenance queries — the symbol asked, the load answered (M56–M57)
+
+The reporting seams shipped the pipeline's own faces; the next two ship the *queries* a build
+system asks about its inputs and symbols — both read-only (no `LinkConfig` field moves, no
+daemon wire rung rides — the wire stays v39), both consuming data the passes already computed.
+
+**M56 — the symbol-reference provenance query (`pgr_core::provenance`, `-why_export`).** The
+M8-a reverse reference index (`revindex::ReverseIndex`) always knew every
+`(file, section, offset)` site referencing a symbol; only the propagation planner could reach
+it. The seam makes the index's answer nameable: `explain_export(index, objects, resolution,
+interner, name)` — the definition the Pass-2 resolution installed (`DefinitionSource::Input`:
+the file and section, rank and weak mark; `Dylib`: the provider named through the
+resolution's ordinal map — a dylib export never installs a `Def`, the two-level bind rides
+`dylib_exports`; `DynamicLookup` for the loader's own decision) and every reference site, one
+record per `(file, section, offset)` (the index's dedup, surfaced). Design decisions:
+
+1. **The product rides the result**: `LinkResult` carries the `Resolution` (the struct's
+   own "full Pass 1–3 product" contract — `RelocLink` had it since M10; the image result
+   gains it at M56), so a library consumer queries any entry point's result without a new
+   pipeline shape, and the driver queries after its one-shot link.
+2. **Read-only, parity-gated**: the query consumes references; a queried link plans the
+   identical layout (the gate is the seam's own contract, `tests/m56_provenance.rs`).
+3. **A vacuous query refuses**: a name nothing interned — defined or referenced — is the
+   M39/M24 misspelling shape, the C-underscore hint the fix; silence is never an answer.
+4. **The interchange follows M55**: fixed key order, one line, the report-JSON escape rules
+   (the map writer's escape shared — one escape table per crate), text face diffable.
+
+**M57 — the load-provenance report (`LoadReport`, `-why_load`).** ld64's flag (*"Print why
+each archive member or dylib was loaded"*) is the S7 pull's own record made nameable: each
+admitted member names its decision (`Reference { seed }` — the still-unresolved reference
+whose index entry reached it; `AllLoad` — the eager family; `ObjcMetadata` — the ranlib
+family) beside its symbol surface (definitions and opens — the next fixpoint round's food),
+in pull order; a member nothing reached rides nowhere. Under `-dead_strip_dylibs` every
+input dylib carries its carriage (`kept` — a referenced name binds against it, an identity
+obligation, or a dynamic lookup could reach it; else dropped, the M42 decision named).
+Design decisions:
+
+1. **The pull records from data it already had**: one entry per pulled member, built in the
+   same walk that feeds `record_names` — the pass re-derives nothing, the record never
+   changes the plan (the parity gate, `tests/m57_why_load.rs`).
+2. **The eager families outrank the lazy fixpoint**: the first puller names itself — the
+   pull order's own precedence (eager archives, the `-ObjC` pass, then the reference
+   rounds).
+3. **The dylib rows ride only under the knob**: without `-dead_strip_dylibs` every dylib
+   rides because the command line names it — nothing to explain; with it the carriage is
+   the decision.
+4. **The lane contract**: the resident and incremental relinks never carry the one-shot
+   Pass-2 product, so both queries refuse those lanes at parse (the M11 `-order_file` ×
+   `-resident` refusal shape, the fix in the help).
+
+Supporting pieces: the provenance gate matrices (`crates/pgr-core/tests/m56_provenance.rs` +
+`m57_why_load.rs`, the driver's `m56_why_export.rs` + `m57_why_load.rs`), the `provenance`
+and `why_load` benches (the index build/query price, the pull-record and render price), and
+the `why_export_link` and `why_load_link` consumer examples (both faces beside the refusal
+shapes).
 
 ---
 
