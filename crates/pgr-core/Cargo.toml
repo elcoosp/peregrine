@@ -383,5 +383,13 @@ harness = false
 name = "rename_sections"
 harness = false
 
+# The M54 link-observer bench: the pipeline's cost with and without a
+# subscribed observer over the same corpus — a shape gate, the seam emits
+# one event per phase (seven per segmented link) regardless of corpus
+# size, so the honest expectation is near-parity.
+[[bench]]
+name = "observer"
+harness = false
+
 [lints]
 workspace = true
