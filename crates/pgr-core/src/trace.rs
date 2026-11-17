@@ -16,13 +16,20 @@
 //! Each event arrives on the thread the pipeline runs the seam on; the
 //! collector keeps one lane per distinct arrival thread (first-arrival
 //! order — the lane ids are the collector's own registry, never
-//! `std::thread` internals), so today's one-shot pipeline renders one
-//! `pgr link` lane, and a future seam that reports worker-lane spans
-//! rides the same shape with more lanes. A span's start is the arrival
-//! clock minus the event's own wall (the seam delivers the completion;
-//! the reconstruction is one emit-call behind the clock — documented,
-//! and saturating rather than negative). The gaps between the spans are
-//! the surface's point: the idle stretch the §9.4 toolbox reads.
+//! `std::thread` internals), and the registry names its lanes (M64):
+//! the pipeline's thread rides `pgr link`, the pool's workers `pgr
+//! parse pool N` — the labels the `thread_name` metadata carries and
+//! the §9.4 viewer reads. The one-shot pipeline renders the pipeline's
+//! own lane plus the M63 worker lanes: the parse pool's per-input parses
+//! ride the seam as [`crate::observe::TaskEvent`]s, each carrying the
+//! thread that ran it and its own arrival clock, and the collector keeps
+//! them as [`TraceTask`] spans on the workers' lanes — the per-thread
+//! face the §9.4 toolbox reads stragglers and idle gaps from. A span's
+//! start is the arrival clock minus the event's own wall (the seam
+//! delivers the completion; the reconstruction is one emit-call behind
+//! the clock — documented, and saturating rather than negative). The gaps
+//! between the spans are the surface's point: the idle stretch the §9.4
+//! toolbox reads.
 //!
 //! The reader is strict like the other interchange faces
 //! (`parse_trace_json`): it restores the writer's data exactly (the
@@ -35,16 +42,23 @@
 use std::thread::ThreadId;
 use std::time::Instant;
 
-use crate::observe::{LinkNote, LinkObserver, Phase, PhaseDetail, PhaseEvent};
+use crate::observe::{LinkNote, LinkObserver, Phase, PhaseDetail, PhaseEvent, TaskEvent};
 use crate::time_report::detail_json;
 
 /// The trace's `cat` — every timeline row the collector writes carries
 /// it (the reader requires it on the non-metadata rows).
 const TRACE_CAT: &str = "pgr";
 
-/// The lane name the `thread_name` metadata carries (the pipeline's
-/// calling thread; the seam's events arrive on it).
+/// The lane name the `thread_name` metadata carries for the pipeline's
+/// own thread (the seam's phase/note events arrive on it; M64 names the
+/// worker lanes beside it — `LANE_WORKER_PREFIX` + the registration
+/// ordinal).
 const LANE_NAME: &str = "pgr link";
+
+/// The worker lane names' prefix (M64): the parse pool's lanes carry
+/// `pgr parse pool 1`, `pgr parse pool 2`, … — the §9.4 viewer reads the
+/// workers beside the pipeline's `pgr link` lane.
+const LANE_WORKER_PREFIX: &str = "pgr parse pool ";
 
 /// The note's stable token — the `name` the instant event carries and
 /// the reader restores. `LinkNote` is a one-variant enum today; the
@@ -93,6 +107,42 @@ pub struct TraceSpan {
     pub dur_us: u64,
 }
 
+/// One intra-phase task span on the timeline (M63): a parse the pool's
+/// worker thread carried, on the worker's own lane — the worker lanes
+/// the §9.4 toolbox reads stragglers and idle gaps from. The span's
+/// start is the task event's own arrival clock minus its wall (the
+/// event carries the clock the thread that ran it stamped — the drain
+/// never re-stamps).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceTask {
+    /// The phase the task rode in (today the parse pool's `Parse`).
+    pub phase: Phase,
+    /// The task's own label (the input's command-line name for a parse).
+    pub label: String,
+    /// The lane the task's thread registered (the collector's 1-based
+    /// arrival-thread registry).
+    pub lane: u64,
+    /// The span's start, in µs from the collector's epoch.
+    pub start_us: u64,
+    /// The span's wall, in µs (the event's own `elapsed`).
+    pub dur_us: u64,
+}
+
+/// One lane on the timeline (M64): the registry id the spans and notes
+/// carry, and the lane's own label — the `thread_name` metadata the
+/// viewer reads. The collector names the pipeline's thread `pgr link`
+/// and the pool's worker lanes `pgr parse pool N` (1-based, registration
+/// order among the workers); the reader restores whatever label the
+/// document carries (the round-trip convention — a foreign writer names
+/// its lanes its own way).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceLane {
+    /// The registry id (1-based, first-arrival order).
+    pub id: u64,
+    /// The lane's own label (the `thread_name` metadata's `name`).
+    pub name: String,
+}
+
 /// One pipeline note on the timeline: an instant at its arrival (the
 /// ladder's silent-correct rungs, made visible between the spans).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,11 +164,16 @@ pub struct TraceNote {
 pub struct TraceReport {
     /// The phase spans, in arrival order (the seam's own).
     pub spans: Vec<TraceSpan>,
+    /// The task spans, in the timeline's canonical `ts` order (the
+    /// pool's drain interleaves the workers' records; [`TraceCollector::finish`]
+    /// sorts so the render's document and the reader's restore agree —
+    /// the round-trip convention, gated).
+    pub tasks: Vec<TraceTask>,
     /// The notes, in arrival order.
     pub notes: Vec<TraceNote>,
-    /// The lane ids (1-based, arrival order — the ids the spans and
-    /// notes carry, ascending in the render).
-    pub lanes: Vec<u64>,
+    /// The lanes (M64: the named registry — the ids the spans and notes
+    /// carry, ascending, each with its own `thread_name` label).
+    pub lanes: Vec<TraceLane>,
 }
 
 /// The M61 trace collector: subscribes to the observation seam and keeps
@@ -135,10 +190,16 @@ pub struct TraceCollector {
     base: Instant,
     /// The spans, in arrival order.
     spans: Vec<TraceSpan>,
+    /// The task spans, in arrival order.
+    tasks: Vec<TraceTask>,
     /// The notes, in arrival order.
     notes: Vec<TraceNote>,
     /// The arrival threads, in first-arrival order (the lane registry).
     lanes: Vec<ThreadId>,
+    /// The pipeline's own thread (the first phase/note arrival — the
+    /// lane the `pgr link` label names; M64). A feed with no phase or
+    /// note events has none, and every lane is a worker lane.
+    pipeline: Option<ThreadId>,
 }
 
 impl Default for TraceCollector {
@@ -154,8 +215,10 @@ impl TraceCollector {
         Self {
             base: Instant::now(),
             spans: Vec::new(),
+            tasks: Vec::new(),
             notes: Vec::new(),
             lanes: Vec::new(),
+            pipeline: None,
         }
     }
 
@@ -179,13 +242,39 @@ impl TraceCollector {
     }
 
     /// Consumes the collection into the report. The spans and notes stay
-    /// in arrival order (the seam's own); the lanes are the registry's
-    /// ids, ascending.
+    /// in arrival order (the seam's own — the phases run sequentially on
+    /// the pipeline's lane, so their arrival order *is* the timeline's
+    /// ts order); the tasks ride the timeline's canonical order — the
+    /// pool's drain interleaves the workers' records, the render sorts
+    /// by `ts`, and the reader restores the document exactly, so the
+    /// tasks land ts-ordered here (stable on the ties) and the round
+    /// trip holds (gated in `tests/m63_task_spans.rs`). The lanes are
+    /// the named registry (M64): the pipeline's thread rides `pgr link`,
+    /// the pool's workers `pgr parse pool N` (1-based, registration
+    /// order among the workers); a feed with no phase or note events
+    /// names every lane a worker lane.
     #[must_use]
-    pub fn finish(self) -> TraceReport {
-        let lanes = (1..=u64::try_from(self.lanes.len()).unwrap_or(u64::MAX)).collect();
+    pub fn finish(mut self) -> TraceReport {
+        let mut lanes = Vec::with_capacity(self.lanes.len());
+        let mut worker = 0usize;
+        for (i, thread) in self.lanes.iter().enumerate() {
+            if self.pipeline == Some(*thread) {
+                lanes.push(TraceLane {
+                    id: u64::try_from(i + 1).unwrap_or(u64::MAX),
+                    name: LANE_NAME.to_string(),
+                });
+            } else {
+                worker += 1;
+                lanes.push(TraceLane {
+                    id: u64::try_from(i + 1).unwrap_or(u64::MAX),
+                    name: format!("{LANE_WORKER_PREFIX}{worker}"),
+                });
+            }
+        }
+        self.tasks.sort_by_key(|t| t.start_us);
         TraceReport {
             spans: self.spans,
+            tasks: self.tasks,
             notes: self.notes,
             lanes,
         }
@@ -194,7 +283,11 @@ impl TraceCollector {
 
 impl LinkObserver for TraceCollector {
     fn on_phase(&mut self, event: PhaseEvent) {
-        let lane = self.lane_of(std::thread::current().id());
+        let thread = std::thread::current().id();
+        if self.pipeline.is_none() {
+            self.pipeline = Some(thread);
+        }
+        let lane = self.lane_of(thread);
         // The seam delivers the completion; the span's start is the
         // arrival clock minus the event's own wall (one emit-call behind
         // the clock — the module doc names the reconstruction).
@@ -211,8 +304,32 @@ impl LinkObserver for TraceCollector {
         });
     }
 
+    fn on_task(&mut self, task: TaskEvent) {
+        // The lane keys on the thread the task ran on (the event's own
+        // fact — a task forwarded from the parse pool's drain lands on
+        // the worker's lane, never the caller's), and the span's start
+        // reconstructs from the event's own arrival clock (the drain
+        // must not re-stamp: every worker's span would end at the
+        // drain). Saturating at the axis's floor, like the phase spans.
+        let lane = self.lane_of(task.thread);
+        let start = task.at.checked_sub(task.elapsed).unwrap_or(self.base);
+        let start_us = self.us_since_base(start);
+        let dur_us = u64::try_from(task.elapsed.as_micros()).unwrap_or(u64::MAX);
+        self.tasks.push(TraceTask {
+            phase: task.phase,
+            label: task.label,
+            lane,
+            start_us,
+            dur_us,
+        });
+    }
+
     fn on_note(&mut self, note: LinkNote) {
-        let lane = self.lane_of(std::thread::current().id());
+        let thread = std::thread::current().id();
+        if self.pipeline.is_none() {
+            self.pipeline = Some(thread);
+        }
+        let lane = self.lane_of(thread);
         let at_us = self.us_since_base(Instant::now());
         // `LinkNote` is a one-variant enum today; this destructure keeps
         // a later rung from riding silently (the bridge's convention —
@@ -249,15 +366,16 @@ impl TraceReport {
         );
         for lane in &self.lanes {
             rows.push(format!(
-                "{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{lane},\"args\":{{\"name\":{}}}}}",
-                crate::map::escape_json(LANE_NAME),
+                "{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{},\"args\":{{\"name\":{}}}}}",
+                lane.id,
+                crate::map::escape_json(&lane.name),
             ));
         }
         // The timeline rows in `ts` order — the phase tokens are unique
         // per link, so the rows carry their own identity (the sort is
         // the stable `ts` pass below).
         let mut events: Vec<(u64, u8, String)> =
-            Vec::with_capacity(self.spans.len() + self.notes.len());
+            Vec::with_capacity(self.spans.len() + self.tasks.len() + self.notes.len());
         for span in &self.spans {
             let row = format!(
                 "{{\"name\":\"{}\",\"cat\":\"{TRACE_CAT}\",\"ph\":\"X\",\"ts\":{},\"dur\":{},\"pid\":1,\"tid\":{},\"args\":{}}}",
@@ -268,6 +386,17 @@ impl TraceReport {
                 detail_json(&span.detail),
             );
             events.push((span.start_us, 0, row));
+        }
+        for task in &self.tasks {
+            let row = format!(
+                "{{\"name\":\"{}\",\"cat\":\"{TRACE_CAT}\",\"ph\":\"X\",\"ts\":{},\"dur\":{},\"pid\":1,\"tid\":{},\"args\":{{\"kind\":\"task\",\"name\":{}}}}}",
+                task.phase.as_str(),
+                task.start_us,
+                task.dur_us,
+                task.lane,
+                crate::map::escape_json(&task.label),
+            );
+            events.push((task.start_us, 0, row));
         }
         for note in &self.notes {
             let row = format!(
@@ -698,7 +827,7 @@ impl TraceJsonReader<'_> {
                         if label.is_empty() {
                             return Self::field("args", "the lane name is empty");
                         }
-                        Ok(EventRow::ThreadName { tid })
+                        Ok(EventRow::ThreadName { tid, name: label })
                     }
                     other => Self::field("name", format!("unknown metadata row `{other}`")),
                 }
@@ -722,16 +851,26 @@ impl TraceJsonReader<'_> {
                             ),
                         );
                     };
-                    let ArgsRow::Detail(detail) = args else {
-                        return Self::field("args", "the span's args carry the phase detail");
-                    };
-                    Ok(EventRow::Span {
-                        phase,
-                        detail,
-                        ts,
-                        dur,
-                        tid,
-                    })
+                    match args {
+                        ArgsRow::Detail(detail) => Ok(EventRow::Span {
+                            phase,
+                            detail,
+                            ts,
+                            dur,
+                            tid,
+                        }),
+                        ArgsRow::Task(label) => Ok(EventRow::Task {
+                            phase,
+                            label,
+                            ts,
+                            dur,
+                            tid,
+                        }),
+                        _ => Self::field(
+                            "args",
+                            "the span's args carry the phase detail or the task label",
+                        ),
+                    }
                 } else {
                     if dur.is_some() {
                         return Self::field("dur", "the instant row carries no duration");
@@ -756,8 +895,8 @@ impl TraceJsonReader<'_> {
 
     /// The `args` object: three shapes share the parser — the phase
     /// detail (`kind` plus its own counts), the metadata's `name`, the
-    /// instant's `reason`. Exactly one marker rides (a mix is the
-    /// malformed shape).
+    /// instant's `reason`, and the M63 task's `kind`+`name` pair.
+    /// Exactly one marker rides (a mix is the malformed shape).
     fn parse_args(&mut self) -> Result<ArgsRow, TraceJsonError> {
         self.expect(b'{')?;
         let mut kind: Option<String> = None;
@@ -790,6 +929,24 @@ impl TraceJsonReader<'_> {
             }
         }
         if let Some(kind) = kind {
+            if kind == "task" {
+                // The M63 task shape: the kind and the label alone (a
+                // count key beside it is the malformed mix).
+                if reason.is_some()
+                    || inputs.is_some()
+                    || pulled.is_some()
+                    || interned.is_some()
+                    || reused.is_some()
+                    || active.is_some()
+                    || folded.is_some()
+                    || segments.is_some()
+                    || sections.is_some()
+                {
+                    return Self::field("args", "the task args carry the kind and the label");
+                }
+                let label = Self::require(name, "name")?;
+                return Ok(ArgsRow::Task(label));
+            }
             if name.is_some() || reason.is_some() {
                 return Self::field("args", "the detail args carry the kind and its counts");
             }
@@ -840,23 +997,28 @@ impl TraceJsonReader<'_> {
         Self::field("args", "the args carry one of `kind`, `name` or `reason`")
     }
 
-    /// Assembles the report: the metadata rows fill the lane registry
-    /// (ascending tids refused — the writer sorts), the timeline rows
-    /// cross-check their lane against it.
+    /// Assembles the report: the metadata rows fill the named lane
+    /// registry (ascending tids refused — the writer sorts; M64 the
+    /// labels ride the registry), the timeline rows cross-check their
+    /// lane against it.
     fn assemble(events: Vec<EventRow>) -> Result<TraceReport, TraceJsonError> {
-        let mut lanes: Vec<u64> = Vec::new();
+        let mut lanes: Vec<TraceLane> = Vec::new();
         for row in &events {
-            if let EventRow::ThreadName { tid } = row {
-                if lanes.contains(tid) {
+            if let EventRow::ThreadName { tid, name } = row {
+                if lanes.iter().any(|l| l.id == *tid) {
                     return Self::field("tid", "duplicate thread_name row");
                 }
-                if lanes.last().is_some_and(|last| last > tid) {
+                if lanes.last().is_some_and(|last| last.id > *tid) {
                     return Self::field("tid", "the thread_name rows ride ascending");
                 }
-                lanes.push(*tid);
+                lanes.push(TraceLane {
+                    id: *tid,
+                    name: name.clone(),
+                });
             }
         }
         let mut spans = Vec::new();
+        let mut tasks = Vec::new();
         let mut notes = Vec::new();
         for row in events {
             match row {
@@ -868,7 +1030,7 @@ impl TraceJsonReader<'_> {
                     dur,
                     tid,
                 } => {
-                    if !lanes.contains(&tid) {
+                    if !lanes.iter().any(|l| l.id == tid) {
                         return Self::field(
                             "tid",
                             format!("the span names lane {tid}, no thread_name declares it"),
@@ -882,13 +1044,34 @@ impl TraceJsonReader<'_> {
                         dur_us: dur,
                     });
                 }
+                EventRow::Task {
+                    phase,
+                    label,
+                    ts,
+                    dur,
+                    tid,
+                } => {
+                    if !lanes.iter().any(|l| l.id == tid) {
+                        return Self::field(
+                            "tid",
+                            format!("the task names lane {tid}, no thread_name declares it"),
+                        );
+                    }
+                    tasks.push(TraceTask {
+                        phase,
+                        label,
+                        lane: tid,
+                        start_us: ts,
+                        dur_us: dur,
+                    });
+                }
                 EventRow::Note {
                     kind,
                     reason,
                     ts,
                     tid,
                 } => {
-                    if !lanes.contains(&tid) {
+                    if !lanes.iter().any(|l| l.id == tid) {
                         return Self::field(
                             "tid",
                             format!("the note names lane {tid}, no thread_name declares it"),
@@ -909,6 +1092,7 @@ impl TraceJsonReader<'_> {
         }
         Ok(TraceReport {
             spans,
+            tasks,
             notes,
             lanes,
         })
@@ -924,6 +1108,8 @@ enum EventRow {
     ThreadName {
         /// The lane it names.
         tid: u64,
+        /// The lane's own label (M64: the data the registry carries).
+        name: String,
     },
     /// A phase span (`ph: "X"`).
     Span {
@@ -931,6 +1117,20 @@ enum EventRow {
         phase: Phase,
         /// The shape the args restored.
         detail: PhaseDetail,
+        /// The µs start.
+        ts: u64,
+        /// The µs wall.
+        dur: u64,
+        /// The lane.
+        tid: u64,
+    },
+    /// A task span (`ph: "X"`, the M63 task args — a parse the pool's
+    /// worker carried).
+    Task {
+        /// The phase the task rode in.
+        phase: Phase,
+        /// The task's label.
+        label: String,
         /// The µs start.
         ts: u64,
         /// The µs wall.
@@ -951,12 +1151,14 @@ enum EventRow {
     },
 }
 
-/// The `args` object's shape (the detail union or the metadata/instant
-/// strings the two metadata rows carry).
+/// The `args` object's shape (the detail union, the task label, or the
+/// metadata/instant strings the two metadata rows carry).
 #[derive(Debug, PartialEq, Eq)]
 enum ArgsRow {
     /// A phase detail (the `kind`-token union).
     Detail(PhaseDetail),
+    /// A task span's label (the M63 `kind: "task"` shape).
+    Task(String),
     /// The instant's reason.
     Reason(String),
     /// A metadata row's `name` (the process/lane label).
