@@ -410,3 +410,12 @@ harness = false
 [[bench]]
 name = "why_load"
 harness = false
+
+# The M58 time-report bench: the collector's price over the observed
+# pipeline (one push per phase — seven per segmented link, regardless of
+# the corpus size, so the honest expectation is near-parity with the
+# unobserved link) and the two faces' render price over a fixed report —
+# a shape gate, the render is O(rows).
+[[bench]]
+name = "time_report"
+harness = false
