@@ -1,6 +1,6 @@
 # Peregrine Benchmarks — Recorded Baselines
 
-**Status: M0–M55 surfaces recorded on the dev sandbox** (M47–M52 as shape-parity gates — initial runs noted inline). These numbers exist to (a) prove the
+**Status: M0–M57 surfaces recorded on the dev sandbox** (M47–M52 as shape-parity gates — initial runs noted inline). These numbers exist to (a) prove the
 harness works end-to-end from day one and (b) give each pass a regression anchor.
 
 > [!WARNING]
@@ -559,6 +559,15 @@ link's hot path", recorded honestly:**
   the text render over the same 12×256-symbol corpus — `write` (the compact render, escape rules
   included) and `write_read` (the strict reader's round trip), the cost pinned to the symbol count
   the map carries.
+- `provenance` (`cargo bench -p pgr-core --bench provenance`, M56): the `-why_export` query's
+  price over the resolve bench's corpus — `index_build` (the M8-a reverse index's once-per-link
+  build: 3.3 µs at 16 objects, 16.0 µs at 64, ~19.2/4.0 Melem/s) and `query` (one answer against
+  the built index: 234 ns at 64 objects — O(log n) plus a slice walk). The shape gate asserts the
+  queried export carries exactly the corpus's own edges, named.
+- `why_load` (`cargo bench -p pgr-core --bench why_load`, M57): the S7 pull with the load record
+  riding — `pull` (the full reference-driven pull over a 16- and a 64-member archive, one row per
+  admitted member) and `render` (the text and JSON renders, 17.6 µs at 64 members). The shape gate
+  asserts the report carries exactly the pulled members, each decision a `Reference` seed.
 
 ## Pending measurements
 
