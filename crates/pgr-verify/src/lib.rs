@@ -40,6 +40,9 @@
 //! * [`report_json`] — the M13 report interchange shape (one writer,
 //!   one reader, a round-trip gate; the CLI's `--json` output is the
 //!   same form the library renders),
+//! * [`sarif`] — the M69 SARIF 2.1.0 interchange (the one-way writer
+//!   the ecosystem's triage reads; the M13 escape rules and the
+//!   determinism gate ride),
 //! * [`baseline`] — the M13 baseline gate: [`BaselineDelta::between`]
 //!   classifies a fresh report against the last accepted image's
 //!   (introduced / resolved / surviving) under an [`IssueIdentity`]
@@ -55,6 +58,7 @@ pub mod export_trie;
 pub mod misc;
 pub mod pair;
 pub mod report_json;
+pub mod sarif;
 pub mod signature;
 pub mod structural;
 pub mod tlv;
