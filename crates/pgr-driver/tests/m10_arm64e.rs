@@ -5,15 +5,15 @@
 //! The gates: the flag parses in both ld64 spellings (attached and
 //! separated), refuses unknown values with the vocabulary in the hint,
 //! refuses the combinations that cannot carry the requested family (the
-//! classic opcode path has no chain words, the resident session's reuse
-//! gates and wire plan Offset64 shapes this slice, and `-r` objects carry
-//! no fixups at all), and — slice 5 — an explicitly named family refuses
-//! a deployment target below the platform's chained-fixups floor (the
-//! link would plan the classic opcode streams and the named family would
-//! never reach the image; the flag-less default keeps the silent
-//! fallback). The end-to-end arm64e link verifies strict — the
-//! verifier's dyld walk re-reads the produced words and finds them
-//! well-formed — with byte-determinism and an unchanged Offset64 default.
+//! classic opcode path has no chain words, and `-r` objects carry no
+//! fixups at all — the resident lane serves the family since M82), and
+//! — slice 5 — an explicitly named family refuses a deployment target
+//! below the platform's chained-fixups floor (the link would plan the
+//! classic opcode streams and the named family would never reach the
+//! image; the flag-less default keeps the silent fallback). The
+//! end-to-end arm64e link verifies strict — the verifier's dyld walk
+//! re-reads the produced words and finds them well-formed — with
+//! byte-determinism and an unchanged Offset64 default.
 
 use pgr_core::fixups::FixupPointerFormat;
 use pgr_driver::opts::{Options, parse};
@@ -274,11 +274,16 @@ fn arm64e_refuses_the_classic_opcode_path() {
 }
 
 #[test]
-fn arm64e_refuses_the_resident_session() {
+fn arm64e_serves_the_resident_session() {
+    // M82: the family is config, the config crosses the wire (the v6
+    // tail byte has mirrored it since M10), and the session's warm
+    // pipeline plans it — the M10 lane refusal ("the resident session's
+    // reuse gates plan Offset64 shapes this slice") is gone; the record
+    // carries the family and the relink ladders admit through it.
     let dir = scratch("resident");
     let obj = dir.join("printf_main.o");
     std::fs::write(&obj, printf_main()).unwrap();
-    let err = parse(&args(&[
+    let opts = parse(&args(&[
         "-o",
         "out",
         "-fixup_chains_format",
@@ -286,11 +291,16 @@ fn arm64e_refuses_the_resident_session() {
         "-resident",
         obj.to_str().unwrap(),
     ]))
-    .unwrap_err();
-    let msg = err.to_string();
+    .expect("the resident arm64e set parses (M82 flipped the refusal)");
     assert!(
-        msg.contains("resident"),
-        "the refusal names the gated session: {msg}"
+        opts.resident,
+        "the session rides the parsed surface: {:?}",
+        opts.resident
+    );
+    assert_eq!(
+        opts.config.chain_word_format,
+        FixupPointerFormat::Arm64e,
+        "the family shaped the config"
     );
 }
 
