@@ -14,6 +14,7 @@
 //! scaled-down randomized-edit gate (the M9 GA bar runs 10⁴ sequences on
 //! the P0 rig; this suite runs a deterministic subset in CI).
 
+use pgr_core::fixups::FixupPointerFormat;
 use pgr_core::layout::{Layout, LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, Parallelism, link_cached};
 use pgr_core::resolve::Dylib;
@@ -1381,10 +1382,11 @@ fn record_v5_round_trips_the_resolution_snapshot() {
 
     // The resolution snapshot rides the record since v5 (the M9
     // resolve wiring); M30's `__LINKEDIT` plan bump moved the format
-    // to v6 — the snapshot contract crosses it unchanged.
+    // to v6, M82's family byte to v7 — the snapshot contract crosses
+    // them unchanged.
     assert_eq!(
-        record.format_version, 6,
-        "the record format is v6 (the M30 bump)"
+        record.format_version, 7,
+        "the record format is v7 (the M82 bump)"
     );
     let snap = record
         .resolution
@@ -1703,4 +1705,64 @@ fn tile_stream_carries_the_replay_hash() {
     let rebuilt = apply_tiles(&prev, &betrayed);
     let got: [u8; 32] = Sha256::digest(&rebuilt).into();
     assert_ne!(got, betrayed.image_hash, "the tampered stream is named");
+}
+
+/// The record carries the chain word family (M82, v7): the plan names the
+/// family it encoded its fixup words with, and the record inherits it —
+/// one source (the plan), no re-derivation. The codec is lossless over
+/// the family, and the default plans ride `Offset64` (the pre-M82 byte
+/// shape).
+#[test]
+fn record_v7_carries_the_chain_word_family() {
+    for (family, asked) in [
+        (FixupPointerFormat::Offset64, FixupPointerFormat::Offset64),
+        (FixupPointerFormat::Arm64e, FixupPointerFormat::Arm64e),
+    ] {
+        let mut cfg1 = cfg(OutputType::Execute, false, Vec::new());
+        cfg1.chain_word_format = family;
+        let (layout1, objects1) = link(&inputs(&hello(64, false)), &cfg1);
+        let image1 = build_image_fused(&layout1, &objects1).unwrap();
+        let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+        assert_eq!(
+            record.chain_word_format, asked,
+            "the record carries the family the plan encoded"
+        );
+        let decoded = LinkRecord::decode(&record.encode()).expect("the v7 record decodes");
+        assert_eq!(
+            decoded.chain_word_format, asked,
+            "the codec is lossless over the family"
+        );
+    }
+}
+
+/// The relink ladder's named admission (M82): a record admits the config
+/// whose family matches its own and refuses a flip with the named
+/// fallback reason — the patch cannot renegotiate the word shape in
+/// place, so a flipped relink is the full link's job, never a silent
+/// cross-shape patch.
+#[test]
+fn the_record_admits_its_own_family_and_refuses_a_flip() {
+    let cfg1 = cfg(OutputType::Execute, false, Vec::new());
+    let (layout1, objects1) = link(&inputs(&hello(64, false)), &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+    assert_eq!(
+        record.chain_word_format,
+        FixupPointerFormat::Offset64,
+        "the default plans ride the Offset64 family"
+    );
+
+    let matching = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    assert!(
+        record.admits(&matching).is_ok(),
+        "a config naming the record's own family is admitted"
+    );
+
+    let mut flipped = cfg(OutputType::Execute, true, anchors_of(&layout1));
+    flipped.chain_word_format = FixupPointerFormat::Arm64e;
+    let reason = record.admits(&flipped).expect_err("a flip refuses");
+    assert!(
+        matches!(reason, FallbackReason::ChainFamily { .. }),
+        "the refusal names the family move: {reason}"
+    );
 }
