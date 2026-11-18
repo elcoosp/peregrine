@@ -72,5 +72,13 @@ harness = false
 name = "universal"
 harness = false
 
+# The M74 selected-container bench: `verify_universal_with_checks`
+# beside the full pass it wraps over 2/4-slice containers — the M12
+# `checks` bench's shape composed over the M71 container face (the
+# signature-only lane under the full pass, both linear in the slices).
+[[bench]]
+name = "universal_checks"
+harness = false
+
 [lints]
 workspace = true
