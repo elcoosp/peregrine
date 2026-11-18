@@ -110,6 +110,7 @@ fn request(hello_bytes: &[u8], greet_bytes: &[u8]) -> (LinkRequest, [u8; 32], [u
         time: false,
         trace: false,
         verify: false,
+        verify_checks: None,
     };
     (req, content_hash(hello_bytes), content_hash(greet_bytes))
 }
