@@ -29,8 +29,9 @@ use pgr_core::LinkArchiveMember;
 use pgr_core::LinkInput;
 use pgr_core::SymbolMatcher;
 use pgr_core::cache::PoiCache;
+use pgr_core::observe::LinkObserver as _;
 use pgr_core::resolve::Dylib;
-use pgr_emit::write_image;
+use pgr_emit::{write_image, write_image_observed};
 use std::path::Path;
 
 /// The load-command kind a framework flag names (M14; M45 adds the
@@ -551,6 +552,75 @@ pub fn link_to_image(opts: &opts::Options) -> Result<ImageAndPlan, DriverError> 
     Ok(link_to_image_recorded(opts, None)?.0)
 }
 
+/// The one-shot pipeline's pending measurement faces (M68): the timing
+/// flags' collectors ride out of [`link_to_image_recorded`] so Pass 5's
+/// flush — the atomic write the caller performs — joins the same
+/// collection before the faces build (one collection per run; the
+/// report's rows stay in link order through the emit half). The time
+/// face carries its own clock: the pipeline wall's anchor (the total
+/// band's measurement rides the same `Some`).
+struct PendingFaces {
+    /// The `--time`/`--time-json` collector beside the clock the
+    /// pipeline started on (`None` when no time face asked — the band
+    /// keys stay the library caller's).
+    time: Option<(pgr_core::TimeCollector, std::time::Instant)>,
+    /// The `--trace` collector (`None` when no timeline asked).
+    trace: Option<pgr_core::trace::TraceCollector>,
+}
+
+/// The driver's observer slot over the two optional faces (M58/M61/M68):
+/// `--time` feeds the report collector, `--trace` the timeline collector,
+/// both compose behind one subscription — the `None`-forwarding twin of
+/// [`pgr_core::ObserverPair`], the one subscription the pipeline's phases,
+/// the emit half and the flush report through.
+struct FaceSlot<'a> {
+    time: Option<&'a mut dyn pgr_core::LinkObserver>,
+    trace: Option<&'a mut dyn pgr_core::LinkObserver>,
+}
+
+impl<'a> FaceSlot<'a> {
+    /// Slots the two collectors (each face asks for itself; a face that
+    /// did not ask subscribes to nothing).
+    fn new(
+        time: Option<&'a mut pgr_core::TimeCollector>,
+        trace: Option<&'a mut pgr_core::trace::TraceCollector>,
+    ) -> Self {
+        Self {
+            time: time.map(|t| t as &'a mut dyn pgr_core::LinkObserver),
+            trace: trace.map(|t| t as &'a mut dyn pgr_core::LinkObserver),
+        }
+    }
+}
+
+impl pgr_core::LinkObserver for FaceSlot<'_> {
+    fn on_phase(&mut self, event: pgr_core::observe::PhaseEvent) {
+        if let Some(obs) = self.time.as_deref_mut() {
+            obs.on_phase(event.clone());
+        }
+        if let Some(obs) = self.trace.as_deref_mut() {
+            obs.on_phase(event);
+        }
+    }
+
+    fn on_task(&mut self, task: pgr_core::observe::TaskEvent) {
+        if let Some(obs) = self.time.as_deref_mut() {
+            obs.on_task(task.clone());
+        }
+        if let Some(obs) = self.trace.as_deref_mut() {
+            obs.on_task(task);
+        }
+    }
+
+    fn on_note(&mut self, note: pgr_core::observe::LinkNote) {
+        if let Some(obs) = self.time.as_deref_mut() {
+            obs.on_note(note.clone());
+        }
+        if let Some(obs) = self.trace.as_deref_mut() {
+            obs.on_note(note);
+        }
+    }
+}
+
 /// The M56 `-why_export` answers (the driver's consumer face): one text
 /// report per queried name, in flag order — the definition the
 /// resolution installed and every reference site the M8-a reverse index
@@ -587,7 +657,14 @@ fn print_why_export(
 fn link_to_image_recorded(
     opts: &opts::Options,
     seed: Option<&pgr_core::observe::LinkNote>,
-) -> Result<(ImageAndPlan, Option<pgr_emit::incremental::LinkRecord>), DriverError> {
+) -> Result<
+    (
+        ImageAndPlan,
+        Option<pgr_emit::incremental::LinkRecord>,
+        PendingFaces,
+    ),
+    DriverError,
+> {
     let (mut prepared, cache) = prepare_link(opts)?;
     // M58/M61: the observed faces — the time report's and the timeline's
     // collectors ride the one-shot pipeline (the resident lane is served
@@ -672,6 +749,13 @@ fn link_to_image_recorded(
                         fixup_slots: usize::try_from(img.fixup_slots).unwrap_or(usize::MAX),
                     },
                     record,
+                    // The served faces rode the wire (the session's own
+                    // observed pipeline); the client collects nothing
+                    // locally (M59/M62's shape, unchanged).
+                    PendingFaces {
+                        time: None,
+                        trace: None,
+                    },
                 ));
             }
             Err(e) => {
@@ -687,54 +771,36 @@ fn link_to_image_recorded(
     // hold it. The resident path above captures through the wire; this
     // half serves the one-shot path.
     prepared.config.record_resolution = opts.incremental;
-    // M58/M61: `--time`/`--time-json`/`--trace` subscribe the collectors
-    // to the M54 observation seam — the same pipeline, observed (the
-    // parity gate is the seam's own contract: neither face moves a byte
-    // of the plan). Both faces read the one observed run; the
-    // [`pgr_core::ObserverPair`] serves them together when both ride.
+    // M58/M61/M68: `--time`/`--time-json`/`--trace` subscribe the
+    // collectors to the M54 observation seam — the same pipeline,
+    // observed (the parity gate is the seam's own contract: neither face
+    // moves a byte of the plan). Both faces read the one observed run;
+    // the [`FaceSlot`] serves them together when both ride, and stays
+    // the subscription the emit half reports through below.
     let started = std::time::Instant::now();
-    let emit_elapsed: Option<std::time::Duration>;
     let mut times = pgr_core::TimeCollector::default();
     let mut traces = pgr_core::trace::TraceCollector::new();
-    // M65: the ladder's handover note leads the report — the collectors
-    // carry it into the run that actually produced the output (a table
-    // that hid the fallback would misread the run; the same convention
-    // that names the resolve-reuse fallback on the one-shot report).
-    if let Some(note) = seed {
-        use pgr_core::observe::LinkObserver as _;
-        times.on_note(note.clone());
-        traces.on_note(note.clone());
-    }
     let result = if timing {
-        if opts.trace_path.is_some() && (opts.time || opts.time_json) {
-            let mut pair = pgr_core::ObserverPair::new(&mut times, &mut traces);
-            pgr_core::link_observed(
-                &prepared.inputs,
-                &prepared.archives,
-                &prepared.config,
-                pgr_core::Parallelism::Auto,
-                cache.as_ref(),
-                &mut pair,
-            )?
-        } else if opts.trace_path.is_some() {
-            pgr_core::link_observed(
-                &prepared.inputs,
-                &prepared.archives,
-                &prepared.config,
-                pgr_core::Parallelism::Auto,
-                cache.as_ref(),
-                &mut traces,
-            )?
-        } else {
-            pgr_core::link_observed(
-                &prepared.inputs,
-                &prepared.archives,
-                &prepared.config,
-                pgr_core::Parallelism::Auto,
-                cache.as_ref(),
-                &mut times,
-            )?
+        let mut slot = FaceSlot::new(
+            (opts.time || opts.time_json).then_some(&mut times),
+            opts.trace_path.is_some().then_some(&mut traces),
+        );
+        // M65: the ladder's handover note leads the report — the
+        // collectors carry it into the run that actually produced the
+        // output (a table that hid the fallback would misread the run;
+        // the same convention that names the resolve-reuse fallback on
+        // the one-shot report).
+        if let Some(note) = seed {
+            slot.on_note(note.clone());
         }
+        pgr_core::link_observed(
+            &prepared.inputs,
+            &prepared.archives,
+            &prepared.config,
+            pgr_core::Parallelism::Auto,
+            cache.as_ref(),
+            &mut slot,
+        )?
     } else {
         pgr_core::link_cached(
             &prepared.inputs,
@@ -787,17 +853,20 @@ fn link_to_image_recorded(
             }
         }
     }
-    // M58: the emit band — the fused tile emit (Passes 4–5's own wall),
-    // measured here so the report's row names the pipeline's second
-    // half; the total rides right after it (the pipeline wall through
-    // the emit — the reports print beside the link, not inside it).
-    let image = {
-        let emit_started = std::time::Instant::now();
-        let image = pgr_emit::build_image_fused(&result.layout, &result.objects)?;
-        emit_elapsed = Some(emit_started.elapsed());
-        image
+    // M68: the emit half rides the seam — the fused tile emit (Pass 4)
+    // reports its completion to the same subscription the pipeline's
+    // phases used (the parity gate is the seam's own contract); the
+    // flush (Pass 5) joins the same collection in [`run`], the caller's
+    // atomic write, so one collection covers the run end to end.
+    let image = if timing {
+        let mut slot = FaceSlot::new(
+            (opts.time || opts.time_json).then_some(&mut times),
+            opts.trace_path.is_some().then_some(&mut traces),
+        );
+        pgr_emit::build_image_fused_observed(&result.layout, &result.objects, &mut slot)?
+    } else {
+        pgr_emit::build_image_fused(&result.layout, &result.objects)?
     };
-    let total = started.elapsed();
     // M11: the link map — the plan's own segments/sections/symbols,
     // rendered deterministically and written beside the link.
     if let Some(map_path) = &opts.map_path {
@@ -825,32 +894,16 @@ fn link_to_image_recorded(
     if opts.why_load {
         print!("{}", result.loads.render());
     }
-    // M58: the per-pass wall report — the collector's phase rows plus
-    // the emit and total bands, printed beside the link (the text face
-    // under `--time`, the interchange line under `--time-json`).
-    if opts.time || opts.time_json {
-        let mut report = times.report();
-        report.emit = emit_elapsed;
-        report.total = Some(total);
-        if opts.time {
-            print!("{}", report.render());
-        }
-        if opts.time_json {
-            println!("{}", report.render_json());
-        }
-    }
-    // M61: the Chrome-trace timeline — the collector's spans rendered in
-    // the Trace Event Format's object form, written beside the link (the
-    // `-map` contract: the sidecar writes when the link completes).
-    if let Some(trace_path) = &opts.trace_path {
-        let timeline = traces.finish();
-        std::fs::write(Path::new(trace_path), timeline.render()).map_err(|source| {
-            DriverError::Io {
-                path: trace_path.clone(),
-                source,
-            }
-        })?;
-    }
+    // M68: the pending faces ride out to the caller — the flush (Pass 5,
+    // the pooled atomic write) joins the same collection before the faces
+    // build (one collection per run; the report's rows stay in link
+    // order through the emit half, the total band measuring the wall
+    // through the flush). The band face stays the library caller's: the
+    // driver's rows ride the seam, `report.emit` stays `None`.
+    let faces = PendingFaces {
+        time: (opts.time || opts.time_json).then_some((times, started)),
+        trace: opts.trace_path.is_some().then_some(traces),
+    };
     let record = if opts.incremental {
         Some(pgr_emit::incremental::LinkRecord::record(
             &result.layout,
@@ -868,6 +921,7 @@ fn link_to_image_recorded(
             image,
         },
         record,
+        faces,
     ))
 }
 
@@ -1524,14 +1578,60 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     // handover note leads the full link's report (the collectors seed it
     // before the pipeline runs — the note names why the rungs stop, the
     // rows name the run that produced the output).
-    let (linked, record) = if opts.incremental && opts.config.layout_slack.is_none() {
+    let (linked, record, mut faces) = if opts.incremental && opts.config.layout_slack.is_none() {
         let mut slacked = opts.clone();
         slacked.config.layout_slack = Some(pgr_core::slack::SlackPolicy::default());
         link_to_image_recorded(&slacked, handover_note.as_ref())?
     } else {
         link_to_image_recorded(opts, handover_note.as_ref())?
     };
-    write_image(&linked.image, Path::new(&opts.output))?;
+    // M68: the flush (Pass 5, the pooled atomic write) joins the same
+    // collection before the faces build — the report's rows stay in link
+    // order through the emit half, the total band measuring the wall
+    // through the flush (the reports print beside the link, not inside
+    // it — the M58 convention, now with the whole pipeline on the rows).
+    if faces.time.is_some() || faces.trace.is_some() {
+        {
+            let mut slot = FaceSlot::new(
+                faces.time.as_mut().map(|(times, _)| times),
+                faces.trace.as_mut(),
+            );
+            write_image_observed(&linked.image, Path::new(&opts.output), &mut slot)?;
+        }
+        // M58: the per-pass wall report — the collector's phase rows
+        // (the pipeline's passes and the emit half) plus the total band
+        // (the wall through the flush), printed beside the link (the
+        // text face under `--time`, the interchange line under
+        // `--time-json`; the `emit` band stays the library caller's —
+        // the driver's rows ride the seam).
+        if let Some((times, started)) = faces.time.take() {
+            let mut report = times.report();
+            report.total = Some(started.elapsed());
+            if opts.time {
+                print!("{}", report.render());
+            }
+            if opts.time_json {
+                println!("{}", report.render_json());
+            }
+        }
+        // M61: the Chrome-trace timeline — the collector's spans rendered
+        // in the Trace Event Format's object form, written beside the
+        // link (the `-map` contract: the sidecar writes when the link
+        // completes).
+        if let Some(traces) = faces.trace.take() {
+            if let Some(trace_path) = &opts.trace_path {
+                let timeline = traces.finish();
+                std::fs::write(Path::new(trace_path), timeline.render()).map_err(|source| {
+                    DriverError::Io {
+                        path: trace_path.clone(),
+                        source,
+                    }
+                })?;
+            }
+        }
+    } else {
+        write_image(&linked.image, Path::new(&opts.output))?;
+    }
     if let Some(record) = record {
         store_record(opts, &record);
     }
