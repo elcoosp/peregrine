@@ -1,6 +1,6 @@
 # Peregrine Benchmarks — Recorded Baselines
 
-**Status: M0–M67 surfaces recorded on the dev sandbox** (M47–M52 as shape-parity gates — initial runs noted inline). These numbers exist to (a) prove the
+**Status: M0–M71 surfaces recorded on the dev sandbox** (M47–M52 as shape-parity gates — initial runs noted inline). These numbers exist to (a) prove the
 harness works end-to-end from day one and (b) give each pass a regression anchor.
 
 > [!WARNING]
@@ -86,6 +86,7 @@ harness works end-to-end from day one and (b) give each pass a regression anchor
 # format
 cargo bench -p pgr-format                                  # summarize
 cargo bench -p pgr-format --bench parse -- parse_archive
+cargo bench -p pgr-format --bench universal
 # driver: pipeline + surfaces
 cargo bench -p pgr-driver                                  # link, link_dylib, link_outputs, …
 cargo bench -p pgr-driver --bench link -- "link_archive|link_dead_strip|link_cstring"
@@ -159,6 +160,8 @@ cargo bench -p pgr-verify --bench platform
 cargo bench -p pgr-verify --bench arm64e
 cargo bench -p pgr-verify --bench checks
 cargo bench -p pgr-verify --bench baseline
+cargo bench -p pgr-verify --bench sarif
+cargo bench -p pgr-verify --bench universal
 # the randomized edit gate (CI subsets: 80 engine / 24 driver steps)
 PGR_RANDOMIZED_STEPS=2000 cargo test -p pgr-emit --release --test incremental -- randomized
 ```
@@ -512,7 +515,7 @@ Nanoseconds per name against a millisecond-scale Pass 3 — off the hot path by 
 magnitude. Hundreds of globs over hundreds of thousands of names is the shape that would need
 a prefix index; this bench is where that decision lives.
 
-## Knob parity (M10–M53) · reporting seams (M54–M62, M67)
+## Knob parity (M10–M53) · reporting & interchange seams (M54–M62, M67–M71)
 
 **Shared reading for every row below**: parity within the sandbox's run-to-run spread (up to
 ±20 %; criterion change-detection non-significant where a p-value is shown). Each released knob
@@ -616,6 +619,21 @@ link's hot path", recorded honestly:**
   honest expectation) and `verify_extra/policy-only` beside the parse pre-pass (342 ns — the
   extension alone prices the unit's own read; the group pins the shape, the hardware gates own
   the comparable numbers).
+- `sarif` (`cargo bench -p pgr-verify --bench sarif`, M69): the render face over the fixed
+  triage shapes — `render/8` (the 8-issue report) **4.17 µs** and `render/64` (the 64-issue worst
+  case) **19.6 µs**, beside the M13 JSON writer's `to_json/64` at **18.2 µs** — the O(issues)
+  price the document's shape promises, the rule table riding one pass over the report's distinct
+  codes. (The M69 surface predates this recording pass; the row joins with M70/M71's.)
+- `universal` (`cargo bench -p pgr-format --bench universal`, M70): the read seam's own price over
+  `FAT_MAGIC` containers — `universal-decode` (header + slice table + window bounds) **28.2 ns**
+  (2 slices), **38.7 ns** (5) and **53.2 ns** (9); `universal-select` (decode + the arm64 cputype
+  match) **20.0 ns**, **33.0 ns** and **49.7 ns** — linear in the table rows, the window a
+  subslice and never a copy (the throughput column prices the container bytes; the work is the
+  table).
+- `universal` (`cargo bench -p pgr-verify --bench universal`, M71): the container face beside the
+  single-image pass it wraps — `single_image` **10.5 µs**, `verify/1` **10.5 µs** (the container
+  adds nothing per byte), `verify/2` **21.2 µs**, `verify/4` **42.4 µs** — one strict pass per
+  declared slice plus the table-row/header agreement check, linear in the slices.
 
 ## Pending measurements
 
