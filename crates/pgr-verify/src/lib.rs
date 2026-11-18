@@ -72,7 +72,9 @@ pub use checks::{
 pub use report_json::{
     ReportJsonError, parse_report_json, to_json, to_json_with_baseline, to_json_with_file,
 };
-pub use universal::{SliceVerdict, UniversalReport, verify_universal};
+pub use universal::{
+    SliceVerdict, UniversalReport, verify_universal, verify_universal_with_checks,
+};
 
 use pgr_format::FormatError;
 
