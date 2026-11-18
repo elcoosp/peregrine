@@ -150,6 +150,16 @@ pub struct Options {
     /// failures" gate). A divergence never ships: the output is
     /// rewritten from the full emit.
     pub incremental_verify: bool,
+    /// M73 `-verify`: after the pipeline produces the image, run the
+    /// strict verifier on the produced bytes and refuse to ship a
+    /// failing verdict — the gate sits before the write, so the output
+    /// file is never created when the image fails it (the audit's rule,
+    /// on the cold path). The verdict rides
+    /// [`LinkOutcome::verify`](crate::LinkOutcome::verify). The relink
+    /// ladder carries its own gate (`-incremental-verify`): the two
+    /// refuse to compose, and `-r` (an object, not an image) refuses
+    /// the knob outright.
+    pub verify: bool,
     /// M10 rung 4, slice 5: `-fixup_chains_format` was passed explicitly
     /// (either spelling). The default (`false`) keeps the documented
     /// below-floor fallback — the layout silently plans the classic
@@ -299,6 +309,7 @@ impl Default for Options {
             final_output: None,
             incremental: false,
             incremental_verify: false,
+            verify: false,
             chain_word_format_explicit: false,
             order_file: None,
             map_path: None,
@@ -535,6 +546,20 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     HeaderPadConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-verify` surface conflict (M73): the gate is an image-output
+    /// decision — `-r` produces an `MH_OBJECT` (the verifier's object
+    /// face gates it as a tool, never a link gate), and the relink
+    /// ladder carries its own gate (`-incremental-verify` — the §7.3
+    /// audit, whose subject is the patch). The verdict names the shape
+    /// conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    VerifyConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -1548,6 +1573,9 @@ fn apply_flag(
             opts.incremental = true;
             opts.incremental_verify = true;
         }
+        // M73: the cold link's own gate — the strict pass on the
+        // produced bytes before the write.
+        "-verify" => opts.verify = true,
         "-all_load" => opts.all_load = true,
         "-force_load" => {
             let v = next_value(args, i, arg)?;
@@ -2046,6 +2074,30 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
         return Err(OptsError::Missing {
             message: "no input object files".into(),
         });
+    }
+    // M73: the verify gate is an image-output decision. `-r` produces an
+    // `MH_OBJECT` — the verifier's object face gates it as a tool, never
+    // a link gate — and the relink ladder carries its own gate (the §7.3
+    // audit, `-incremental-verify`; its subject is the patch, the cold
+    // gate's subject is the image). An explicitly named knob that cannot
+    // apply is a refusal, never a silently dropped one.
+    if opts.verify {
+        if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+            return Err(OptsError::VerifyConflict {
+                verdict: "-verify gates an image, but the relocatable output is an object".into(),
+                fix: "drop -verify or link a segmented output (an executable, dylib or \
+                      bundle); gate the object with pgr-verify itself"
+                    .into(),
+            });
+        }
+        if opts.incremental {
+            return Err(OptsError::VerifyConflict {
+                verdict: "-verify and -incremental name two gates for one image".into(),
+                fix: "the relink ladder's gate is -incremental-verify (the §7.3 audit); \
+                      use it, or drop -incremental for the cold link's gate"
+                    .into(),
+            });
+        }
     }
     // M10 rung 4, slice 2: the requested word family must be encodable
     // where it is requested — a refusal, never a silently dropped knob.
