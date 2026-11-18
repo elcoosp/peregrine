@@ -123,6 +123,52 @@ pub struct ServedLink {
     /// time collector when both faces ask). The wire carries the
     /// document verbatim; the strict reader is its own face.
     pub trace_json: Option<String>,
+    /// The served verify verdict (v43, M72): `Some` when the request
+    /// asked for it — the strict verifier's effective report on the
+    /// final bytes (the full link's, the patched relink's and the
+    /// untouched relink's alike; the `-no_adhoc` carve-out applied the
+    /// audit's way, [`effective_report`]). The subject is the image —
+    /// every outcome serves one — so a build system reads the gate's
+    /// verdict without re-reading the file it is about to write.
+    pub verify_report: Option<pgr_verify::Report>,
+}
+
+/// The verdict's effective shape (M72): the strict pass's report with
+/// the `-no_adhoc` carve-out applied — the missing-signature shape is
+/// the config's own choice, never a defect the verdict names (the
+/// audit's rule, mirrored; everything else gates at full strictness).
+/// The stats ride unfiltered — they describe the image.
+fn effective_report(
+    mut report: pgr_verify::Report,
+    signature_expected: bool,
+) -> pgr_verify::Report {
+    report.issues.retain(|issue| match issue.severity {
+        pgr_verify::Severity::Error => {
+            issue.code != pgr_verify::Code::SignatureLayout || signature_expected
+        }
+        pgr_verify::Severity::Warning => true,
+    });
+    report
+}
+
+/// The strict verifier on the final bytes (M72): the served verdict's
+/// body — full strictness, the `-no_adhoc` carve-out applied, one
+/// `tracing` span (inert until a subscriber installs — the workspace
+/// convention).
+fn serve_verify(bytes: &[u8], signature_expected: bool) -> pgr_verify::Report {
+    let span = tracing::info_span!("daemon_verify", len = bytes.len(), signature_expected);
+    let _entered = span.enter();
+    let opts = pgr_verify::Options {
+        strict_warnings: true,
+        skip_hash_recompute: false,
+    };
+    let report = pgr_verify::verify(bytes, &opts);
+    let effective = effective_report(report, signature_expected);
+    tracing::debug!(
+        issues = effective.issues.len(),
+        "the daemon's verify finished"
+    );
+    effective
 }
 
 /// Why the session's §7.3 ladder declined: the caller (the link entry)
@@ -424,6 +470,7 @@ impl ResidentSession {
         // resident output state — the next relink's previous output is
         // already here.
         self.hold_output(&image);
+        let verify_report = req.verify.then(|| serve_verify(&image, req.config.adhoc));
         let record = if req.record_resolution {
             Some(
                 pgr_emit::incremental::LinkRecord::record(
@@ -448,6 +495,7 @@ impl ResidentSession {
             tiles: None,
             time_report,
             trace_json,
+            verify_report,
         })
     }
 
@@ -634,6 +682,10 @@ impl ResidentSession {
                 report
             });
             let trace_json = req.trace.then(|| traces.finish().render());
+            // M72: the verdict's subject is the image, every outcome
+            // serves one — an untouched relink's is the resident previous
+            // output itself.
+            let verify_report = req.verify.then(|| serve_verify(prev, cfg.adhoc));
             return Ok(ServedLink {
                 image: prev.to_vec(),
                 entryoff: result.layout.entryoff,
@@ -649,6 +701,7 @@ impl ResidentSession {
                 tiles,
                 time_report,
                 trace_json,
+                verify_report,
             });
         }
         let patch_started = std::time::Instant::now();
@@ -754,6 +807,10 @@ impl ResidentSession {
             report
         });
         let trace_json = req.trace.then(|| traces.finish().render());
+        // M72: the verdict's subject is the image the reply serves —
+        // computed after the audit's heal, so a healed image is what the
+        // verdict answers for (the audit's ordering, mirrored).
+        let verify_report = req.verify.then(|| serve_verify(&image, cfg.adhoc));
         Ok(ServedLink {
             image,
             entryoff: result.layout.entryoff,
@@ -764,6 +821,7 @@ impl ResidentSession {
             tiles,
             time_report,
             trace_json,
+            verify_report,
         })
     }
 
@@ -897,6 +955,7 @@ mod tests {
             tiles: false,
             time: false,
             trace: false,
+            verify: false,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -1096,6 +1155,7 @@ mod tests {
             tiles: false,
             time: false,
             trace: false,
+            verify: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1265,6 +1325,7 @@ mod fusion_tests {
             tiles: false,
             time: false,
             trace: false,
+            verify: false,
         };
         let hashes = req.blob_hashes();
         (req, hashes)
@@ -1404,6 +1465,95 @@ mod fusion_tests {
             warm_hits,
             session.hits
         );
+    }
+
+    #[test]
+    fn served_verify_verdict_rides_every_outcome() {
+        // v43 (M72): the strict verifier runs inside the session on the
+        // final bytes — the full link's, the untouched relink's alike —
+        // and the report crosses as the reply's tail. Unasked, the tail
+        // rides absent (nothing moves).
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        req.record_resolution = true;
+        req.verify = true;
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        let cold = session.link(&req).unwrap();
+        let verdict = cold
+            .verify_report
+            .expect("the served verdict rides the full link");
+        assert!(
+            verdict.is_ok(&pgr_verify::Options::default()),
+            "the clean link verifies: {:?}",
+            verdict.issues
+        );
+        assert!(verdict.stats.segments > 0, "the stats ride the verdict");
+
+        // The untouched relink asks too — its subject is the resident
+        // previous output (nothing changed, the verdict says so again).
+        let prev_output = cold.image.clone();
+        let (mut relink, _) = request(&link_config(), &hello_bytes, &greet_bytes);
+        relink.record = Some(cold.record.expect("the cold capture"));
+        relink.prev_output = Some(content_hash(&prev_output));
+        relink.verify = true;
+        session
+            .store_blob(&content_hash(&prev_output), prev_output)
+            .unwrap();
+        let warm = session.link(&relink).unwrap();
+        assert!(
+            warm.patch.as_ref().expect("the relink plans").untouched,
+            "an identical corpus relinks untouched"
+        );
+        let warm_verdict = warm
+            .verify_report
+            .expect("the untouched relink serves its verdict");
+        assert!(warm_verdict.is_ok(&pgr_verify::Options::default()));
+
+        // Unasked, the verdict never crosses.
+        relink.verify = false;
+        let plain = session.link(&relink).unwrap();
+        assert!(
+            plain.verify_report.is_none(),
+            "an unasked verdict rides absent"
+        );
+    }
+
+    #[test]
+    fn the_no_adhoc_carve_out_excuses_only_the_signature() {
+        // M72: a `-no_adhoc` link has no signature to verify — the
+        // missing-signature shape is the config's own choice, never a
+        // defect the served verdict names (the audit's carve-out,
+        // mirrored). Everything else gates at full strictness.
+        let mut report = pgr_verify::Report::default();
+        report.issues.push(pgr_verify::Issue::error(
+            pgr_verify::Code::SignatureLayout,
+            "arm64 images require an ad-hoc code signature",
+            Some(0),
+        ));
+        report.issues.push(pgr_verify::Issue::error(
+            pgr_verify::Code::SegmentContract,
+            "the vmaddr breaks the 16 KiB congruence",
+            Some(4096),
+        ));
+        report.stats.segments = 2;
+        // A signed link's verdict names every defect.
+        let signed = super::effective_report(report.clone(), true);
+        assert_eq!(signed.issues.len(), 2);
+        // A `-no_adhoc` link's verdict excuses the missing signature —
+        // and nothing else; the stats ride unfiltered.
+        let unsigned = super::effective_report(report, false);
+        assert_eq!(unsigned.issues.len(), 1);
+        assert_eq!(unsigned.issues[0].code, pgr_verify::Code::SegmentContract);
+        assert_eq!(unsigned.stats.segments, 2);
     }
 
     #[test]
