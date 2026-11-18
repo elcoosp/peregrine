@@ -6,6 +6,33 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M75)
+
+- **M75** — the CLI's SARIF face: `pgr-verify --sarif` rides the M69 render
+  (`pgr_verify::sarif::render`) — one deterministic SARIF 2.1.0 document per verified image
+  (one line, fixed key order, `ruleId` the stable code token, `level` the severity, the
+  anchor offset as a binary `region.byteOffset`), the exit gate the whole verdict keeps.
+  The face refuses where it cannot apply honestly: beside `--json` (two machine faces are
+  two writers; one run serves one), beside `--baseline` (the delta has no SARIF shape) and
+  on a universal container (the SARIF anchors name file bytes; a slice's issues ride their
+  own window — re-anchoring would re-shape, so the face names the slice story)
+
+### Added (M74)
+
+- **M74** — the CLI's universal-container face: `pgr-verify <fat-container>` walks
+  `verify_universal_with_checks` — the M71 container face composed with the M12 selector
+  surface (the new public seam: the check selection narrows every slice's pass, the
+  table-row/header agreement riding as the container's own contract under any selection) —
+  instead of running the single-image pass over the container's bytes (the fat magic is no
+  Mach-O magic, so the gate refused the *container* and never named the slice). One verdict
+  per declared slice, printed slice by slice, the exit gate every slice's; the `--json` face
+  serves one M13 document per slice (each line the strict reader's own shape, the `file`
+  field naming the slice it rode), `--baseline` refuses a container (the baseline identity
+  gates one image's offsets, never a slice table), and a malformed table refuses with the
+  format reader's offset-tagged error verbatim. The `universal_checks` bench pins the
+  narrowed lane beside the full pass, and the `universal_checks` example walks both
+  selections beside the corrupted twin
+
 ### Added (M73)
 
 - **M73** — the link's own verify gate: `-verify` runs the strict verifier on the
