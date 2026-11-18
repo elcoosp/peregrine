@@ -20,6 +20,16 @@
 //! (`RelinkFallback` — the full link the ladder handed over to, named the
 //! way the resolve-reuse fallback already names itself).
 //!
+//! The M68 rung adds the emit half: Passes 4–5 stop being the caller's
+//! opaque band and ride the seam as [`Phase`]s (`Emit` — the fused tile
+//! emit's completion; `Flush` — the pooled atomic write's, the TDD §9.3
+//! instrumentation spec's named rows beside the pipeline's passes) —
+//! `pgr-emit`'s `build_image_fused_observed`/`write_image_observed` report
+//! them to the caller's observer slot, and the driver's `--time`/`--trace`
+//! faces collect them beside the Passes 1–3 rows (one collection per run).
+//! The band face stays the library caller's: `TimeReport::emit`/`total`
+//! remain the `Option`s a consumer fills.
+//!
 //! The seam follows the house observability convention: [`TracingObserver`]
 //! bridges every event onto the `tracing` debug level, inert until a
 //! subscriber installs — the binaries and the consumer examples install
@@ -77,6 +87,18 @@ pub enum Phase {
     /// the strict verifier on the final bytes (a divergence is healed, a
     /// blocking issue never ships).
     RelinkAudit,
+    /// Pass 4's completion (M68): the fused tile emit planned the image —
+    /// copy, relocate, chain words, `__LINKEDIT` chunks and the page-hash
+    /// table in one pass over the tiles. The event rides the emit's
+    /// completion (never a per-tile stream — the M54 shape), reported by
+    /// `pgr-emit`'s `build_image_fused_observed`.
+    Emit,
+    /// Pass 5's completion (M68): the pooled atomic write shipped the
+    /// image — the temp file preallocated, the 8 MiB blocks `pwrite`d,
+    /// fsynced, renamed. Reported by `pgr-emit`'s `write_image_observed`
+    /// (the fast-path lanes keep their own shapes — the resident run
+    /// patches in memory and the client writes unobserved).
+    Flush,
 }
 
 impl Phase {
@@ -98,6 +120,8 @@ impl Phase {
             Self::RelinkPlan => "relink_plan",
             Self::RelinkPatch => "relink_patch",
             Self::RelinkAudit => "relink_audit",
+            Self::Emit => "emit",
+            Self::Flush => "flush",
         }
     }
 }
@@ -177,6 +201,24 @@ pub enum PhaseDetail {
         /// The strict verifier's blocking-issue count (the audit refuses
         /// the ship when it is nonzero — the event rode anyway).
         issues: usize,
+    },
+    /// Pass 4's shape (M68): the fused tile emit's own plan-derived facts —
+    /// the 16 KiB tiles the pass processed and the image bytes it produced.
+    Emitted {
+        /// The 16 KiB tiles the emit processed (`file_size` rounded up).
+        tiles: usize,
+        /// The image bytes the emit produced (the plan's file size).
+        bytes: u64,
+    },
+    /// Pass 5's shape (M68): the pooled write's own facts — the 8 MiB
+    /// blocks the file split into (zero for an empty image) and the pool
+    /// threads that carried them (one on the single-writer path).
+    Flushed {
+        /// The 8 MiB blocks the write split into (`buf.len()` rounded up).
+        blocks: usize,
+        /// The writer threads that ran (the pool's four or the single
+        /// small-output writer).
+        writers: usize,
     },
 }
 
