@@ -12,6 +12,11 @@ publish = false
 pgr-core = { workspace = true }
 pgr-emit = { workspace = true }
 pgr-format = { workspace = true }
+# The served verify verdict (M72, wire v43): the session runs the strict
+# verifier on the final bytes when the request asks — the audit's own
+# read-side engine, now answering on the wire (promoted from a
+# dev-dependency, which rode for the pgrd binary test's verifier gate).
+pgr-verify = { workspace = true }
 sha2 = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
@@ -20,7 +25,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 pgr-fixtures = { workspace = true }
-pgr-verify = { workspace = true }
 criterion = { workspace = true }
 
 [lints]
@@ -42,6 +46,14 @@ harness = false
 # entries before it.
 [[bench]]
 name = "wire_trace"
+harness = false
+
+# The M72 verify-tail bench: the served verdict's encode/decode price
+# (the M13 interchange document rides the reply verbatim, the strict
+# reader its own face). Registered explicitly — the same M34/M61
+# pathology, healed here like the entries before it.
+[[bench]]
+name = "wire_verify"
 harness = false
 
 [[bin]]
