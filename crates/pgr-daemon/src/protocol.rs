@@ -234,8 +234,15 @@ use sha2::{Digest, Sha256};
 /// alike, the `-no_adhoc` carve-out applied the audit's way — and the
 /// reply's IMAGE tail carries the effective report rendered in the M13
 /// interchange form, the strict reader
-/// (`pgr_verify::report_json::parse_report_json`) its own face).
-pub const PROTO_VERSION: u32 = 43;
+/// (`pgr_verify::report_json::parse_report_json`) its own face);
+/// **v44** appends the verify gate's check selection (M77 — the
+/// request's `verify_checks` selection, present only beside the
+/// `verify` flag, carries the M12 [`pgr_verify::CheckSet`] the
+/// session's served pass narrows to, rendered in the selector's own
+/// canonical form; a selection the parser refuses is a malformed
+/// request — the wire never carries a gate the pipeline would silently
+/// widen).
+pub const PROTO_VERSION: u32 = 44;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -488,6 +495,15 @@ pub struct LinkRequest {
     /// `-no_adhoc` carve-out applied the audit's way. An unasked verdict
     /// never crosses the wire.
     pub verify: bool,
+    /// The verify gate's check selection (v44, M77): the M12 selector
+    /// ([`pgr_verify::CheckSet`]) the session's served pass narrows to —
+    /// the same subtractive contract the verifier CLI's `--checks`
+    /// carries (fewer families against the same parsed image, the parse
+    /// pre-pass and the stats ride regardless). `None` names the full
+    /// pass (the pre-M77 shape, byte-identical on the wire's decode
+    /// side); a selection only rides beside the `verify` flag — a gate
+    /// the selection narrows is the only gate it means.
+    pub verify_checks: Option<pgr_verify::CheckSet>,
 }
 
 impl LinkRequest {
@@ -551,6 +567,17 @@ impl LinkRequest {
         put_u8(&mut b, u8::from(self.trace));
         // M72 (v43): the verify-verdict request flag.
         put_u8(&mut b, u8::from(self.verify));
+        // M77 (v44): the verify gate's check selection — present only
+        // beside the `verify` flag (the driver refuses a selection
+        // without a gate); the selector's canonical form is its own
+        // wire shape, so the decode side restores the set exactly.
+        match &self.verify_checks {
+            Some(set) => {
+                put_u8(&mut b, 1);
+                put_str(&mut b, &set.to_string());
+            }
+            None => put_u8(&mut b, 0),
+        }
         b
     }
 
@@ -605,6 +632,20 @@ impl LinkRequest {
         let trace = r.u8()? != 0;
         // M72 (v43): the verify-verdict request flag.
         let verify = r.u8()? != 0;
+        // M77 (v44): the verify gate's check selection (see encode). A
+        // selection the parser refuses is a malformed request — the wire
+        // never carries a gate the pipeline would silently widen.
+        let verify_checks = if r.u8()? == 0 {
+            None
+        } else {
+            let rendered = r.str()?;
+            Some(pgr_verify::CheckSet::parse(&rendered).map_err(|e| {
+                DecodeError::Malformed(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("the request's check selection does not parse: {e}"),
+                ))
+            })?)
+        };
         r.done()?;
         Ok(Self {
             config,
@@ -619,6 +660,7 @@ impl LinkRequest {
             time,
             trace,
             verify,
+            verify_checks,
         })
     }
 }
@@ -2161,6 +2203,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2186,6 +2229,7 @@ mod tests {
             time: false,
             trace: false,
             verify: true,
+            verify_checks: None,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2212,12 +2256,87 @@ mod tests {
             time: false,
             trace: false,
             verify: true,
+            verify_checks: None,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
         assert_eq!(back, req);
         req.verify = false;
         assert_ne!(LinkRequest::decode(&req.encode()).unwrap(), back);
+    }
+
+    #[test]
+    fn verify_checks_selection_round_trips() {
+        // v44 (M77): the verify gate's check selection rides the
+        // selector's own canonical form — the decode side restores the
+        // set exactly, and the absent byte names the full pass.
+        let mut req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: true,
+            verify_checks: Some(
+                pgr_verify::CheckSet::parse("segments,signature").expect("canonical names"),
+            ),
+        };
+        let body = req.encode();
+        let back = LinkRequest::decode(&body).unwrap();
+        assert_eq!(back, req);
+        // A different selection is a different request.
+        req.verify_checks = Some(pgr_verify::CheckSet::parse("tlv").expect("canonical names"));
+        assert_ne!(LinkRequest::decode(&req.encode()).unwrap(), back);
+        // The absent byte still decodes to the full pass (None).
+        req.verify_checks = None;
+        let plain = LinkRequest::decode(&req.encode()).unwrap();
+        assert!(plain.verify_checks.is_none());
+    }
+
+    #[test]
+    fn verify_checks_refuses_an_unknown_family() {
+        // The selection rides the selector's canonical form: a body a
+        // parser refuses is a malformed request (the wire never carries
+        // a gate the pipeline would silently widen).
+        let req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: true,
+            verify_checks: None,
+        };
+        // Hand-splice the malformed selection past the well-formed tail:
+        // encode a plain request body, drop the trailing absent byte,
+        // append the malformed one.
+        let mut wire = req.encode();
+        wire.pop();
+        put_u8(&mut wire, 1);
+        put_str(&mut wire, "segmants");
+        let err = LinkRequest::decode(&wire).unwrap_err();
+        match err {
+            DecodeError::Malformed(e) => {
+                let text = e.to_string();
+                assert!(
+                    text.contains("segmants"),
+                    "the refusal names the offending token: {text}"
+                );
+            }
+            other => panic!("expected a malformed body, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2277,6 +2396,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2305,6 +2425,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -2332,6 +2453,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2358,6 +2480,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let back = LinkRequest::decode(&bare.encode()).unwrap();
         assert_eq!(back, bare);
@@ -2395,6 +2518,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert!(back.tiles, "the flag rides the wire");
@@ -2424,6 +2548,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let body = req.encode();
         // The distinctive vmsize appears exactly once (every other field
@@ -2473,6 +2598,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the decisions cross byte-for-byte");
@@ -2507,6 +2633,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The segment name rides as a length-prefixed string exactly
@@ -2548,6 +2675,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the reserve crosses byte-for-byte");
@@ -2592,6 +2720,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The reserve rides as a present-byte + u64 exactly once (the
@@ -2633,6 +2762,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the base crosses byte-for-byte");
@@ -2667,6 +2797,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The base rides as a present-byte + u64 exactly once (the
@@ -2719,6 +2850,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -2754,6 +2886,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The member rides as (kind byte, u32 len, name bytes) exactly
@@ -2802,6 +2935,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -2836,6 +2970,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The client rides as (u32 len, name bytes) exactly once; the
@@ -2882,6 +3017,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -2917,6 +3053,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The pair rides as (u32 len, pair bytes) exactly once; the
@@ -2963,6 +3100,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -2999,6 +3137,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3046,6 +3185,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3092,6 +3232,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3128,6 +3269,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3160,6 +3302,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3192,6 +3335,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3221,6 +3365,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3254,6 +3399,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3287,6 +3433,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3317,6 +3464,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3351,6 +3499,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3383,6 +3532,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3413,6 +3563,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3446,6 +3597,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3476,6 +3628,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3508,6 +3661,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3544,6 +3698,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3575,6 +3730,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3633,6 +3789,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         let needle = b"__mydata";
@@ -3680,6 +3837,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3715,6 +3873,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3748,6 +3907,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3780,6 +3940,7 @@ mod tests {
                 time: false,
                 trace: false,
                 verify: false,
+                verify_checks: None,
             }
             .encode(),
         )
@@ -3809,6 +3970,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The marks are the wire tail's last section: the count rides
@@ -3842,6 +4004,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The floor rides the config tail as (present byte, u64); the
@@ -3881,6 +4044,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The last floor byte is `__TEXT,__text`'s exponent (12); the
@@ -3922,6 +4086,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         // The path rides as (u32 len, path bytes) exactly once; the
@@ -3954,6 +4119,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         }
         .encode();
         let rel_path = b"bin/dyld";
@@ -3989,6 +4155,7 @@ mod tests {
             time: true,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -4013,6 +4180,7 @@ mod tests {
             time: false,
             trace: true,
             verify: false,
+            verify_checks: None,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
