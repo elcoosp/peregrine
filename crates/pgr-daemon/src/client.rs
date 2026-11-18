@@ -93,11 +93,13 @@ pub struct ResidentImage {
     /// The served verify verdict (v43, M72): `Some` when the request
     /// asked for it — the session's own strict pass on the final bytes,
     /// decoded from the M13 interchange document the tail rides (the
-    /// `-no_adhoc` carve-out applied the audit's way). The client gates
-    /// nothing on it — the verdict is the build system's to read — but
-    /// a lying document (one the strict reader refuses) refuses the
-    /// reply, like every tail. `None` when unasked or on the fallback
-    /// path (the one-shot link verifies through the driver's own gate).
+    /// `-no_adhoc` carve-out applied the audit's way). A lying document
+    /// (one the strict reader refuses) refuses the reply, like every
+    /// tail. M76: the driver's own `-verify` flag gates the write on
+    /// this verdict (`pgr_driver::gate_from_served` shapes the gate
+    /// face) — a library consumer reads it as data instead. `None` when
+    /// unasked or on the fallback path (the one-shot link verifies
+    /// through the driver's own gate).
     pub verify_report: Option<pgr_verify::Report>,
     /// How the image tail crossed (v5): [`Transport::Full`] or the tile
     /// summary (what the benches and the driver's outcome line record).
@@ -198,6 +200,7 @@ impl LinkJob {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         Self { request, blobs }
     }
