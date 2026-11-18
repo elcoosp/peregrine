@@ -58,5 +58,11 @@ harness = false
 name = "baseline"
 harness = false
 
+# The M69 SARIF interchange bench: the render face over fixed 8- and
+# 64-issue reports, beside the M13 JSON writer's (the O(issues) price).
+[[bench]]
+name = "sarif"
+harness = false
+
 [lints]
 workspace = true
