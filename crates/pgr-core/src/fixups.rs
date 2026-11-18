@@ -922,7 +922,9 @@ pub fn plan_fixups_with_auth(
                 }
                 let marker = DYLD_CHAINED_PTR_START_MULTI
                     | u16::try_from(page_start_end + toff).map_err(|_| LinkError::Layout {
-                        message: "multi-start overflow table beyond 15-bit marker".into(),
+                        message: format!(
+                            "multi-start overflow table beyond the 15-bit marker: the                              16-bit offset {page_start_end:#x} does not fit (the overflow                              tables ride {toff} bytes)"
+                        ),
                     })? & DYLD_CHAINED_PTR_START_MULTI_MASK;
                 payload[w..w + 2].copy_from_slice(&marker.to_le_bytes());
                 marker_seen += 1;
