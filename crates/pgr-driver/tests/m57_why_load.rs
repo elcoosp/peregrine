@@ -96,14 +96,13 @@ fn the_flag_parses_and_defaults_off() {
 }
 
 #[test]
-fn the_report_refuses_the_resident_lane() {
+fn the_report_rides_the_resident_lane() {
+    // M79: the resident lane serves the report — the pull's record is
+    // the session's own (wire v45), so the M57 resident refusal flipped
+    // to service; the surface parses and carries the flag.
     let dir = scratch("resident");
-    let err = parse(&dir, &["-why_load", "-resident"]).expect_err("the lane refuses");
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("-why_load") && rendered.contains("-resident"),
-        "the conflict names both flags: {rendered}"
-    );
+    let o = parse(&dir, &["-why_load", "-resident"]).expect("the resident lane serves");
+    assert!(o.resident && o.why_load, "the flag rides the lane");
 }
 
 #[test]
