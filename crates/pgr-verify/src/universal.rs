@@ -19,7 +19,7 @@
 use pgr_format::MachHeader64;
 use pgr_format::universal::parse_universal;
 
-use crate::{Code, Options, Report, verify};
+use crate::{CheckSet, Code, Options, Report, verify_with_checks};
 
 /// One slice's verdict: the table row it rode and the strict pass's
 /// report over its window.
@@ -55,7 +55,8 @@ impl UniversalReport {
 /// Verifies every slice of a universal ("fat") container (M71): the
 /// strict pass runs per declared slice, the table's rows are checked
 /// against the slices' own headers, and the verdicts ride in table
-/// order.
+/// order. The whole check surface runs — the M12 selector surface
+/// ([`verify_universal_with_checks`]) narrows it.
 ///
 /// # Errors
 /// The format reader's offset-tagged [`pgr_format::FormatError`] when the
@@ -66,6 +67,28 @@ pub fn verify_universal(
     bytes: &[u8],
     opts: &Options,
 ) -> Result<UniversalReport, pgr_format::FormatError> {
+    verify_universal_with_checks(bytes, opts, &CheckSet::all())
+}
+
+/// Verifies every slice of a universal ("fat") container over the named
+/// check families only (M74): the M71 container face composed with the
+/// M12 selector surface — one pass per declared slice over the selected
+/// families, the table-row/header agreement riding as the container's
+/// own contract (it is not one of the families, so a lying row refuses
+/// under any selection), and the verdicts in table order. A build gate
+/// auditing an SDK's fat dylibs prices a narrowed lane (`signature`
+/// only) without re-running the whole pass; the full set is
+/// [`verify_universal`].
+///
+/// # Errors
+/// The format reader's offset-tagged [`pgr_format::FormatError`] when the
+/// container is malformed — a malformed table is a refusal, not a
+/// report: the selection never excuses the decode.
+pub fn verify_universal_with_checks(
+    bytes: &[u8],
+    opts: &Options,
+    checks: &CheckSet,
+) -> Result<UniversalReport, pgr_format::FormatError> {
     let container = parse_universal(bytes)?;
     tracing::debug!(
         slices = container.arches.len(),
@@ -75,7 +98,7 @@ pub fn verify_universal(
     let mut slices = Vec::with_capacity(container.arches.len());
     for arch in &container.arches {
         let window = container.slice(bytes, arch)?;
-        let mut report = verify(window, opts);
+        let mut report = verify_with_checks(window, opts, checks);
         // The table's row and the window's own header must agree on the
         // arch they name — the driver links by the row, so a lie here
         // is the wrong slice's bytes linked under the right name.
