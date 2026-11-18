@@ -839,7 +839,7 @@ mod tests {
             indirect_syms: Vec::new(),
             fixups: FixupPlan {
                 payload: Vec::new(),
-                payload_off: 0,
+                chain_word_format: crate::fixups::FixupPointerFormat::Offset64,
                 slot_words: Vec::new(),
                 chain_starts: Vec::new(),
                 slot_count: 0,
