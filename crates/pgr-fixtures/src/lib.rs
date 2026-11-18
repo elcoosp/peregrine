@@ -23,19 +23,21 @@
 //! fill (xorshift64*). Building the same spec twice yields identical bytes —
 //! the determinism test asserts it.
 
+use pgr_format::FatArch;
 use pgr_format::consts::{
     CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, CS_ADHOC, CS_CODEDIRECTORY_VERSION_EXECSEG,
     CS_EXECSEG_MAIN_BINARY, CS_HASHTYPE_SHA256, CS_PAGE_SIZE_LOG2, CS_SHA256_LEN,
     CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE, CSSLOT_CODEDIRECTORY, DYLD_CHAINED_IMPORT,
     DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
-    DYLD_CHAINED_PTR_START_NONE, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE,
-    LC_DATA_IN_CODE, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_ENVIRONMENT, LC_DYLD_EXPORTS_TRIE,
-    LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN,
-    LC_SEGMENT_64, LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_BUNDLE,
-    MH_DYLDLINK, MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE,
-    MH_TWOLEVEL, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64,
-    PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD,
-    VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
+    DYLD_CHAINED_PTR_START_NONE, FAT_MAGIC, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION,
+    LC_CODE_SIGNATURE, LC_DATA_IN_CODE, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_ENVIRONMENT,
+    LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB,
+    LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA,
+    LC_SYMTAB, LC_UUID, MH_BUNDLE, MH_DYLDLINK, MH_DYLIB, MH_EXECUTE, MH_MAGIC_64,
+    MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT, N_PEXT, N_SECT, N_UNDF,
+    N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS,
+    SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ,
+    VM_PROT_WRITE,
 };
 use pgr_format::fixups::{
     Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
@@ -215,16 +217,9 @@ impl PointerFormatKind {
 }
 
 /// Anything the builder refuses to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
 pub struct BuildError(pub String);
-
-impl core::fmt::Display for BuildError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl core::error::Error for BuildError {}
 
 impl From<pgr_format::FormatError> for BuildError {
     fn from(e: pgr_format::FormatError) -> Self {
@@ -1930,6 +1925,65 @@ pub fn filler(seed: u64, len: usize) -> Vec<u8> {
         chunk.copy_from_slice(&b[..chunk.len()]);
     }
     v
+}
+
+/// Wraps slices into a `FAT_MAGIC` universal ("fat") container (M70):
+/// the big-endian header and slice table first, then each slice at its
+/// `2^12`-aligned offset — the page alignment real SDK containers use.
+/// The slices ride in list order (the decoder refuses a table that
+/// walks backwards), `cpusubtype` rides `CPU_SUBTYPE_ARM64_ALL`, and the
+/// same `(bytes, cputype)` list always yields the same bytes (the
+/// determinism contract every fixture carries).
+///
+/// The 64-bit width (`FAT_MAGIC_64`) is the decoder's job, not the
+/// builder's — the fixture containers the tests and benches need are
+/// all expressible at the classic width.
+///
+/// # Errors
+/// [`BuildError`] when a slice or window does not fit the classic
+/// width's 32-bit fields — a fixture-spec bug, not a runtime condition
+/// (TDD §2: "typed errors, never panic").
+pub fn universal_image(slices: &[(&[u8], u32)]) -> Result<Vec<u8>, BuildError> {
+    const ALIGN_LOG2: u32 = 12;
+    let align_mask = (1u64 << ALIGN_LOG2) - 1;
+    let mut offsets = Vec::with_capacity(slices.len());
+    let mut pos = 8u64
+        + u64::try_from(FatArch::ENTRY_SIZE * slices.len())
+            .map_err(|_| BuildError("the fat table does not fit u64".into()))?;
+    for (bytes, _) in slices {
+        let offset = (pos + align_mask) & !align_mask;
+        offsets.push(offset);
+        pos = offset
+            + u64::try_from(bytes.len())
+                .map_err(|_| BuildError("the slice does not fit u64".into()))?;
+    }
+    let mut v = Vec::with_capacity(usize::try_from(pos).unwrap_or(usize::MAX));
+    v.extend_from_slice(&FAT_MAGIC.to_be_bytes());
+    v.extend_from_slice(
+        &u32::try_from(slices.len())
+            .map_err(|_| BuildError("the fat table does not fit u32".into()))?
+            .to_be_bytes(),
+    );
+    for ((bytes, cputype), offset) in slices.iter().zip(&offsets) {
+        v.extend_from_slice(&cputype.to_be_bytes());
+        v.extend_from_slice(&CPU_SUBTYPE_ARM64_ALL.to_be_bytes());
+        // The classic width carries 32-bit offsets (the table the
+        // decoder's FAT_MAGIC branch reads).
+        let offset32 = u32::try_from(*offset)
+            .map_err(|_| BuildError("the slice offset does not fit the 32-bit width".into()))?;
+        v.extend_from_slice(&offset32.to_be_bytes());
+        let size32 = u32::try_from(bytes.len())
+            .map_err(|_| BuildError("the slice size does not fit the 32-bit width".into()))?;
+        v.extend_from_slice(&size32.to_be_bytes());
+        v.extend_from_slice(&ALIGN_LOG2.to_be_bytes());
+    }
+    for ((bytes, _), offset) in slices.iter().zip(&offsets) {
+        let target = usize::try_from(*offset)
+            .map_err(|_| BuildError("the slice offset does not fit usize".into()))?;
+        v.resize(target, 0);
+        v.extend_from_slice(bytes);
+    }
+    Ok(v)
 }
 
 /// Computes the SHA-256 page hashes over `file[0..sig_off]`, optionally
