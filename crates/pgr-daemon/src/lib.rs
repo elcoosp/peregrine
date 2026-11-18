@@ -160,8 +160,10 @@ mod tests {
         // the request's flag asks the session to verify its own output,
         // the reply's tail carries the effective report in the M13
         // interchange form (the `-no_adhoc` carve-out applied the
-        // audit's way).
-        assert_eq!(crate::PROTO_VERSION, 43);
+        // audit's way) — and v44 carries the verify gate's check
+        // selection (M77, `verify_checks`): the M12 selector the
+        // session's served pass narrows to rides beside the flag.
+        assert_eq!(crate::PROTO_VERSION, 44);
     }
 
     #[test]
@@ -180,6 +182,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
