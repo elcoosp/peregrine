@@ -2147,9 +2147,11 @@ pub fn layout(
             .collect();
         let plan = if !has_fixups {
             // No pointer slots at all: no fixup metadata of either kind.
+            // The plan still names the family the config asked for (M82:
+            // the record's single source for the word family).
             FixupPlan {
                 payload: Vec::new(),
-                payload_off: 0,
+                chain_word_format: cfg.chain_word_format,
                 slot_words: Vec::new(),
                 chain_starts: Vec::new(),
                 slot_count: 0,
@@ -2186,7 +2188,7 @@ pub fn layout(
             }
             FixupPlan {
                 payload: Vec::new(),
-                payload_off: 0,
+                chain_word_format: cfg.chain_word_format,
                 slot_words: Vec::new(),
                 chain_starts: Vec::new(),
                 slot_count: 0,
