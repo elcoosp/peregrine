@@ -183,11 +183,17 @@ pub struct Options {
     pub chain_word_format_explicit: bool,
     /// M11 `-order_file <path>`: the order file's path (read and ranked
     /// by the driver before Pass 3 — see [`pgr_core::order`]). `None`
-    /// (the default) packs the layout exactly as before.
+    /// (the default) packs the layout exactly as before. The resident
+    /// lane serves the table since M81 (wire v47 carries it in the
+    /// config tail) — the session's own walk ranks the entries the
+    /// client named, either lane, the same layout.
     pub order_file: Option<String>,
     /// M11 `-map <path>`: write the link map (the placed image's
     /// segments/sections/symbols, rendered by [`pgr_core::map`]) next to
-    /// the link. `None` (the default) writes no map.
+    /// the link. `None` (the default) writes no map. The resident lane
+    /// serves the document since M80 (wire v46) — the session's own walk
+    /// renders it, the client writes the file; the one-shot lane renders
+    /// its own (either lane, the same face).
     pub map_path: Option<String>,
     /// M56 `-why_export <symbol>` (repeatable): after a link, answer
     /// *why is this symbol exported?* — the definition the resolution
@@ -2929,8 +2935,11 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
         }
     }
     // M11: the map reports the placed image — the surfaces that do not
-    // produce one (an input object, the patch tiers' in-place plan, the
-    // daemon's wire) refuse the knob instead of dropping it.
+    // produce one (an input object, the patch tiers' in-place plan)
+    // refuse the knob instead of dropping it. M80: the resident lane
+    // serves the map (the session's own walk renders the placed image's
+    // report — wire v46 carries the document verbatim), so the only
+    // remaining refusals are the lanes that produce no segment layout.
     if opts.map_path.is_some() {
         if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
             return Err(OptsError::OrderFileConflict {
@@ -2948,34 +2957,23 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 fix: "drop -map or -incremental".into(),
             });
         }
-        if opts.resident {
-            return Err(OptsError::OrderFileConflict {
-                verdict: "the resident session links across the v6 wire and never returns the \
-                          layout the map reports"
-                    .into(),
-                fix: "drop -map or -resident".into(),
-            });
-        }
     }
     // M11: the order file must be appliable where it was requested — a
     // refusal, never a silently dropped knob (the surface's contract).
-    if opts.order_file.is_some() {
-        if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
-            return Err(OptsError::OrderFileConflict {
-                verdict: "-r writes an input object: sections merge at their declared \
-                         alignments and no segment layout exists to rank"
-                    .into(),
-                fix: "drop -order_file".into(),
-            });
-        }
-        if opts.resident {
-            return Err(OptsError::OrderFileConflict {
-                verdict: "the resident session's reuse gates replay the v6 wire config, \
-                          which does not carry the order-file rank table"
-                    .into(),
-                fix: "drop -resident or -order_file".into(),
-            });
-        }
+    // M81: the resident lane serves the rank table (wire v47 carries
+    // it in the config tail — a resident ordered link ranks the
+    // entries the client named, the ladder's replay beside the record
+    // included), so the only remaining refusal is the relocatable
+    // output's (no segment layout to rank).
+    if opts.order_file.is_some()
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::OrderFileConflict {
+            verdict: "-r writes an input object: sections merge at their declared \
+                     alignments and no segment layout exists to rank"
+                .into(),
+            fix: "drop -order_file".into(),
+        });
     }
     // M56: the provenance query reads the link's own Pass-2 product — a
     // refusal where the lane never carries it, never a silently
