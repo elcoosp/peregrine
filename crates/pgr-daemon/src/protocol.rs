@@ -49,12 +49,14 @@
 //! moves only the changed tiles across the wire.
 //!
 //! M10 rung 4 slice 2 (wire v6): the config body carries the chain word
-//! family (one byte — `FixupPointerFormat`). The driver refuses
-//! `-resident` + `arm64e` this slice (the session's reuse gates ride the
-//! Offset64 shapes), so every wire request still names `offset64` — the
-//! byte exists so the wire can never silently drop the family a client
-//! asked for, and a fusion rung can widen the surface without the
-//! config's shape moving again.
+//! family (one byte — `FixupPointerFormat`). Until M82 the driver refused
+//! `-resident` + `arm64e` (the session's reuse gates rode the Offset64
+//! shapes), so every wire request named `offset64` — the byte existed so
+//! the wire could never silently drop the family a client asked for.
+//! M82: the family is config, the session's warm pipeline plans it, the
+//! record carries it (v7), and the relink ladders admit through it —
+//! the same byte now carries the family a resident arm64e link names,
+//! no config shape moved.
 //!
 //! M14 (wire v7): the config body's export-filter lists carry
 //! [`SymbolPattern`]s, not bare names — one kind byte per entry (`0`
@@ -728,6 +730,31 @@ impl LinkRequest {
                  the full emit's layout",
             )));
         }
+        // M83: the relocatable shape's edges at the wire. The object
+        // walk serves the full link and the provenance queries (the
+        // object's Pass-2 product is the same arena the query reads);
+        // the replay faces have no object shape — a record, tiles, the
+        // audit, `-verify` or `-map` beside a relocatable config is a
+        // malformed request, never a silently widened one (the surface
+        // refuses the knobs beside `-r`, so the driver never asks; no
+        // wire caller can plan the shape either).
+        if config.filetype == OutputType::Relocatable {
+            let replay_face = record.is_some()
+                || prev_output.is_some()
+                || audit
+                || tiles
+                || verify
+                || map
+                || record_resolution;
+            if replay_face {
+                return Err(DecodeError::Malformed(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the request carries a replay face beside a relocatable output: \
+                     the object shape has no ladder — no record, no tiles, no audit, \
+                     no verify, no map beside -r",
+                )));
+            }
+        }
         r.done()?;
         Ok(Self {
             config,
@@ -1299,9 +1326,9 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
             OutputType::Execute => 0,
             OutputType::Dylib => 1,
             OutputType::Bundle => 2,
-            // Relocatable links never ride the daemon (the driver refuses
-            // `-r -resident` at parse time); the wire value is reserved so
-            // the encoding stays total.
+            // M83: the relocatable shape rides the daemon (until then the
+            // driver refused `-r -resident` at parse time and the wire
+            // value stayed reserved).
             OutputType::Relocatable => 3,
         },
     );
@@ -1673,6 +1700,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         0 => OutputType::Execute,
         1 => OutputType::Dylib,
         2 => OutputType::Bundle,
+        // M83: the relocatable shape rides the daemon — the session's
+        // walk runs the object path over the raw blobs and the reply
+        // carries the MH_OBJECT verbatim (the replay faces beside it
+        // refuse at the gates below).
+        3 => OutputType::Relocatable,
         _ => return Err(malformed()),
     };
     let entry_symbol = r.str()?;
@@ -2115,7 +2147,7 @@ mod tests {
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
-    use pgr_core::layout::LinkConfig;
+    use pgr_core::layout::{LinkConfig, OutputType};
     use pgr_core::observe::LinkObserver;
     use pgr_core::resolve::Dylib;
 
@@ -5233,5 +5265,80 @@ mod tests {
             text.contains("rank") && text.contains("_main"),
             "the refusal names the contradiction: {text}"
         );
+    }
+
+    // ---- M83: the relocatable shape rides the daemon -------------------
+
+    #[test]
+    fn the_relocatable_config_round_trips() {
+        // The M83 rung: the reserved wire value decodes now — the
+        // session's walk serves the object shape, and the codec is
+        // lossless over the config it carries.
+        let mut req = map_request();
+        req.map = false;
+        req.config.filetype = OutputType::Relocatable;
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        assert_eq!(
+            back.config.filetype,
+            OutputType::Relocatable,
+            "the relocatable output rides the wire"
+        );
+        assert_eq!(back.encode(), req.encode(), "the codec is lossless");
+    }
+
+    /// The replay faces a relocatable request cannot carry (the wire
+    /// gate's input, one setter per face).
+    fn face_record(req: &mut LinkRequest) {
+        req.record = Some(vec![1, 2, 3]);
+    }
+    fn face_prev_output(req: &mut LinkRequest) {
+        req.prev_output = Some([0u8; 32]);
+    }
+    fn face_audit(req: &mut LinkRequest) {
+        req.audit = true;
+    }
+    fn face_tiles(req: &mut LinkRequest) {
+        req.tiles = true;
+    }
+    fn face_verify(req: &mut LinkRequest) {
+        req.verify = true;
+    }
+    fn face_map(req: &mut LinkRequest) {
+        req.map = true;
+    }
+    fn face_capture(req: &mut LinkRequest) {
+        req.record_resolution = true;
+    }
+
+    #[test]
+    fn a_replay_face_beside_the_relocatable_output_refuses() {
+        // The object shape has no ladder: a record, tiles, the audit,
+        // `-verify` or `-map` beside a relocatable config is a malformed
+        // request, never a silently widened one (the surface refuses the
+        // knobs beside `-r`; no wire caller can plan the shape either).
+        let faces: [(fn(&mut LinkRequest), &str); 7] = [
+            (face_record, "record"),
+            (face_prev_output, "previous output"),
+            (face_audit, "audit"),
+            (face_tiles, "tiles"),
+            (face_verify, "verify"),
+            (face_map, "map"),
+            (face_capture, "capture"),
+        ];
+        for (face, name) in faces {
+            let mut req = map_request();
+            req.map = false;
+            req.config.filetype = OutputType::Relocatable;
+            face(&mut req);
+            let err = LinkRequest::decode(&req.encode()).unwrap_err();
+            let DecodeError::Malformed(e) = err else {
+                panic!("the {name} beside the relocatable output is malformed");
+            };
+            let text = e.to_string();
+            assert!(
+                text.contains("relocatable"),
+                "the refusal names the shape ({name}): {text}"
+            );
+        }
     }
 }
