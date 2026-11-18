@@ -158,8 +158,22 @@ pub struct Options {
     /// [`LinkOutcome::verify`](crate::LinkOutcome::verify). The relink
     /// ladder carries its own gate (`-incremental-verify`): the two
     /// refuse to compose, and `-r` (an object, not an image) refuses
-    /// the knob outright.
+    /// the knob outright. M76: beside `-resident` the flag serves —
+    /// the request asks the session for its own strict pass (v43) and
+    /// the client gates the write on the served verdict, one verifier
+    /// pass per resident link; a resident attempt that stands down
+    /// hands over to the one-shot link, whose own gate still runs.
     pub verify: bool,
+    /// M77 `-verify-checks <families>`: the M12 selector the link's own
+    /// verify gate narrows to — the same [`pgr_verify::CheckSet`] the
+    /// verifier CLI's `--checks` parses, the same subtractive contract
+    /// (fewer families against the same parsed image; the parse
+    /// pre-pass and the stats ride regardless). `None` names the full
+    /// pass, every pre-M77 link's shape. The selection only rides
+    /// beside `-verify` — a gate the selection narrows is the only
+    /// gate it means — and on the resident lane it crosses the wire
+    /// (v44) so the session's served pass narrows to the same families.
+    pub verify_checks: Option<pgr_verify::CheckSet>,
     /// M10 rung 4, slice 5: `-fixup_chains_format` was passed explicitly
     /// (either spelling). The default (`false`) keeps the documented
     /// below-floor fallback — the layout silently plans the classic
@@ -310,6 +324,7 @@ impl Default for Options {
             incremental: false,
             incremental_verify: false,
             verify: false,
+            verify_checks: None,
             chain_word_format_explicit: false,
             order_file: None,
             map_path: None,
@@ -565,6 +580,15 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-verify-checks` value the selector refuses (M77): the M12
+    /// selector's own error rides verbatim — the offending token and the
+    /// canonical family names — so the fix is one line away.
+    #[error("invalid value for -verify-checks: {0}")]
+    #[diagnostic(help(
+        "name the families the gate runs (comma-separated `--checks` tokens, \
+         the canonical names `pgr-verify --list-checks` prints)"
+    ))]
+    VerifyChecksValue(#[from] pgr_verify::CheckSetError),
     /// A `-stack_size` value the grammar refuses (M18): the reserve is
     /// a non-zero multiple of the 16 KiB arm64 page — the same
     /// validation the core seam pays — and the help names the grammar
@@ -1576,6 +1600,16 @@ fn apply_flag(
         // M73: the cold link's own gate — the strict pass on the
         // produced bytes before the write.
         "-verify" => opts.verify = true,
+        // M77: the verify gate's check selection — the M12 selector's
+        // canonical tokens, comma-separated. The parse names the
+        // offending token and the canonical spellings (the selector's
+        // own error, the fix not just the verdict); a selection without
+        // a gate refuses in `finish`'s conflict walk.
+        "-verify-checks" => {
+            let v = next_value(args, i, arg)?;
+            opts.verify_checks =
+                Some(pgr_verify::CheckSet::parse(&v).map_err(OptsError::VerifyChecksValue)?);
+        }
         "-all_load" => opts.all_load = true,
         "-force_load" => {
             let v = next_value(args, i, arg)?;
@@ -2095,6 +2129,21 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 verdict: "-verify and -incremental name two gates for one image".into(),
                 fix: "the relink ladder's gate is -incremental-verify (the §7.3 audit); \
                       use it, or drop -incremental for the cold link's gate"
+                    .into(),
+            });
+        }
+    }
+    // M77: a selection without a gate is dead weight — the families
+    // narrow the gate, never the link. The refusal names the gate the
+    // selection means (the selection itself, rendered in the selector's
+    // canonical order).
+    if let Some(set) = opts.verify_checks {
+        if !opts.verify {
+            return Err(OptsError::VerifyConflict {
+                verdict: format!("-verify-checks ({set}) names a selection but no gate to narrow"),
+                fix: "pass -verify (the strict pass the families narrow); the \
+                      selection rides beside the gate on the cold and resident \
+                      lanes alike"
                     .into(),
             });
         }
