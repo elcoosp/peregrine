@@ -152,9 +152,11 @@ cargo bench -p pgr-core --bench provenance
 cargo bench -p pgr-core --bench why_load
 cargo bench -p pgr-core --bench dep_info
 cargo bench -p pgr-driver --bench final_output
+cargo bench -p pgr-driver --bench verify_gate
 # daemon: the served tails' codec price
 cargo bench -p pgr-daemon --bench wire_time
 cargo bench -p pgr-daemon --bench wire_trace
+cargo bench -p pgr-daemon --bench wire_verify
 # verify
 cargo bench -p pgr-verify --bench platform
 cargo bench -p pgr-verify --bench arm64e
@@ -606,6 +608,14 @@ link's hot path", recorded honestly:**
   the ladder's note instant) — `encode_trace/6_rows` and `decode_trace/6_rows` (one length
   prefix, one string push; the JSON rides verbatim). The tail rides an IMAGE reply that
   carries pages, so the honest expectation is noise beside the transfer.
+- `wire_verify` (`cargo bench -p pgr-daemon --bench wire_verify`, M72): the served verdict's
+  wire-tail codec price over served-shape reports — `encode_report/clean` (the stats ride, no
+  issues) **102.2 ns**, `decode_report/clean` (the strict reader restores the report)
+  **386.8 ns**, `encode_report/refused` (a handful of issues ride the document) **946.6 ns**,
+  `decode_report/refused` **1.76 µs**, `encode_absent` (the unasked byte) **281 ps** (dev-sandbox
+  medians). The tail rides an IMAGE reply that carries pages, so the honest expectation is noise
+  beside the transfer; the document rides the M13 interchange form verbatim — the codec's own
+  price is the M13 writer and the strict reader, never a re-shape.
 - `dep_info` (`cargo bench -p pgr-core --bench dep_info`, M60): the dependency record's own price
   over records sized like real build-system links (8, 64 and 512 rows) — `render` (the version
   row plus one NUL-terminated row per entry) and `parse` (the strict reader's decode), linear in
@@ -717,6 +727,14 @@ The "30 CPU-days clean" gate formally closes on the rig.
 </details>
 
 <details><summary><b>Correctness-gate inventory behind the numbers</b></summary>
+
+- `verify_gate` (`cargo bench -p pgr-driver --bench verify_gate`, M73): the link's own gate
+  over a linked dylib — `dylib_16_objects/clean` **496.9 µs** (the strict pass on the produced
+  bytes, the signature recompute included), `corrupted` **471.3 µs** (the refusal path walks the
+  same checks and renders the same issue list), `no_adhoc` **470.3 µs** (the `-no_adhoc`
+  carve-out's filter — one retain over the issues) (dev-sandbox medians). The gate rides before
+  the write on the cold link, so the honest expectation is one verifier pass beside the write —
+  the same shape the verifier's own `checks` bench pins, composed at the driver.
 
 - **M4**: `m4_fused_driver_output_is_byte_identical_to_the_reference`, `m4_fused_matches_reference_on_m2_and_m3_corpora`, ten `pgr-emit/tests/m4_fused.rs` corpus shapes, bench-setup assertions.
 - **M5**: `m5_archive_member_is_pulled_and_the_output_verifies`, `m5_dead_strip_matches_the_reference_emit_and_determinism`, `m5_cstring_merge_dedups_across_inputs` (+ section-relative pointer gate), `m5_sectcreate_places_file_contents`.
