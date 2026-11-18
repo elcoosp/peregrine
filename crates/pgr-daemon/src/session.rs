@@ -79,6 +79,12 @@ pub enum SessionError {
     /// The M9 record/patch state failed (record capture, plan contract).
     #[error(transparent)]
     Patch(#[from] pgr_emit::incremental::PatchError),
+    /// A provenance query the link's own product refused (M79): the
+    /// vacuous decision — a name nothing interned — is the cold lane's
+    /// refusal, surfaced as the `ERROR` the client's one-shot fallback
+    /// reproduces (the same refusal either lane).
+    #[error(transparent)]
+    Provenance(#[from] pgr_core::provenance::ProvenanceError),
 }
 
 /// One cached POI frame: the encoded Pass 1 product plus its last-use
@@ -131,6 +137,13 @@ pub struct ServedLink {
     /// every outcome serves one — so a build system reads the gate's
     /// verdict without re-reading the file it is about to write.
     pub verify_report: Option<pgr_verify::Report>,
+    /// The served provenance answers (v45, M79): `Some` when the request
+    /// asked — the `-why_export` answers in flag order and the
+    /// `-why_load` report, rendered from the session's own Pass-2
+    /// product (the full link's walk; the ladder's replay serves none —
+    /// the fusion lane's request is refused at the wire). The renders
+    /// cross verbatim; the client prints the cold lane's face.
+    pub provenance: Option<crate::protocol::ServedProvenance>,
 }
 
 /// The verdict's effective shape (M72): the strict pass's report with
@@ -505,6 +518,15 @@ impl ResidentSession {
         } else {
             None
         };
+        // M79 (v45): the served provenance — the session's own Pass-2
+        // product (the warm pipeline *is* the one-shot shape: the walk
+        // ran, the arena, the resolution and the pull record are in
+        // memory) renders the answers the cold lane renders. A vacuous
+        // query refuses the link (the cold lane's own refusal — the
+        // `ERROR` reply is the client's fallback cue, the same refusal
+        // either lane); the index builds once per link, the queries read
+        // it.
+        let provenance = Self::serve_provenance(req, &result)?;
         Ok(ServedLink {
             image,
             entryoff,
@@ -516,7 +538,40 @@ impl ResidentSession {
             time_report,
             trace_json,
             verify_report,
+            provenance,
         })
+    }
+
+    /// The served provenance answers (M79): the request's queries over
+    /// the link's own Pass-2 product — one `-why_export` answer per name
+    /// in flag order (a vacuous query refuses with the misspelling
+    /// named), the `-why_load` report beside them when the flag asked.
+    /// `None` when the request asked nothing (the pre-M79 shape — an
+    /// unasked query crosses nothing).
+    fn serve_provenance(
+        req: &crate::protocol::LinkRequest,
+        result: &pgr_core::LinkResult,
+    ) -> Result<Option<crate::protocol::ServedProvenance>, SessionError> {
+        if req.why_export.is_empty() && !req.why_load {
+            return Ok(None);
+        }
+        let index = pgr_core::ReverseIndex::build_all(&result.objects);
+        let mut exports = Vec::with_capacity(req.why_export.len());
+        for name in &req.why_export {
+            let answer = pgr_core::explain_export(
+                &index,
+                &result.objects,
+                &result.resolution,
+                &result.interner,
+                name,
+            )?;
+            exports.push(crate::protocol::ServedExport {
+                name: name.clone(),
+                render: answer.render(),
+            });
+        }
+        let loads = req.why_load.then(|| result.loads.render());
+        Ok(Some(crate::protocol::ServedProvenance { exports, loads }))
     }
 
     /// Reports one ladder rung through the watching faces (M66): the same
@@ -724,6 +779,11 @@ impl ResidentSession {
                 time_report,
                 trace_json,
                 verify_report,
+                // M79: the ladder's replay serves no provenance (the
+                // fusion lane's request is refused at the wire — the
+                // replay's Pass-2 product is the record's, not the
+                // walk's).
+                provenance: None,
             });
         }
         let patch_started = std::time::Instant::now();
@@ -846,6 +906,7 @@ impl ResidentSession {
             time_report,
             trace_json,
             verify_report,
+            provenance: None,
         })
     }
 
@@ -981,6 +1042,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -1182,6 +1245,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1192,6 +1257,121 @@ mod tests {
         let image2 = session.link(&req).unwrap().image;
         assert_eq!(image1, image2);
         assert!(!image1.is_empty(), "image built");
+    }
+
+    #[test]
+    fn the_served_provenance_queries_ride_the_link() {
+        // v45 (M79): a query-asking request serves the answers the
+        // session's own Pass-2 product renders — the `-why_export`
+        // answer naming the resolution's winner and every reference
+        // site, the `-why_load` report naming the pulled member — and
+        // an unasked query rides nothing (the tail is one byte).
+        let hello = hello_main_only();
+        let greet = greet();
+        let mut archive = pgr_fixtures::ArchiveBuilder::new("libutil.a");
+        archive.add_member("greet.o", greet);
+        let archive_bytes = archive.build();
+        let req = LinkRequest {
+            config: LinkConfig {
+                ident: "session-provenance".into(),
+                ..LinkConfig::default()
+            },
+            force_load: Vec::new(),
+            inputs: vec![InputEntry {
+                name: "hello.o".into(),
+                hash: content_hash(&hello),
+            }],
+            archives: vec![ArchiveEntry {
+                name: "libutil.a".into(),
+                all_load: false,
+                hash: content_hash(&archive_bytes),
+            }],
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: vec!["_greet".to_string()],
+            why_load: true,
+        };
+        let mut session = ResidentSession::default();
+        session.store_blob(&content_hash(&hello), hello).unwrap();
+        session
+            .store_blob(&content_hash(&archive_bytes), archive_bytes)
+            .unwrap();
+        let served = session.link(&req).unwrap();
+        let prov = served
+            .provenance
+            .expect("the asked queries serve their answers");
+        assert_eq!(prov.exports.len(), 1, "one answer per query, in order");
+        assert_eq!(prov.exports[0].name, "_greet");
+        assert!(
+            prov.exports[0].render.contains("_greet") && prov.exports[0].render.contains("greet.o"),
+            "the answer names the definition and its file: {}",
+            prov.exports[0].render
+        );
+        let loads = prov.loads.expect("the asked load report serves");
+        assert!(
+            loads.contains("libutil.a") && loads.contains("greet.o"),
+            "the report names the pulled member: {loads}"
+        );
+        // An unasked query rides nothing (the pre-M79 shape).
+        let mut quiet = req.clone();
+        quiet.why_export.clear();
+        quiet.why_load = false;
+        let quiet_served = session.link(&quiet).unwrap();
+        assert!(quiet_served.provenance.is_none());
+    }
+
+    #[test]
+    fn a_vacuous_query_refuses_the_served_link() {
+        // The vacuous decision is the cold lane's own refusal (the
+        // misspelling named, never silently empty): the session errors,
+        // the reply is the TAG_ERROR the client's one-shot fallback
+        // reproduces — the same refusal either lane.
+        let hello = hello_main_only();
+        let greet = greet();
+        let req = LinkRequest {
+            config: LinkConfig {
+                ident: "session-provenance-miss".into(),
+                ..LinkConfig::default()
+            },
+            force_load: Vec::new(),
+            inputs: vec![
+                InputEntry {
+                    name: "hello.o".into(),
+                    hash: content_hash(&hello),
+                },
+                InputEntry {
+                    name: "greet.o".into(),
+                    hash: content_hash(&greet),
+                },
+            ],
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: vec!["_nope".to_string()],
+            why_load: false,
+        };
+        let mut session = ResidentSession::default();
+        session.store_blob(&content_hash(&hello), hello).unwrap();
+        session.store_blob(&content_hash(&greet), greet).unwrap();
+        let err = session.link(&req).unwrap_err();
+        assert!(
+            err.to_string().contains("_nope"),
+            "the refusal names the misspelling: {err}"
+        );
     }
 
     fn hello_main_only() -> Vec<u8> {
@@ -1353,6 +1533,8 @@ mod fusion_tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let hashes = req.blob_hashes();
         (req, hashes)
