@@ -64,5 +64,13 @@ harness = false
 name = "sarif"
 harness = false
 
+# The M71 universal-container bench: `verify_universal` over 1/2/4-slice
+# containers beside the single-image pass it wraps — one strict pass per
+# declared slice plus the table/header agreement check, linear in the
+# slices, nothing per byte.
+[[bench]]
+name = "universal"
+harness = false
+
 [lints]
 workspace = true
