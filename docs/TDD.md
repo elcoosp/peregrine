@@ -2160,3 +2160,98 @@ refusal), the wire round-trip/refusal gates (`protocol.rs`), the
 `wire_provenance` bench (the tail's encode/decode price beside the image
 pages it rides), and the `served_provenance_link` consumer example (the
 served face beside the vacuous refusal).
+
+---
+
+### 29 The resident lane's served map (M80)
+
+The M11 lane contract refused `-map` beside `-resident` because the product
+never crossed the wire — the surface's own verdict named the wire "never
+returning the layout the map reports" — and the session's warm pipeline *is*
+the walk (parse from resident POIs, intern, resolve, layout), so the layout
+and the interner the map renders from were in its memory the whole time. The
+M79 lesson applies: the driver never asked. M80 flips the refusal to
+service. Design decisions:
+
+1. **The map ask rides the request (v46).** The `-map` flag joins the
+   request; the unset flag is the pre-M80 shape, byte-identical on the
+   decode side. The session renders the placed image's report from its
+   own walk — [`pgr_core::map::build_link_map`], the same pure function
+   the cold lane's `-map` calls over the same layout and interner — so
+   the document cannot disagree with the bytes the reply carries (the
+   M11 "report and bytes cannot disagree" contract, kept at the wire).
+2. **The tail carries the document verbatim.** The M62 convention: the
+   wire never re-shapes the face the client writes, so it never
+   re-excuses it — one present byte, one length-prefixed string, the
+   absent byte when unasked. The driver writes the served bytes to the
+   `-map` path exactly as the cold lane writes its own render (the
+   daemon never touches the filesystem, the client does), and the
+   fallback hands over to the one-shot link, whose own render writes
+   the file — either lane, one walk, one document.
+3. **The lane contract stays honest at the edges.** A map beside the
+   `record` (the §7.3 ladder's replay — the fusion lane's request) is a
+   malformed request at the wire: the replay patches the recorded plan
+   in place, and the map reports the full emit's layout — a document
+   naming it would misreport the run. The fusion lane keeps refusing
+   (`-map × -incremental` refuses at the surface unchanged), and no
+   wire caller can plan the shape either. The relocatable lane keeps
+   its refusal (an input object has no segment layout to report).
+
+Supporting pieces: wire v46 (the request field, the codec, the map
+tail), the session's `serve_map` render (the full link's walk), the
+client decode and the driver's served write, the
+`m80_served_map.rs` gate matrix (the served face's byte parity, the
+fallback, the surface refusal kept, the unasked link writes no file),
+the wire round-trip/refusal gates (`protocol.rs`), the `wire_map` bench
+(the tail's encode/decode price beside the image pages it rides), and
+the `served_map_link` consumer example (the served face beside the
+fallback's parity gate).
+
+---
+
+### 30 The wire carries the order-file rank table (M81)
+
+The M11 lane contract refused `-order_file` beside `-resident` because the
+table never crossed the wire — the surface's own verdict named the wire
+config "not carrying the rank table" — and the table is config: the same
+`LinkConfig` field every other knob rides. The M80 lesson applies: the
+config crosses, the session's warm pipeline *is* the walk that consumes
+it. M81 flips the refusal to service. Design decisions:
+
+1. **The table rides the config tail (v47).** The rank table joins the
+   config tail after the renames — a present byte, then a
+   count-prefixed entry list (per entry the optional object scope, the
+   symbol, the diagnostics line); the empty absence is the pre-M81
+   shape, byte-identical on the decode side. The table's canonical form
+   is the entries in rank order, so the decode side rebuilds through
+   [`pgr_core::order::SymbolOrder::from_entries`] — the same refusals
+   the file parse carries (an empty list, two ranks for one symbol,
+   the lines named) refuse the request as malformed: the wire never
+   carries a table the pipeline would silently misread. The ladder's
+   replay beside the `record` rides the table the way the cold ladder
+   always has — the table is config, not a product, so no
+   malformed-beside-record edge exists.
+2. **The split rule is one named decision.** The parity gate caught the
+   drift it exists for: the Pass-1 atom-split decision (a rank table
+   feeds the split the same way dead-strip does, and rides the same
+   cache-key flag) was the cold lane's inline `||` — the session's
+   prepare read only the dead-strip half, so a warm ordered link parsed
+   a different atom shape than the cold one and planned different bytes.
+   [`pgr_core::link::split_symbols_for`] is the named rule both lanes
+   read now (one rule, no re-derivation drift), and the
+   `m81_resident_order` parity gate pins it: either lane, byte-identical
+   images, the ranked symbol leading `__text` in both.
+3. **The advisory stays lane-local.** The unmatched-name warning is the
+   cold lane's stderr face (the same shape the export-filter advisory
+   rides): the product is the bytes, and the bytes are what cross — the
+   warning never blocked a link, and the served lane's silence is the
+   existing resident shape, not a new gap.
+
+Supporting pieces: wire v47 (the config tail, the codec, the
+constructor-gated decode), the pgr-core seam (`SymbolOrder::from_entries`,
+`split_symbols_for`), the driver's flipped refusal (`opts.rs`, the
+usage text), the `m81_resident_order.rs` gate matrix (the served parity,
+the fallback, the cold advisory), the wire round-trip/garbage gates
+(`protocol.rs`), the `wire_order` bench (the config tail's price at the
+build-system scales), and the `ordered_resident_link` consumer example
+(the parity gate beside the placed order).
