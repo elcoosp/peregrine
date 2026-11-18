@@ -6,6 +6,51 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M83)
+
+- **M83** — the resident lane's relocatable shape: the M8 lane contract (`-r` named "no
+  resident shape") flips to service the M82 way: the session's raw blobs are the walk's
+  inputs, and the object path re-parses them (the POI cache is the segmented pipeline's
+  optimization, not a prerequisite). The wire value the config body reserved for the
+  relocatable filetype decodes now (an old server's refusal is the `ERROR` the client's
+  fallback speaks — honest degradation), the session's walk runs the object path over the
+  raw blobs (`pgr_core::link_reloc`, the cold lane's own entry — the observed variant when a
+  face asks, the report naming the object shape's own phases, the emit band absent) and
+  `pgr_emit::build_object_image` assembles the `MH_OBJECT` the reply carries verbatim, so
+  `-r -resident` plans the object the cold lane plans (byte-identical; the M10 two-step gate
+  relinks the served object into an executable), the provenance queries ride the object's
+  Pass-2 product (the same arena the cold lane's `-why_export` reads — `serve_provenance_from`
+  is the parts face both shapes share), the replay faces refuse at the wire and at the
+  session (no record, tiles, audit, `-verify` or `-map` beside a relocatable config — the
+  surface's knob refusals mirrored exactly), and a stand-down hands over to the one-shot
+  relocatable link, whose own walk produces the same bytes — either lane, one walk, one
+  object. The `resident` bench's reloc group pins the object shape's session cost beside the
+  one-shot's, and the `resident_reloc_link` example walks the parity gate beside the
+  two-step relink
+
+### Added (M82)
+
+- **M82** — the resident lane's arm64e chain words: the M10 rung-4 lane contract
+  (`-fixup_chains_format arm64e` rode Offset64 shapes beside `-resident` — the surface's own
+  verdict named the session's reuse gates "planning Offset64 shapes this slice, the v6 wire
+  mirrors the family") flips to service the M81 way: the family is config, and the config
+  crosses the wire — the v6 tail byte has mirrored it since M10, so no wire shape moves.
+  `pgr_core::fixups::FixupPlan::chain_word_format` is the seam (the plan names its own
+  encoding — one source, no re-derivation), the record carries it now (v7 — one byte;
+  v1–v6 records decode to `None` and re-record, the designed path; the codec is lossless
+  over the family), and `pgr_emit::incremental::LinkRecord::admits` is the named admission
+  both relink ladders read (the session's §7.3 ladder and the driver's in-process one): a
+  config naming a different family than the record's declines to the full link — which
+  re-plans the family the request named and re-records — never a patch across word shapes.
+  So `-resident -fixup_chains_format arm64e` links with the image the cold lane plans
+  (byte-identical; the payload declares the arm64e family, the strict pass walks the served
+  words), the fusion ladder patches arm64e records in place, and a family flip lands the
+  family the client asked for on either lane. The `resident` bench's arm64e group pins the
+  plan-side price beside the lane's own warm shape, and the `resident_arm64e_link` example
+  walks the parity gate beside the record's family and the flip's full link. Alongside: the
+  vestigial `FixupPlan::payload_off` field (always 0 since the `__LINKEDIT` plan owned the
+  authoritative offset; no reader anywhere) is dropped from the plan constructor surface
+
 ### Added (M81)
 
 - **M81** — the wire carries the order-file rank table: the M11 lane contract (`-order_file`
