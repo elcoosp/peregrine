@@ -11,6 +11,9 @@ publish = false
 [dependencies]
 pgr-format = { workspace = true }
 sha2 = { workspace = true }
+# The builder refusals ride the workspace's one error derive (the
+# `BuildError` Display/Error impls were the last hand-rolled pair).
+thiserror = { workspace = true }
 
 [lints]
 workspace = true
