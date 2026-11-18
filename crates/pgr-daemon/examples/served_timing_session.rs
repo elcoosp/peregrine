@@ -117,6 +117,7 @@ fn request(hello_bytes: &[u8], greet_bytes: &[u8], time: bool, trace: bool) -> L
         time,
         trace,
         verify: false,
+        verify_checks: None,
     }
 }
 
