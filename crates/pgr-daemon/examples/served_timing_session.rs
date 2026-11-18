@@ -116,6 +116,7 @@ fn request(hello_bytes: &[u8], greet_bytes: &[u8], time: bool, trace: bool) -> L
         tiles: false,
         time,
         trace,
+        verify: false,
     }
 }
 
