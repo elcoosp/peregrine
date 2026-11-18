@@ -13,10 +13,12 @@
 //!
 //! The report is a measurement, not a layout product: the row set and the
 //! columns are deterministic, the wall times are what the clock said. The
-//! emit and total bands are the caller's (`Some` when the caller measured
-//! them — the driver times the fused tile emit and the pipeline wall; a
-//! library consumer may leave them `None`) and render as `null` in the
-//! interchange when absent. The ladder's silent-correct rungs ride the
+//! emit and total bands are the library caller's (`Some` when the caller
+//! measured them — a consumer may leave them `None`) and render as `null`
+//! in the interchange when absent; the driver's emit half rides the seam
+//! itself since M68 (the `emit`/`flush` phase rows beside the pipeline's
+//! passes — the driver no longer fills the band), so the band face stays
+//! the library consumer's. The ladder's silent-correct rungs ride the
 //! report as [`crate::observe::LinkNote`] lines — the "silent-correct, not
 //! silent-blind" contract names its decisions, and a phase table that hid
 //! the resolve-reuse fallback would misread the resolve row's price.
@@ -82,10 +84,13 @@ impl TimeCollector {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TimeReport {
     /// The phase rows, in link order (the M54 seam's own order — one
-    /// event per phase, seven per segmented link).
+    /// event per phase; the M68 emit half rides the rows on the image
+    /// path: nine per one-shot segmented link).
     pub phases: Vec<PhaseEvent>,
-    /// The emit band (Passes 4–5, the fused tile emit) — the caller's
-    /// measurement, `None` when unmeasured.
+    /// The emit band (Passes 4–5, the fused tile emit) — the library
+    /// caller's measurement, `None` when unmeasured (the driver's emit
+    /// half rides the `emit`/`flush` phase rows since M68, the band stays
+    /// the library consumer's).
     pub emit: Option<Duration>,
     /// The pipeline's total wall — the caller's measurement, `None`
     /// when unmeasured.
@@ -120,6 +125,8 @@ fn detail_text(detail: &PhaseDetail) -> String {
         PhaseDetail::Plan { tiles, dirty } => format!("tiles={tiles}, dirty={dirty}"),
         PhaseDetail::Patch { bytes, tiles } => format!("bytes={bytes}, tiles={tiles}"),
         PhaseDetail::Audit { healed, issues } => format!("healed={healed}, issues={issues}"),
+        PhaseDetail::Emitted { tiles, bytes } => format!("tiles={tiles}, bytes={bytes}"),
+        PhaseDetail::Flushed { blocks, writers } => format!("blocks={blocks}, writers={writers}"),
     }
 }
 
@@ -284,6 +291,12 @@ pub(crate) fn detail_json(detail: &PhaseDetail) -> String {
         }
         PhaseDetail::Audit { healed, issues } => {
             format!("{{\"kind\":\"audit\",\"healed\":{healed},\"issues\":{issues}}}")
+        }
+        PhaseDetail::Emitted { tiles, bytes } => {
+            format!("{{\"kind\":\"emitted\",\"tiles\":{tiles},\"bytes\":{bytes}}}")
+        }
+        PhaseDetail::Flushed { blocks, writers } => {
+            format!("{{\"kind\":\"flushed\",\"blocks\":{blocks},\"writers\":{writers}}}")
         }
     }
 }
