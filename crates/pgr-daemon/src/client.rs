@@ -109,6 +109,14 @@ pub struct ResidentImage {
     /// on the fallback path (the one-shot link prints the cold lane's
     /// answers itself).
     pub provenance: Option<crate::protocol::ServedProvenance>,
+    /// The served link map (v46, M80): `Some` when the request asked —
+    /// the session's own walk rendered the placed image's report, the
+    /// document the driver writes to the `-map` path verbatim (the
+    /// M62 convention; the daemon never touches the filesystem, the
+    /// client writes the file). `None` when unasked (the tail rode
+    /// absent) or on the fallback path (the one-shot link writes the
+    /// cold lane's map itself).
+    pub map_text: Option<String>,
     /// How the image tail crossed (v5): [`Transport::Full`] or the tile
     /// summary (what the benches and the driver's outcome line record).
     pub transport: Transport,
@@ -211,6 +219,7 @@ impl LinkJob {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         Self { request, blobs }
     }
@@ -430,6 +439,11 @@ impl DaemonClient {
                     // ride verbatim — a nameless answer refuses the
                     // reply, like every malformed tail).
                     let provenance = crate::protocol::decode_provenance(&mut r)?;
+                    // The v46 tail: the served link map when the request
+                    // asked, absent otherwise (the document rides
+                    // verbatim — the client writes the `-map` file's
+                    // bytes exactly as the reply carried them).
+                    let map_text = crate::protocol::decode_map(&mut r)?;
                     r.done()?;
                     return Ok(ResidentImage {
                         image,
@@ -445,6 +459,7 @@ impl DaemonClient {
                         trace_json,
                         verify_report,
                         provenance,
+                        map_text,
                         transport,
                     });
                 }
