@@ -57,3 +57,13 @@ harness = false
 [[bench]]
 name = "final_output"
 harness = false
+
+# The M73 verify-gate bench: the link's own gate over a linked dylib —
+# the strict pass on the produced bytes (clean, corrupted and -no_adhoc
+# subjects). Registered explicitly — the M34/M61 pathology
+# (auto-discovery compiles the bench under the libtest harness, whose
+# generated main shadows the criterion one, so it "passes" and measures
+# nothing), healed here like the entries before it.
+[[bench]]
+name = "verify_gate"
+harness = false
