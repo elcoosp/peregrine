@@ -165,8 +165,15 @@ mod tests {
         // session's served pass narrows to rides beside the flag — and
         // v45 carries the provenance queries (M79, `why_export`/
         // `why_load`): the session's own full walk renders the answers,
-        // the tail carries the renders verbatim.
-        assert_eq!(crate::PROTO_VERSION, 45);
+        // the tail carries the renders verbatim — v46 carries the
+        // link-map ask (M80, `map`): the session's own walk renders the
+        // placed image's report, the tail carries the document verbatim
+        // (the client writes the file; the map beside the `record`
+        // refuses at the wire, the replay is not the walk) — and v47
+        // carries the order-file rank table (M81, the config tail): a
+        // resident ordered link ranks the entries the client named, a
+        // table the constructor refuses is a malformed request.
+        assert_eq!(crate::PROTO_VERSION, 47);
     }
 
     #[test]
@@ -188,6 +195,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
