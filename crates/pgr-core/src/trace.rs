@@ -16,15 +16,18 @@
 //! Each event arrives on the thread the pipeline runs the seam on; the
 //! collector keeps one lane per distinct arrival thread (first-arrival
 //! order — the lane ids are the collector's own registry, never
-//! `std::thread` internals), and the registry names its lanes (M64):
-//! the pipeline's thread rides `pgr link`, the pool's workers `pgr
-//! parse pool N` — the labels the `thread_name` metadata carries and
-//! the §9.4 viewer reads. The one-shot pipeline renders the pipeline's
-//! own lane plus the M63 worker lanes: the parse pool's per-input parses
-//! ride the seam as [`crate::observe::TaskEvent`]s, each carrying the
-//! thread that ran it and its own arrival clock, and the collector keeps
-//! them as [`TraceTask`] spans on the workers' lanes — the per-thread
-//! face the §9.4 toolbox reads stragglers and idle gaps from. A span's
+//! `std::thread` internals), and the registry names its lanes (M64,
+//! family-aware since M78): the pipeline's thread rides `pgr link`, the
+//! pools' workers the prefix the pool that fed them names — the parse
+//! pool's `pgr parse pool N` (M63), the flush pool's `pgr write pool N`
+//! (M78) — the labels the `thread_name` metadata carries and the §9.4
+//! viewer reads. The one-shot pipeline renders the pipeline's own lane
+//! plus the worker lanes: the parse pool's per-input parses (M63) and
+//! the flush pool's per-writer writes (M78) ride the seam as
+//! [`crate::observe::TaskEvent`]s, each carrying the thread that ran it
+//! and its own arrival clock, and the collector keeps them as
+//! [`TraceTask`] spans on the workers' lanes — the per-thread face the
+//! §9.4 toolbox reads stragglers and idle gaps from. A span's
 //! start is the arrival clock minus the event's own wall (the seam
 //! delivers the completion; the reconstruction is one emit-call behind
 //! the clock — documented, and saturating rather than negative). The gaps
@@ -59,6 +62,13 @@ const LANE_NAME: &str = "pgr link";
 /// `pgr parse pool 1`, `pgr parse pool 2`, … — the §9.4 viewer reads the
 /// workers beside the pipeline's `pgr link` lane.
 const LANE_WORKER_PREFIX: &str = "pgr parse pool ";
+
+/// The write pool's lane names' prefix (M78): the flush pool's workers
+/// carry `pgr write pool 1`, `pgr write pool 2`, … — the M64 registry's
+/// one label stopped being the truth when the task seam grew its second
+/// pool, and a viewer could not tell the parse workers from the write
+/// workers.
+const LANE_WRITE_PREFIX: &str = "pgr write pool ";
 
 /// The note's stable token — the `name` the instant event carries and
 /// the reader restores. The acceptance set mirrors the collector's
@@ -262,27 +272,54 @@ impl TraceCollector {
     /// by `ts`, and the reader restores the document exactly, so the
     /// tasks land ts-ordered here (stable on the ties) and the round
     /// trip holds (gated in `tests/m63_task_spans.rs`). The lanes are
-    /// the named registry (M64): the pipeline's thread rides `pgr link`,
-    /// the pool's workers `pgr parse pool N` (1-based, registration
-    /// order among the workers); a feed with no phase or note events
-    /// names every lane a worker lane.
+    /// the named registry (M64, family-aware since M78): the pipeline's
+    /// thread rides `pgr link`, the pool's workers the prefix the pool
+    /// that fed them names — the parse pool's `pgr parse pool N` (M63),
+    /// the flush pool's `pgr write pool N` (M78) — each family numbered
+    /// 1-based in registration order among its own lanes; a feed with no
+    /// phase or note events names every lane a worker lane (the M64
+    /// rule), a lane no task fed keeps the parse pool's name (the M64
+    /// shape no in-tree pipeline produces).
     #[must_use]
     pub fn finish(mut self) -> TraceReport {
+        // The pool that fed each lane: the first task the lane carried
+        // names its family (a lane is one thread's work — the tree's
+        // pools never share one thread).
+        let mut families: Vec<Option<Phase>> = vec![None; self.lanes.len()];
+        for task in &self.tasks {
+            let idx = usize::try_from(task.lane - 1).unwrap_or(usize::MAX);
+            if let Some(slot) = families.get_mut(idx) {
+                if slot.is_none() {
+                    *slot = Some(task.phase);
+                }
+            }
+        }
         let mut lanes = Vec::with_capacity(self.lanes.len());
-        let mut worker = 0usize;
+        let mut parse_workers = 0usize;
+        let mut write_workers = 0usize;
         for (i, thread) in self.lanes.iter().enumerate() {
+            let id = u64::try_from(i + 1).unwrap_or(u64::MAX);
             if self.pipeline == Some(*thread) {
                 lanes.push(TraceLane {
-                    id: u64::try_from(i + 1).unwrap_or(u64::MAX),
+                    id,
                     name: LANE_NAME.to_string(),
                 });
-            } else {
-                worker += 1;
-                lanes.push(TraceLane {
-                    id: u64::try_from(i + 1).unwrap_or(u64::MAX),
-                    name: format!("{LANE_WORKER_PREFIX}{worker}"),
-                });
+                continue;
             }
+            // The family the lane's first task named (the prefix's own
+            // match — the tree's pools are the parse pool's and the
+            // flush pool's; a caller-fed task naming any other phase
+            // rides the parse pool's prefix, the M64 registry's name
+            // for worker lanes the tree's pools did not feed).
+            let (prefix, count) = match families[i].unwrap_or(Phase::Parse) {
+                Phase::Flush => (LANE_WRITE_PREFIX, &mut write_workers),
+                _ => (LANE_WORKER_PREFIX, &mut parse_workers),
+            };
+            *count += 1;
+            lanes.push(TraceLane {
+                id,
+                name: format!("{prefix}{count}"),
+            });
         }
         self.tasks.sort_by_key(|t| t.start_us);
         TraceReport {
