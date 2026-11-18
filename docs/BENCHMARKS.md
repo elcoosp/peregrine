@@ -164,6 +164,7 @@ cargo bench -p pgr-verify --bench checks
 cargo bench -p pgr-verify --bench baseline
 cargo bench -p pgr-verify --bench sarif
 cargo bench -p pgr-verify --bench universal
+cargo bench -p pgr-verify --bench universal_checks
 # the randomized edit gate (CI subsets: 80 engine / 24 driver steps)
 PGR_RANDOMIZED_STEPS=2000 cargo test -p pgr-emit --release --test incremental -- randomized
 ```
@@ -644,6 +645,13 @@ link's hot path", recorded honestly:**
   single-image pass it wraps — `single_image` **10.5 µs**, `verify/1` **10.5 µs** (the container
   adds nothing per byte), `verify/2` **21.2 µs**, `verify/4` **42.4 µs** — one strict pass per
   declared slice plus the table-row/header agreement check, linear in the slices.
+- `universal_checks` (`cargo bench -p pgr-verify --bench universal_checks`, M74): the selected
+  container face beside the full pass it wraps (the M12 selector surface composed over the M71
+  face) — `full/2` **21.0 µs**, `signature/2` **20.1 µs**, `full/4` **42.0 µs**, `signature/4`
+  **40.2 µs** (dev-sandbox medians) — the signature-only lane under the full pass, both linear
+  in the slices: the page-hash recompute dominates either lane, and the selection's saving is
+  the skipped segment/fixup walks (the honest expectation the M12 `checks` bench pins, composed
+  over the slices).
 
 ## Pending measurements
 
