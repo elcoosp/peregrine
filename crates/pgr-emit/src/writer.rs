@@ -33,6 +33,56 @@ const BLOCK: usize = 8 << 20;
 /// [`EmitError::Io`] on any filesystem failure; no partial output is left
 /// behind (the temp file is removed on failure).
 pub fn write_image(buf: &[u8], path: &Path) -> Result<(), EmitError> {
+    write_image_inner(buf, path, None)
+}
+
+/// [`write_image`] under an observer (M68): the same atomic write — the
+/// parity gate is the seam's own contract, `tests/emit_observed.rs` — with
+/// Pass 5's completion reported as the `flush` phase (the M68 emit half of
+/// the M54 observation seam: the 8 MiB blocks the file split into and the
+/// writer threads that carried them, the single-writer path included). One
+/// event per write — the completion; a refused write reports nothing (the
+/// phase did not complete). The zero-config consumer installs
+/// [`pgr_core::TracingObserver`].
+///
+/// # Errors
+/// [`EmitError::Io`] on any filesystem failure; no partial output is left
+/// behind (the temp file is removed on failure).
+pub fn write_image_observed(
+    buf: &[u8],
+    path: &Path,
+    observer: &mut dyn pgr_core::LinkObserver,
+) -> Result<(), EmitError> {
+    write_image_inner(buf, path, Some(observer))
+}
+
+/// The flush body both entries share; `observer` carries the M68 phase
+/// report (`None` = the unobserved write, the shape every pre-M68 caller
+/// keeps).
+fn write_image_inner(
+    buf: &[u8],
+    path: &Path,
+    observer: Option<&mut dyn pgr_core::LinkObserver>,
+) -> Result<(), EmitError> {
+    let blocks = buf.len().div_ceil(BLOCK);
+    let started = std::time::Instant::now();
+    write_image_body(buf, path)?;
+    if let Some(observer) = observer {
+        observer.on_phase(pgr_core::PhaseEvent {
+            phase: pgr_core::Phase::Flush,
+            detail: pgr_core::PhaseDetail::Flushed {
+                blocks,
+                writers: WRITERS.min(blocks).max(1),
+            },
+            elapsed: started.elapsed(),
+        });
+    }
+    Ok(())
+}
+
+/// The atomic write itself (the M4 writer pool over the preallocated
+/// sibling temp file, fsync, rename).
+fn write_image_body(buf: &[u8], path: &Path) -> Result<(), EmitError> {
     let tmp_path = path.with_extension("pgr.tmp");
     // A fresh vnode avoids stale-signature state on macOS hosts (§8.3).
     let mut file = std::fs::File::create(&tmp_path).map_err(|e| EmitError::Io {
