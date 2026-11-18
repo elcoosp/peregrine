@@ -486,6 +486,7 @@ version = "0.22.0"
 dependencies = [
  "pgr-format",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
