@@ -76,6 +76,122 @@ pub struct LinkOutcome {
     /// tile summary is the §7.2 rung's honest record; `None` on every
     /// non-resident path).
     pub transport: Option<pgr_daemon::Transport>,
+    /// M73: the link's own verify gate (`-verify`): the strict pass's
+    /// summary on the produced bytes — `Some` when the flag ran. The gate
+    /// sits before the write, so an outcome with a failing gate never
+    /// exists (the driver refused instead, `DriverError::Verify`);
+    /// `None` on every path the gate does not ride (no flag, the `-r`
+    /// object, the relink ladder's own audit).
+    pub verify: Option<VerifySummary>,
+}
+
+/// The verify gate's summary (M73): the strict pass's verdict on the
+/// produced bytes, the shape the outcome line and a build system read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifySummary {
+    /// The strict pass found nothing (no error- and no warning-severity
+    /// issue — the strict contract: `is_ok` under
+    /// `strict_warnings`). The gate refuses otherwise, before the write.
+    pub ok: bool,
+    /// Error-severity issues the pass named (zero when `ok`).
+    pub errors: usize,
+    /// Warning-severity issues the pass named (zero when `ok` — the
+    /// strict gate counts them as blocking).
+    pub warnings: usize,
+}
+
+/// The gate's full face (M73): the summary plus every issue the strict
+/// pass named, in the verifier's own words — the refusal's body.
+#[derive(Debug, Clone)]
+pub struct VerifyGate {
+    /// The verdict's summary (what `LinkOutcome::verify` carries).
+    pub summary: VerifySummary,
+    /// Every issue, rendered (`{:?} [code] message` — the audit's
+    /// shape).
+    pub issues: Vec<String>,
+}
+
+impl VerifyGate {
+    /// The refusal (the fix, not just the verdict): the miette-rendered
+    /// error the driver maps onto [`DriverError::Verify`].
+    #[must_use]
+    pub fn refusal(&self) -> VerifyRefusal {
+        VerifyRefusal {
+            issues: self.issues.clone(),
+        }
+    }
+}
+
+/// A refused-to-ship image: the link's own verify gate named issues on
+/// the produced bytes. The driver renders this (miette help-text) and
+/// exits — and because the gate sits before the write, the output file
+/// is never created.
+#[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)]
+#[error(
+    "the image failed the link's verify gate ({} issue(s)):\n{}",
+    .issues.len(),
+    .issues.join("\n")
+)]
+#[diagnostic(help(
+    "a failing gate ships nothing: the verifier's own words above name \
+     each finding — re-run the link after fixing the input, or inspect \
+     the image with pgr-verify --json for the machine-readable report"
+))]
+pub struct VerifyRefusal {
+    /// The issues, in the verifier's own words.
+    pub issues: Vec<String>,
+}
+
+impl VerifyRefusal {
+    /// Renders the refusal with its help text (multi-line, no backtrace
+    /// noise) — the string the driver prints (the audit's convention).
+    #[must_use]
+    pub fn render(&self) -> String {
+        let report = miette::Report::new(self.clone());
+        format!("{report:?}")
+    }
+}
+
+/// The link's own gate (M73): the strict verifier on the produced bytes,
+/// the `-no_adhoc` carve-out applied the audit's way (the
+/// missing-signature shape is the config's own choice, never a defect
+/// the gate names), one `tracing` span (inert until a subscriber
+/// installs — the workspace convention). The driver runs it before the
+/// write; library callers can run it on any bytes — the corrupted-twin
+/// gate is the same face.
+#[must_use]
+pub fn verify_gate(bytes: &[u8], signature_expected: bool) -> VerifyGate {
+    let span = tracing::info_span!("verify_gate", len = bytes.len(), signature_expected);
+    let _entered = span.enter();
+    let opts = pgr_verify::Options {
+        strict_warnings: true,
+        skip_hash_recompute: false,
+    };
+    let mut report = pgr_verify::verify(bytes, &opts);
+    report.issues.retain(|issue| match issue.severity {
+        pgr_verify::Severity::Error => {
+            issue.code != pgr_verify::Code::SignatureLayout || signature_expected
+        }
+        pgr_verify::Severity::Warning => true,
+    });
+    let errors = report
+        .issues
+        .iter()
+        .filter(|i| i.severity == pgr_verify::Severity::Error)
+        .count();
+    let warnings = report.issues.len() - errors;
+    let issues = report
+        .issues
+        .iter()
+        .map(|i| format!("{:?} [{}] {}", i.severity, i.code.as_str(), i.message))
+        .collect();
+    let summary = VerifySummary {
+        ok: errors == 0 && warnings == 0,
+        errors,
+        warnings,
+    };
+    tracing::debug!(ok = summary.ok, "the driver's verify gate finished");
+    VerifyGate { summary, issues }
 }
 
 /// A driver failure: options, I/O, or link errors.
@@ -145,6 +261,17 @@ pub enum DriverError {
     #[error("{path}: {detail}")]
     Audit {
         /// The output path the audit gates.
+        path: String,
+        /// The rendered refusal (issue list + miette help text).
+        detail: String,
+    },
+    /// M73 `-verify` refused to ship the image: the link's own gate ran
+    /// the strict verifier on the produced bytes and named issues — the
+    /// miette-rendered refusal, help text included. The output file is
+    /// untouched when this fires: the gate sits before the write.
+    #[error("{path}: {detail}")]
+    Verify {
+        /// The output path the gate gates.
         path: String,
         /// The rendered refusal (issue list + miette help text).
         detail: String,
@@ -1669,6 +1796,22 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     } else {
         link_to_image_recorded(opts, handover_note.as_ref())?
     };
+    // M73: the link's own gate. `-verify` runs the strict verifier on
+    // the produced bytes before the write — a failing gate ships
+    // nothing (the file is never created; the audit's rule, on the cold
+    // path), and a passing one rides the outcome's summary.
+    let gate_summary = if opts.verify {
+        let gate = verify_gate(&linked.image, opts.config.adhoc);
+        if !gate.summary.ok {
+            return Err(DriverError::Verify {
+                path: opts.output.clone(),
+                detail: gate.refusal().render(),
+            });
+        }
+        Some(gate.summary)
+    } else {
+        None
+    };
     // M68: the flush (Pass 5, the pooled atomic write) joins the same
     // collection before the faces build — the report's rows stay in link
     // order through the emit half, the total band measuring the wall
@@ -1727,6 +1870,7 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
         patch: None,
         audit: None,
         transport: None,
+        verify: gate_summary,
     })
 }
 
@@ -1835,6 +1979,7 @@ fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
         patch: None,
         audit: None,
         transport: None,
+        verify: None,
     })
 }
 
@@ -2072,6 +2217,7 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
         patch: served.patch,
         audit: served.audit.map(|a| a.summary()),
         transport: Some(served.transport),
+        verify: None,
     })
 }
 
@@ -2237,6 +2383,7 @@ fn incremental_relink(
             }),
             audit: None,
             transport: None,
+            verify: None,
         });
     }
     let patch_started = std::time::Instant::now();
@@ -2349,6 +2496,7 @@ fn incremental_relink(
         patch: Some(outcome),
         audit: audit_summary,
         transport: None,
+        verify: None,
     })
 }
 
@@ -2546,6 +2694,13 @@ pub fn usage() -> String {
     s.push_str("                               -resident; in-process else) and\n");
     s.push_str("                               run the strict verifier on the\n");
     s.push_str("                               patched bytes\n");
+    s.push_str("  -verify                      after the pipeline produces the\n");
+    s.push_str("                               image, run the strict verifier on\n");
+    s.push_str("                               the produced bytes and refuse to\n");
+    s.push_str("                               ship a failing verdict (the gate\n");
+    s.push_str("                               sits before the write; the relink\n");
+    s.push_str("                               ladder's gate is\n");
+    s.push_str("                               -incremental-verify)\n");
     s.push_str("  -resident                    route the link through the resident\n");
     s.push_str("                               daemon (pgrd); falls back to the\n");
     s.push_str("                               one-shot link when unreachable\n");
