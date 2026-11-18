@@ -104,7 +104,7 @@ pub use layout::{
 pub use link::{
     LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, RelocLink,
     check_load_symbols, link, link_cached, link_from_objects, link_from_objects_observed,
-    link_observed, link_reloc, link_reloc_observed, link_with,
+    link_observed, link_reloc, link_reloc_observed, link_with, split_symbols_for,
 };
 pub use make_undefined::{MakeUndefined, MakeUndefinedError, MakeUndefinedName};
 pub use map::MapJsonError;
