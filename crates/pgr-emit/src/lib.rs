@@ -14,6 +14,13 @@
 //!   disjoint `par_chunks_mut` slices, and the M4 writer pool uses
 //!   position-independent `pwrite` (`FileExt::write_at`) — the workspace
 //!   `unsafe_code = "forbid"` gate stays intact.
+//!
+//! The M68 emit half rides the M54 observation seam: the two Pass-4/Pass-5
+//! completions are reportable phases (`build_image_fused_observed`,
+//! `write_image_observed` — the `emit`/`flush` vocabulary the driver's
+//! `--time`/`--trace` faces collect beside the pipeline's passes). The
+//! unobserved entries stay the default: observing never moves a byte (the
+//! parity gate lives in `tests/emit_observed.rs`).
 
 pub mod emit;
 pub mod incremental;
@@ -31,8 +38,8 @@ pub use incremental::{
 };
 pub use object::{ObjectRelocRefusal, build_object_image};
 pub use signature::{build_superblob, derive_uuid, page_hashes};
-pub use tile::{build_image_fused, build_image_fused_into};
-pub use writer::write_image;
+pub use tile::{build_image_fused, build_image_fused_into, build_image_fused_observed};
+pub use writer::{write_image, write_image_observed};
 
 /// A Pass 4/5 failure.
 #[derive(Debug, thiserror::Error)]
