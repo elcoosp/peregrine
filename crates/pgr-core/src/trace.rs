@@ -77,9 +77,10 @@ const RELINK_FALLBACK: &str = "relink_fallback";
 const NOTE_KINDS: [&str; 2] = [RESOLVE_REUSE_FALLBACK, RELINK_FALLBACK];
 
 /// The phase tokens the reader accepts, in link order (the mirror of
-/// [`Phase::as_str`] — the writer's name set; the M65 rung tokens ride
-/// beside the pipeline's passes, in the seam's declaration order).
-const PHASES: [Phase; 12] = [
+/// [`Phase::as_str`] — the writer's name set; the M65 rung tokens and the
+/// M68 emit half ride beside the pipeline's passes, in the seam's
+/// declaration order).
+const PHASES: [Phase; 14] = [
     Phase::Parse,
     Phase::ArchivePull,
     Phase::Intern,
@@ -92,6 +93,8 @@ const PHASES: [Phase; 12] = [
     Phase::RelinkPlan,
     Phase::RelinkPatch,
     Phase::RelinkAudit,
+    Phase::Emit,
+    Phase::Flush,
 ];
 
 /// The phase a timeline row's name restores (the token → phase lookup).
@@ -931,6 +934,8 @@ impl TraceJsonReader<'_> {
         let mut tiles: Option<u64> = None;
         let mut dirty: Option<u64> = None;
         let mut bytes: Option<u64> = None;
+        let mut blocks: Option<u64> = None;
+        let mut writers: Option<u64> = None;
         let mut healed: Option<bool> = None;
         let mut issues: Option<u64> = None;
         let mut first = true;
@@ -952,6 +957,8 @@ impl TraceJsonReader<'_> {
                 "tiles" => Self::set(&mut tiles, "tiles", self.u64_field("tiles")?)?,
                 "dirty" => Self::set(&mut dirty, "dirty", self.u64_field("dirty")?)?,
                 "bytes" => Self::set(&mut bytes, "bytes", self.u64_field("bytes")?)?,
+                "blocks" => Self::set(&mut blocks, "blocks", self.u64_field("blocks")?)?,
+                "writers" => Self::set(&mut writers, "writers", self.u64_field("writers")?)?,
                 "healed" => Self::set(&mut healed, "healed", self.bool_field("healed")?)?,
                 "issues" => Self::set(&mut issues, "issues", self.u64_field("issues")?)?,
                 other => return Self::field(other, "unknown key in the trace args"),
@@ -974,6 +981,8 @@ impl TraceJsonReader<'_> {
                     || tiles.is_some()
                     || dirty.is_some()
                     || bytes.is_some()
+                    || blocks.is_some()
+                    || writers.is_some()
                     || healed.is_some()
                     || issues.is_some()
                 {
@@ -1028,6 +1037,15 @@ impl TraceJsonReader<'_> {
                 "audit" => PhaseDetail::Audit {
                     healed: Self::require(healed, "healed")?,
                     issues: usize::try_from(Self::require(issues, "issues")?).unwrap_or(usize::MAX),
+                },
+                "emitted" => PhaseDetail::Emitted {
+                    tiles: usize::try_from(Self::require(tiles, "tiles")?).unwrap_or(usize::MAX),
+                    bytes: Self::require(bytes, "bytes")?,
+                },
+                "flushed" => PhaseDetail::Flushed {
+                    blocks: usize::try_from(Self::require(blocks, "blocks")?).unwrap_or(usize::MAX),
+                    writers: usize::try_from(Self::require(writers, "writers")?)
+                        .unwrap_or(usize::MAX),
                 },
                 other => {
                     return Self::field("kind", format!("unknown detail kind `{other}`"));
