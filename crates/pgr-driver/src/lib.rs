@@ -106,6 +106,18 @@ pub enum DriverError {
         /// The parse failure.
         source: pgr_format::FormatError,
     },
+    /// A universal ("fat") input refused (M70): the container's slice
+    /// table is malformed (the format reader's offset-tagged refusal)
+    /// or it carries no arm64 slice (the refusal names the cputypes it
+    /// does — the fix is the container's own rebuild, or linking the
+    /// arch it carries).
+    #[error("{path}: {source}")]
+    Universal {
+        /// The universal input path.
+        path: String,
+        /// The container refusal (the format reader's offset-tagged error).
+        source: pgr_format::FormatError,
+    },
     /// A `-sectcreate` payload could not become a synthetic object: the
     /// section or segment name exceeds the 16-byte Mach-O field (M67 —
     /// the typed refusal, no longer misfiled under the `.tbd` variant).
@@ -366,6 +378,38 @@ fn looks_like_tbd(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"--- !tbd-tbd-version")
 }
 
+/// M70: the universal read seam — a fat container is linked through its
+/// arm64 slice (ld64's `-arch` match; the surface links arm64, so the
+/// cputype match is exact). The container decodes, the arm64 window is
+/// copied out, and the caller's per-kind dispatch runs on it unchanged —
+/// every arm below (`map_input`'s tbd/dylib/archive/object chain, the
+/// `-l`/`-framework` scans) links the slice it already linked. A
+/// non-universal input rides untouched (`None` — the probe is one
+/// four-byte magic read, no copy), so every pre-M70 link is
+/// byte-identical (the parity gate lives in `tests/m70_universal_input.rs`).
+///
+/// # Errors
+/// [`DriverError::Universal`] when the container is malformed (the
+/// offset-tagged format refusal) or carries no arm64 slice (the refusal
+/// names the cputypes it does).
+fn universal_arm64_slice(path: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>, DriverError> {
+    if !pgr_format::is_universal(bytes) {
+        return Ok(None);
+    }
+    let container =
+        pgr_format::parse_universal(bytes).map_err(|source| DriverError::Universal {
+            path: path.to_string(),
+            source,
+        })?;
+    let slice = container
+        .arm64(bytes)
+        .map_err(|source| DriverError::Universal {
+            path: path.to_string(),
+            source,
+        })?;
+    Ok(Some(slice.to_vec()))
+}
+
 /// Maps one `.tbd` document to a [`Dylib`] input.
 ///
 /// # Errors
@@ -435,6 +479,26 @@ pub fn tbd_to_dylib_cached(
 /// executable, a broken surface) — the message names the path and the
 /// fix.
 pub fn scan_loader_executable(path: &str, bytes: &[u8]) -> Result<BundleLoader, DriverError> {
+    // M70: a universal host rides its arm64 slice (the bundle_loader
+    // host is an SDK executable — it ships fat). One unwrap: the
+    // dispatch never re-enters, a slice that still opens with a fat
+    // magic refuses at the Mach-O header below (a container inside a
+    // container is not a host).
+    let bytes = if pgr_format::is_universal(bytes) {
+        let container =
+            pgr_format::parse_universal(bytes).map_err(|source| DriverError::Universal {
+                path: path.to_string(),
+                source,
+            })?;
+        container
+            .arm64(bytes)
+            .map_err(|source| DriverError::Universal {
+                path: path.to_string(),
+                source,
+            })?
+    } else {
+        bytes
+    };
     let header = pgr_format::MachHeader64::parse(bytes).map_err(|e| DriverError::Tbd {
         path: path.to_string(),
         source: e,
@@ -1104,6 +1168,13 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             });
         };
         deps.record_input(&dep_path(&path))?;
+        // M70: a universal container rides its arm64 slice — the unwrap
+        // runs before the per-kind dispatch (the `.tbd`/dylib/archive
+        // arms below link the slice they already linked).
+        let bytes = match universal_arm64_slice(&path, &bytes)? {
+            Some(sliced) => sliced,
+            None => bytes,
+        };
         if looks_like_tbd(&bytes) {
             dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
         } else if pgr_format::MachHeader64::parse(&bytes)
@@ -1170,6 +1241,12 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             });
         };
         deps.record_input(&dep_path(&path))?;
+        // M70: a universal container rides its arm64 slice (SDK
+        // frameworks ship fat) — the unwrap runs before the dispatch.
+        let bytes = match universal_arm64_slice(&path, &bytes)? {
+            Some(sliced) => sliced,
+            None => bytes,
+        };
         let mut dylib = if looks_like_tbd(&bytes) {
             tbd_to_dylib_cached(&path, &bytes, kind == DylibKind::Weak, cache.as_ref())?
         } else if pgr_format::MachHeader64::parse(&bytes)
@@ -1357,6 +1434,13 @@ fn map_input(
     // to be (ld64's object/dylib/archive rows are one input-family opcode
     // in the field) — the file the link read is the row, not its class.
     deps.record_input(&dep_path(path))?;
+    // M70: a universal container rides its arm64 slice — the unwrap runs
+    // before the per-kind dispatch, so every arm below links the slice it
+    // already linked.
+    let bytes = match universal_arm64_slice(path, &bytes)? {
+        Some(sliced) => sliced,
+        None => bytes,
+    };
     if looks_like_tbd(&bytes) {
         let weak = opts_index.is_some_and(|i| opts.weak_library_inputs.contains(&i));
         let mut dylib = tbd_to_dylib_cached(path, &bytes, weak, cache)?;
