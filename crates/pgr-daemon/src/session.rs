@@ -384,6 +384,33 @@ impl ResidentSession {
     /// symbols, duplicates, layout contract) or emit failures.
     pub fn link(&mut self, req: &crate::protocol::LinkRequest) -> Result<ServedLink, SessionError> {
         use pgr_core::Parallelism;
+        // M83: the relocatable shape rides the session — the object walk
+        // is Passes 1–2 over the raw blobs (`pgr_core::link_reloc`, the
+        // cold lane's own entry; the POI cache is the segmented
+        // pipeline's optimization, the object path re-parses) and
+        // `pgr_emit::build_object_image` assembles the `MH_OBJECT` the
+        // reply carries verbatim. The replay faces have no object shape:
+        // a record, tiles, the audit, `-verify` or `-map` beside a
+        // relocatable config refuses (the surface refuses the knobs
+        // beside `-r`, so the driver never asks — no wire caller can
+        // plan the shape either); the provenance queries ride (the
+        // object's Pass-2 product is the same arena the query reads).
+        if req.config.filetype == pgr_core::layout::OutputType::Relocatable {
+            if req.record.is_some()
+                || req.prev_output.is_some()
+                || req.audit
+                || req.tiles
+                || req.verify
+                || req.map
+            {
+                return Err(SessionError::Link(pgr_core::LinkError::Layout {
+                    message: "the relocatable output has no ladder shape: no record, no tiles, \
+                              no audit, no verify, no map beside -r"
+                        .into(),
+                }));
+            }
+            return self.serve_relocatable(req);
+        }
         // The Pass-1 split rule is pgr-core's own (M11: a rank table
         // feeds the atom split the same way dead-strip does) — the M81
         // config tail carries the table, so the session's prepare reads
@@ -400,34 +427,7 @@ impl ResidentSession {
                 split,
             )?);
         }
-        let mut archives: Vec<pgr_core::LinkArchive> = Vec::with_capacity(req.archives.len());
-        for a in &req.archives {
-            let bytes = self.blob(&a.hash)?;
-            let parsed =
-                pgr_format::parse_archive(&bytes).map_err(|e| pgr_core::LinkError::Parse {
-                    file: a.name.clone(),
-                    message: e.to_string(),
-                })?;
-            archives.push(pgr_core::LinkArchive {
-                name: a.name.clone(),
-                bytes: bytes.as_ref().clone(),
-                index: parsed
-                    .index
-                    .iter()
-                    .map(|e| (e.name.clone().into_bytes(), e.member))
-                    .collect(),
-                members: parsed
-                    .members
-                    .iter()
-                    .map(|m| pgr_core::LinkArchiveMember {
-                        name: m.name.clone(),
-                        offset: m.offset,
-                        size: m.size,
-                    })
-                    .collect(),
-                all_load: a.all_load,
-            });
-        }
+        let archives: Vec<pgr_core::LinkArchive> = self.build_archives(req)?;
         // The §7.3 ladder (v3 fusion): a record plus the previous output
         // runs the relink inside the session. A record that will not
         // decode, a missing previous output or any ladder refusal falls
@@ -575,26 +575,166 @@ impl ResidentSession {
         req: &crate::protocol::LinkRequest,
         result: &pgr_core::LinkResult,
     ) -> Result<Option<crate::protocol::ServedProvenance>, SessionError> {
+        Self::serve_provenance_from(
+            req,
+            &result.objects,
+            &result.resolution,
+            &result.interner,
+            &result.loads,
+        )
+    }
+
+    /// [`Self::serve_provenance`] over the shape's parts — the
+    /// relocatable walk (M83) carries the same members on
+    /// [`pgr_core::link_reloc`]'s own product, so the queries read the
+    /// object's Pass-2 arena the way the cold lane's `-why_export` does.
+    fn serve_provenance_from(
+        req: &crate::protocol::LinkRequest,
+        objects: &[pgr_core::object::InputObject],
+        resolution: &pgr_core::resolve::Resolution,
+        interner: &pgr_core::Interner,
+        loads: &pgr_core::provenance::LoadReport,
+    ) -> Result<Option<crate::protocol::ServedProvenance>, SessionError> {
         if req.why_export.is_empty() && !req.why_load {
             return Ok(None);
         }
-        let index = pgr_core::ReverseIndex::build_all(&result.objects);
+        let index = pgr_core::ReverseIndex::build_all(objects);
         let mut exports = Vec::with_capacity(req.why_export.len());
         for name in &req.why_export {
-            let answer = pgr_core::explain_export(
-                &index,
-                &result.objects,
-                &result.resolution,
-                &result.interner,
-                name,
-            )?;
+            let answer = pgr_core::explain_export(&index, objects, resolution, interner, name)?;
             exports.push(crate::protocol::ServedExport {
                 name: name.clone(),
                 render: answer.render(),
             });
         }
-        let loads = req.why_load.then(|| result.loads.render());
+        let loads = req.why_load.then(|| loads.render());
         Ok(Some(crate::protocol::ServedProvenance { exports, loads }))
+    }
+
+    /// Assembles the request's archives over the session's blobs — the
+    /// ranlib index and member table the archive pull walks, `all_load`
+    /// riding per archive. One assembly both link shapes read (the
+    /// segmented pipeline and the relocatable walk, M83).
+    fn build_archives(
+        &mut self,
+        req: &crate::protocol::LinkRequest,
+    ) -> Result<Vec<pgr_core::LinkArchive>, SessionError> {
+        let mut archives: Vec<pgr_core::LinkArchive> = Vec::with_capacity(req.archives.len());
+        for a in &req.archives {
+            let bytes = self.blob(&a.hash)?;
+            let parsed =
+                pgr_format::parse_archive(&bytes).map_err(|e| pgr_core::LinkError::Parse {
+                    file: a.name.clone(),
+                    message: e.to_string(),
+                })?;
+            archives.push(pgr_core::LinkArchive {
+                name: a.name.clone(),
+                bytes: bytes.as_ref().clone(),
+                index: parsed
+                    .index
+                    .iter()
+                    .map(|e| (e.name.clone().into_bytes(), e.member))
+                    .collect(),
+                members: parsed
+                    .members
+                    .iter()
+                    .map(|m| pgr_core::LinkArchiveMember {
+                        name: m.name.clone(),
+                        offset: m.offset,
+                        size: m.size,
+                    })
+                    .collect(),
+                all_load: a.all_load,
+            });
+        }
+        Ok(archives)
+    }
+
+    /// The relocatable shape's walk (M83): Passes 1–2 over the raw blobs
+    /// (`pgr_core::link_reloc` — the cold lane's own entry; the POI cache
+    /// is the segmented pipeline's optimization, the object path
+    /// re-parses) and `pgr_emit::build_object_image` assembles the
+    /// `MH_OBJECT` the reply carries verbatim. The faces ride the same
+    /// wire tails the segmented shape serves: the time report names the
+    /// object shape's own phases (the cold lane's report — the emit band
+    /// stays absent, the `-r` Pass 4 is the object assembly, not the
+    /// fused tile emit), the timeline renders the same run, and the
+    /// provenance queries read the object's Pass-2 product. The daemon
+    /// never touches the filesystem: the client writes the object.
+    fn serve_relocatable(
+        &mut self,
+        req: &crate::protocol::LinkRequest,
+    ) -> Result<ServedLink, SessionError> {
+        use pgr_core::Parallelism;
+        let started = std::time::Instant::now();
+        let mut time_collector = pgr_core::TimeCollector::default();
+        let mut traces = pgr_core::trace::TraceCollector::new();
+        let mut inputs: Vec<pgr_core::link::LinkInput> = Vec::with_capacity(req.inputs.len());
+        for entry in &req.inputs {
+            let bytes = self.blob(&entry.hash)?;
+            inputs.push(pgr_core::link::LinkInput {
+                name: entry.name.clone(),
+                bytes: bytes.as_ref().clone(),
+            });
+        }
+        let archives = self.build_archives(req)?;
+        let linked = if req.time && req.trace {
+            let mut pair = pgr_core::ObserverPair::new(&mut time_collector, &mut traces);
+            pgr_core::link_reloc_observed(
+                &inputs,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                &mut pair,
+            )?
+        } else if req.trace {
+            pgr_core::link_reloc_observed(
+                &inputs,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                &mut traces,
+            )?
+        } else if req.time {
+            pgr_core::link_reloc_observed(
+                &inputs,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                &mut time_collector,
+            )?
+        } else {
+            pgr_core::link_reloc(&inputs, &archives, &req.config, Parallelism::Auto)?
+        };
+        let image = pgr_emit::build_object_image(&linked, &req.config)?;
+        let total = req.time.then(|| started.elapsed());
+        let time_report = req.time.then(|| {
+            let mut report = time_collector.report();
+            report.total = total;
+            report
+        });
+        let trace_json = req.trace.then(|| traces.finish().render());
+        let provenance = Self::serve_provenance_from(
+            req,
+            &linked.objects,
+            &linked.resolution,
+            &linked.interner,
+            &linked.loads,
+        )?;
+        Ok(ServedLink {
+            image,
+            entryoff: 0,
+            fixup_slots: 0,
+            record: None,
+            patch: None,
+            audit: None,
+            tiles: None,
+            time_report,
+            trace_json,
+            verify_report: None,
+            provenance,
+            map_text: None,
+        })
     }
 
     /// Reports one ladder rung through the watching faces (M66): the same
@@ -640,6 +780,14 @@ impl ResidentSession {
         archives: &[pgr_core::LinkArchive],
     ) -> Result<ServedLink, RelinkDecline> {
         use pgr_core::Parallelism;
+        // M82: the ladder's named admission — `pgr_emit::incremental::LinkRecord::admits`,
+        // the same decision the driver's in-process relink reads. A config
+        // naming a different chain word family than the record's declines:
+        // the patch cannot renegotiate the word shape in place, and the
+        // full link re-plans the family the request named and re-records.
+        if record.admits(&req.config).is_err() {
+            return Err(RelinkDecline::Fallback);
+        }
         // The integrity gate rides the timed block below (M66: the gate is
         // real work and reports beside the other rungs when a face asks).
         // The anchored relink config: exactly the assembly the driver's
@@ -2469,5 +2617,376 @@ mod fusion_tests {
             "the relink's Pass-4 half is the patch — no fused-emit band"
         );
         assert!(report.total.is_some(), "the ladder wall is measured");
+    }
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::ResidentSession;
+    use crate::protocol::{InputEntry, LinkRequest, content_hash};
+    use pgr_core::fixups::FixupPointerFormat;
+    use pgr_core::layout::LinkConfig;
+    use pgr_core::link::{LinkInput, Parallelism, link_cached};
+    use pgr_emit::build_image_fused;
+    use pgr_emit::incremental::LinkRecord;
+    use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
+
+    /// hello.o: `_main` ADRP+ADD loads `_msg`, BL `_greet`, ret (the
+    /// fusion fixture's shape — the family gates ride the same corpus).
+    fn hello() -> Vec<u8> {
+        let words: Vec<u32> = vec![
+            0x9000_0000, // adrp x0, _msg@page
+            0x9100_0000, // add x0, x0, #_msg@pageoff
+            0x9400_0000, // bl _greet
+            0x5280_0000, // mov w0, #0
+            0xD65F_03C0, // ret
+        ];
+        let text: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let mut b = ObjectBuilder::new("hello.o");
+        let sect = b.add_section(ObjectSection::text(
+            "__text",
+            text,
+            vec![
+                ObjectReloc::addend(0).at(0),
+                ObjectReloc::page21(1).at(0),
+                ObjectReloc::addend(0).at(4),
+                ObjectReloc::pageoff12(1).at(4),
+                ObjectReloc::branch26(2).at(8),
+            ],
+        ));
+        b.add_section(ObjectSection::cstring("hello, peregrine\n"));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_main".into(),
+            section_index: sect,
+            value: 0,
+            weak: false,
+        });
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_msg".into(),
+            section_index: 1,
+            value: 0,
+            weak: false,
+        });
+        b.add_symbol(ObjectSymbol::Undefined {
+            name: "_greet".into(),
+            weak_ref: false,
+        });
+        b.build().unwrap()
+    }
+
+    /// greet.o: `_greet` + a `__data` pointer to `_greet`.
+    fn greet() -> Vec<u8> {
+        let mut b = ObjectBuilder::new("greet.o");
+        let text = b.add_section(ObjectSection::text(
+            "__text",
+            vec![0xC0, 0x03, 0x5F, 0xD6],
+            vec![],
+        ));
+        let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_greet".into(),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+        b.section_mut(data).relocs = vec![ObjectReloc::unsigned(0).at(0)];
+        b.build().unwrap()
+    }
+
+    fn cfg_with(family: FixupPointerFormat) -> LinkConfig {
+        LinkConfig {
+            ident: "family-test".into(),
+            chain_word_format: family,
+            layout_slack: Some(pgr_core::slack::SlackPolicy::default()),
+            ..LinkConfig::default()
+        }
+    }
+
+    fn request(
+        cfg: &LinkConfig,
+        hello_bytes: &[u8],
+        greet_bytes: &[u8],
+    ) -> (LinkRequest, Vec<[u8; 32]>) {
+        let req = LinkRequest {
+            config: cfg.clone(),
+            force_load: Vec::new(),
+            inputs: vec![
+                InputEntry {
+                    name: "hello.o".into(),
+                    hash: content_hash(hello_bytes),
+                },
+                InputEntry {
+                    name: "greet.o".into(),
+                    hash: content_hash(greet_bytes),
+                },
+            ],
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+        };
+        let hashes = req.blob_hashes();
+        (req, hashes)
+    }
+
+    /// The plain full link's image over the given config (the reference
+    /// the session's full link must match byte for byte).
+    fn full_image(cfg: &LinkConfig, hello_bytes: &[u8], greet_bytes: &[u8]) -> Vec<u8> {
+        let inputs = vec![
+            LinkInput {
+                name: "hello.o".into(),
+                bytes: hello_bytes.to_vec(),
+            },
+            LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.to_vec(),
+            },
+        ];
+        let result = link_cached(&inputs, &[], cfg, Parallelism::Auto, None).unwrap();
+        build_image_fused(&result.layout, &result.objects).unwrap()
+    }
+
+    /// M82: the record carries the family the session's walk encoded, and
+    /// a record-bearing request naming a different family declines to the
+    /// full link — the ladder never patches across word shapes. The
+    /// served image is the full link's (the asked family planned), the
+    /// renewed record carries the family that landed, and a matching
+    /// relink still patches.
+    #[test]
+    fn a_family_flip_falls_back_inside_the_session() {
+        let hello_bytes = hello();
+        let greet_bytes = greet();
+        let arm64e = cfg_with(FixupPointerFormat::Arm64e);
+        let (mut req, hashes) = request(&arm64e, &hello_bytes, &greet_bytes);
+        let mut session = ResidentSession::default();
+        for (h, bytes) in hashes
+            .into_iter()
+            .zip([hello_bytes.clone(), greet_bytes.clone()])
+        {
+            session.store_blob(&h, bytes).unwrap();
+        }
+
+        req.record_resolution = true;
+        let cold = session.link(&req).unwrap();
+        let record_bytes = cold.record.expect("capture was requested");
+        let record = LinkRecord::decode(&record_bytes).expect("the arm64e record decodes");
+        assert_eq!(
+            record.chain_word_format,
+            FixupPointerFormat::Arm64e,
+            "the record carries the family the session's walk encoded"
+        );
+
+        // The flip: the same inputs and previous output, the Offset64
+        // config. The ladder declines at admission — the patch cannot
+        // renegotiate the word shape in place — and the full link plans
+        // the family the request named.
+        let offset64 = cfg_with(FixupPointerFormat::Offset64);
+        let (mut flipped, _) = request(&offset64, &hello_bytes, &greet_bytes);
+        flipped.record = Some(record_bytes.clone());
+        flipped.prev_output = Some(content_hash(&cold.image));
+        flipped.record_resolution = true;
+        session
+            .store_blob(&content_hash(&cold.image), cold.image.clone())
+            .unwrap();
+        let served = session.link(&flipped).unwrap();
+        assert!(
+            served.patch.is_none(),
+            "the flipped relink declines to the full link"
+        );
+        assert_eq!(
+            served.image,
+            full_image(&offset64, &hello_bytes, &greet_bytes),
+            "the full link planned the family the request named"
+        );
+        let renewed = LinkRecord::decode(served.record.as_ref().expect("the full link re-records"))
+            .expect("the renewed record decodes");
+        assert_eq!(
+            renewed.chain_word_format,
+            FixupPointerFormat::Offset64,
+            "the renewed record carries the family that landed"
+        );
+
+        // A matching relink still patches: the record's own family rides
+        // the ladder the way every other recorded shape does.
+        let (mut matching, _) = request(&arm64e, &hello_bytes, &greet_bytes);
+        matching.record = Some(record_bytes.clone());
+        matching.prev_output = Some(content_hash(&cold.image));
+        session
+            .store_blob(&content_hash(&cold.image), cold.image.clone())
+            .unwrap();
+        let warm = session.link(&matching).unwrap();
+        assert!(warm.patch.is_some(), "the matching relink patches in place");
+    }
+}
+
+#[cfg(test)]
+mod reloc_tests {
+    use super::ResidentSession;
+    use crate::protocol::{InputEntry, LinkRequest, content_hash};
+    use pgr_core::layout::{LinkConfig, OutputType};
+    use pgr_core::link::{LinkInput, Parallelism, link_reloc};
+    use pgr_emit::build_object_image;
+    use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
+
+    /// `hello_main.o`: `_main` ADRP+ADD loads `_msg`, BL `_greet`, ret —
+    /// the M10 relocatable fixture's shape (an open `_greet`).
+    fn hello_main() -> Vec<u8> {
+        let mut b = ObjectBuilder::new("hello_main.o");
+        let text = b.add_section(ObjectSection::text(
+            "__text",
+            vec![
+                0x90, 0x00, 0x00, 0x00, // adrp x0, _msg@page
+                0x91, 0x00, 0x00, 0x00, // add x0, x0, #_msg@pageoff
+                0x94, 0x00, 0x00, 0x00, // bl _greet
+                0xC0, 0x03, 0x5F, 0xD6, // ret
+            ],
+            vec![
+                ObjectReloc::addend(0).at(0),
+                ObjectReloc::page21(1).at(0),
+                ObjectReloc::addend(0).at(4),
+                ObjectReloc::pageoff12(1).at(4),
+                ObjectReloc::branch26(2).at(8),
+            ],
+        ));
+        b.add_section(ObjectSection::cstring("hello, peregrine\n"));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_main".into(),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_msg".into(),
+            section_index: 1,
+            value: 0,
+            weak: false,
+        });
+        b.add_symbol(ObjectSymbol::Undefined {
+            name: "_greet".into(),
+            weak_ref: false,
+        });
+        b.build().unwrap()
+    }
+
+    /// greet.o: `_greet` (the step-two resolution).
+    fn greet() -> Vec<u8> {
+        let mut b = ObjectBuilder::new("greet.o");
+        let text = b.add_section(ObjectSection::text(
+            "__text",
+            vec![0xC0, 0x03, 0x5F, 0xD6],
+            vec![],
+        ));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_greet".into(),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+        b.build().unwrap()
+    }
+
+    fn reloc_request() -> (LinkRequest, Vec<([u8; 32], Vec<u8>)>) {
+        let hello_bytes = hello_main();
+        let greet_bytes = greet();
+        let req = LinkRequest {
+            config: LinkConfig {
+                filetype: OutputType::Relocatable,
+                ..LinkConfig::default()
+            },
+            force_load: Vec::new(),
+            inputs: vec![
+                InputEntry {
+                    name: "hello_main.o".into(),
+                    hash: content_hash(&hello_bytes),
+                },
+                InputEntry {
+                    name: "greet.o".into(),
+                    hash: content_hash(&greet_bytes),
+                },
+            ],
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+        };
+        let hashes = req.blob_hashes();
+        (
+            req,
+            hashes.into_iter().zip([hello_bytes, greet_bytes]).collect(),
+        )
+    }
+
+    /// The plain cold reference: the object shape's two steps over the
+    /// same bytes (`link_reloc` + `build_object_image`).
+    fn cold_object(config: &LinkConfig, hello_bytes: &[u8], greet_bytes: &[u8]) -> Vec<u8> {
+        let inputs = vec![
+            LinkInput {
+                name: "hello_main.o".into(),
+                bytes: hello_bytes.to_vec(),
+            },
+            LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.to_vec(),
+            },
+        ];
+        let linked = link_reloc(&inputs, &[], config, Parallelism::Auto).unwrap();
+        build_object_image(&linked, config).unwrap()
+    }
+
+    /// M83: the session's walk serves the object shape — the same two
+    /// steps the cold lane runs over the same raw bytes (the POI cache is
+    /// the segmented pipeline's optimization; the object path re-parses),
+    /// and the replay faces a record cannot ride refuse (the ladder has
+    /// no object shape; the surface refuses the knobs beside `-r`, so the
+    /// driver never asks — a wire caller cannot plan the shape either).
+    #[test]
+    fn a_relocatable_request_serves_the_object_shape() {
+        let (req, blobs) = reloc_request();
+        let mut session = ResidentSession::default();
+        for (h, bytes) in &blobs {
+            session.store_blob(h, bytes.clone()).unwrap();
+        }
+        let served = session.link(&req).unwrap();
+        assert!(served.patch.is_none(), "an object never patches");
+        assert!(served.record.is_none(), "an object never records");
+        let hello_bytes = &blobs[0].1;
+        let greet_bytes = &blobs[1].1;
+        assert_eq!(
+            served.image,
+            cold_object(&req.config, hello_bytes, greet_bytes),
+            "the session's object walk matches the cold one byte for byte"
+        );
+
+        // The replay faces refuse: a record beside a relocatable config
+        // has no ladder to run (the §7.3 replay patches the recorded
+        // plan; objects plan no record).
+        let (mut req, blobs) = reloc_request();
+        req.record = Some(Vec::new());
+        for (h, bytes) in &blobs {
+            session.store_blob(h, bytes.clone()).unwrap();
+        }
+        let refused = session.link(&req).expect_err("a record beside -r refuses");
+        assert!(
+            refused.to_string().contains("relocatable"),
+            "the refusal names the shape: {refused}"
+        );
     }
 }
