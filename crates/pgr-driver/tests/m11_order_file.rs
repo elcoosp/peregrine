@@ -1,7 +1,8 @@
 //! M11 rung 1 — the `-order_file` driver surface: the flag parses, the
 //! rank table rides the link, the output verifies strict with the ranked
 //! symbol first in `__text`, and the combinations that cannot carry the
-//! rank table refuse with the fix in the message (`-r`, `-resident`).
+//! rank table refuse with the fix in the message (`-r` — M81 flipped the
+//! resident lane's refusal to service: wire v47 carries the table).
 //! A malformed order file refuses with its line; a missing file is an
 //! io error, never a silent drop.
 
@@ -181,7 +182,9 @@ fn an_order_file_refuses_the_combinations_that_cannot_carry_it() {
     let err = opts::parse(&argv).unwrap_err();
     assert!(err.to_string().contains("no segment layout"), "{err}");
 
-    // `-resident`: the v6 wire config does not carry the rank table.
+    // `-resident`: the surface serves since M81 (wire v47 carries the
+    // rank table in the config tail); the served face is the
+    // `m81_resident_order` gate matrix's subject.
     let argv = args(&[
         "-o",
         "out",
@@ -190,8 +193,8 @@ fn an_order_file_refuses_the_combinations_that_cannot_carry_it() {
         order.to_str().unwrap(),
         "-resident",
     ]);
-    let err = opts::parse(&argv).unwrap_err();
-    assert!(err.to_string().contains("resident"), "{err}");
+    let o = opts::parse(&argv).expect("the resident lane serves the rank table");
+    assert!(o.order_file.is_some(), "the rank ask rides the surface");
 }
 
 #[test]
