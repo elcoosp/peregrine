@@ -6,6 +6,36 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M77)
+
+- **M77** — the gate's check selection: `-verify-checks <families>` composes the M12 selector
+  into the link's own verify gate — the same `CheckSet` the verifier CLI's `--checks` parses,
+  the same subtractive contract (fewer families against the same parsed image; the parse
+  pre-pass and the stats ride regardless, the `-no_adhoc` carve-out and the strict contract
+  unchanged), so a build gate that prices only one contract runs the families it prices.
+  The selection rides beside `-verify` only (a selection without a gate refuses — the families
+  narrow the gate, never the link) and crosses the wire (v44) so the resident lane's served
+  pass narrows to the same families — one selector, both lanes; a selection the wire parser
+  refuses is a malformed request, never a widened gate. `pgr_driver::verify_gate_selected` is
+  the public face (`verify_gate` delegates to the full set), the `verify_gate` bench pins the
+  narrowed lane beside the full pass, and the `verify_checks_gate` example walks both
+  selections beside the corrupted twin
+
+### Added (M76)
+
+- **M76** — the resident lane's verify gate: the M73 cold-path `-verify` gate re-ran the
+  strict pass on the client even when the link rode the resident session — and the session
+  (M72, wire v43) could already serve its own verdict for the asking, but the driver never
+  asked. `-resident -verify` rides the request's `verify` flag now: the session's own strict
+  pass gates the write through the served verdict (`pgr_driver::gate_from_served` shapes the
+  gate face from the reply's report — O(issues), never the image walk), one verifier pass per
+  resident link instead of two, and the summary rides `LinkOutcome::verify` exactly like the
+  cold lane's. The fallback story stays honest: a resident attempt that stands down hands over
+  to the one-shot link, whose own gate runs the pass locally — either lane, one gate, one
+  outcome shape. The `verify_gate` bench pins the served face beside the cold pass, and the
+  `verify_gate_resident` example walks the cold link, the warm relink, the corrupted twin's
+  rendered refusal and the fallback
+
 ### Added (M75)
 
 - **M75** — the CLI's SARIF face: `pgr-verify --sarif` rides the M69 render
