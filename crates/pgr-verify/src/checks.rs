@@ -10,7 +10,8 @@
 //!
 //! * [`Check`] enumerates the nine families in canonical verify order;
 //! * [`CheckSet`] is the selector (parse `"segments,fixups"`, build with
-//!   [`CheckSet::with`], render back with `Display`);
+//!   [`CheckSet::with`]/[`CheckSet::all`]/[`CheckSet::empty`], render
+//!   back with `Display`);
 //! * [`ImageCheck`] is the seam each family implements — one unit per
 //!   family, collected in [`image_checks`], driven by
 //!   `crate::verify_with_checks`.
@@ -189,26 +190,14 @@ impl Check {
 
 /// A [`CheckSet::parse`] failure: the offending token plus the canonical
 /// names, so the fix (not just the verdict) is one line away.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown check `{invalid}` (valid checks: {})", .valid.join(", "))]
 pub struct CheckSetError {
     /// The token that named no family (empty for empty input).
     pub invalid: String,
     /// The canonical selector names, in verify order.
     pub valid: Vec<&'static str>,
 }
-
-impl fmt::Display for CheckSetError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "unknown check `{}` (valid checks: {})",
-            self.invalid,
-            self.valid.join(", ")
-        )
-    }
-}
-
-impl std::error::Error for CheckSetError {}
 
 /// The selector: a set of check families to run.
 ///
@@ -242,7 +231,8 @@ impl CheckSet {
         Self { mask: 0 }
     }
 
-    /// Adds a family (dedup free — it is a bit test).
+    /// Adds a family (dedup free — it is a bit test; the `checks` bench
+    /// builds its per-family sets this way).
     #[must_use]
     pub const fn with(mut self, check: Check) -> Self {
         self.mask |= bit(check);
