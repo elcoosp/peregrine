@@ -339,12 +339,10 @@ pub struct FixupPlan {
     /// `LC_DYLD_CHAINED_FIXUPS` payload bytes (header | starts | segment
     /// records | import table | name pool).
     pub payload: Vec<u8>,
-    /// The payload's `__LINKEDIT` file offset as recorded at plan time —
-    /// always `0`: the authoritative offset is assigned during LINKEDIT
-    /// chunk placement (`LinkeditPlan::fixup_payload_off`) and consumed
-    /// by emit from there; this field predates that plan and stays for
-    /// constructor compatibility.
-    pub payload_off: u64,
+    /// The chain word family the payload's words encode with (M82): the
+    /// plan names its own encoding — the record inherits it and the
+    /// relink ladders admit through it, one source, no re-derivation.
+    pub chain_word_format: FixupPointerFormat,
     /// Final slot words: `(slot vaddr, encoded word)` sorted by vaddr.
     pub slot_words: Vec<(u64, u64)>,
     /// `__TEXT,__chain_starts` section bytes (static mirror, TDD §7.5):
@@ -970,7 +968,7 @@ pub fn plan_fixups_with_auth(
 
     Ok(FixupPlan {
         payload,
-        payload_off: 0,
+        chain_word_format: format,
         slot_words,
         chain_starts,
         slot_count: slots.len(),
