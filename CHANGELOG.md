@@ -6,6 +6,46 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M79)
+
+- **M79** — the resident lane's served provenance: the M56/M57 lane contract (`-why_export`/
+  `-why_load` read the one-shot link's Pass-2 product, so the resident lane refused them —
+  the product never crossed the wire) flips to service the M76 way: the session's warm
+  pipeline *is* the walk (parse from resident POIs, intern, resolve, layout), the product is
+  in its memory, and the driver never asked. The queries ride the request now (v45 — the
+  `-why_export` names in flag order, the `-why_load` flag beside them), the session renders
+  the answers from its own Pass-2 product (the index builds once per link, the queries read
+  it), and the reply's IMAGE tail carries the rendered text verbatim — the M62 convention,
+  the wire never re-shapes the face the client prints — so the driver prints the served
+  answers beside the resident link exactly as the cold lane prints its own. The lane contract
+  stays honest at the edges: a query beside the `record` (the §7.3 ladder's replay) is a
+  malformed request at the wire — the replay's Pass-2 product is the record's, not the
+  walk's, so the fusion lane keeps refusing; a vacuous query refuses the session's link (the
+  cold lane's own refusal), the `ERROR` reply is the client's one-shot fallback cue, and the
+  misspelling is named either lane. The `wire_provenance` bench pins the tail's encode/decode
+  price beside the image pages it rides, and the `served_provenance_link` example walks the
+  served face beside the vacuous refusal
+
+### Added (M78)
+
+- **M78** — the flush pool's writer lanes: the M64 registry named every worker lane
+  `pgr parse pool N` because the parse pool (M63) was the only pool the M63 task seam
+  carried — and the §5 flush runs a second pool, four writer threads whose `pwrite` work the
+  aggregate `Flushed` phase event hid. The writers carry their own spans now: one
+  [`pgr_core::observe::TaskEvent`] per writer (the blocks it carried as its label —
+  `blocks 1,5 of 5`, writer *k* takes blocks *k, k+4, …* — its wall time, its thread and its
+  own arrival clock), reported through the M63 channel convention (the records cross an mpsc
+  channel that opens only when a subscriber rides; the caller forwards them once the pool
+  returns; a single-block write reports on the calling thread — the pipeline lane, the M64
+  serial rule). The timeline's registry names the second family beside the first
+  (`pgr write pool N`, each pool numbered among its own workers, family-aware since the
+  first task the lane carried), so the §9.4 toolbox reads the write workers' stragglers and
+  idle gaps beside the parse pool's. The observation never moves a byte (the parity gate,
+  `m78_write_tasks`), the strict reader restores both families' labels exactly (the round
+  trip, gated on the mixed shape in `m78_write_lanes`), the `trace` bench's write-pool
+  groups pin the rows' render/parse price, and the `write_lanes` consumer example renders
+  the four writers beside the round-trip gate
+
 ### Added (M77)
 
 - **M77** — the gate's check selection: `-verify-checks <families>` composes the M12 selector
