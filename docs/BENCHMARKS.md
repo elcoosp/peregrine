@@ -627,6 +627,22 @@ cargo bench -p pgr-daemon --bench wire_provenance`, M72): the served verdict's
   **281 ps** (dev-sandbox medians). The tail rides an IMAGE reply that carries pages, so the
   honest expectation is noise beside the transfer; the renders ride verbatim — the codec's
   own price is two length-prefixed string pushes and their reads, never a re-shape.
+- `wire_map` (`cargo bench -p pgr-daemon --bench wire_map`, M80): the served link map's
+  wire-tail codec price over served-shape documents — `encode/small` (the hello shape's
+  render, one length prefix) **17.0 ns**, `decode/small` (the verbatim document restores)
+  **105.7 ns**, `encode/large_64_sections` (the build-system scale's render) **71.7 ns**,
+  `decode/large_64_sections` **2.09 µs**, `encode_absent` (the unasked byte) **280 ps**
+  (dev-sandbox medians). The tail rides an IMAGE reply that carries pages, so the honest
+  expectation is noise beside the transfer; the document rides verbatim — the codec's own
+  price is one length-prefixed string push and its read, never a re-shape.
+- `wire_order` (`cargo bench -p pgr-daemon --bench wire_order`, M81): the rank table's
+  config-tail price over the request body at the build-system scales — `encode/no_table`
+  (the pre-M81 shape) **186 ns**, `decode/no_table` **268 ns**, `encode/8_entries` (the
+  repeatable flag's real shape) **323 ns**, `decode/8_entries` **1.72 µs**,
+  `encode/64_entries` **938 ns**, `decode/64_entries` **17.8 µs** (dev-sandbox medians).
+  The tail rides a body that carries the inputs' manifest, so the honest expectation is
+  noise beside the transfer; the table's own price is the count-prefixed entry pushes and
+  the constructor's rebuild (the duplicate walk one pass over the entries).
 - `dep_info` (`cargo bench -p pgr-core --bench dep_info`, M60): the dependency record's own price
   over records sized like real build-system links (8, 64 and 512 rows) — `render` (the version
   row plus one NUL-terminated row per entry) and `parse` (the strict reader's decode), linear in
