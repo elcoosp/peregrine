@@ -89,6 +89,54 @@ fn fixed_report() -> pgr_core::time_report::TimeReport {
     }
 }
 
+/// The fixed report with the M68 emit half riding (the one-shot
+/// segmented link's shape): the seven pipeline rows plus the `emit` and
+/// `flush` rows — nine per run — and the bands the library caller fills.
+fn fixed_emit_report() -> pgr_core::time_report::TimeReport {
+    let row = |phase: Phase, detail: PhaseDetail, us: u64| PhaseEvent {
+        phase,
+        detail,
+        elapsed: Duration::from_micros(us),
+    };
+    pgr_core::time_report::TimeReport {
+        phases: vec![
+            row(Phase::Parse, PhaseDetail::Objects { inputs: 64 }, 900),
+            row(Phase::ArchivePull, PhaseDetail::Members { pulled: 0 }, 4),
+            row(Phase::Intern, PhaseDetail::Names { interned: 128 }, 90),
+            row(Phase::Resolve, PhaseDetail::Winners { reused: false }, 120),
+            row(Phase::Liveness, PhaseDetail::Live { active: false }, 30),
+            row(Phase::Fold, PhaseDetail::Folded { folded: 0 }, 10),
+            row(
+                Phase::Layout,
+                PhaseDetail::Planned {
+                    segments: 4,
+                    sections: 9,
+                },
+                210,
+            ),
+            row(
+                Phase::Emit,
+                PhaseDetail::Emitted {
+                    tiles: 256,
+                    bytes: 4_194_304,
+                },
+                1_100,
+            ),
+            row(
+                Phase::Flush,
+                PhaseDetail::Flushed {
+                    blocks: 1,
+                    writers: 1,
+                },
+                400,
+            ),
+        ],
+        emit: None,
+        total: Some(Duration::from_micros(2_854)),
+        notes: Vec::new(),
+    }
+}
+
 fn bench_time_report(c: &mut Criterion) {
     let mut group = c.benchmark_group("time_report");
     let inputs = corpus();
@@ -127,6 +175,17 @@ fn bench_time_report(c: &mut Criterion) {
     });
     group.bench_function("render_json_8_rows", |b| {
         let report = fixed_report();
+        b.iter(|| black_box(black_box(&report).render_json()));
+    });
+    // The M68 emit-half rows' price: the fused emit and the pooled flush
+    // ride the same faces (one one-shot segmented link's report is the
+    // 9-row shape — the pipeline's rows, the emit half, the bands).
+    group.bench_function("render_9_rows", |b| {
+        let report = fixed_emit_report();
+        b.iter(|| black_box(black_box(&report).render()));
+    });
+    group.bench_function("render_json_9_rows", |b| {
+        let report = fixed_emit_report();
         b.iter(|| black_box(black_box(&report).render_json()));
     });
     group.finish();
