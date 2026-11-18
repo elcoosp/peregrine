@@ -5,6 +5,39 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+
+### Added (M73)
+
+- **M73** — the link's own verify gate: `-verify` runs the strict verifier on the
+  produced bytes and refuses to ship a failing verdict — the gate sits before the
+  write, so the output file is never created when the image fails it (the audit's
+  rule, on the cold path), and a passing verdict rides `LinkOutcome::verify` (the
+  embedding caller reads the summary without re-reading the file). The `-no_adhoc`
+  carve-out applies the audit's way (the missing-signature shape is the config's own
+  choice), the strict contract blocks warnings, and the refusal renders with miette
+  help text (`DriverError::Verify` — exit 1, the issues in the verifier's own words).
+  The knob is an image-output decision: `-incremental` refuses it (the relink
+  ladder's gate is `-incremental-verify` — the §7.3 audit, whose subject is the
+  patch) and `-r` refuses it (an object, not an image — `pgr-verify` gates objects
+  as a tool). The `verify_gate` bench pins one verifier pass beside the write (the
+  clean image, the corrupted twin, the `-no_adhoc` filter), and the `verify_gate`
+  example walks the gated link beside its corrupted twin's rendered refusal
+
+### Added (M72)
+
+- **M72** — the resident lane's served verify verdict (wire v43): the request's
+  `verify` flag asks the session to run the strict verifier on the final bytes, and
+  the reply's IMAGE tail carries the effective report — the subject is the image, so
+  every outcome serves one (the full link's, the patched relink's, the untouched
+  relink's; the audit's subject is the patch — complementary, not duplicate). The
+  document rides verbatim in the M13 interchange form, the strict reader
+  (`pgr_verify::report_json::parse_report_json`) its own face — a lying document
+  refuses the reply — and the `-no_adhoc` carve-out applies the audit's way (the
+  stats ride unfiltered). The client gates nothing on the verdict (the audit remains
+  the write gate); the `wire_verify` bench pins the tail's codec price beside the
+  image pages it rides, and the `verify_session` example walks the cold link, the
+  patched relink, the untouched relink and the unasked relink that rides no tail
+
 ### Added (M71)
 
 - **M71** — the verifier's universal-container face: the driver links a fat container
