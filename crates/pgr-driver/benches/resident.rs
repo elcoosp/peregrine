@@ -154,6 +154,92 @@ fn bench_resident(c: &mut Criterion) {
 
     bench_resident_fusion(c, &dir, &base);
     bench_resident_fusion_audited(c, &dir, &base);
+    bench_resident_arm64e(c, &dir, &base);
+    bench_resident_reloc(c, &dir, &base);
+}
+
+/// M82 benchmark: the arm64e chain word family rides the resident lane —
+/// the same warm pair as [`bench_resident`] over the same parse-heavy
+/// corpus with `-fixup_chains_format arm64e` named. The cold group prices
+/// the family's plan cost against the resident group's warm cost (the
+/// POI decode, the manifest-only transfer, the reused emit buffer — the
+/// family byte has ridden the wire config since v6, so the family costs
+/// nothing at the wire). The parity's correctness is gated in
+/// `tests/m82_resident_arm64e.rs`, not here.
+fn bench_resident_arm64e(
+    c: &mut Criterion,
+    dir: &std::path::Path,
+    base: &pgr_driver::opts::Options,
+) {
+    let sock = dir.join("bench-arm64e.sock");
+    start_daemon(&sock);
+
+    let mut cold = base.clone();
+    cold.config.chain_word_format = pgr_core::fixups::FixupPointerFormat::Arm64e;
+    cold.output = dir.join("resident_arm64e_out.bin").display().to_string();
+    let mut resident = cold.clone();
+    resident.resident = true;
+    resident.resident_socket = Some(sock.display().to_string());
+
+    let mut group = c.benchmark_group("pgr-driver/resident-arm64e");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(4));
+    group.bench_function("one_shot_arm64e_64_objects", |b| {
+        b.iter(|| {
+            let image = pgr_driver::link_to_bytes(&cold).unwrap();
+            std::hint::black_box(image.len());
+        });
+    });
+    group.bench_function("resident_warm_arm64e_64_objects", |b| {
+        b.iter(|| {
+            let image = pgr_driver::link_to_bytes(&resident).unwrap();
+            std::hint::black_box(image.len());
+        });
+    });
+    group.finish();
+    let _ = std::fs::remove_file(&sock);
+}
+
+/// M83 benchmark: the relocatable output rides the resident lane — the
+/// session's walk runs the object path over the raw blobs (Passes 1–2;
+/// the POI cache is the segmented pipeline's optimization, the object
+/// path re-parses) and `build_object_image` assembles the `MH_OBJECT`
+/// the reply carries. The pair prices the object shape's session cost
+/// beside the one-shot's (the manifest/wire share rides with it, the
+/// same shape the M8 groups record for images). The parity's correctness
+/// is gated in `tests/m83_resident_reloc.rs`, not here.
+fn bench_resident_reloc(
+    c: &mut Criterion,
+    dir: &std::path::Path,
+    base: &pgr_driver::opts::Options,
+) {
+    let sock = dir.join("bench-reloc.sock");
+    start_daemon(&sock);
+
+    let mut cold = base.clone();
+    cold.config.filetype = pgr_core::layout::OutputType::Relocatable;
+    cold.output = dir.join("resident_reloc_out.bin").display().to_string();
+    let mut resident = cold.clone();
+    resident.resident = true;
+    resident.resident_socket = Some(sock.display().to_string());
+
+    let mut group = c.benchmark_group("pgr-driver/resident-reloc");
+    group.sample_size(20);
+    group.measurement_time(core::time::Duration::from_secs(4));
+    group.bench_function("one_shot_reloc_64_objects", |b| {
+        b.iter(|| {
+            let image = pgr_driver::link_to_bytes(&cold).unwrap();
+            std::hint::black_box(image.len());
+        });
+    });
+    group.bench_function("resident_warm_reloc_64_objects", |b| {
+        b.iter(|| {
+            let image = pgr_driver::link_to_bytes(&resident).unwrap();
+            std::hint::black_box(image.len());
+        });
+    });
+    group.finish();
+    let _ = std::fs::remove_file(&sock);
 }
 
 /// M9 GA fusion benchmark (architecture doc §7.3 + §10.4 M9): the
