@@ -118,6 +118,8 @@ fn request(hello_bytes: &[u8], greet_bytes: &[u8], verify: bool) -> LinkRequest 
         trace: false,
         verify,
         verify_checks: None,
+        why_export: Vec::new(),
+        why_load: false,
     }
 }
 
