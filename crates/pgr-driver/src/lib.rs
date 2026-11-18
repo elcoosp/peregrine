@@ -81,7 +81,10 @@ pub struct LinkOutcome {
     /// sits before the write, so an outcome with a failing gate never
     /// exists (the driver refused instead, `DriverError::Verify`);
     /// `None` on every path the gate does not ride (no flag, the `-r`
-    /// object, the relink ladder's own audit).
+    /// object, the relink ladder's own audit). M76: the resident lane
+    /// rides too — the summary is the session's own served verdict
+    /// ([`gate_from_served`]) on the exact bytes the reply carried, one
+    /// verifier pass per resident link, never two.
     pub verify: Option<VerifySummary>,
 }
 
@@ -158,16 +161,39 @@ impl VerifyRefusal {
 /// the gate names), one `tracing` span (inert until a subscriber
 /// installs — the workspace convention). The driver runs it before the
 /// write; library callers can run it on any bytes — the corrupted-twin
-/// gate is the same face.
+/// gate is the same face. The full pass, every family — the shape the
+/// flagless gate runs; [`verify_gate_selected`] narrows it.
 #[must_use]
 pub fn verify_gate(bytes: &[u8], signature_expected: bool) -> VerifyGate {
-    let span = tracing::info_span!("verify_gate", len = bytes.len(), signature_expected);
+    verify_gate_selected(bytes, signature_expected, &pgr_verify::CheckSet::all())
+}
+
+/// The link's own gate over a **selected** pass (M77): the M12 selector
+/// narrows the strict verifier to the named families — the same
+/// subtractive contract the verifier CLI's `--checks` carries (fewer
+/// families against the same parsed image; the parse pre-pass and the
+/// stats ride regardless, the `-no_adhoc` carve-out and the strict
+/// contract unchanged). A build gate that prices only one contract runs
+/// the families it prices; the cold lane and, over wire v44, the
+/// resident lane's served pass narrow to the same set.
+#[must_use]
+pub fn verify_gate_selected(
+    bytes: &[u8],
+    signature_expected: bool,
+    checks: &pgr_verify::CheckSet,
+) -> VerifyGate {
+    let span = tracing::info_span!(
+        "verify_gate",
+        len = bytes.len(),
+        signature_expected,
+        selected = %checks
+    );
     let _entered = span.enter();
     let opts = pgr_verify::Options {
         strict_warnings: true,
         skip_hash_recompute: false,
     };
-    let mut report = pgr_verify::verify(bytes, &opts);
+    let mut report = pgr_verify::verify_with_checks(bytes, &opts, checks);
     report.issues.retain(|issue| match issue.severity {
         pgr_verify::Severity::Error => {
             issue.code != pgr_verify::Code::SignatureLayout || signature_expected
@@ -191,6 +217,38 @@ pub fn verify_gate(bytes: &[u8], signature_expected: bool) -> VerifyGate {
         warnings,
     };
     tracing::debug!(ok = summary.ok, "the driver's verify gate finished");
+    VerifyGate { summary, issues }
+}
+
+/// The resident lane's served gate face (M76): builds the gate's verdict
+/// from the reply's own report — the session's strict pass on the exact
+/// bytes the image tail carries (the `-no_adhoc` carve-out applied the
+/// session's way, wire v43). The client consumes the served verdict
+/// instead of re-running the pass: one verifier pass per resident link,
+/// not two, and the face prices O(issues), never the image walk. The
+/// strict contract holds either way — a warning-severity issue blocks
+/// the summary, so an outcome this face shaped is a clean one.
+#[must_use]
+pub fn gate_from_served(report: &pgr_verify::Report) -> VerifyGate {
+    let span = tracing::debug_span!("served_verify_gate", issues = report.issues.len());
+    let _entered = span.enter();
+    let errors = report
+        .issues
+        .iter()
+        .filter(|i| i.severity == pgr_verify::Severity::Error)
+        .count();
+    let warnings = report.issues.len() - errors;
+    let issues = report
+        .issues
+        .iter()
+        .map(|i| format!("{:?} [{}] {}", i.severity, i.code.as_str(), i.message))
+        .collect();
+    let summary = VerifySummary {
+        ok: errors == 0 && warnings == 0,
+        errors,
+        warnings,
+    };
+    tracing::debug!(ok = summary.ok, "the served verify gate finished");
     VerifyGate { summary, issues }
 }
 
@@ -853,6 +911,12 @@ fn link_to_image_recorded(
         ImageAndPlan,
         Option<pgr_emit::incremental::LinkRecord>,
         PendingFaces,
+        // M76: the resident lane's served verify gate (`-resident
+        // -verify`) — the session's own strict pass on the served bytes,
+        // the face the caller gates the write on. `None` on every other
+        // path: the one-shot lane, the fallback, the fusion relink (the
+        // ladder's audit gates it).
+        Option<VerifyGate>,
     ),
     DriverError,
 > {
@@ -888,6 +952,15 @@ fn link_to_image_recorded(
         // session's timeline (the rendered document rides the reply's
         // tail; the client writes it to `--trace`'s path verbatim).
         job.request.trace = opts.trace_path.is_some();
+        // M76: a verify-asking link asks the session for its own strict
+        // pass on the final bytes (v43's flag, M72's served verdict) —
+        // the client gates the write on the served verdict below, the
+        // audit's rule on the resident lane.
+        job.request.verify = opts.verify;
+        // M77 (wire v44): the gate's check selection crosses with the
+        // flag — the session's served pass narrows to the families the
+        // client named, the same set the cold lane's gate would run.
+        job.request.verify_checks = opts.verify_checks;
         let socket = opts
             .resident_socket
             .clone()
@@ -933,6 +1006,17 @@ fn link_to_image_recorded(
                 // the wire), so the served link writes it too; the daemon
                 // never touches the filesystem, the client does.
                 write_dependency_record(opts, &prepared.deps)?;
+                // M76: the served verdict is the resident lane's gate face
+                // — the session's own strict pass on the exact bytes the
+                // reply carries (the `-no_adhoc` carve-out applied the
+                // session's way, v43). The caller gates the write on it; a
+                // verdict the protocol somehow rode absent falls back to
+                // the caller's local pass on the same bytes.
+                let served_gate = if opts.verify {
+                    img.verify_report.as_ref().map(gate_from_served)
+                } else {
+                    None
+                };
                 return Ok((
                     ImageAndPlan {
                         image: img.image,
@@ -947,6 +1031,7 @@ fn link_to_image_recorded(
                         time: None,
                         trace: None,
                     },
+                    served_gate,
                 ));
             }
             Err(e) => {
@@ -1113,6 +1198,9 @@ fn link_to_image_recorded(
         },
         record,
         faces,
+        // M76: the one-shot lane gates through the caller's local pass —
+        // no served verdict rode the wire here.
+        None,
     ))
 }
 
@@ -1789,19 +1877,32 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     // handover note leads the full link's report (the collectors seed it
     // before the pipeline runs — the note names why the rungs stop, the
     // rows name the run that produced the output).
-    let (linked, record, mut faces) = if opts.incremental && opts.config.layout_slack.is_none() {
-        let mut slacked = opts.clone();
-        slacked.config.layout_slack = Some(pgr_core::slack::SlackPolicy::default());
-        link_to_image_recorded(&slacked, handover_note.as_ref())?
-    } else {
-        link_to_image_recorded(opts, handover_note.as_ref())?
-    };
+    let (linked, record, mut faces, served_gate) =
+        if opts.incremental && opts.config.layout_slack.is_none() {
+            let mut slacked = opts.clone();
+            slacked.config.layout_slack = Some(pgr_core::slack::SlackPolicy::default());
+            link_to_image_recorded(&slacked, handover_note.as_ref())?
+        } else {
+            link_to_image_recorded(opts, handover_note.as_ref())?
+        };
     // M73: the link's own gate. `-verify` runs the strict verifier on
     // the produced bytes before the write — a failing gate ships
     // nothing (the file is never created; the audit's rule, on the cold
-    // path), and a passing one rides the outcome's summary.
+    // path), and a passing one rides the outcome's summary. M76: on the
+    // resident lane the session's own served verdict is the gate face
+    // (the strict pass on the exact bytes the reply carries, the
+    // `-no_adhoc` carve-out applied the session's way) — the client
+    // consumes it instead of re-running the pass; every other lane runs
+    // the local gate. Either way the gate sits before the write. M77:
+    // the check selection narrows the pass to the named families —
+    // cold and fallback lanes run the selected pass locally, the
+    // resident lane's served verdict was narrowed by the session
+    // (wire v44 carries the set).
     let gate_summary = if opts.verify {
-        let gate = verify_gate(&linked.image, opts.config.adhoc);
+        let gate = served_gate.unwrap_or_else(|| match &opts.verify_checks {
+            Some(set) => verify_gate_selected(&linked.image, opts.config.adhoc, set),
+            None => verify_gate(&linked.image, opts.config.adhoc),
+        });
         if !gate.summary.ok {
             return Err(DriverError::Verify {
                 path: opts.output.clone(),
@@ -2701,6 +2802,14 @@ pub fn usage() -> String {
     s.push_str("                               sits before the write; the relink\n");
     s.push_str("                               ladder's gate is\n");
     s.push_str("                               -incremental-verify)\n");
+    s.push_str("  -verify-checks <families>    the families the -verify gate runs\n");
+    s.push_str("                               (comma-separated, the\n");
+    s.push_str("                               `pgr-verify --checks` tokens:\n");
+    s.push_str("                               structure, segments, symbols,\n");
+    s.push_str("                               linkedit, fixups, chain_starts,\n");
+    s.push_str("                               unwind, tlv, branch_range,\n");
+    s.push_str("                               dyld_info, signature — default:\n");
+    s.push_str("                               the full pass)\n");
     s.push_str("  -resident                    route the link through the resident\n");
     s.push_str("                               daemon (pgrd); falls back to the\n");
     s.push_str("                               one-shot link when unreachable\n");
