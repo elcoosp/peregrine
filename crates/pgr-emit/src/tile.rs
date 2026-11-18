@@ -88,6 +88,37 @@ pub fn build_image_fused(layout: &Layout, objects: &[InputObject]) -> Result<Vec
     Ok(buf)
 }
 
+/// [`build_image_fused`] under an observer (M68): the same emit — the
+/// parity gate is the seam's own contract, `tests/emit_observed.rs` — with
+/// Pass 4's completion reported as the `emit` phase (the M68 emit half of
+/// the M54 observation seam: the tiles and the image bytes the plan
+/// already knew, the wall time the pass took). One event per phase — the
+/// completion, never a per-tile stream; a refused emit reports nothing
+/// (the phase did not complete). The zero-config consumer installs
+/// [`pgr_core::TracingObserver`].
+///
+/// # Errors
+/// [`EmitError::Contract`] on operand/plan inconsistencies;
+/// [`EmitError::Internal`] on buffer indexing bugs.
+pub fn build_image_fused_observed(
+    layout: &Layout,
+    objects: &[InputObject],
+    observer: &mut dyn pgr_core::LinkObserver,
+) -> Result<Vec<u8>, EmitError> {
+    let tiles = usize::try_from(layout.file_size.div_ceil(TILE)).unwrap_or(usize::MAX);
+    let started = std::time::Instant::now();
+    let image = build_image_fused(layout, objects)?;
+    observer.on_phase(pgr_core::PhaseEvent {
+        phase: pgr_core::Phase::Emit,
+        detail: pgr_core::PhaseDetail::Emitted {
+            tiles,
+            bytes: layout.file_size,
+        },
+        elapsed: started.elapsed(),
+    });
+    Ok(image)
+}
+
 /// [`build_image_fused`] into a caller-owned buffer (M8: the resident
 /// server's page-fault gate — reusing one buffer across links turns the
 /// fresh `mmap`-style zero-fill fault storm into warm-page writes). The
