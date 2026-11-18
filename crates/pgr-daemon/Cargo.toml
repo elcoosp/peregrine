@@ -56,6 +56,14 @@ harness = false
 name = "wire_verify"
 harness = false
 
+# The M79 provenance-tail bench: the served answers' encode/decode price
+# (the renders ride the reply verbatim — length-prefixed strings beside
+# an image that carries pages). Registered explicitly — the same M34/M61
+# pathology, healed here like the entries before it.
+[[bench]]
+name = "wire_provenance"
+harness = false
+
 [[bin]]
 name = "pgrd"
 path = "src/main.rs"
