@@ -127,7 +127,7 @@ pub struct ServedLink {
     /// asked for it — the strict verifier's effective report on the
     /// final bytes (the full link's, the patched relink's and the
     /// untouched relink's alike; the `-no_adhoc` carve-out applied the
-    /// audit's way, [`effective_report`]). The subject is the image —
+    /// audit's way, `effective_report`). The subject is the image —
     /// every outcome serves one — so a build system reads the gate's
     /// verdict without re-reading the file it is about to write.
     pub verify_report: Option<pgr_verify::Report>,
@@ -154,15 +154,33 @@ fn effective_report(
 /// The strict verifier on the final bytes (M72): the served verdict's
 /// body — full strictness, the `-no_adhoc` carve-out applied, one
 /// `tracing` span (inert until a subscriber installs — the workspace
-/// convention).
-fn serve_verify(bytes: &[u8], signature_expected: bool) -> pgr_verify::Report {
-    let span = tracing::info_span!("daemon_verify", len = bytes.len(), signature_expected);
+/// convention). M77: the request's check selection narrows the pass to
+/// the named families (the M12 selector's subtractive contract — the
+/// parse pre-pass and the stats ride regardless); `None` names the full
+/// pass, the pre-M77 shape.
+fn serve_verify(
+    bytes: &[u8],
+    signature_expected: bool,
+    checks: Option<&pgr_verify::CheckSet>,
+) -> pgr_verify::Report {
+    let selection_text = match checks {
+        Some(set) => set.to_string(),
+        None => "all".to_string(),
+    };
+    let span = tracing::info_span!(
+        "daemon_verify",
+        len = bytes.len(),
+        signature_expected,
+        selection = selection_text
+    );
     let _entered = span.enter();
     let opts = pgr_verify::Options {
         strict_warnings: true,
         skip_hash_recompute: false,
     };
-    let report = pgr_verify::verify(bytes, &opts);
+    let full = pgr_verify::CheckSet::all();
+    let selected = checks.unwrap_or(&full);
+    let report = pgr_verify::verify_with_checks(bytes, &opts, selected);
     let effective = effective_report(report, signature_expected);
     tracing::debug!(
         issues = effective.issues.len(),
@@ -470,7 +488,9 @@ impl ResidentSession {
         // resident output state — the next relink's previous output is
         // already here.
         self.hold_output(&image);
-        let verify_report = req.verify.then(|| serve_verify(&image, req.config.adhoc));
+        let verify_report = req
+            .verify
+            .then(|| serve_verify(&image, req.config.adhoc, req.verify_checks.as_ref()));
         let record = if req.record_resolution {
             Some(
                 pgr_emit::incremental::LinkRecord::record(
@@ -685,7 +705,9 @@ impl ResidentSession {
             // M72: the verdict's subject is the image, every outcome
             // serves one — an untouched relink's is the resident previous
             // output itself.
-            let verify_report = req.verify.then(|| serve_verify(prev, cfg.adhoc));
+            let verify_report = req
+                .verify
+                .then(|| serve_verify(prev, cfg.adhoc, req.verify_checks.as_ref()));
             return Ok(ServedLink {
                 image: prev.to_vec(),
                 entryoff: result.layout.entryoff,
@@ -810,7 +832,9 @@ impl ResidentSession {
         // M72: the verdict's subject is the image the reply serves —
         // computed after the audit's heal, so a healed image is what the
         // verdict answers for (the audit's ordering, mirrored).
-        let verify_report = req.verify.then(|| serve_verify(&image, cfg.adhoc));
+        let verify_report = req
+            .verify
+            .then(|| serve_verify(&image, cfg.adhoc, req.verify_checks.as_ref()));
         Ok(ServedLink {
             image,
             entryoff: result.layout.entryoff,
@@ -956,6 +980,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -1156,6 +1181,7 @@ mod tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1326,6 +1352,7 @@ mod fusion_tests {
             time: false,
             trace: false,
             verify: false,
+            verify_checks: None,
         };
         let hashes = req.blob_hashes();
         (req, hashes)
