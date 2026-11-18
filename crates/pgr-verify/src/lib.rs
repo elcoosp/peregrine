@@ -62,6 +62,7 @@ pub mod sarif;
 pub mod signature;
 pub mod structural;
 pub mod tlv;
+pub mod universal;
 pub mod unwind;
 
 pub use baseline::{BaselineDelta, CodeIdentity, IssueIdentity, IssueKey, OffsetIdentity};
@@ -71,6 +72,7 @@ pub use checks::{
 pub use report_json::{
     ReportJsonError, parse_report_json, to_json, to_json_with_baseline, to_json_with_file,
 };
+pub use universal::{SliceVerdict, UniversalReport, verify_universal};
 
 use pgr_format::FormatError;
 
