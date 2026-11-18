@@ -103,19 +103,15 @@ fn an_empty_name_refuses() {
 }
 
 #[test]
-fn the_query_refuses_the_resident_lane() {
+fn the_query_rides_the_resident_lane() {
+    // M79: the resident lane serves the query — the session's own full
+    // walk renders the answer (wire v45), so the M56 resident refusal
+    // flipped to service; the surface parses and carries the name.
     let dir = scratch("resident");
-    let err = parse(&dir, &["-why_export", "_greet", "-resident"])
-        .expect_err("the resident conflict refuses");
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("-why_export") && rendered.contains("-resident"),
-        "the conflict names both flags: {rendered}"
-    );
-    assert!(
-        rendered.contains("one-shot"),
-        "the fix names the lane the query runs on: {rendered}"
-    );
+    let o = parse(&dir, &["-why_export", "_greet", "-resident"])
+        .expect("the resident lane serves the query");
+    assert!(o.resident, "the lane rides");
+    assert_eq!(o.why_export, vec!["_greet".to_string()]);
 }
 
 #[test]
