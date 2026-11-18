@@ -54,6 +54,12 @@ impl LinkObserver for PhaseTable {
             pgr_core::observe::PhaseDetail::Audit { healed, issues } => {
                 format!("healed={healed}, issues={issues}")
             }
+            pgr_core::observe::PhaseDetail::Emitted { tiles, bytes } => {
+                format!("tiles={tiles}, bytes={bytes}")
+            }
+            pgr_core::observe::PhaseDetail::Flushed { blocks, writers } => {
+                format!("blocks={blocks}, writers={writers}")
+            }
         };
         self.rows
             .push((event.phase.as_str().to_string(), detail, event.elapsed));
