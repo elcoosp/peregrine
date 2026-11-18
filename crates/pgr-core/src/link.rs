@@ -198,7 +198,7 @@ fn link_cached_inner(
     // ---- Pass 1: parse & collect names for the interner --------------------
     // M11: an order file ranks symbols — the atom split feeds it the same
     // way dead-strip does (and rides the same cache-key flag).
-    let split_symbols = cfg.dead_strip || cfg.symbol_order.is_some();
+    let split_symbols = split_symbols_for(cfg);
     let parse_started = Instant::now();
     let objects = parse_inputs(inputs, parallel, split_symbols, cache, &mut observer)?;
     emit_phase(
@@ -210,6 +210,17 @@ fn link_cached_inner(
         parse_started.elapsed(),
     );
     link_from_objects_observed(objects, archives, cfg, parallel, cache, observer)
+}
+
+/// The Pass-1 symbol-split decision (M11): an order file ranks symbols —
+/// the atom split feeds it the same way dead-strip does (and rides the
+/// same cache-key flag). One rule, both lanes: the driver's cached link
+/// and the resident session's prepare must decide identically, or a warm
+/// ordered link plans a different atom shape than the cold one (the M81
+/// parity gate is the rule's own contract).
+#[must_use]
+pub fn split_symbols_for(cfg: &LinkConfig) -> bool {
+    cfg.dead_strip || cfg.symbol_order.is_some()
 }
 
 /// Runs Passes 1b–3 over **already-parsed** direct inputs (M8): the resident
