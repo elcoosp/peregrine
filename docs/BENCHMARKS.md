@@ -371,6 +371,46 @@ wire. What it proves functionally: the skip is real (hit counters), output byte-
 iteration, buffer survives across links. The ≥ 5× gate and the page-fault/wire savings are
 rig-bound.
 
+#### The arm64e family on the resident lane (M82)
+
+The same parse-heavy corpus with `-fixup_chains_format arm64e` named
+(`cargo bench -p pgr-driver --bench resident`): the family byte has ridden
+the wire config since v6, so the family costs nothing at the wire — the
+group pins the plan-side price beside the lane's own shape (the M8 verdict
+above governs the warm-vs-cold wash here too).
+
+| Bench                                            | Median (dev sandbox) |
+| ------------------------------------------------ | -------------------- |
+| `resident-arm64e/one_shot_arm64e_64_objects`     | 226.8 ms             |
+| `resident-arm64e/resident_warm_arm64e_64_objects` | **279.9 ms**         |
+
+Initial dev-sandbox run (this host only; the recording-pass convention above governs the
+comparable table): one-shot 226.8 ms beside warm 279.9 ms — the same wash-to-slight-loss shape
+the Offset64 pair records, inside its span at this profile. The bench pins the shape (the
+family's plan cost rides the group's warm/cold pair), the hardware gates own the comparable
+numbers.
+
+#### The relocatable shape on the resident lane (M83)
+
+The same parse-heavy corpus under `-r`
+(`cargo bench -p pgr-driver --bench resident`): the session's walk runs
+the object path over the raw blobs (Passes 1–2, no POI interning — the
+object path re-parses) and `build_object_image` assembles the `MH_OBJECT`
+the reply carries. The group prices the object shape's session cost
+beside the one-shot's; the manifest/wire share rides with it, the same
+shape the M8 groups record for images.
+
+| Bench                                          | Median (dev sandbox) |
+| ---------------------------------------------- | -------------------- |
+| `resident-reloc/one_shot_reloc_64_objects`     | 225.6 ms             |
+| `resident-reloc/resident_warm_reloc_64_objects` | **166.4 ms**         |
+
+Initial dev-sandbox run (this host only; the recording-pass convention above governs the
+comparable table): one-shot 225.6 ms beside warm 166.4 ms — warm under parity (the skipped
+blob re-transfer covers the session's manifest/negotiation share at this profile; the object
+path re-parses either lane). The bench pins the shape, the hardware gates own the comparable
+numbers.
+
 ### Stage C — incremental relink (M9, all tiers)
 
 The ladder, with the bytes-written gate as the sandbox verdict (wall times are ext4-bound;
