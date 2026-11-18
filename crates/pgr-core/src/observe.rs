@@ -37,6 +37,17 @@
 //! keeps (or ships) its own. The typed surface is for the consumer that
 //! wants the events *as data* — a build-system progress bar, a phase-time
 //! report — without scraping formatted spans.
+//!
+//! The M78 rung grows the task seam's second pool: the flush pool's
+//! writers (Pass 5, `pgr-emit`'s writer pool) carry their own
+//! [`TaskEvent`]s — one per writer, the blocks the writer carried as its
+//! label, the same channel convention the parse pool rides (the records
+//! cross an mpsc channel that opens only when a subscriber rides; the
+//! caller forwards them once the pool returns). The timeline's lane
+//! registry names the second family beside the first (`pgr write pool N`
+//! beside `pgr parse pool N`, `tests/m78_write_lanes.rs` gating the
+//! naming and the round trip; `tests/m78_write_tasks.rs` gating the
+//! spans and the parity).
 
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -245,7 +256,8 @@ pub struct PhaseEvent {
 /// every worker's span would end at the drain).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEvent {
-    /// The phase the task rode in (today the parse pool's `Parse`).
+    /// The phase the task rode in (the parse pool's `Parse` — M63 — and
+    /// the flush pool's `Flush` — M78; the two pools the pipeline runs).
     pub phase: Phase,
     /// The task's own label — the input's command-line name for a parse.
     pub label: String,
