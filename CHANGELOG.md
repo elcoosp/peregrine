@@ -5,6 +5,44 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M69)
+
+- **M69** — the verifier's SARIF interchange: `pgr_verify::sarif::render` carries the
+  M13 report into SARIF 2.1.0 — the shape GitHub Code Scanning, IDE problem panels and
+  CI triage read natively (`ruleId` the stable code token, `level` the severity — the
+  verifier's only two, the message verbatim under the M13 escape rules, the anchor
+  offset as a binary `region.byteOffset`; an unanchored issue rides no location). The
+  face is a one-way writer — the reader is the consumer's tooling, not ours — and the
+  document keeps the house interchange conventions: deterministic (two renders of one
+  report are byte-identical, gated), one line, fixed key order. The rule table rides
+  one rule per distinct code in the report — the built-ins in `Code::ALL`'s canonical
+  order, the M67 custom tokens after them in lexicographic order — so the document's
+  key set is the report's own, never the arrival order. The `sarif` bench pins the
+  O(issues) render price beside the M13 JSON writer's, and the `sarif_report` consumer
+  example walks the valid image and its corrupted twin
+
+### Added (M68)
+
+- **M68** — the emit half joins the observation seam: Passes 4–5 stop being the caller's
+  opaque band and ride the M54 seam as typed phases — `Emit` (the fused tile emit's
+  completion: the 16 KiB tiles and the image bytes the plan already knew, reported by
+  `pgr_emit::build_image_fused_observed`) and `Flush` (the pooled atomic write's: the
+  8 MiB blocks and the writer threads that carried them, the single-writer path included,
+  reported by `pgr_emit::write_image_observed`) — the TDD §9.3 instrumentation spec's
+  named rows beside the pipeline's passes. The parity gate is the seam's own contract
+  (the observed emit plans the identical image, the observed flush ships the identical
+  bytes — `emit_observed.rs` gates both); the driver's `--time`/`--time-json`/`--trace`
+  faces collect the rows beside the Passes 1–3 rows through one subscription (the
+  `FaceSlot`, the `None`-forwarding twin of `ObserverPair`), the total band measuring the
+  wall through the flush, and the band face stays the library caller's
+  (`TimeReport::emit`/`total` remain `Option`s). The time-report tail's vocabulary gains
+  the two tokens without a version bump (no served content changes — the session's warm
+  run has no fused emit and the client does the writing). The `time_report` bench's
+  `render_9_rows`/`render_json_9_rows` groups and the `trace` bench's
+  `render_9_rows_image`/`parse_9_rows_image` groups pin the rows' price, and the
+  `emit_flush_observed` consumer example walks the whole pipeline beside the report
+  (the `ObserverPair` composition face riding along)
+
 ### Added (M67)
 
 - **M67** — the verifier's check registry opens to consumer-side checks: the `ImageCheck`
@@ -113,6 +151,21 @@ release automation.
   as `render_8_rows_64_tasks`/`parse_8_rows_64_tasks`; the `trace_tasks` consumer example
   walks the worker lanes beside a twelve-object link, round-trip gate included.
 
+### Added (M62)
+
+- **M62** — the resident lane's served timeline (wire v41): a trace-asking request
+  (`--trace` beside `-resident`) subscribes the same `TraceCollector` to the session's own
+  warm run — paired with the time collector when both faces ask — and the reply's IMAGE
+  tail carries the rendered document verbatim (the same one-line Trace Event Format file
+  the one-shot `--trace` writes; the strict reader is the document's own face, the wire
+  never re-shapes it): the served timeline names the phases the session's run actually
+  executed (no `Parse` row — the POIs are resident, the parse was paid when the blobs
+  arrived; the relink's Pass-4 half is the in-memory patch), and an unasked timeline never
+  crosses (the tail is one byte). The client writes the served document to `--trace`'s
+  path — either lane writes the same face, so the driver's resident refusal flips to
+  service. The `wire_trace` bench pins the tail's encode/decode price (one length prefix,
+  one string push).
+
 ### Added (M61)
 
 - **M61** — the Chrome-trace timeline (`pgr_core::trace`, the `--trace <path>` driver
@@ -140,21 +193,6 @@ release automation.
   both faces). The `trace` bench pins the seam's near-parity and the faces' O(rows)
   render/parse prices; the `trace_timeline` consumer example writes the file beside a real
   link and reads it back through the strict reader.
-
-### Added (M62)
-
-- **M62** — the resident lane's served timeline (wire v41): a trace-asking request
-  (`--trace` beside `-resident`) subscribes the same `TraceCollector` to the session's own
-  warm run — paired with the time collector when both faces ask — and the reply's IMAGE
-  tail carries the rendered document verbatim (the same one-line Trace Event Format file
-  the one-shot `--trace` writes; the strict reader is the document's own face, the wire
-  never re-shapes it): the served timeline names the phases the session's run actually
-  executed (no `Parse` row — the POIs are resident, the parse was paid when the blobs
-  arrived; the relink's Pass-4 half is the in-memory patch), and an unasked timeline never
-  crosses (the tail is one byte). The client writes the served document to `--trace`'s
-  path — either lane writes the same face, so the driver's resident refusal flips to
-  service. The `wire_trace` bench pins the tail's encode/decode price (one length prefix,
-  one string push).
 
 ### Added (M60)
 
@@ -186,6 +224,21 @@ release automation.
   the `-l`/`-framework` not-found refusals name the directories they searched (the weak error
   the record's probes made visible).
 
+### Added (M59)
+
+- **M59** — the resident lane's served time report (wire v40): the session observes its own
+  pipeline — a time-asking request (`--time` beside `-resident`) subscribes the same
+  `TimeCollector` to the warm run the §7.3 ladder serves (`link_from_objects_observed` on
+  both the full link and the relink), and the reply's IMAGE tail carries the collected
+  report (count-prefixed phase rows — phase token, detail kind, µs — the notes, the
+  present-byte + µs bands). The served table names the phases the session's run actually
+  executed (no `Parse` row — the POIs are resident, the parse was paid when the blobs
+  arrived); the relink's Pass-4 half is the in-memory patch, so its emit band rides absent;
+  an unasked report never crosses (the tail is one byte); a client whose daemon falls back
+  prints the one-shot link's own report — either way the run is observed, and the daemon
+  still never touches the filesystem. The `wire_time` bench pins the tail's encode/decode
+  price; the driver's resident cycle walks the served face end to end.
+
 ### Added (M58)
 
 - **M58** — the per-pass time report (`pgr_core::time_report`, the `--time` / `--time-json`
@@ -208,42 +261,6 @@ release automation.
   collector's near-parity with the unobserved link (one push per phase — seven per segmented
   link) and the faces' O(rows) render price; the `time_report` consumer example renders the
   driver faces beside the library face.
-
-### Added (M59)
-
-- **M59** — the resident lane's served time report (wire v40): the session observes its own
-  pipeline — a time-asking request (`--time` beside `-resident`) subscribes the same
-  `TimeCollector` to the warm run the §7.3 ladder serves (`link_from_objects_observed` on
-  both the full link and the relink), and the reply's IMAGE tail carries the collected
-  report (count-prefixed phase rows — phase token, detail kind, µs — the notes, the
-  present-byte + µs bands). The served table names the phases the session's run actually
-  executed (no `Parse` row — the POIs are resident, the parse was paid when the blobs
-  arrived); the relink's Pass-4 half is the in-memory patch, so its emit band rides absent;
-  an unasked report never crosses (the tail is one byte); a client whose daemon falls back
-  prints the one-shot link's own report — either way the run is observed, and the daemon
-  still never touches the filesystem. The `wire_time` bench pins the tail's encode/decode
-  price; the driver's resident cycle walks the served face end to end.
-
-### Added (M56)
-
-- **M56** — the symbol-reference provenance query (`pgr_core::provenance`, the
-  `-why_export <symbol>` driver flag): the M8-a reverse reference index the propagation
-  planner keeps private becomes a nameable, typed answer a library consumer and the driver
-  can read. A query names the definition the Pass-2 resolution installed — the input file
-  and section it came from (direct object or pulled archive member, the rank and weak mark
-  riding), the dylib export whose two-level bind serves it (the provider named through the
-  resolution's ordinal map), or the loader's dynamic lookup — and every reference site the
-  link saw: `(file, section, offset)` in the index's own ascending order, one record per
-  site. `RefExplanation::render` is the diffable text face, `render_json` the deterministic
-  interchange (fixed key order, one line, the report-JSON escape rules, shared with the M55
-  map writer), a vacuous query refuses with the misspelling named (the C-underscore hint is
-  the fix). The seam is read-only — the query consumes the link's own Pass-2 product
-  (`LinkResult` carries the resolution since M56) and re-derives nothing; a queried link
-  plans the identical layout (the parity gate is the seam's own contract); the resident and
-  incremental lanes refuse the flag (the product never crosses the wire — the daemon wire
-  stays v39). The `provenance` bench pins the index build (16.0 µs at 64 objects) and the
-  query price (234 ns); the `why_export_link` consumer example renders both faces beside
-  the vacuous refusal.
 
 ### Added (M57)
 
@@ -282,6 +299,27 @@ release automation.
   that planned is byte-identical under the fix (live definitions always
   match an atom at or before their value — the `idx == 0` arm is dead-def
   only, and dead defs never reached the output).
+
+### Added (M56)
+
+- **M56** — the symbol-reference provenance query (`pgr_core::provenance`, the
+  `-why_export <symbol>` driver flag): the M8-a reverse reference index the propagation
+  planner keeps private becomes a nameable, typed answer a library consumer and the driver
+  can read. A query names the definition the Pass-2 resolution installed — the input file
+  and section it came from (direct object or pulled archive member, the rank and weak mark
+  riding), the dylib export whose two-level bind serves it (the provider named through the
+  resolution's ordinal map), or the loader's dynamic lookup — and every reference site the
+  link saw: `(file, section, offset)` in the index's own ascending order, one record per
+  site. `RefExplanation::render` is the diffable text face, `render_json` the deterministic
+  interchange (fixed key order, one line, the report-JSON escape rules, shared with the M55
+  map writer), a vacuous query refuses with the misspelling named (the C-underscore hint is
+  the fix). The seam is read-only — the query consumes the link's own Pass-2 product
+  (`LinkResult` carries the resolution since M56) and re-derives nothing; a queried link
+  plans the identical layout (the parity gate is the seam's own contract); the resident and
+  incremental lanes refuse the flag (the product never crosses the wire — the daemon wire
+  stays v39). The `provenance` bench pins the index build (16.0 µs at 64 objects) and the
+  query price (234 ns); the `why_export_link` consumer example renders both faces beside
+  the vacuous refusal.
 
 ### Added (M55)
 
@@ -1081,7 +1119,7 @@ release automation.
 > structure now matches the published tags (v0.2.0–v0.10.0; Cargo.toml
 > carries 0.10.0).
 
-## [Unreleased]
+## [0.10.1] - unreleased slot (retitled: this section sat stray between [0.11.0] and [0.10.0], a generation artifact — its position's own version)
 
 ### Features
 
