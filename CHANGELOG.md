@@ -6,6 +6,52 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M81)
+
+- **M81** — the wire carries the order-file rank table: the M11 lane contract (`-order_file`
+  is a driver-side Pass-3 input, so the resident lane refused it — the surface's own verdict
+  named the wire config "not carrying the rank table") flips to service the M80 way: the
+  table is config, and the config crosses the wire. The rank table rides the request's
+  config tail now (v47 — a present byte, count-prefixed entries with their object scope and
+  diagnostics line; the empty absence is the pre-M81 shape, byte-identical on the decode
+  side; a table the constructor refuses — an empty list, two ranks for one symbol — is a
+  malformed request at the wire, never a silently misread table), and
+  `pgr_core::order::SymbolOrder::from_entries` is the pgr-core seam the decode side builds
+  through (the same refusals the file parse carries, the lines named). `-resident
+  -order_file` links with the layout the cold lane plans now — the parity gate is the rung's
+  own contract (byte-identical images), and it caught the drift it exists for: the Pass-1
+  atom-split decision (a rank table feeds the split the same way dead-strip does) was the
+  cold lane's inline `||` — `pgr_core::split_symbols_for` is the named rule both lanes read,
+  so a warm ordered link plans the atom shape the cold one plans. The ladder's replay beside
+  the `record` rides the table the way the cold ladder always has (the table is config, not
+  a product), the unmatched-name advisory stays the cold lane's stderr face (the product is
+  the bytes, and the bytes are what cross), and the fallback ranks the one-shot's own way.
+  The `wire_order` bench pins the config tail's encode/decode price at the build-system
+  scales (8 and 64 entries beside the table-free shape), and the `ordered_resident_link`
+  example walks the parity gate beside the placed order
+
+### Added (M80)
+
+- **M80** — the resident lane's served map: the M11 lane contract (`-map` reads the one-shot
+  link's layout, so the resident lane refused it — the surface's own verdict named the wire
+  "never returning the layout the map reports") flips to service the M79 way: the session's
+  warm pipeline *is* the walk (parse from resident POIs, intern, resolve, layout), the layout
+  and the interner are in its memory, and the driver never asked. The map ask rides the
+  request now (v46 — the `-map` flag; a map beside the `record` is a malformed request at the
+  wire: the §7.3 ladder's replay patches the recorded plan in place, and the map reports the
+  full emit's layout — the fusion lane keeps refusing, no wire caller can plan the shape
+  either), the session renders the placed image's report from its own walk
+  (`pgr_core::map::build_link_map`, the same pure function the cold lane's `-map` calls — the
+  document cannot disagree with the bytes the reply carries), and the reply's IMAGE tail
+  carries the rendered document verbatim (the M62 convention — the wire never re-shapes the
+  face the client writes), so the driver writes the served bytes to the `-map` path exactly as
+  the cold lane writes its own — the daemon never touches the filesystem, the client does. The
+  fallback story stays honest: a resident attempt that stands down hands over to the one-shot
+  link, whose own render writes the file — either lane, one walk, one document (`m80_served_map`
+  pins the byte parity and the fallback's). The `wire_map` bench pins the tail's encode/decode
+  price beside the image pages it rides, and the `served_map_link` example walks the served
+  face beside the fallback's parity gate
+
 ### Added (M79)
 
 - **M79** — the resident lane's served provenance: the M56/M57 lane contract (`-why_export`/
