@@ -247,7 +247,7 @@ use sha2::{Digest, Sha256};
 /// rendered text verbatim; a query the §7.3 ladder's replay cannot
 /// answer honestly — beside the `record` — is a malformed request, the
 /// fusion lane's own refusal enforced at the wire).
-pub const PROTO_VERSION: u32 = 45;
+pub const PROTO_VERSION: u32 = 47;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -525,6 +525,16 @@ pub struct LinkRequest {
     /// dylib's carriage) rendered from the session's own pull record.
     /// The lane contract mirrors [`LinkRequest::why_export`].
     pub why_load: bool,
+    /// The link-map flag (v46, M80): `-map` — the session's own full
+    /// walk renders the placed image's report (`pgr_core::map`, the
+    /// segments/sections/symbols document the cold lane's `-map`
+    /// writes), and the reply's IMAGE tail carries the rendered
+    /// document verbatim — the client writes the file (the daemon never
+    /// touches the filesystem). The flag beside the `record` (the §7.3
+    /// ladder's replay) is a malformed request: the map reports the
+    /// full emit's layout, the replay patches the recorded plan in
+    /// place, so an answer would misreport the run.
+    pub map: bool,
 }
 
 impl LinkRequest {
@@ -607,6 +617,8 @@ impl LinkRequest {
             put_str(&mut b, name);
         }
         put_u8(&mut b, u8::from(self.why_load));
+        // M80 (v46): the link-map request flag.
+        put_u8(&mut b, u8::from(self.map));
         b
     }
 
@@ -692,6 +704,13 @@ impl LinkRequest {
             )));
         }
         let why_load = r.u8()? != 0;
+        // M80 (v46): the link-map request flag (see encode). A map
+        // beside the `record` is a malformed request — the ladder's
+        // replay patches the recorded plan in place, and the map
+        // reports the full emit's layout (the fusion lane's own
+        // refusal, enforced at the wire so no caller can plan the
+        // shape either).
+        let map = r.u8()? != 0;
         let queries_asked = !why_export.is_empty() || why_load;
         if queries_asked && record.is_some() {
             return Err(DecodeError::Malformed(std::io::Error::new(
@@ -699,6 +718,14 @@ impl LinkRequest {
                 "the request asks provenance beside a record: the §7.3 ladder's \
                  replay cannot answer the query honestly (the Pass-2 product is \
                  the record's, not the walk's)",
+            )));
+        }
+        if map && record.is_some() {
+            return Err(DecodeError::Malformed(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the request asks the link map beside a record: the §7.3 ladder's \
+                 replay patches the recorded plan in place, and the map reports \
+                 the full emit's layout",
             )));
         }
         r.done()?;
@@ -718,6 +745,7 @@ impl LinkRequest {
             verify_checks,
             why_export,
             why_load,
+            map,
         })
     }
 }
@@ -1198,6 +1226,47 @@ pub fn decode_provenance_bytes(body: &[u8]) -> Result<Option<ServedProvenance>, 
     Ok(served)
 }
 
+// ---- the v46 link-map tail -----------------------------------------------------
+
+/// Encodes the reply's link-map tail (v46): a present byte, then — when
+/// the request asked — the rendered map document as one length-prefixed
+/// UTF-8 string (the same deterministic text the cold lane's `-map`
+/// writes; the wire never re-shapes the face the client writes to the
+/// `-map` path). An unasked map rides the absent byte.
+pub fn encode_map(out: &mut Vec<u8>, document: Option<&str>) {
+    match document {
+        Some(text) => {
+            put_u8(out, 1);
+            put_str(out, text);
+        }
+        None => put_u8(out, 0),
+    }
+}
+
+/// Decodes the reply's link-map tail (v46; see [`encode_map`] for the
+/// shape). The document rides verbatim — the client writes the file.
+pub(crate) fn decode_map(r: &mut Reader<'_>) -> Result<Option<String>, DecodeError> {
+    if r.u8()? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(r.str()?))
+}
+
+/// Decodes the reply's link-map tail from a whole body (v46) — the
+/// byte-slice shape of the crate-private `decode_map`, for a consumer
+/// that reads the tail in isolation (the wire codec's round-trip gate;
+/// the client reads it inline after the provenance tail). Trailing
+/// bytes after the tail refuse, like every body.
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation or trailing bytes.
+pub fn decode_map_bytes(body: &[u8]) -> Result<Option<String>, DecodeError> {
+    let mut r = Reader::new(body);
+    let document = decode_map(&mut r)?;
+    r.done()?;
+    Ok(document)
+}
+
 /// Encodes one export-filter pattern (M14, wire v7): a kind byte (the
 /// `SymbolPattern` variant) ahead of the line as written, so the daemon
 /// relinks with the surface the client named — globs stay globs.
@@ -1576,6 +1645,23 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         put_str(out, rename.to_seg());
         put_str(out, rename.to_sect());
     }
+    // M81 (v47): the order-file rank table rides the tail after the
+    // renames — a present byte, then a count-prefixed entry list (per
+    // entry the optional object scope, the symbol, the diagnostics
+    // line); a resident ordered link ranks the entries the client named,
+    // never the default absence.
+    match &cfg.symbol_order {
+        Some(order) => {
+            put_u8(out, 1);
+            put_u32(out, order.entries().len() as u32);
+            for entry in order.entries() {
+                put_opt_str(out, entry.object.as_deref());
+                put_str(out, &entry.symbol);
+                put_u32(out, u32::try_from(entry.line).unwrap_or(u32::MAX));
+            }
+        }
+        None => put_u8(out, 0),
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1908,6 +1994,36 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             .collect(),
     )
     .map_err(|_| malformed())?;
+    // M81 (v47 wire): the order-file rank table (see encode). The absent
+    // byte is the pre-M81 shape (every clean link); a table the
+    // constructor refuses — an empty list, two ranks for one symbol — is
+    // a malformed request: the wire never carries a table the pipeline
+    // would silently misread (the parse's own refusals, mirrored here
+    // with the lines carried so the report reads like the cold lane's).
+    let symbol_order = if r.u8()? == 0 {
+        None
+    } else {
+        let count = r.u32()?;
+        let mut entries = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let object = r.opt_str()?;
+            let symbol = r.str()?;
+            let line = r.u32()?;
+            entries.push(pgr_core::order::OrderEntry {
+                symbol,
+                object,
+                line: usize::try_from(line).unwrap_or(usize::MAX),
+            });
+        }
+        Some(
+            pgr_core::order::SymbolOrder::from_entries(entries).map_err(|e| {
+                DecodeError::Malformed(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("the request's order-file rank table does not parse: {e}"),
+                ))
+            })?,
+        )
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -1946,12 +2062,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         layout_slack,
         slack_anchor,
         chain_word_format,
-        // M11: the order-file rank table is a driver-side Pass-3 input
-        // the v6 wire does not carry — the driver refuses
-        // `-order_file` + `-resident` at parse time (the same honest
-        // scope note `-fixup_chains_format` rides), so a decoded config
-        // is always order-free.
-        symbol_order: None,
+        // M11: the order-file rank table rides the v47 tail now (M81) —
+        // a resident ordered link ranks the entries the client named;
+        // a table the constructor refuses refuses the request (never a
+        // silently misread table).
+        symbol_order,
         pagezero,
         init_offsets,
         seg_prots,
@@ -1993,9 +2108,10 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
 mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, ServedExport,
-        ServedProvenance, TAG_LINK, content_hash, decode_provenance_bytes, decode_time_report,
-        decode_trace_bytes, decode_verify_report_bytes, encode_provenance, encode_time_report,
-        encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64,
+        ServedProvenance, TAG_LINK, content_hash, decode_map_bytes, decode_provenance_bytes,
+        decode_time_report, decode_trace_bytes, decode_verify_report_bytes, encode_map,
+        encode_provenance, encode_time_report, encode_trace, encode_verify_report, put_str, put_u8,
+        put_u32, put_u64,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
@@ -2364,6 +2480,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2392,6 +2509,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2421,6 +2539,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2452,6 +2571,7 @@ mod tests {
             ),
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2486,15 +2606,17 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         // Hand-splice the malformed selection past the well-formed tail:
         // encode a plain request body, drop the trailing absent byte and
-        // the v45 provenance fields beside it (the count u32 and the
-        // load-report flag — six bytes), append the malformed one. The
-        // selection's parse refuses before the decoder reads past it —
-        // the spliced tail rides no further fields.
+        // the v45 provenance fields beside it plus the v46 map flag (the
+        // count u32, the load-report flag, the map flag — seven bytes),
+        // append the malformed one. The selection's parse refuses before
+        // the decoder reads past it — the spliced tail rides no further
+        // fields.
         let mut wire = req.encode();
-        wire.truncate(wire.len() - 6);
+        wire.truncate(wire.len() - 7);
         put_u8(&mut wire, 1);
         put_str(&mut wire, "segmants");
         let err = LinkRequest::decode(&wire).unwrap_err();
@@ -2573,6 +2695,7 @@ mod tests {
             verify_checks: None,
             why_export: vec!["_greet".to_string(), "_msg".to_string()],
             why_load: true,
+            map: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2607,6 +2730,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         // Hand-splice a one-query tail with an empty name over the
         // no-query one: the encoded tail is the count u32 + the flag
@@ -2642,6 +2766,7 @@ mod tests {
             verify_checks: None,
             why_export: vec!["_greet".to_string()],
             why_load: false,
+            map: false,
         };
         let err = LinkRequest::decode(&req.encode()).unwrap_err();
         match err {
@@ -2714,6 +2839,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2745,6 +2871,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -2775,6 +2902,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2804,6 +2932,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let back = LinkRequest::decode(&bare.encode()).unwrap();
         assert_eq!(back, bare);
@@ -2844,6 +2973,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert!(back.tiles, "the flag rides the wire");
@@ -2876,6 +3006,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let body = req.encode();
         // The distinctive vmsize appears exactly once (every other field
@@ -2928,6 +3059,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the decisions cross byte-for-byte");
@@ -2965,6 +3097,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The segment name rides as a length-prefixed string exactly
@@ -3009,6 +3142,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the reserve crosses byte-for-byte");
@@ -3056,6 +3190,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The reserve rides as a present-byte + u64 exactly once (the
@@ -3100,6 +3235,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the base crosses byte-for-byte");
@@ -3137,6 +3273,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The base rides as a present-byte + u64 exactly once (the
@@ -3192,6 +3329,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3230,6 +3368,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The member rides as (kind byte, u32 len, name bytes) exactly
@@ -3281,6 +3420,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3318,6 +3458,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The client rides as (u32 len, name bytes) exactly once; the
@@ -3367,6 +3508,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3405,6 +3547,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The pair rides as (u32 len, pair bytes) exactly once; the
@@ -3454,6 +3597,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3493,6 +3637,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3543,6 +3688,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3592,6 +3738,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3631,6 +3778,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3666,6 +3814,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3701,6 +3850,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3733,6 +3883,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3769,6 +3920,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3805,6 +3957,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3838,6 +3991,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3875,6 +4029,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3910,6 +4065,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3943,6 +4099,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -3979,6 +4136,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4012,6 +4170,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4047,6 +4206,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4086,6 +4246,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4120,6 +4281,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4181,6 +4343,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         let needle = b"__mydata";
@@ -4231,6 +4394,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4269,6 +4433,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4305,6 +4470,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4340,6 +4506,7 @@ mod tests {
                 verify_checks: None,
                 why_export: Vec::new(),
                 why_load: false,
+                map: false,
             }
             .encode(),
         )
@@ -4372,6 +4539,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The marks are the wire tail's last section: the count rides
@@ -4408,6 +4576,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The floor rides the config tail as (present byte, u64); the
@@ -4450,6 +4619,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The last floor byte is `__TEXT,__text`'s exponent (12); the
@@ -4494,6 +4664,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         // The path rides as (u32 len, path bytes) exactly once; the
@@ -4529,6 +4700,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         }
         .encode();
         let rel_path = b"bin/dyld";
@@ -4567,6 +4739,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -4594,6 +4767,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -4851,5 +5025,213 @@ mod tests {
         let mut trailing = body.clone();
         trailing.push(0);
         assert!(decode_trace_bytes(&trailing).is_err());
+    }
+
+    // ---- M80 (wire v46): the resident lane's served map ------------------
+
+    /// A map-asking request (the flag beside an otherwise plain link).
+    fn map_request() -> LinkRequest {
+        LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: true,
+        }
+    }
+
+    #[test]
+    fn the_map_flag_round_trips_cleanly() {
+        // The M80 rung: the `-map` flag rides the request; the empty
+        // flag (the pre-M80 shape) is byte-identical on the decode side.
+        let back = LinkRequest::decode(&map_request().encode()).unwrap();
+        assert!(back.map, "the map ask rides the wire");
+        let mut quiet = map_request();
+        quiet.map = false;
+        let back = LinkRequest::decode(&quiet.encode()).unwrap();
+        assert!(!back.map, "an unasked map never crosses");
+    }
+
+    #[test]
+    fn the_map_request_beside_a_record_refuses() {
+        // The ladder's replay cannot answer the map honestly: the map
+        // reports the full emit's layout, the fusion lane patches the
+        // recorded plan in place — the wire refuses the shape so no
+        // caller can plan it either (the M79 provenance rule, mirrored).
+        let mut req = map_request();
+        req.record = Some(vec![1, 2, 3]);
+        let err = LinkRequest::decode(&req.encode()).unwrap_err();
+        let DecodeError::Malformed(e) = err else {
+            panic!("the map-beside-record shape is malformed, got {err:?}");
+        };
+        let text = e.to_string();
+        assert!(
+            text.contains("map") && text.contains("record"),
+            "the refusal names the shape: {text}"
+        );
+    }
+
+    /// A served-shape map document: the render the cold lane's `-map`
+    /// writes (segments, sections, symbols), byte-for-byte.
+    fn served_map_document() -> String {
+        "# Sections\n\n__TEXT,__text (the placed image's report)\n".to_string()
+    }
+
+    #[test]
+    fn the_map_tail_round_trips_the_document() {
+        let document = served_map_document();
+        // The rendered document rides verbatim — the wire never
+        // re-shapes the bytes the client writes to the `-map` path.
+        let mut body = Vec::new();
+        encode_map(&mut body, Some(&document));
+        let back = decode_map_bytes(&body).unwrap();
+        assert_eq!(
+            back.as_deref(),
+            Some(document.as_str()),
+            "the map document crosses verbatim"
+        );
+    }
+
+    #[test]
+    fn the_map_tail_rides_absent() {
+        let mut body = Vec::new();
+        encode_map(&mut body, None);
+        assert_eq!(decode_map_bytes(&body).unwrap(), None, "one byte");
+        assert_eq!(body.len(), 1, "an unasked map never crosses");
+    }
+
+    #[test]
+    fn the_map_tail_refuses_truncation_and_trailing_bytes() {
+        let mut body = Vec::new();
+        encode_map(&mut body, Some("# Sections\n"));
+        let truncated = &body[..body.len() - 1];
+        assert!(decode_map_bytes(truncated).is_err());
+        let mut trailing = body.clone();
+        trailing.push(0);
+        assert!(decode_map_bytes(&trailing).is_err());
+    }
+
+    // ---- M81 (wire v47): the order-file rank table crosses the wire -----
+
+    /// A representative rank table: a global entry, a scoped entry and
+    /// another global — the parse's own shapes, in rank order.
+    fn rich_order_entries() -> Vec<pgr_core::order::OrderEntry> {
+        vec![
+            pgr_core::order::OrderEntry {
+                symbol: "_main".into(),
+                object: None,
+                line: 1,
+            },
+            pgr_core::order::OrderEntry {
+                symbol: "_shared".into(),
+                object: Some("first.o".into()),
+                line: 2,
+            },
+            pgr_core::order::OrderEntry {
+                symbol: "_late".into(),
+                object: None,
+                line: 3,
+            },
+        ]
+    }
+
+    #[test]
+    fn the_order_table_round_trips() {
+        // The M81 rung: the rank table rides the config tail — a
+        // resident ordered link ranks the entries the client named
+        // (never the default absence), and the rebuilt table's lookup
+        // faces answer exactly what the client's table answers.
+        let mut req = map_request();
+        req.map = false;
+        req.config.symbol_order = Some(
+            pgr_core::order::SymbolOrder::from_entries(rich_order_entries())
+                .expect("the table builds"),
+        );
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        let order = back.config.symbol_order.expect("the table rides the wire");
+        let entries = order.entries();
+        assert_eq!(entries.len(), 3, "every entry rides");
+        assert_eq!(entries[0].symbol, "_main");
+        assert_eq!(entries[1].symbol, "_shared");
+        assert_eq!(entries[1].object.as_deref(), Some("first.o"));
+        assert_eq!(entries[1].line, 2, "the diagnostics line rides");
+        assert_eq!(entries[2].symbol, "_late");
+        assert_eq!(order.rank_of("first.o", b"_shared"), Some(1));
+        // The scoped entry ranks its object only (the parse's own
+        // shape — no global twin rode, so no other object answers).
+        assert_eq!(order.rank_of("other.o", b"_shared"), None);
+        assert_eq!(order.rank_of("other.o", b"_main"), Some(0));
+        // The empty flag (the pre-M81 shape) is byte-identical on the
+        // decode side.
+        let mut plain = req.clone();
+        plain.config.symbol_order = None;
+        let back = LinkRequest::decode(&plain.encode()).unwrap();
+        assert!(back.config.symbol_order.is_none(), "the absence rides");
+    }
+
+    #[test]
+    fn a_wire_garbage_order_table_is_malformed() {
+        // Two ranks for one symbol is a contradiction — the wire never
+        // carries a table the pipeline would silently misread (the
+        // parse's own refusal, mirrored at the decode). The encode side
+        // cannot produce the shape (a [`SymbolOrder`] cannot hold a
+        // duplicate), so the body is hand-spliced: a well-formed config
+        // tail whose table carries the duplicate, then the plain
+        // request fields.
+        use super::encode_config;
+        let mut body = Vec::new();
+        put_u32(&mut body, PROTO_VERSION);
+        encode_config(&mut body, &rich_config());
+        // `rich_config` carries no table: drop the absent byte the
+        // encoder just wrote, the hand-spliced table takes its place
+        // (the v47 tail's slot at the config's end).
+        body.truncate(body.len() - 1);
+        // The v47 table tail: present, two entries, the second a
+        // duplicate of the first (the lines ride, so the refusal reads
+        // like the cold lane's).
+        put_u8(&mut body, 1);
+        put_u32(&mut body, 2);
+        put_u8(&mut body, 0); // no object (global)
+        put_str(&mut body, "_main");
+        put_u32(&mut body, 1);
+        put_u8(&mut body, 0);
+        put_str(&mut body, "_main");
+        put_u32(&mut body, 9);
+        // The plain request fields behind the config.
+        put_u32(&mut body, 0); // force_load
+        put_u32(&mut body, 0); // inputs
+        put_u32(&mut body, 0); // archives
+        put_u8(&mut body, 0); // record
+        put_u8(&mut body, 0); // record_resolution
+        put_u8(&mut body, 0); // prev_output
+        put_u8(&mut body, 0); // audit
+        put_u8(&mut body, 0); // tiles
+        put_u8(&mut body, 0); // time
+        put_u8(&mut body, 0); // trace
+        put_u8(&mut body, 0); // verify
+        put_u8(&mut body, 0); // verify_checks
+        put_u32(&mut body, 0); // why_export count
+        put_u8(&mut body, 0); // why_load
+        put_u8(&mut body, 0); // map
+        let err = LinkRequest::decode(&body).unwrap_err();
+        let DecodeError::Malformed(e) = err else {
+            panic!("a duplicate rank table is malformed, got {err:?}");
+        };
+        let text = e.to_string();
+        assert!(
+            text.contains("rank") && text.contains("_main"),
+            "the refusal names the contradiction: {text}"
+        );
     }
 }
