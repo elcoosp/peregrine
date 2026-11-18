@@ -740,9 +740,14 @@ The "30 CPU-days clean" gate formally closes on the rig.
   over a linked dylib — `dylib_16_objects/clean` **496.9 µs** (the strict pass on the produced
   bytes, the signature recompute included), `corrupted` **471.3 µs** (the refusal path walks the
   same checks and renders the same issue list), `no_adhoc` **470.3 µs** (the `-no_adhoc`
-  carve-out's filter — one retain over the issues) (dev-sandbox medians). The gate rides before
-  the write on the cold link, so the honest expectation is one verifier pass beside the write —
-  the same shape the verifier's own `checks` bench pins, composed at the driver.
+  carve-out's filter — one retain over the issues), `served_face` **~3.4 ns** (M76 — the
+  resident lane's served face: the session's verdict arrives as a report, shaping the gate face
+  from it is O(issues), never the image walk; one verifier pass per resident link, not two),
+  `selected_segments` **~4.3 µs** (M77 — the narrowed lane beside the full pass: the M12
+  selector skips every family the selection did not name, the signature recompute included)
+  (dev-sandbox medians). The gate rides before the write on the cold link, so the honest
+  expectation is one verifier pass beside the write — the same shape the verifier's own
+  `checks` bench pins, composed at the driver.
 
 - **M4**: `m4_fused_driver_output_is_byte_identical_to_the_reference`, `m4_fused_matches_reference_on_m2_and_m3_corpora`, ten `pgr-emit/tests/m4_fused.rs` corpus shapes, bench-setup assertions.
 - **M5**: `m5_archive_member_is_pulled_and_the_output_verifies`, `m5_dead_strip_matches_the_reference_emit_and_determinism`, `m5_cstring_merge_dedups_across_inputs` (+ section-relative pointer gate), `m5_sectcreate_places_file_contents`.
