@@ -144,6 +144,14 @@ pub struct ServedLink {
     /// the fusion lane's request is refused at the wire). The renders
     /// cross verbatim; the client prints the cold lane's face.
     pub provenance: Option<crate::protocol::ServedProvenance>,
+    /// The served link map (v46, M80): `Some` when the request asked —
+    /// the placed image's report rendered from the session's own walk
+    /// (the full link's layout and interner; the ladder's replay serves
+    /// none — the map beside the `record` is refused at the wire, the
+    /// map reports the full emit's layout and the replay patches in
+    /// place). The document crosses verbatim; the client writes the
+    /// cold lane's file.
+    pub map_text: Option<String>,
 }
 
 /// The verdict's effective shape (M72): the strict pass's report with
@@ -376,7 +384,13 @@ impl ResidentSession {
     /// symbols, duplicates, layout contract) or emit failures.
     pub fn link(&mut self, req: &crate::protocol::LinkRequest) -> Result<ServedLink, SessionError> {
         use pgr_core::Parallelism;
-        let split = req.config.dead_strip;
+        // The Pass-1 split rule is pgr-core's own (M11: a rank table
+        // feeds the atom split the same way dead-strip does) — the M81
+        // config tail carries the table, so the session's prepare reads
+        // the same named decision the cold lane reads (one rule, both
+        // lanes; a warm ordered link plans the atom shape the cold one
+        // plans — the `m81_resident_order` parity gate pins it).
+        let split = pgr_core::split_symbols_for(&req.config);
         let mut objects: Vec<InputObject> = Vec::with_capacity(req.inputs.len());
         for (i, entry) in req.inputs.iter().enumerate() {
             objects.push(self.prepare_object(
@@ -527,6 +541,14 @@ impl ResidentSession {
         // either lane); the index builds once per link, the queries read
         // it.
         let provenance = Self::serve_provenance(req, &result)?;
+        // M80 (v46): the served map — the session's own walk renders the
+        // placed image's report (the layout and the interner are the
+        // warm pipeline's product; the render is the same pure function
+        // the cold lane's `-map` calls, so the document cannot
+        // disagree with the bytes the reply carries).
+        let map_text = req
+            .map
+            .then(|| pgr_core::map::build_link_map(&result.layout, &result.interner).render());
         Ok(ServedLink {
             image,
             entryoff,
@@ -539,6 +561,7 @@ impl ResidentSession {
             trace_json,
             verify_report,
             provenance,
+            map_text,
         })
     }
 
@@ -784,6 +807,11 @@ impl ResidentSession {
                 // replay's Pass-2 product is the record's, not the
                 // walk's).
                 provenance: None,
+                // M80: the ladder's replay serves no map either (the
+                // map beside the `record` is refused at the wire — the
+                // map reports the full emit's layout, the replay
+                // patches the recorded plan in place).
+                map_text: None,
             });
         }
         let patch_started = std::time::Instant::now();
@@ -907,6 +935,10 @@ impl ResidentSession {
             trace_json,
             verify_report,
             provenance: None,
+            // M80: the patched replay serves no map (the wire gate
+            // refuses the shape — the replay patches the recorded plan
+            // in place, the map reports the full emit's layout).
+            map_text: None,
         })
     }
 
@@ -1044,6 +1076,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         (req.clone(), req.blob_hashes())
     }
@@ -1247,6 +1280,7 @@ mod tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1297,6 +1331,7 @@ mod tests {
             verify_checks: None,
             why_export: vec!["_greet".to_string()],
             why_load: true,
+            map: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1363,6 +1398,7 @@ mod tests {
             verify_checks: None,
             why_export: vec!["_nope".to_string()],
             why_load: false,
+            map: false,
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1535,6 +1571,7 @@ mod fusion_tests {
             verify_checks: None,
             why_export: Vec::new(),
             why_load: false,
+            map: false,
         };
         let hashes = req.blob_hashes();
         (req, hashes)
