@@ -14,6 +14,14 @@
 //! partial file ever visible under the output path, page-granular chunks —
 //! is unchanged. Small outputs (one block or fewer) keep the simple
 //! single-writer path.
+//!
+//! The M78 observation face: under a subscriber the pool's writers report
+//! their own spans through the M63 task seam (one
+//! [`pgr_core::observe::TaskEvent`] per writer — the blocks it carried,
+//! its wall time, its thread and its own arrival clock), so the §9.4
+//! timeline renders the write workers' lanes beside the parse pool's.
+//! The channel opens only when a subscriber rides; the unobserved write
+//! keeps its no-channel shape (the doc paragraph above, unchanged).
 
 use crate::EmitError;
 use std::io::Write;
@@ -45,6 +53,17 @@ pub fn write_image(buf: &[u8], path: &Path) -> Result<(), EmitError> {
 /// phase did not complete). The zero-config consumer installs
 /// [`pgr_core::TracingObserver`].
 ///
+/// M78 extends the report to the intra-phase face the M63 seam named: the
+/// pool's writers carry their own spans — one [`pgr_core::observe::TaskEvent`]
+/// per writer (the blocks the writer carried, its wall time, its thread
+/// and its own arrival clock), the same shape the parse pool's per-input
+/// tasks ride. The pool's threads cannot borrow the caller's observer
+/// slot, so the records cross an mpsc channel that opens only when a
+/// subscriber rides (the inert-until-subscriber convention — the
+/// unsubscribed write allocates nothing) and the caller forwards them
+/// once the pool returns; a single-block write reports its task on the
+/// calling thread (the serial path — the timeline's pipeline lane).
+///
 /// # Errors
 /// [`EmitError::Io`] on any filesystem failure; no partial output is left
 /// behind (the temp file is removed on failure).
@@ -57,16 +76,33 @@ pub fn write_image_observed(
 }
 
 /// The flush body both entries share; `observer` carries the M68 phase
-/// report (`None` = the unobserved write, the shape every pre-M68 caller
-/// keeps).
+/// report and the M78 writer spans (`None` = the unobserved write, the
+/// shape every pre-M68 caller keeps).
 fn write_image_inner(
     buf: &[u8],
     path: &Path,
-    observer: Option<&mut dyn pgr_core::LinkObserver>,
+    mut observer: Option<&mut dyn pgr_core::LinkObserver>,
 ) -> Result<(), EmitError> {
     let blocks = buf.len().div_ceil(BLOCK);
+    // M78: the writers report through a channel only when a subscriber
+    // rides (the M63 convention — the pool's closures run on other
+    // threads and cannot borrow the caller's observer slot).
+    let (task_tx, task_rx) = if observer.is_some() {
+        let (tx, rx) = std::sync::mpsc::channel::<pgr_core::observe::TaskEvent>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let started = std::time::Instant::now();
-    write_image_body(buf, path)?;
+    write_image_body(buf, path, task_tx.as_ref())?;
+    if let Some(rx) = task_rx {
+        drop(task_tx);
+        for task in rx {
+            if let Some(observer) = observer.as_deref_mut() {
+                observer.on_task(task);
+            }
+        }
+    }
     if let Some(observer) = observer {
         observer.on_phase(pgr_core::PhaseEvent {
             phase: pgr_core::Phase::Flush,
@@ -80,9 +116,24 @@ fn write_image_inner(
     Ok(())
 }
 
+/// The writer task's label: the 1-based blocks the writer carried
+/// (`blocks 1,5 of 5` — writer *k* takes blocks *k, k+W, k+2W, …*).
+fn writer_label(writer: usize, blocks: usize) -> String {
+    let mine: Vec<String> = (writer..blocks)
+        .step_by(WRITERS)
+        .map(|b| u64::try_from(b + 1).unwrap_or(u64::MAX).to_string())
+        .collect();
+    format!("blocks {} of {blocks}", mine.join(","))
+}
+
 /// The atomic write itself (the M4 writer pool over the preallocated
-/// sibling temp file, fsync, rename).
-fn write_image_body(buf: &[u8], path: &Path) -> Result<(), EmitError> {
+/// sibling temp file, fsync, rename); `task_tx` carries the M78 writer
+/// spans when a subscriber rides.
+fn write_image_body(
+    buf: &[u8],
+    path: &Path,
+    task_tx: Option<&std::sync::mpsc::Sender<pgr_core::observe::TaskEvent>>,
+) -> Result<(), EmitError> {
     let tmp_path = path.with_extension("pgr.tmp");
     // A fresh vnode avoids stale-signature state on macOS hosts (§8.3).
     let mut file = std::fs::File::create(&tmp_path).map_err(|e| EmitError::Io {
@@ -101,12 +152,26 @@ fn write_image_body(buf: &[u8], path: &Path) -> Result<(), EmitError> {
                 for writer in 0..WRITERS.min(blocks) {
                     let file = &file;
                     handles.push(scope.spawn(move || -> std::io::Result<()> {
+                        let started = std::time::Instant::now();
                         let mut block = writer;
                         while block < blocks {
                             let start = block * BLOCK;
                             let end = (start + BLOCK).min(buf.len());
                             file.write_all_at(&buf[start..end], start as u64)?;
                             block += WRITERS;
+                        }
+                        // M78: the writer reports its own span — the
+                        // blocks it carried and its own arrival clock
+                        // (the drain must not re-stamp: the collector's
+                        // start reconstruction reads the event's clock).
+                        if let Some(tx) = task_tx {
+                            let _ = tx.send(pgr_core::observe::TaskEvent {
+                                phase: pgr_core::Phase::Flush,
+                                label: writer_label(writer, blocks),
+                                elapsed: started.elapsed(),
+                                at: std::time::Instant::now(),
+                                thread: std::thread::current().id(),
+                            });
                         }
                         Ok(())
                     }));
@@ -127,7 +192,20 @@ fn write_image_body(buf: &[u8], path: &Path) -> Result<(), EmitError> {
                 Ok(())
             })?;
         } else {
+            // The single-writer path: the write runs on the calling
+            // thread, so its task is the timeline's pipeline lane (the
+            // M64 serial-path rule the parse path rides too).
+            let started = std::time::Instant::now();
             file.write_all(buf)?;
+            if let Some(tx) = task_tx {
+                let _ = tx.send(pgr_core::observe::TaskEvent {
+                    phase: pgr_core::Phase::Flush,
+                    label: "blocks 1 of 1".to_string(),
+                    elapsed: started.elapsed(),
+                    at: std::time::Instant::now(),
+                    thread: std::thread::current().id(),
+                });
+            }
         }
         file.sync_all()?;
         drop(file);
