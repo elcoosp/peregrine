@@ -147,6 +147,9 @@ cargo bench -p pgr-core --bench dead_strip_inits
 cargo bench -p pgr-core --bench observer
 cargo bench -p pgr-core --bench time_report
 cargo bench -p pgr-core --bench trace
+cargo bench -p pgr-core --bench provenance
+cargo bench -p pgr-core --bench why_load
+cargo bench -p pgr-core --bench dep_info
 cargo bench -p pgr-driver --bench final_output
 # daemon: the served tails' codec price
 cargo bench -p pgr-daemon --bench wire_time
@@ -509,7 +512,7 @@ Nanoseconds per name against a millisecond-scale Pass 3 — off the hot path by 
 magnitude. Hundreds of globs over hundreds of thousands of names is the shape that would need
 a prefix index; this bench is where that decision lives.
 
-## Knob parity (M10–M53) · reporting seams (M54–M55)
+## Knob parity (M10–M53) · reporting seams (M54–M62, M67)
 
 **Shared reading for every row below**: parity within the sandbox's run-to-run spread (up to
 ±20 %; criterion change-detection non-significant where a p-value is shown). Each released knob
@@ -553,7 +556,7 @@ the encoding decision is one integer compare in Pass 3:
 (`m10_platform::*` byte-tests the fallback per platform). _M23's framework re-export rides the
 M3 `LC_REEXPORT_DYLIB` path; no separate bench recorded._
 
-**The reporting seams (M54–M55) ride the same gate shape — "reporting never regresses into the
+**The reporting seams (M54–M62, M67) ride the same gate shape — "reporting never regresses into the
 link's hot path", recorded honestly:**
 
 - `observer` (`cargo bench -p pgr-core --bench observer`): the pipeline's cost with and without a
