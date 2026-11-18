@@ -117,6 +117,7 @@ fn request(hello_bytes: &[u8], greet_bytes: &[u8], verify: bool) -> LinkRequest 
         time: false,
         trace: false,
         verify,
+        verify_checks: None,
     }
 }
 
