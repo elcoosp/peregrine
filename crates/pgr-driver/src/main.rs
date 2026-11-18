@@ -72,6 +72,12 @@ fn main() -> ExitCode {
                     if audit.verify_ok { "clean" } else { "FAILED" }
                 );
             }
+            // M73: the link's own gate rode the cold link — an outcome
+            // with a failing verdict never exists (the driver refused
+            // before the write), so a printed outcome's gate is clean.
+            if outcome.verify.is_some() {
+                println!("{PROGRAM}: verify: clean (the strict pass found nothing)");
+            }
             if let Some(transport) = &outcome.transport {
                 match transport {
                     pgr_daemon::Transport::Full => {
