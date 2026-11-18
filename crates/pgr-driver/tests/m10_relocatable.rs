@@ -88,9 +88,12 @@ fn r_flag_parses_into_the_relocatable_output_type() {
 
 #[test]
 fn r_flag_conflicts_are_rejected_actionably() {
+    // M83: `-resident` rides beside `-r` now (the session serves the
+    // object shape), so the conflict list carries the knobs the
+    // relocatable output itself refuses — the resident surface is a
+    // lane, not a knob.
     for conflict in [
         vec!["-o", "x", "-r", "-incremental", "a.o"],
-        vec!["-o", "x", "-r", "-resident", "a.o"],
         vec!["-o", "x", "-r", "-dead_strip", "a.o"],
         vec!["-o", "x", "-r", "-icf=safe", "a.o"],
         vec!["-o", "x", "-r", "-dylib", "a.o"],
@@ -103,6 +106,30 @@ fn r_flag_conflicts_are_rejected_actionably() {
             "the refusal must name the conflict: {rendered}"
         );
     }
+}
+
+#[test]
+fn r_flag_serves_the_resident_session() {
+    // M83: the family of M10 refusals ("no resident shape") is gone —
+    // the session's walk runs the object path over the raw blobs and the
+    // reply carries the MH_OBJECT verbatim; the surface parses the lane
+    // flags exactly like any other shape.
+    let o = parse(&args(&[
+        "-o",
+        "out.o",
+        "-r",
+        "-resident",
+        "-resident_socket",
+        "/tmp/pgr-m83-surface.sock",
+        "a.o",
+    ]))
+    .expect("the resident relocatable set parses (M83 flipped the refusal)");
+    assert!(o.resident, "the lane rides the parsed surface");
+    assert_eq!(
+        o.config.filetype,
+        OutputType::Relocatable,
+        "the output kind is unchanged"
+    );
 }
 
 #[test]
