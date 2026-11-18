@@ -247,6 +247,62 @@ fn fixed_image_report() -> pgr_core::trace::TraceReport {
     report
 }
 
+/// The fixed image timeline with the M78 write-pool lanes riding (the
+/// one-shot link's shape whose corpus splits five blocks): the emit/flush
+/// spans beside the pipeline's, the four writers' task spans on their own
+/// lanes, the registry naming both families. The write tasks interleave
+/// with the parse tasks' drain (the writers report at the flush's start —
+/// the render's `ts` sort carries the interleaving).
+fn fixed_write_pool_report() -> pgr_core::trace::TraceReport {
+    let mut report = fixed_image_report();
+    let mut tasks = fixed_task_rows();
+    // The four writers' spans (writer *k* takes blocks *k, k+4, …* of the
+    // five-block write; the labels name them, the lanes ride beside the
+    // parse pool's three — lanes 5..8).
+    let writer_blocks = ["1,5", "2", "3", "4"];
+    for (k, blocks) in writer_blocks.iter().enumerate() {
+        tasks.push(TraceTask {
+            phase: Phase::Flush,
+            label: format!("blocks {blocks} of 5"),
+            lane: u64::try_from(k + 5).unwrap_or(u64::MAX),
+            start_us: u64::try_from(2_464 + k * 9).unwrap_or(u64::MAX),
+            dur_us: 380,
+        });
+    }
+    report.tasks = tasks;
+    report.lanes.extend([
+        TraceLane {
+            id: 2,
+            name: "pgr parse pool 1".to_string(),
+        },
+        TraceLane {
+            id: 3,
+            name: "pgr parse pool 2".to_string(),
+        },
+        TraceLane {
+            id: 4,
+            name: "pgr parse pool 3".to_string(),
+        },
+        TraceLane {
+            id: 5,
+            name: "pgr write pool 1".to_string(),
+        },
+        TraceLane {
+            id: 6,
+            name: "pgr write pool 2".to_string(),
+        },
+        TraceLane {
+            id: 7,
+            name: "pgr write pool 3".to_string(),
+        },
+        TraceLane {
+            id: 8,
+            name: "pgr write pool 4".to_string(),
+        },
+    ]);
+    report
+}
+
 fn bench_trace(c: &mut Criterion) {
     let mut group = c.benchmark_group("trace");
     let inputs = corpus();
@@ -330,6 +386,20 @@ fn bench_trace(c: &mut Criterion) {
         b.iter(|| {
             let parsed = parse_trace_json(black_box(&json)).expect("the fixed trace parses");
             black_box(parsed.spans.len());
+        });
+    });
+    // The M78 write-pool rows' price: the flush pool's four writer spans
+    // and both families' lane labels ride the same faces (one five-block
+    // write's timeline is the 9-span shape beside the 68 task rows).
+    group.bench_function("render_9_rows_write_pool", |b| {
+        let report = fixed_write_pool_report();
+        b.iter(|| black_box(black_box(&report).render()));
+    });
+    group.bench_function("parse_9_rows_write_pool", |b| {
+        let json = fixed_write_pool_report().render();
+        b.iter(|| {
+            let parsed = parse_trace_json(black_box(&json)).expect("the fixed trace parses");
+            black_box(parsed.tasks.len());
         });
     });
     group.finish();
