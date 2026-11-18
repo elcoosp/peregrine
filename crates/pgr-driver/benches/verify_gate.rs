@@ -7,7 +7,14 @@
 //! link, so the honest expectation is "one verifier pass beside the
 //! write" — the same shape gate the verifier's own `checks` bench pins;
 //! this bench pins the driver-side composition (parse → filter →
-//! summary) never regresses it.
+//! summary) never regresses it. The M76 group beside them: the resident
+//! lane's served face — the session's verdict arrives as a report and
+//! [`pgr_driver::gate_from_served`] shapes the gate face from it, so
+//! consuming the served verdict prices O(issues), never the image walk
+//! the cold pass pays (one verifier pass per resident link, not two).
+//! The M77 group: the selected gate (`-verify-checks segments`) — the
+//! narrowed lane beside the full pass, the signature recompute skipped
+//! with everything else the selection did not name.
 //!
 //! Baseline note (docs/BENCHMARKS.md): recorded as a shape gate on the
 //! dev sandbox.
@@ -16,7 +23,8 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
 use pgr_core::layout::OutputType;
-use pgr_driver::verify_gate;
+use pgr_driver::gate_from_served;
+use pgr_driver::{verify_gate, verify_gate_selected};
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 
 const OBJECTS: usize = 16;
@@ -112,6 +120,35 @@ fn bench_verify_gate(c: &mut Criterion) {
             black_box(gate.summary.errors);
         });
     });
+    // M76: the served face — the session's verdict arrives as a report
+    // (the strict pass the resident lane asked for); shaping the gate
+    // face from it is O(issues), never the image walk. Beside the clean
+    // pass above, this pins the ratio the wire consumption buys.
+    let strict = pgr_verify::Options {
+        strict_warnings: true,
+        skip_hash_recompute: false,
+    };
+    let served = pgr_verify::verify(&image, &strict);
+    group.bench_function(BenchmarkId::new("dylib_16_objects", "served_face"), |b| {
+        b.iter(|| {
+            let gate = gate_from_served(black_box(&served));
+            black_box(gate.summary.ok);
+        });
+    });
+    // M77: the selected gate — the M12 selector narrows the pass to the
+    // named families (`-verify-checks segments` beside the full pass
+    // above, the M74 narrowed-lane shape): the walk skips every family
+    // the selection did not name, the signature recompute included.
+    let segments = pgr_verify::CheckSet::parse("segments").expect("canonical names");
+    group.bench_function(
+        BenchmarkId::new("dylib_16_objects", "selected_segments"),
+        |b| {
+            b.iter(|| {
+                let gate = verify_gate_selected(black_box(&image), true, &segments);
+                black_box(gate.summary.ok);
+            });
+        },
+    );
     group.finish();
 }
 
