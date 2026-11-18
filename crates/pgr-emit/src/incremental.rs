@@ -123,8 +123,12 @@ pub(crate) const MAGIC: &[u8; 8] = b"PGRINC1\0";
 /// v1–v4 records decode to `None` and re-record. **v6** adds the
 /// data-in-code chunk to the recorded `__LINKEDIT` plan (M30 — the
 /// carriage's slot rides the plan like every other chunk); v1–v5
-/// records decode to `None` and re-record.
-pub const FORMAT_VERSION: u32 = 6;
+/// records decode to `None` and re-record. **v7** adds the chain word
+/// family ([`LinkRecord::chain_word_format`], M82): the relink ladders
+/// admit through it — a config naming a different family is the full
+/// link's job, never a patch across word shapes; v1–v6 records decode
+/// to `None` and re-record.
+pub const FORMAT_VERSION: u32 = 7;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -279,6 +283,12 @@ pub struct LinkRecord {
     /// that did not capture (every clean link); those relinks resolve in
     /// full.
     pub resolution: Option<pgr_core::resolve::ResolutionSnapshot>,
+    /// The chain word family the plan encoded its fixup words with (v7,
+    /// M82): the fixup plan's own field rides the record — one source, no
+    /// re-derivation — so the relink ladders admit through it
+    /// ([`LinkRecord::admits`]): a config naming a different family is
+    /// the full link's job, never a patch across word shapes.
+    pub chain_word_format: pgr_core::fixups::FixupPointerFormat,
 }
 
 /// Why the incremental planner fell back to the full link. The fallback is
@@ -323,6 +333,14 @@ pub enum FallbackReason {
     },
     /// The caller disabled the in-place tier.
     Disabled,
+    /// The relink's config names a chain word family the record does not
+    /// encode (M82): the patch cannot renegotiate the word shape in
+    /// place, so the full link re-plans the family the request named and
+    /// re-records.
+    ChainFamily {
+        /// What moved.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for FallbackReason {
@@ -342,6 +360,7 @@ impl std::fmt::Display for FallbackReason {
                 write!(f, "propagation mismatch: {detail}")
             }
             Self::Disabled => write!(f, "in-place tier disabled"),
+            Self::ChainFamily { detail } => write!(f, "the chain word family moved: {detail}"),
         }
     }
 }
@@ -839,6 +858,9 @@ impl LinkRecord {
             // The Pass-2 snapshot the next relink's resolve plans from
             // (M9 GA rung): `None` resolves in full.
             resolution,
+            // The chain word family the plan encoded (M82): the plan's
+            // own field, one source for the ladders' admission.
+            chain_word_format: layout.fixups.chain_word_format,
         })
     }
 
@@ -846,6 +868,30 @@ impl LinkRecord {
     #[must_use]
     pub fn hashed_pages(&self) -> u64 {
         self.code_limit.div_ceil(HASH_PAGE)
+    }
+
+    /// The relink ladder's config admission (M82): the shapes the patch
+    /// cannot renegotiate in place must agree with the record, and the
+    /// chain word family is one — a config naming a different family
+    /// refuses with [`FallbackReason::ChainFamily`], and the caller's
+    /// full link re-plans the family the request named and re-records.
+    /// Both ladders read this one decision (the session's §7.3 ladder and
+    /// the driver's in-process relink), so neither can patch across word
+    /// shapes.
+    ///
+    /// # Errors
+    /// [`FallbackReason::ChainFamily`] when the config's chain word
+    /// family differs from the record's.
+    pub fn admits(&self, config: &pgr_core::layout::LinkConfig) -> Result<(), FallbackReason> {
+        if config.chain_word_format == self.chain_word_format {
+            return Ok(());
+        }
+        Err(FallbackReason::ChainFamily {
+            detail: format!(
+                "the record encodes {:?} chain words, the link asks {:?}",
+                self.chain_word_format, config.chain_word_format
+            ),
+        })
     }
 
     /// Serializes the record: `magic | version | payload_len | sha256 |
@@ -963,6 +1009,12 @@ impl LinkRecord {
                 encode_snapshot(&mut p, snap);
             }
         }
+        // v7: the chain word family (M82) — one byte, the plan's own
+        // field. The relink ladders admit through it.
+        p.push(match self.chain_word_format {
+            pgr_core::fixups::FixupPointerFormat::Offset64 => 0,
+            pgr_core::fixups::FixupPointerFormat::Arm64e => 1,
+        });
 
         let mut out = Vec::with_capacity(HEADER_LEN + p.len());
         out.extend_from_slice(MAGIC);
@@ -1131,6 +1183,15 @@ impl LinkRecord {
             1 => Some(decode_snapshot(&mut d)?),
             _ => return None,
         };
+        // v7: the chain word family (M82). 0 = Offset64, 1 = Arm64e;
+        // anything else is corruption.
+        let mut family = [0u8; 1];
+        d.bytes(&mut family)?;
+        let chain_word_format = match family[0] {
+            0 => pgr_core::fixups::FixupPointerFormat::Offset64,
+            1 => pgr_core::fixups::FixupPointerFormat::Arm64e,
+            _ => return None,
+        };
         if d.at != d.b.len() || content_digests.len() != sections.len() {
             return None;
         }
@@ -1153,6 +1214,7 @@ impl LinkRecord {
             section_digests,
             content_digests,
             resolution,
+            chain_word_format,
         })
     }
 }
