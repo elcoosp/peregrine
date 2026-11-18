@@ -221,7 +221,14 @@ use sha2::{Digest, Sha256};
 /// `relink_audit` and their detail payloads ride the tail's own shape,
 /// so a captured tail carrying them restores exactly; the session's own
 /// ladder reports through the seam at the next rung — a warm run's
-/// report today carries the pipeline phases alone).
+/// report today carries the pipeline phases alone). M68 extends the
+/// tail's vocabulary with the emit half's tokens (`emit`/`flush` and
+/// their detail payloads, ordinals 12/13) **without a version bump**:
+/// the served content is unchanged — the session's warm run has no
+/// fused emit and the client does the writing — so a v42 daemon never
+/// sends the new tokens and a v42 client never meets them; the decode
+/// side accepts them so the vocabulary is the tail's, not the one-shot
+/// lane's alone.
 pub const PROTO_VERSION: u32 = 42;
 
 // ---- message tags -----------------------------------------------------------
@@ -600,7 +607,8 @@ impl LinkRequest {
 
 /// The phase's wire token (the variant's ordinal in the seam's own
 /// declaration order — `Parse` … `Reloc`, the M65 ladder rungs beside
-/// them).
+/// them, the M68 emit half after them; the new tokens append, the
+/// existing ordinals never move).
 fn phase_token(phase: pgr_core::observe::Phase) -> u8 {
     match phase {
         pgr_core::observe::Phase::Parse => 0,
@@ -615,6 +623,8 @@ fn phase_token(phase: pgr_core::observe::Phase) -> u8 {
         pgr_core::observe::Phase::RelinkPlan => 9,
         pgr_core::observe::Phase::RelinkPatch => 10,
         pgr_core::observe::Phase::RelinkAudit => 11,
+        pgr_core::observe::Phase::Emit => 12,
+        pgr_core::observe::Phase::Flush => 13,
     }
 }
 
@@ -632,6 +642,8 @@ fn phase_from_token(token: u8) -> Result<pgr_core::observe::Phase, DecodeError> 
         9 => pgr_core::observe::Phase::RelinkPlan,
         10 => pgr_core::observe::Phase::RelinkPatch,
         11 => pgr_core::observe::Phase::RelinkAudit,
+        12 => pgr_core::observe::Phase::Emit,
+        13 => pgr_core::observe::Phase::Flush,
         _ => {
             return Err(DecodeError::Malformed(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -709,6 +721,21 @@ pub fn encode_time_report(out: &mut Vec<u8>, report: Option<&pgr_core::time_repo
                 put_u8(out, 11);
                 put_u8(out, u8::from(*healed));
                 put_u64(out, u64::try_from(*issues).unwrap_or(u64::MAX));
+            }
+            // M68: the emit half's rows ride the tail's own shape — the
+            // vocabulary is the tail's (the session's warm run has no
+            // fused emit and the client does the writing, so no served
+            // content changes and the version gate stays v42; the decode
+            // side restores a captured tail carrying the rows).
+            pgr_core::observe::PhaseDetail::Emitted { tiles, bytes } => {
+                put_u8(out, 12);
+                put_u64(out, u64::try_from(*tiles).unwrap_or(u64::MAX));
+                put_u64(out, *bytes);
+            }
+            pgr_core::observe::PhaseDetail::Flushed { blocks, writers } => {
+                put_u8(out, 13);
+                put_u64(out, u64::try_from(*blocks).unwrap_or(u64::MAX));
+                put_u64(out, u64::try_from(*writers).unwrap_or(u64::MAX));
             }
         }
         put_u64(
@@ -789,6 +816,14 @@ pub(crate) fn decode_time_report(
                 11 => pgr_core::observe::PhaseDetail::Audit {
                     healed: r.u8()? != 0,
                     issues: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                },
+                12 => pgr_core::observe::PhaseDetail::Emitted {
+                    tiles: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                    bytes: r.u64()?,
+                },
+                13 => pgr_core::observe::PhaseDetail::Flushed {
+                    blocks: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
+                    writers: usize::try_from(r.u64()?).unwrap_or(usize::MAX),
                 },
                 _ => {
                     return Err(DecodeError::Malformed(std::io::Error::new(
@@ -3889,6 +3924,61 @@ mod tests {
         let back = decode_time_report(&mut r).expect("the rung rows decode");
         r.done().expect("no trailing bytes");
         assert_eq!(back, Some(report), "the ladder rungs restore exactly");
+    }
+
+    #[test]
+    fn the_time_report_tail_round_trips_the_emit_rows() {
+        // M68: the emit half's vocabulary rides the tail's own shape — a
+        // captured report carrying the `emit`/`flush` rows restores
+        // exactly. No served content changes (the session's warm run has
+        // no fused emit and the client does the writing), so the version
+        // gate stays v42: a v42 daemon never sends these tokens and a
+        // v42 client never meets them; the decode side accepts them so
+        // the vocabulary is the tail's, not the one-shot lane's alone.
+        use pgr_core::observe::{Phase, PhaseDetail, PhaseEvent};
+        use std::time::Duration;
+        let row = |phase: Phase, detail: PhaseDetail, us: u64| PhaseEvent {
+            phase,
+            detail,
+            elapsed: Duration::from_micros(us),
+        };
+        let report = pgr_core::time_report::TimeReport {
+            phases: vec![
+                row(
+                    Phase::Layout,
+                    PhaseDetail::Planned {
+                        segments: 4,
+                        sections: 9,
+                    },
+                    210,
+                ),
+                row(
+                    Phase::Emit,
+                    PhaseDetail::Emitted {
+                        tiles: 256,
+                        bytes: 4_194_304,
+                    },
+                    1_100,
+                ),
+                row(
+                    Phase::Flush,
+                    PhaseDetail::Flushed {
+                        blocks: 1,
+                        writers: 4,
+                    },
+                    400,
+                ),
+            ],
+            emit: None,
+            total: Some(Duration::from_micros(1_750)),
+            notes: Vec::new(),
+        };
+        let mut body = Vec::new();
+        encode_time_report(&mut body, Some(&report));
+        let mut r = Reader::new(&body);
+        let back = decode_time_report(&mut r).expect("the emit rows decode");
+        r.done().expect("no trailing bytes");
+        assert_eq!(back, Some(report), "the emit half restores exactly");
     }
 
     #[test]
