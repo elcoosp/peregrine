@@ -217,8 +217,13 @@ fn the_timeline_writes_beside_the_link_and_round_trips() {
             pgr_core::Phase::Liveness,
             pgr_core::Phase::Fold,
             pgr_core::Phase::Layout,
+            // M68: the emit half rides the timeline beside the pipeline's
+            // phases — the fused tile emit and the pooled flush close the
+            // run (the m68 gate matrix pins their details).
+            pgr_core::Phase::Emit,
+            pgr_core::Phase::Flush,
         ],
-        "the real link's seven phases ride the timeline"
+        "the real link's nine phases ride the timeline (the emit half since M68)"
     );
     assert_eq!(
         report.lanes,
