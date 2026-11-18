@@ -189,21 +189,24 @@ pub struct Options {
     /// segments/sections/symbols, rendered by [`pgr_core::map`]) next to
     /// the link. `None` (the default) writes no map.
     pub map_path: Option<String>,
-    /// M56 `-why_export <symbol>` (repeatable): after a one-shot link,
-    /// answer *why is this symbol exported?* — the definition the
-    /// resolution installed and every reference site the M8-a reverse
-    /// index recorded (`pgr_core::provenance`). The default (the empty
-    /// list) queries nothing. The query rides the one-shot link's own
-    /// Pass-2 product, so the resident and incremental lanes refuse it
-    /// (`finish` — a served relink's resolution never crosses the wire).
+    /// M56 `-why_export <symbol>` (repeatable): after a link, answer
+    /// *why is this symbol exported?* — the definition the resolution
+    /// installed and every reference site the M8-a reverse index
+    /// recorded (`pgr_core::provenance`). The default (the empty list)
+    /// queries nothing. The query reads the link's own Pass-2 product:
+    /// the one-shot lane's, and — since M79 (wire v45) — the resident
+    /// session's own full walk (the rendered answers cross the wire
+    /// verbatim); the incremental lane still refuses it (`finish` — the
+    /// §7.3 ladder's replay product is the record's, not the walk's).
     pub why_export: Vec<String>,
-    /// M57 `-why_load`: after a one-shot link, report why each archive
-    /// member was loaded (the S7 pull's per-member decision) and — under
+    /// M57 `-why_load`: after a link, report why each archive member
+    /// was loaded (the S7 pull's per-member decision) and — under
     /// `-dead_strip_dylibs` — every input dylib's carriage
     /// (`pgr_core::provenance::LoadReport`, carried on the link result).
     /// The default (`false`) reports nothing. The lane contract mirrors
-    /// `-why_export`: the resident and incremental lanes refuse the
-    /// report (the pull's record never crosses the wire).
+    /// `-why_export`: the resident lane serves the report since M79
+    /// (the pull's record is the session's own); the incremental lane
+    /// still refuses it (the ladder's replay carries no pull record).
     pub why_load: bool,
     /// M58 `--time`: after a one-shot link, print the per-pass wall
     /// report — the M54 observation seam's phase events collected into
@@ -485,11 +488,14 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
-    /// A `-why_export` surface conflict (M56): the query reads the
-    /// one-shot link's own Pass-2 product (the parsed arena and the
-    /// resolution), and neither the resident session's relink nor the
-    /// incremental engine's patched relink carries that product across
-    /// its lane. The verdict names the lane; the help is the fix.
+    /// A `-why_export` surface conflict (M56, incremental-only since
+    /// M79): the query reads the link's own Pass-2 product (the parsed
+    /// arena, the resolution, the pull record), and the incremental
+    /// engine's relink rides the §7.3 ladder's replay — a Pass-2 product
+    /// that is the record's, not the walk's, and an answer naming it
+    /// would misreport the run. (The resident lane served since M79: the
+    /// session's warm pipeline *is* the walk, wire v45 carries the
+    /// answers.) The verdict names the lane; the help is the fix.
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     WhyExportConflict {
@@ -2971,11 +2977,12 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             });
         }
     }
-    // M56: the provenance query reads the one-shot link's own Pass-2
-    // product — a refusal where the lane never carries it, never a
-    // silently unanswered question (the surface's contract).
-    // M57: the load report rides the same contract (the pull's record
-    // is the one-shot pipeline's, never the wire's).
+    // M56: the provenance query reads the link's own Pass-2 product — a
+    // refusal where the lane never carries it, never a silently
+    // unanswered question (the surface's contract). M57: the load report
+    // rides the same contract. M79: the resident lane serves both (the
+    // session's warm pipeline *is* the walk — wire v45 carries the
+    // rendered answers), so the only remaining refusal is the ladder's.
     if !opts.why_export.is_empty() || opts.why_load {
         // The refusal names every flag the run carried — a run asking
         // both questions is refused for both, not for whichever came
@@ -2988,19 +2995,10 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
         if opts.incremental {
             return Err(OptsError::WhyExportConflict {
                 verdict: format!(
-                    "{lanes} reads the one-shot link's Pass-2 product; -incremental's relink \
+                    "{lanes} reads the link's own Pass-2 product; -incremental's relink \
                      patches the recorded plan inside the engine's ladder"
                 ),
                 fix: format!("drop {lanes} or -incremental"),
-            });
-        }
-        if opts.resident {
-            return Err(OptsError::WhyExportConflict {
-                verdict: format!(
-                    "{lanes} reads the one-shot link's Pass-2 product; -resident relinks \
-                     across the wire and never returns the parsed arena the query reads"
-                ),
-                fix: format!("drop {lanes} or -resident"),
             });
         }
     }
