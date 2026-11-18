@@ -22,5 +22,14 @@ proptest = { workspace = true }
 name = "parse"
 harness = false
 
+# The M70 universal-container bench: the read seam's own price — the
+# container decode (header + slice table + window bounds) and the arm64
+# selection — over 2/5/9-slice `FAT_MAGIC` containers, a shape gate (the
+# decode is O(nfat) rows, the selection one cputype scan; the window is
+# a subslice, never a copy).
+[[bench]]
+name = "universal"
+harness = false
+
 [lints]
 workspace = true
