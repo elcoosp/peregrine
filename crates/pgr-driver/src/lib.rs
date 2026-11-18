@@ -1813,9 +1813,23 @@ pub fn link_reference_bytes(opts: &opts::Options) -> Result<Vec<u8>, DriverError
 /// [`DriverError`] on option, link, emit or filesystem failures.
 pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     // M10 rung 1: `-r` bypasses the image pipeline entirely — Passes 1–2
-    // plus the object emit; no segment layout, no record, no daemon, no
+    // plus the object emit; no segment layout, no record, no
     // signature (the conflicting knobs are refused at parse time).
+    // M83: the resident lane serves the object shape — a stand-down
+    // (no daemon, a session refusal) hands over to the one-shot
+    // relocatable link, whose own walk produces the same bytes.
     if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+        if opts.resident {
+            match run_resident_relocatable(opts) {
+                Ok(outcome) => return Ok(outcome),
+                Err(ResidentAttempt::Error(e)) => return Err(e),
+                Err(ResidentAttempt::StandDown(reason)) => {
+                    if std::env::var_os("PGR_RESIDENT_DEBUG").is_some() {
+                        eprintln!("pgr: resident relocatable stand-down: {reason}");
+                    }
+                }
+            }
+        }
         return run_relocatable(opts);
     }
     if opts.incremental && opts.resident {
@@ -2013,6 +2027,104 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
         transport: None,
         verify: gate_summary,
     })
+}
+
+/// The M83 resident relocatable attempt: the session runs the object
+/// walk (Passes 1–2 over the raw blobs — the POI cache is the segmented
+/// pipeline's optimization, the object path re-parses) and the reply's
+/// IMAGE tail carries the `MH_OBJECT` verbatim; the client writes it,
+/// the served faces print beside the link and the dependency record is
+/// the client-side read set (M60's rule, every lane that reads the
+/// files). The replay faces never ride: the surface refuses the knobs
+/// beside `-r`, and a session that refuses the shape anyway is the
+/// stand-down back to [`run_relocatable`].
+///
+/// # Errors
+/// [`ResidentAttempt::Error`] on a driver-level failure (input
+/// preparation, the write, the faces); [`ResidentAttempt::StandDown`]
+/// when no daemon answers or the session refuses the request — the
+/// caller's one-shot link is the ladder's bottom rung.
+fn run_resident_relocatable(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt> {
+    let (prepared, _cache) = prepare_link(opts).map_err(ResidentAttempt::Error)?;
+    let timing = opts.time || opts.time_json || opts.trace_path.is_some();
+    let mut job = pgr_daemon::LinkJob::build(
+        &prepared.config,
+        &prepared.force_load,
+        &prepared.inputs,
+        &prepared.archives,
+    );
+    // M58/M59 (wire v40): the session observes its own walk.
+    job.request.time = timing;
+    // M61/M62 (wire v41): the same for the timeline.
+    job.request.trace = opts.trace_path.is_some();
+    // M79 (wire v45): the provenance queries ride the object's Pass-2
+    // product (the relocatable lane's own face — the cold lane prints
+    // the same renders).
+    job.request.why_export.clone_from(&opts.why_export);
+    job.request.why_load = opts.why_load;
+    let socket = opts
+        .resident_socket
+        .clone()
+        .map_or_else(pgr_daemon::default_socket, std::path::PathBuf::from);
+    let exe_hint = std::env::current_exe().ok();
+    match pgr_daemon::link_via_daemon(&socket, exe_hint.as_deref(), &job) {
+        Ok(img) => {
+            // The served report prints beside the resident link (the
+            // session's own observed walk); a fallback prints the
+            // one-shot's — either way the run is observed.
+            if timing {
+                if let Some(served) = &img.time_report {
+                    if opts.time {
+                        print!("{}", served.render());
+                    }
+                    if opts.time_json {
+                        println!("{}", served.render_json());
+                    }
+                }
+            }
+            if let (Some(path), Some(json)) = (&opts.trace_path, &img.trace_json) {
+                std::fs::write(Path::new(path), json).map_err(|source| {
+                    ResidentAttempt::Error(DriverError::Io {
+                        path: path.clone(),
+                        source,
+                    })
+                })?;
+            }
+            // M79: the served answers print beside the resident link —
+            // the session's own renders, verbatim.
+            if let Some(served) = &img.provenance {
+                for export in &served.exports {
+                    print!("{}", export.render);
+                }
+                if let Some(loads) = &served.loads {
+                    print!("{loads}");
+                }
+            }
+            write_image(&img.image, Path::new(&opts.output))
+                .map_err(|e| ResidentAttempt::Error(e.into()))?;
+            // M60: the dependency record is the client-side read set
+            // (the request's own input list — Pass 0 mapped it before
+            // the wire), so the served object writes it too.
+            write_dependency_record(opts, &prepared.deps).map_err(ResidentAttempt::Error)?;
+            Ok(LinkOutcome {
+                output: opts.output.clone(),
+                file_size: img.image.len() as u64,
+                entryoff: img.entryoff,
+                fixup_slots: usize::try_from(img.fixup_slots).unwrap_or(usize::MAX),
+                patch: None,
+                audit: None,
+                transport: Some(img.transport),
+                verify: None,
+            })
+        }
+        Err(e) => {
+            // The span, not the eprintln (the workspace convention): the
+            // debug envs install the subscriber, and library consumers
+            // keep their own.
+            tracing::warn!(error = %e, "the resident relocatable attempt stood down");
+            Err(ResidentAttempt::StandDown(e.to_string()))
+        }
+    }
 }
 
 /// The `-r` path (M10 rung 1): Pass 0 maps the inputs exactly as the
@@ -2390,6 +2502,17 @@ fn incremental_relink(
         );
         return Err(pgr_emit::incremental::FallbackReason::RecordUnreadable.into());
     };
+    // M82: the ladder's named admission — `pgr_emit::incremental::LinkRecord::admits`,
+    // the same decision the session's §7.3 ladder reads. A config naming a
+    // different chain word family than the record's hands over to the full
+    // link (the patch cannot renegotiate the word shape in place), which
+    // re-plans the family the request named and re-records — the knob the
+    // caller asked for is the knob that lands, never a silently patched
+    // over shape.
+    if let Err(reason) = record.admits(&opts.config) {
+        emit_relink_fallback(&mut observer, &reason);
+        return Err(reason.into());
+    }
     let output = Path::new(&opts.output);
     // Any integrity-gate failure — missing, resized, corrupt — falls back:
     // the full link never needs the previous output. The gate is real work
