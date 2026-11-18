@@ -2162,21 +2162,16 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     }
     // M10 rung 4, slice 2: the requested word family must be encodable
     // where it is requested — a refusal, never a silently dropped knob.
-    if opts.config.chain_word_format == FixupPointerFormat::Arm64e {
-        if !opts.config.fixup_chains {
-            return Err(OptsError::ChainFormatConflict {
-                verdict: "the classic opcode streams have no chain words to shape".into(),
-                fix: "drop -fixup_chains_format or re-enable chained fixups".into(),
-            });
-        }
-        if opts.resident {
-            return Err(OptsError::ChainFormatConflict {
-                verdict: "the resident session's reuse gates plan Offset64 shapes this slice \
-                          (the v6 wire mirrors the family, the gates do not consume it yet)"
-                    .into(),
-                fix: "drop -resident or -fixup_chains_format".into(),
-            });
-        }
+    // M82: the resident lane serves the family (the v6 wire byte has
+    // mirrored it since M10; the session's warm pipeline plans it, the
+    // record carries it, and the relink ladders admit through it — a
+    // family flip relinks through the full link), so the only remaining
+    // refusal is the classic opcode path's.
+    if opts.config.chain_word_format == FixupPointerFormat::Arm64e && !opts.config.fixup_chains {
+        return Err(OptsError::ChainFormatConflict {
+            verdict: "the classic opcode streams have no chain words to shape".into(),
+            fix: "drop -fixup_chains_format or re-enable chained fixups".into(),
+        });
     }
     // M16: the initializer form. The named form validates against the
     // platform's chained-fixups floor (the one table
@@ -2885,12 +2880,11 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                     value: "-r writes an input object, not an image: no link record exists; drop -incremental".into(),
                 });
             }
-            if opts.resident {
-                return Err(OptsError::InvalidValue {
-                    flag: "-resident".into(),
-                    value: "-r has no resident shape; drop -resident".into(),
-                });
-            }
+            // M83: the resident lane serves the object shape (the
+            // session's walk runs the object path over the raw blobs —
+            // the reply carries the MH_OBJECT verbatim), so `-resident`
+            // rides beside `-r` like every other lane that reads the
+            // files.
         }
     }
     // M10 rung 4, slice 5: an *explicitly named* chain word family must
