@@ -2255,3 +2255,112 @@ the fallback, the cold advisory), the wire round-trip/garbage gates
 (`protocol.rs`), the `wire_order` bench (the config tail's price at the
 build-system scales), and the `ordered_resident_link` consumer example
 (the parity gate beside the placed order).
+
+---
+
+### 31 The resident lane's arm64e chain words (M82)
+
+The M10 rung-4 lane contract refused `-fixup_chains_format arm64e` beside
+`-resident` because the session's reuse gates rode the Offset64 shapes — the
+surface's own verdict named the slice ("the v6 wire mirrors the family, the
+gates do not consume it yet"). The family is config: the v6 wire byte has
+carried it since M10, the session's warm pipeline *is* the walk that plans
+it, and the driver never let the request through. M82 flips the refusal to
+service the M81 way. Design decisions:
+
+1. **The plan names its family.** The record's single source is
+   [`pgr_core::fixups::FixupPlan::chain_word_format`] — the fixup plan
+   carries the family it encoded with (the named planner sets it; the
+   no-slot and classic-opcode paths carry the config's family), so the
+   record inherits it at assembly and no lane re-derives the family from
+   payload bytes. One source, no re-derivation drift — the M81 lesson.
+2. **The record carries the family (v7).** One byte after the v5
+   resolution section; the codec is lossless over it, and an unknown
+   family byte is corruption at decode. The bump retires v1–v6 records
+   (they decode to `None` and re-record — the designed path; the sidecar
+   is an accelerator, never a contract).
+3. **The ladders admit through one named decision.**
+   [`pgr_emit::incremental::LinkRecord::admits`] refuses a relink config
+   whose family differs from the record's
+   (`FallbackReason::ChainFamily`): the patch cannot renegotiate the word
+   shape in place, so a flip is the full link's job — the full link
+   re-plans the family the request named and re-records. Both ladders
+   read it (the session's §7.3 ladder declines inside the daemon; the
+   driver's in-process relink notes the fallback and hands over), so the
+   knob the caller asked for is the knob that lands, either lane — never
+   a silently patched-over shape.
+4. **The surface's remaining refusals stay.** The classic-opcode path
+   (`-no_fixup_chains` beside the named family) refuses unchanged — no
+   chain words exist to shape — and `-r` objects still refuse the family
+   (no fixups at all). The fusion lane's replay beside the `record` rides
+   the family the way the cold ladder always has: the family is config,
+   not a product.
+
+Supporting pieces: the pgr-core seam (`FixupPlan::chain_word_format`),
+the record v7 (the byte, the codec, `admits`), the driver's flipped
+refusal (`opts.rs`), the `m82_resident_arm64e.rs` gate matrix (the served
+parity, the fusion ladder's patched record, the flip's full link on both
+lanes), the session's family gate (`a_family_flip_falls_back_inside_the_session`),
+the wire v6 paragraph's flip note (`protocol.rs`), the
+`resident` bench's arm64e group (the plan-side price beside the warm
+pair), and the `resident_arm64e_link` consumer example (the parity gate
+beside the record's family and the flip's full link).
+
+---
+
+### 32 The resident lane's relocatable shape (M83)
+
+The M8 lane contract refused `-r` beside `-resident` because the object
+shape "has no resident shape" — but the session's raw blobs are the walk's
+inputs, and the object path re-parses them (the POI cache is the segmented
+pipeline's optimization, not a prerequisite). M83 flips the refusal to
+service. Design decisions:
+
+1. **The wire value activates.** `encode_config` reserved `3` for the
+   relocatable filetype the day the config body shipped (the encoding
+   stays total); the decode side refused it because the daemon never
+   served the shape. M83 restores the arm — the reserved value was the
+   same design the v6 family byte rode ("a rung can widen the surface
+   without the config's shape moving again"), and an old server's
+   refusal is the ERROR reply the client's fallback already speaks (the
+   one-shot relocatable link runs either way — honest degradation, never
+   a silent wrongness).
+2. **The session walks the object path over the raw blobs.**
+   `serve_relocatable` builds [`pgr_core::link::LinkInput`]s from the
+   transferred bytes (no POI interning — the object path re-parses), runs
+   [`pgr_core::link_reloc`] (the cold lane's own entry, the observed
+   variant when a face asks — the report names the object shape's own
+   phases and the emit band stays absent: the `-r` Pass 4 is the object
+   assembly, not the fused tile emit) and
+   [`pgr_emit::build_object_image`] assembles the `MH_OBJECT` the reply
+   carries verbatim. The daemon never touches the filesystem; the client
+   writes the object. The provenance queries ride — the object's Pass-2
+   product is the same arena the query reads
+   (`serve_provenance_from` is the parts face both shapes share).
+3. **The replay faces refuse at the wire and at the session.** The
+   object shape has no ladder: a record, tiles, the audit, `-verify` or
+   `-map` beside a relocatable config is a malformed request at the
+   decode gates (the M79/M80 rule — no wire caller can plan the shape)
+   and refuses at the session's own entry (the library caller's same
+   named error). The surface's knob refusals beside `-r` are unchanged —
+   the wire gates mirror them exactly.
+4. **The driver's attempt is the fusion shape without the ladder.**
+   `run_resident_relocatable` prepares, builds the job (the faces ride:
+   time, trace, provenance), attempts the daemon, writes the served
+   object, writes the client-side dependency record (M60's rule — every
+   lane that reads the files), and a stand-down hands over to
+   [`run_relocatable`], whose own walk produces the same bytes. The
+   transport rides the outcome (`Transport::Full`) — a consumer can see
+   which path served the object.
+
+Supporting pieces: the session's relocatable branch (`serve_relocatable`,
+`build_archives`, the `serve_provenance_from` parts face), the wire gates
+(`decode_config`'s arm, the replay-face refusal, the round-trip and
+malformed gates in `protocol.rs`), the driver's attempt (`opts.rs`'s
+flipped refusal, `run()`'s dispatch, `run_resident_relocatable`), the
+`m83_resident_reloc.rs` gate matrix (the served parity, the fallback, the
+M10 two-step self-consumption through the served object), the session's
+object gate (`a_relocatable_request_serves_the_object_shape`), the
+`resident` bench's reloc group (the object shape's session cost beside
+the one-shot's), and the `resident_reloc_link` consumer example (the
+parity gate beside the two-step relink).
