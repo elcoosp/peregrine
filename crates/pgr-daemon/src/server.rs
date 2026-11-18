@@ -23,8 +23,8 @@
 
 use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
-    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_time_report, encode_trace, put_bytes, put_hash,
-    put_str, put_u8, put_u32, put_u64,
+    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_time_report, encode_trace, encode_verify_report,
+    put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
 };
 use crate::session::ResidentSession;
 use std::io::{Read, Write};
@@ -325,6 +325,10 @@ fn serve_link(
             // The v41 tail: the rendered timeline when the request asked
             // (the session's own observed pipeline), absent otherwise.
             encode_trace(&mut b, served.trace_json.as_deref());
+            // The v43 tail: the served verify verdict when the request
+            // asked (the session's own strict pass on the final bytes),
+            // absent otherwise.
+            encode_verify_report(&mut b, served.verify_report.as_ref());
             write_frame(stream, TAG_IMAGE, &b)
         }
         Err(e) => {
