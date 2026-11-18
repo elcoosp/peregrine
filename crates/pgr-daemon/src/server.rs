@@ -23,8 +23,8 @@
 
 use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
-    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_time_report, encode_trace, encode_verify_report,
-    put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
+    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_provenance, encode_time_report, encode_trace,
+    encode_verify_report, put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
 };
 use crate::session::ResidentSession;
 use std::io::{Read, Write};
@@ -329,6 +329,10 @@ fn serve_link(
             // asked (the session's own strict pass on the final bytes),
             // absent otherwise.
             encode_verify_report(&mut b, served.verify_report.as_ref());
+            // The v45 tail: the served provenance answers when the
+            // request asked (the session's own Pass-2 product renders),
+            // absent otherwise.
+            encode_provenance(&mut b, served.provenance.as_ref());
             write_frame(stream, TAG_IMAGE, &b)
         }
         Err(e) => {
