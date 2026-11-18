@@ -2072,4 +2072,91 @@ SARIF interchange (§18 — the one-way writer the ecosystem's triage reads, the
 escape rules and determinism gate riding); **M74** joins the M71 container face to the
 CLI (§23 — `verify_universal_with_checks`, the check selection composed per slice, one
 verdict per table row); **M75** puts the SARIF face on the CLI (§24 — one machine face
-per run, the document riding the M69 writer's own shape); **M76** rides the resident lane's served verdict as the write gate (§25 — the flag the driver never asked for, one verifier pass per resident link, either lane one gate); **M77** composes the M12 selector into the link's own gate (§26 — `-verify-checks`, the narrowed lane cold and served, wire v44))*
+per run, the document riding the M69 writer's own shape); **M76** rides the resident lane's served verdict as the write gate (§25 — the flag the driver never asked for, one verifier pass per resident link, either lane one gate); **M77** composes the M12 selector into the link's own gate (§26 — `-verify-checks`, the narrowed lane cold and served, wire v44); **M78** extends the M63 task seam to the flush pool's writers (§27 — the second pool's spans, the family-aware lane registry); **M79** flips the provenance queries' resident refusal to service (§28 — the session's own walk renders the answers, wire v45 carries the renders verbatim))*
+
+---
+
+### 27 The flush pool's writer lanes (M78)
+
+The M64 registry named every worker lane `pgr parse pool N` because the
+parse pool (M63) was the only pool the task seam carried — and the §5
+flush runs a second pool whose `pwrite` work the aggregate `Flushed`
+phase event hid: a viewer could not tell the parse workers from the
+write workers, and the write workers' stragglers were invisible. M78
+extends the M63 seam to the second pool. Design decisions:
+
+1. **The writers ride the same task seam, never a second
+   instrumentation.** `pgr_emit::write_image_observed` reports one
+   [`TaskEvent`] per writer — the phase `Flush`, the blocks the writer
+   carried as its label (`blocks 1,5 of 5`: writer *k* takes blocks
+   *k, k+4, …*), its wall time, its thread and its own arrival clock
+   (the facts the phase event cannot: the lane registry's key, and the
+   start the span's µs bounds reconstruct from). The records cross an
+   mpsc channel opened only when a subscriber rides (the M63
+   inert-until-subscriber convention — the unobserved write keeps its
+   no-channel shape), the caller forwards them once the pool returns,
+   and a single-block write reports on the calling thread (the M64
+   serial rule — the pipeline lane, not a worker).
+2. **The registry's naming rule is family-aware.** The M64 rule keyed
+   on the thread alone; a lane is now named by the pool the first task
+   that rode it came from — the parse pool's `pgr parse pool N`, the
+   flush pool's `pgr write pool N`, each family numbered 1-based in
+   registration order among its own lanes. The M64 shapes keep holding:
+   the pure-parse feed names every lane a parse worker, the no-task
+   lane keeps the parse prefix, the serial flush task rides the
+   pipeline lane.
+3. **The observation stays read-only.** The parity gate is the seam's
+   own contract (the task-carrying write ships the identical bytes —
+   `m78_write_tasks`), the refused write reports nothing (the tasks did
+   not run to completion), and the strict reader restores both families'
+   labels exactly (the round trip, gated on the mixed shape in
+   `m78_write_lanes`).
+
+Supporting pieces: the writer-span reporting (`pgr_emit::writer`), the
+family-aware registry (`pgr_core::trace`), the `m78_write_tasks.rs`
+gate matrix (emit) and the `m78_write_lanes.rs` gate matrix (core), the
+`trace` bench's write-pool groups (the render/parse price over a
+five-block write's timeline), and the `write_lanes` consumer example
+(the four writers beside the round-trip gate).
+
+---
+
+### 28 The resident lane's served provenance (M79)
+
+The M56/M57 lane contract refused `-why_export`/`-why_load` beside
+`-resident` because the product never crossed the wire — and the
+session's warm pipeline *is* the walk (parse from resident POIs, intern,
+resolve, layout), so the product was in its memory the whole time. The
+M76 lesson applies: the driver never asked. M79 flips the refusal to
+service. Design decisions:
+
+1. **The queries ride the request (v45).** The `-why_export` names in
+   flag order and the `-why_load` flag join the request; the empty list
+   is the pre-M79 shape, byte-identical on the decode side. The session
+   renders the answers from its own Pass-2 product — the index builds
+   once per link, the queries read it — and a vacuous query refuses the
+   link (the cold lane's own refusal: the misspelling named, never
+   silently empty).
+2. **The tail carries the renders verbatim.** The M62 convention: the
+   wire never re-shapes the face the client prints, so it never
+   re-excuses it — one present byte, count-prefixed `(name, render)`
+   entries, the load report beside them, the absent byte when unasked.
+   The driver prints the served answers beside the resident link exactly
+   as the cold lane prints its own; the fallback prints the one-shot's.
+3. **The lane contract stays honest at the edges.** A query beside the
+   `record` (the §7.3 ladder's replay — the fusion lane's request) is a
+   malformed request at the wire: the replay's Pass-2 product is the
+   record's, not the walk's, and an answer naming it would misreport the
+   run — the fusion lane keeps refusing, and no wire caller can plan the
+   shape either. The vacuous query's `ERROR` reply is the client's
+   one-shot fallback cue: the same refusal either lane.
+
+Supporting pieces: wire v45 (the request fields, the codec, the
+`ServedProvenance` tail), the session's `serve_provenance` (the index,
+the renders, the refusal), the client decode and the driver's served
+prints, the `m79_served_provenance.rs` gate matrix (the served face, the
+fallback, the vacuous refusal through the fallback, the fusion lane's
+refusal), the wire round-trip/refusal gates (`protocol.rs`), the
+`wire_provenance` bench (the tail's encode/decode price beside the image
+pages it rides), and the `served_provenance_link` consumer example (the
+served face beside the vacuous refusal).
