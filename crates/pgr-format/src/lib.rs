@@ -5,8 +5,9 @@
 //! everything the pipeline and the verifier reason about — load commands,
 //! symbol tables, relocations, chained fixups (both the 64 and arm64e
 //! word families), classic dyld-info opcode streams, export tries, `.tbd`
-//! v3/v4 stubs, `!<arch>` archives and code-signature blobs. Everything
-//! parses with typed errors and never panics on malformed input.
+//! v3/v4 stubs, `!<arch>` archives, universal (`FAT_MAGIC`) containers
+//! and code-signature blobs. Everything parses with typed errors and
+//! never panics on malformed input.
 //!
 //! Design invariants carried from the TDD / perf doc:
 //!
@@ -32,6 +33,7 @@ pub mod signature;
 pub mod symtab;
 pub mod tbd;
 pub mod trie;
+pub mod universal;
 pub mod unwind;
 
 pub use dyld_info::{BindEntry, BindOrdinal, DyldInfoCommand, RebaseEntry};
@@ -106,6 +108,7 @@ pub fn loader_export_surface(bytes: &[u8]) -> Result<Vec<Vec<u8>>, FormatError> 
 }
 pub use tbd::{Tbd, TbdSymbol, parse_tbd};
 pub use trie::{TrieExport, exports as exports_trie};
+pub use universal::{FatArch, Universal, is_universal, parse_universal};
 
 use consts::LC_DYLD_CHAINED_FIXUPS;
 use cursor::Cursor;
