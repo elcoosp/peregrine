@@ -1461,7 +1461,7 @@ pub(crate) fn check_object_contract(bytes: &[u8], img: &ParsedImage<'_>, report:
                     _ => None,
                 };
                 if let Some(leader) = paired {
-                    let Some(next) = s.nreloc.checked_sub(i + 1).filter(|rest| *rest > 0) else {
+                    let Some(_) = s.nreloc.checked_sub(i + 1).filter(|rest| *rest > 0) else {
                         report.issues.push(Issue::error(
                             Code::SymbolTable,
                             format!(
@@ -1471,7 +1471,6 @@ pub(crate) fn check_object_contract(bytes: &[u8], img: &ParsedImage<'_>, report:
                         ));
                         break;
                     };
-                    let _ = next;
                     let Ok(r2) = RelocationInfo::parse(bytes, at + 8) else {
                         report.issues.push(Issue::error(
                             Code::SymbolTable,
