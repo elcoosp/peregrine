@@ -146,8 +146,9 @@ fn write_issue(s: &mut String, issue: &Issue) {
 
 /// Minimal JSON string escaping (the CLI writer's original rules):
 /// the two mandatory escapes, the short forms, and `\uXXXX` for the
-/// remaining control characters.
-fn escape(s: &str) -> String {
+/// remaining control characters. The crate's one copy of the escape
+/// rules — the M69 SARIF writer shares it, never a second shape.
+pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
