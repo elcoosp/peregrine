@@ -155,8 +155,13 @@ mod tests {
         // asks the same of the session's timeline (the collectors pair
         // when both faces ride), the reply's tail carries the rendered
         // document verbatim — and v42 registers the §7.3 ladder's rung
-        // vocabulary in the time-report tail (M65).
-        assert_eq!(crate::PROTO_VERSION, 42);
+        // vocabulary in the time-report tail (M65) — and v43 serves the
+        // strict verifier's verdict on the final bytes (M72, `verify`):
+        // the request's flag asks the session to verify its own output,
+        // the reply's tail carries the effective report in the M13
+        // interchange form (the `-no_adhoc` carve-out applied the
+        // audit's way).
+        assert_eq!(crate::PROTO_VERSION, 43);
     }
 
     #[test]
@@ -174,6 +179,7 @@ mod tests {
             tiles: false,
             time: false,
             trace: false,
+            verify: false,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
