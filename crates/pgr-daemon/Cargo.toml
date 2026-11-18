@@ -64,6 +64,22 @@ harness = false
 name = "wire_provenance"
 harness = false
 
+# The M80 map-tail bench: the served document's encode/decode price (the
+# rendered link map rides the reply verbatim — one length-prefixed
+# string beside an image that carries pages). Registered explicitly —
+# the same M34/M61 pathology, healed here like the entries before it.
+[[bench]]
+name = "wire_map"
+harness = false
+
+# The M81 rank-table bench: the config tail's encode/decode price over
+# the request body at the build-system scales (8 and 64 entries) beside
+# the table-free shape. Registered explicitly — the same M34/M61
+# pathology, healed here like the entries before it.
+[[bench]]
+name = "wire_order"
+harness = false
+
 [[bin]]
 name = "pgrd"
 path = "src/main.rs"
