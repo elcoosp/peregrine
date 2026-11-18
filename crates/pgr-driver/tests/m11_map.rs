@@ -152,7 +152,9 @@ fn the_map_refuses_the_surfaces_without_a_full_emit_layout() {
     let err = opts::parse(&argv).unwrap_err();
     assert!(err.to_string().contains("patch tiers"), "{err}");
 
-    // `-resident`: the wire never returns the layout.
+    // `-resident`: the surface serves since M80 (wire v46 — the
+    // session's own walk renders the map); the served face is the
+    // `m80_served_map` gate matrix's subject.
     let argv = args(&[
         "-o",
         "out",
@@ -161,8 +163,8 @@ fn the_map_refuses_the_surfaces_without_a_full_emit_layout() {
         "out.map",
         "-resident",
     ]);
-    let err = opts::parse(&argv).unwrap_err();
-    assert!(err.to_string().contains("v6 wire"), "{err}");
+    let o = opts::parse(&argv).expect("the resident lane serves the map");
+    assert!(o.map_path.is_some(), "the map ask rides the surface");
 }
 
 #[test]
