@@ -5,6 +5,40 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added (M71)
+
+- **M71** — the verifier's universal-container face: the driver links a fat container
+  through its arm64 slice (M70), so the verifier owes the same container a read-side
+  story — `pgr_verify::verify_universal` runs the strict pass per declared slice (one
+  `SliceVerdict` per table row: the row beside its own `Report`), and the table's row
+  must agree with the slice's own header about the arch it names (the driver links by
+  the row; a lying row rides `Code::HeaderInvalid` anchored at the slice's offset). A
+  malformed table stays the format reader's offset-tagged refusal — there is nothing
+  to slice — and the face rides the tracing seam inert-until-subscriber like every
+  check family. The `universal` bench pins the per-slice price beside the single-image
+  pass (linear in the slices, nothing per byte), and the `universal_verify` example
+  walks the clean container and its corrupted twin
+
+### Added (M70)
+
+- **M70** — the universal-binary read seam: ld64 links against universal ("fat")
+  containers daily — every SDK dylib and static archive ships one — and Peregrine
+  refused them ("not a .tbd stub, Mach-O dylib or static archive") because the
+  container's magic is `FAT_MAGIC`, not a Mach-O magic. The format layer gains the
+  container's codec (`pgr_format::universal`): the big-endian `fat_header` and slice
+  table decode at both widths (`FAT_MAGIC`, `FAT_MAGIC_64`), every structural refusal
+  is the offset-tagged `FormatError` the other parsers carry (a truncated header, a
+  lying count, an out-of-bounds or overlapping window, a sub-header slice), and
+  `Universal::arm64` names the cputypes it carries when the arm64 slice is missing —
+  the fix, not just the verdict. The driver's input dispatch (the positional/filelist
+  `map_input` chain, the `-l` and `-framework` scans, the `-bundle_loader` host)
+  unwraps the arm64 slice before the per-kind dispatch, so every input class links the
+  slice it already linked — a non-universal input costs one four-byte probe, and the
+  parity gate pins the container adding nothing the pipeline sees (byte-identical
+  images beside the bare slice). The `universal` bench pins the decode/selection price
+  over 2/5/9-slice containers, and the `universal_input_link` consumer example walks
+  the container end to end
+
 ### Added (M69)
 
 - **M69** — the verifier's SARIF interchange: `pgr_verify::sarif::render` carries the
