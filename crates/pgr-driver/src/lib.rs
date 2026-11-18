@@ -969,6 +969,12 @@ fn link_to_image_recorded(
         // same face).
         job.request.why_export.clone_from(&opts.why_export);
         job.request.why_load = opts.why_load;
+        // M80 (wire v46): a map-asking link asks the session's own full
+        // walk for the placed image's report — the served document is
+        // written to the `-map` path below, verbatim (the daemon never
+        // touches the filesystem; the fallback below writes the
+        // one-shot's own render).
+        job.request.map = opts.map_path.is_some();
         let socket = opts
             .resident_socket
             .clone()
@@ -1010,6 +1016,19 @@ fn link_to_image_recorded(
                     if let Some(loads) = &served.loads {
                         print!("{loads}");
                     }
+                }
+                // M80: the served map writes beside the resident link
+                // (the document rides the reply verbatim — the same
+                // `-map` contract the trace rides, the sidecar writes
+                // when the link completes; the daemon never touches the
+                // filesystem, the client does).
+                if let (Some(path), Some(document)) = (&opts.map_path, &img.map_text) {
+                    std::fs::write(Path::new(path), document).map_err(|source| {
+                        DriverError::Io {
+                            path: path.clone(),
+                            source,
+                        }
+                    })?;
                 }
                 let record = img.record.and_then(|bytes| {
                     let decoded = pgr_emit::incremental::LinkRecord::decode(&bytes);
@@ -2751,7 +2770,9 @@ pub fn usage() -> String {
     s.push_str("  -order_file <path>           rank symbols in the output (M11): one\n");
     s.push_str("                               `symbol` or `object.o:symbol` per line;\n");
     s.push_str("                               ranked pieces lead, unranked keep their\n");
-    s.push_str("                               order (refused with -r and -resident)\n");
+    s.push_str("                               order (refused with -r; serves beside\n");
+    s.push_str("                               -resident since M81 — wire v47 carries\n");
+    s.push_str("                               the rank table)\n");
     s.push_str("  -weak_library <path>         weak-load a dylib\n");
     s.push_str("  -lazy_library <path>         lazy-load a dylib (LC_LAZY_LOAD_DYLIB)\n");
     s.push_str("  -upward_library <path>       load a dylib as the umbrella relationship\n");
@@ -2780,8 +2801,10 @@ pub fn usage() -> String {
     s.push_str("                               (up to 0x4000); refused with -r\n");
     s.push_str("  -map <path>                  write the link map (segments,\n");
     s.push_str("                               sections, symbols — the placed\n");
-    s.push_str("                               image's report; refused with -r,\n");
-    s.push_str("                               -incremental and -resident)\n");
+    s.push_str("                               image's report; refused with -r and\n");
+    s.push_str("                               -incremental; serves beside -resident\n");
+    s.push_str("                               since M80 — the session's own walk\n");
+    s.push_str("                               renders it, wire v46)\n");
     s.push_str("  -syslibroot <dir>            SDK root prefixed onto every search\n");
     s.push_str("                               path (repeatable; ld64 pairing rule)\n");
     s.push_str("  @<response-file>             expand arguments from a file\n");
