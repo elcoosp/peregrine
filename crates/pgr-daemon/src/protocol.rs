@@ -241,8 +241,13 @@ use sha2::{Digest, Sha256};
 /// session's served pass narrows to, rendered in the selector's own
 /// canonical form; a selection the parser refuses is a malformed
 /// request — the wire never carries a gate the pipeline would silently
-/// widen).
-pub const PROTO_VERSION: u32 = 44;
+/// widen). **v45** appends the provenance queries (M79 — the request's
+/// `why_export` names and `why_load` flag ask the session's own full
+/// walk for the M56/M57 answers, the reply's IMAGE tail carrying the
+/// rendered text verbatim; a query the §7.3 ladder's replay cannot
+/// answer honestly — beside the `record` — is a malformed request, the
+/// fusion lane's own refusal enforced at the wire).
+pub const PROTO_VERSION: u32 = 45;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -504,6 +509,22 @@ pub struct LinkRequest {
     /// side); a selection only rides beside the `verify` flag — a gate
     /// the selection narrows is the only gate it means.
     pub verify_checks: Option<pgr_verify::CheckSet>,
+    /// The provenance queries (v45, M79): the `-why_export` names in
+    /// flag order and the `-why_load` flag — the session's own full walk
+    /// (the warm pipeline *is* the one-shot shape: parse from resident
+    /// POIs, intern, resolve, layout) renders the M56/M57 answers, and
+    /// the reply's IMAGE tail carries the rendered text verbatim. The
+    /// empty list (the default) queries nothing. A query beside the
+    /// `record` (the §7.3 ladder's replay — the fusion lane's request)
+    /// is a malformed request: the replay's Pass-2 product is the
+    /// record's, not the walk's, and an answer naming it would misreport
+    /// the run.
+    pub why_export: Vec<String>,
+    /// The load-report flag (v45, M79): `-why_load` — the S7 pull's
+    /// per-member decision (and, under `-dead_strip_dylibs`, every input
+    /// dylib's carriage) rendered from the session's own pull record.
+    /// The lane contract mirrors [`LinkRequest::why_export`].
+    pub why_load: bool,
 }
 
 impl LinkRequest {
@@ -578,6 +599,14 @@ impl LinkRequest {
             }
             None => put_u8(&mut b, 0),
         }
+        // M79 (v45): the provenance queries — the names in flag order,
+        // the load-report flag beside them (the empty list is the
+        // pre-M79 shape, byte-identical on the decode side).
+        put_u32(&mut b, self.why_export.len() as u32);
+        for name in &self.why_export {
+            put_str(&mut b, name);
+        }
+        put_u8(&mut b, u8::from(self.why_load));
         b
     }
 
@@ -646,6 +675,32 @@ impl LinkRequest {
                 ))
             })?)
         };
+        // M79 (v45): the provenance queries (see encode). An empty name
+        // is a malformed request — the surface's grammar the driver
+        // parses before the wire (a query names a C symbol); a query
+        // beside the `record` is malformed too — the ladder's replay
+        // cannot answer it honestly (the fusion lane's own refusal,
+        // enforced at the wire so no caller can plan the shape either).
+        let why_export = (0..r.u32()?)
+            .map(|_| r.str())
+            .collect::<Result<Vec<String>, DecodeError>>()?;
+        if why_export.iter().any(String::is_empty) {
+            return Err(DecodeError::Malformed(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the request's provenance query names no symbol (the name is the \
+                 C symbol, the leading underscore included)",
+            )));
+        }
+        let why_load = r.u8()? != 0;
+        let queries_asked = !why_export.is_empty() || why_load;
+        if queries_asked && record.is_some() {
+            return Err(DecodeError::Malformed(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the request asks provenance beside a record: the §7.3 ladder's \
+                 replay cannot answer the query honestly (the Pass-2 product is \
+                 the record's, not the walk's)",
+            )));
+        }
         r.done()?;
         Ok(Self {
             config,
@@ -661,6 +716,8 @@ impl LinkRequest {
             trace,
             verify,
             verify_checks,
+            why_export,
+            why_load,
         })
     }
 }
@@ -1039,6 +1096,106 @@ pub fn decode_verify_report_bytes(body: &[u8]) -> Result<Option<pgr_verify::Repo
     let report = decode_verify_report(&mut r)?;
     r.done()?;
     Ok(report)
+}
+
+// ---- the v45 provenance tail -------------------------------------------------
+
+/// One served `-why_export` answer (v45, M79): the queried name beside
+/// the rendered text the cold lane prints — the wire carries the render
+/// verbatim (the M62 convention: the wire never re-shapes the face the
+/// client prints, so it never re-excuses it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedExport {
+    /// The queried name (with the C underscore, verbatim).
+    pub name: String,
+    /// The answer's rendered text ([`pgr_core::provenance::RefExplanation::render`]
+    /// — the definition the resolution installed and every reference
+    /// site, in the index's own order).
+    pub render: String,
+}
+
+/// The served provenance answers (v45, M79): one entry per
+/// `-why_export` query, in flag order, beside the `-why_load` report
+/// when the request asked. `None` rides absent — an unasked query
+/// crosses nothing (the tail is one byte).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedProvenance {
+    /// The export answers, in the request's flag order.
+    pub exports: Vec<ServedExport>,
+    /// The load report's rendered text (the S7 pull's per-member
+    /// decision and the dylib carriage rows), when the request asked.
+    pub loads: Option<String>,
+}
+
+/// Encodes the reply's provenance tail (v45): a present byte, then —
+/// when the request asked and the session answered — the export answers
+/// (count-prefixed; per entry the name and the render, length-prefixed
+/// strings) and the load report (a present byte + the render). A
+/// request that asked nothing rides the absent byte.
+pub fn encode_provenance(out: &mut Vec<u8>, served: Option<&ServedProvenance>) {
+    let Some(served) = served else {
+        put_u8(out, 0);
+        return;
+    };
+    put_u8(out, 1);
+    put_u32(out, served.exports.len() as u32);
+    for export in &served.exports {
+        put_str(out, &export.name);
+        put_str(out, &export.render);
+    }
+    match &served.loads {
+        Some(render) => {
+            put_u8(out, 1);
+            put_str(out, render);
+        }
+        None => put_u8(out, 0),
+    }
+}
+
+/// Decodes the reply's provenance tail (v45; see [`encode_provenance`]
+/// for the shape). An empty answer name is a malformed tail — a query
+/// names its answer, the session never renders one without.
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation or a nameless answer.
+pub(crate) fn decode_provenance(
+    r: &mut Reader<'_>,
+) -> Result<Option<ServedProvenance>, DecodeError> {
+    if r.u8()? == 0 {
+        return Ok(None);
+    }
+    let exports = (0..r.u32()?)
+        .map(|_| {
+            Ok(ServedExport {
+                name: r.str()?,
+                render: r.str()?,
+            })
+        })
+        .collect::<Result<Vec<ServedExport>, DecodeError>>()?;
+    if exports.iter().any(|e| e.name.is_empty()) {
+        return Err(DecodeError::Malformed(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the provenance tail answers a query that named no symbol",
+        )));
+    }
+    let loads = if r.u8()? == 0 { None } else { Some(r.str()?) };
+    Ok(Some(ServedProvenance { exports, loads }))
+}
+
+/// Decodes the reply's provenance tail from a whole body (v45) — the
+/// byte-slice shape of the crate-private `decode_provenance`, for a
+/// consumer that reads the tail in isolation (the wire codec's
+/// round-trip gate; the client reads it inline after the verify tail).
+/// Trailing bytes after the tail refuse, like every body.
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation, trailing bytes or a
+/// nameless answer.
+pub fn decode_provenance_bytes(body: &[u8]) -> Result<Option<ServedProvenance>, DecodeError> {
+    let mut r = Reader::new(body);
+    let served = decode_provenance(&mut r)?;
+    r.done()?;
+    Ok(served)
 }
 
 /// Encodes one export-filter pattern (M14, wire v7): a kind byte (the
@@ -1835,9 +1992,10 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, TAG_LINK,
-        content_hash, decode_time_report, decode_trace_bytes, decode_verify_report_bytes,
-        encode_time_report, encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64,
+        ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, ServedExport,
+        ServedProvenance, TAG_LINK, content_hash, decode_provenance_bytes, decode_time_report,
+        decode_trace_bytes, decode_verify_report_bytes, encode_provenance, encode_time_report,
+        encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
@@ -2204,6 +2362,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2230,6 +2390,8 @@ mod tests {
             trace: false,
             verify: true,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2257,6 +2419,8 @@ mod tests {
             trace: false,
             verify: true,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2286,6 +2450,8 @@ mod tests {
             verify_checks: Some(
                 pgr_verify::CheckSet::parse("segments,signature").expect("canonical names"),
             ),
+            why_export: Vec::new(),
+            why_load: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2318,12 +2484,17 @@ mod tests {
             trace: false,
             verify: true,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         // Hand-splice the malformed selection past the well-formed tail:
-        // encode a plain request body, drop the trailing absent byte,
-        // append the malformed one.
+        // encode a plain request body, drop the trailing absent byte and
+        // the v45 provenance fields beside it (the count u32 and the
+        // load-report flag — six bytes), append the malformed one. The
+        // selection's parse refuses before the decoder reads past it —
+        // the spliced tail rides no further fields.
         let mut wire = req.encode();
-        wire.pop();
+        wire.truncate(wire.len() - 6);
         put_u8(&mut wire, 1);
         put_str(&mut wire, "segmants");
         let err = LinkRequest::decode(&wire).unwrap_err();
@@ -2382,6 +2553,150 @@ mod tests {
     }
 
     #[test]
+    fn provenance_queries_round_trip() {
+        // v45 (M79): the provenance queries ride the request — the
+        // `-why_export` names in flag order, the `-why_load` flag beside
+        // them — and the no-query default stays the pre-M79 shape.
+        let mut req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: vec!["_greet".to_string(), "_msg".to_string()],
+            why_load: true,
+        };
+        let body = req.encode();
+        let back = LinkRequest::decode(&body).unwrap();
+        assert_eq!(back, req);
+        // A different load-report answer is a different request.
+        req.why_load = false;
+        assert_ne!(LinkRequest::decode(&req.encode()).unwrap(), back);
+        // The empty list decodes to the no-query shape.
+        req.why_export.clear();
+        let plain = LinkRequest::decode(&req.encode()).unwrap();
+        assert!(plain.why_export.is_empty() && !plain.why_load);
+    }
+
+    #[test]
+    fn a_wire_garbage_provenance_name_is_malformed() {
+        // The names ride the C-symbol grammar the surface parses: an
+        // empty name is a malformed request, never a silently widened
+        // query (the M77 selection's own convention).
+        let req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+        };
+        // Hand-splice a one-query tail with an empty name over the
+        // no-query one: the encoded tail is the count u32 + the flag
+        // byte — rewrite both.
+        let mut wire = req.encode();
+        wire.truncate(wire.len() - 5);
+        put_u32(&mut wire, 1);
+        put_str(&mut wire, "");
+        put_u8(&mut wire, 0);
+        let err = LinkRequest::decode(&wire).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn provenance_queries_beside_a_record_refuse() {
+        // The §7.3 ladder's replay cannot answer the query honestly (the
+        // Pass-2 product is the record's, not the walk's — the fusion
+        // lane's own refusal, enforced at the wire): a request carrying
+        // both is malformed, never silently answered.
+        let req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: Some(vec![1, 2, 3]),
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: vec!["_greet".to_string()],
+            why_load: false,
+        };
+        let err = LinkRequest::decode(&req.encode()).unwrap_err();
+        match err {
+            DecodeError::Malformed(e) => {
+                let text = e.to_string();
+                assert!(
+                    text.contains("record"),
+                    "the refusal names the ladder it cannot serve: {text}"
+                );
+            }
+            other => panic!("expected a malformed body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provenance_tail_round_trips_the_renders() {
+        // v45 (M79): the served answers ride the tail verbatim (the M62
+        // convention — the wire never re-shapes the rendered face); an
+        // unasked query rides the absent byte.
+        let served = ServedProvenance {
+            exports: vec![ServedExport {
+                name: "_greet".to_string(),
+                render: "_greet: greet.o(__TEXT,__text) ...\n  read by main.o(...)\n".to_string(),
+            }],
+            loads: Some(
+                "libgreet.a(greet.o):\n  pulled for _greet (the lazy fixpoint)\n".to_string(),
+            ),
+        };
+        let mut body = Vec::new();
+        encode_provenance(&mut body, Some(&served));
+        let back = decode_provenance_bytes(&body)
+            .unwrap()
+            .expect("the answers ride");
+        assert_eq!(back, served);
+        let mut absent = Vec::new();
+        encode_provenance(&mut absent, None);
+        assert!(decode_provenance_bytes(&absent).unwrap().is_none());
+    }
+
+    #[test]
+    fn provenance_tail_refuses_a_nameless_answer() {
+        // A tail entry whose name rode empty is a malformed tail — the
+        // session never renders one (a query names its answer), so an
+        // empty name means the body is not ours.
+        let mut body = Vec::new();
+        put_u8(&mut body, 1);
+        put_u32(&mut body, 1);
+        put_str(&mut body, "");
+        put_str(&mut body, "a render");
+        put_u8(&mut body, 0);
+        let err = decode_provenance_bytes(&body).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
     fn default_config_round_trips() {
         let req = LinkRequest {
             config: LinkConfig::default(),
@@ -2397,6 +2712,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2426,6 +2743,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -2454,6 +2773,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2481,6 +2802,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let back = LinkRequest::decode(&bare.encode()).unwrap();
         assert_eq!(back, bare);
@@ -2519,6 +2842,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert!(back.tiles, "the flag rides the wire");
@@ -2549,6 +2874,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let body = req.encode();
         // The distinctive vmsize appears exactly once (every other field
@@ -2599,6 +2926,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the decisions cross byte-for-byte");
@@ -2634,6 +2963,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The segment name rides as a length-prefixed string exactly
@@ -2676,6 +3007,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the reserve crosses byte-for-byte");
@@ -2721,6 +3054,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The reserve rides as a present-byte + u64 exactly once (the
@@ -2763,6 +3098,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the base crosses byte-for-byte");
@@ -2798,6 +3135,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The base rides as a present-byte + u64 exactly once (the
@@ -2851,6 +3190,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -2887,6 +3228,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The member rides as (kind byte, u32 len, name bytes) exactly
@@ -2936,6 +3279,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -2971,6 +3316,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The client rides as (u32 len, name bytes) exactly once; the
@@ -3018,6 +3365,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3054,6 +3403,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The pair rides as (u32 len, pair bytes) exactly once; the
@@ -3101,6 +3452,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3138,6 +3491,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3186,6 +3541,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3233,6 +3590,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3270,6 +3629,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3303,6 +3664,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3336,6 +3699,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3366,6 +3731,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3400,6 +3767,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3434,6 +3803,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3465,6 +3836,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3500,6 +3873,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3533,6 +3908,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3564,6 +3941,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3598,6 +3977,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3629,6 +4010,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3662,6 +4045,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3699,6 +4084,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3731,6 +4118,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3790,6 +4179,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         let needle = b"__mydata";
@@ -3838,6 +4229,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3874,6 +4267,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3908,6 +4303,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3941,6 +4338,8 @@ mod tests {
                 trace: false,
                 verify: false,
                 verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
             }
             .encode(),
         )
@@ -3971,6 +4370,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The marks are the wire tail's last section: the count rides
@@ -4005,6 +4406,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The floor rides the config tail as (present byte, u64); the
@@ -4045,6 +4448,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The last floor byte is `__TEXT,__text`'s exponent (12); the
@@ -4087,6 +4492,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         // The path rides as (u32 len, path bytes) exactly once; the
@@ -4120,6 +4527,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         }
         .encode();
         let rel_path = b"bin/dyld";
@@ -4156,6 +4565,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -4181,6 +4592,8 @@ mod tests {
             trace: true,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
