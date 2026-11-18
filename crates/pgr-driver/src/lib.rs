@@ -923,7 +923,8 @@ fn link_to_image_recorded(
     let (mut prepared, cache) = prepare_link(opts)?;
     // M58/M61: the observed faces — the time report's and the timeline's
     // collectors ride the one-shot pipeline (the resident lane is served
-    // on the wire; `finish` refuses `--trace` beside it at this rung).
+    // on the wire — v40/v41, the session's own observed run; the
+    // incremental lane rides its own since M65).
     let timing = opts.time || opts.time_json || opts.trace_path.is_some();
     if opts.resident {
         // M9 GA fusion rung: an `-incremental` cycle's full link asks the
@@ -961,6 +962,13 @@ fn link_to_image_recorded(
         // flag — the session's served pass narrows to the families the
         // client named, the same set the cold lane's gate would run.
         job.request.verify_checks = opts.verify_checks;
+        // M79 (wire v45): a query-asking link asks the session's own
+        // full walk for the answers — the served renders print beside
+        // the resident link exactly as the cold lane prints its own
+        // (the fallback below prints the one-shot's; either lane, the
+        // same face).
+        job.request.why_export.clone_from(&opts.why_export);
+        job.request.why_load = opts.why_load;
         let socket = opts
             .resident_socket
             .clone()
@@ -989,6 +997,19 @@ fn link_to_image_recorded(
                         path: path.clone(),
                         source,
                     })?;
+                }
+                // M79: the served answers print beside the resident link
+                // — the session's own renders, verbatim (the wire never
+                // re-shapes the face the client prints; the vacuous
+                // query is the session's `ERROR` — the fallback below
+                // refuses with the same message).
+                if let Some(served) = &img.provenance {
+                    for export in &served.exports {
+                        print!("{}", export.render);
+                    }
+                    if let Some(loads) = &served.loads {
+                        print!("{loads}");
+                    }
                 }
                 let record = img.record.and_then(|bytes| {
                     let decoded = pgr_emit::incremental::LinkRecord::decode(&bytes);
@@ -2851,9 +2872,9 @@ pub fn usage() -> String {
     s.push_str("                               the fused emit and the pipeline's\n");
     s.push_str("                               total (M58; the resident lane serves\n");
     s.push_str("                               its own observed run — wire v40,\n");
-    s.push_str("                               M59; refused with -incremental —\n");
-    s.push_str("                               the ladder runs where the observer\n");
-    s.push_str("                               does not)\n");
+    s.push_str("                               M59; the incremental lane rides\n");
+    s.push_str("                               since M65 — the ladder's rungs join\n");
+    s.push_str("                               the report as phases)\n");
     s.push_str("  --time-json                  the same measurement as the compact\n");
     s.push_str("                               JSON interchange line (one line, the\n");
     s.push_str("                               report-JSON escape rules; walls in\n");
