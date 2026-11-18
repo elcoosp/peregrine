@@ -191,6 +191,63 @@ impl SymbolOrder {
         }
     }
 
+    /// Rebuilds the rank table from the entries themselves (M81): the
+    /// wire's canonical form — the entries in rank order, each with its
+    /// scope and its diagnostics line — is all the state the table
+    /// carries, so a resident session restores exactly what the client
+    /// built from its parsed file. The same shapes the parse refuses
+    /// refuse here (an empty table cannot rank anything; two ranks for
+    /// one symbol is a contradiction), so a table the wire carries is
+    /// always a legal one.
+    ///
+    /// # Errors
+    /// [`OrderFileError::Empty`] on an empty table (the codec encodes
+    /// the absence instead),
+    /// [`OrderFileError::Duplicate`] on two ranks for one symbol (the
+    /// same `(object, symbol)` key twice — the lines named, the report
+    /// reads like the cold lane's).
+    pub fn from_entries(entries: Vec<OrderEntry>) -> Result<Self, OrderFileError> {
+        if entries.is_empty() {
+            return Err(OrderFileError::Empty);
+        }
+        // The duplicate walk (the table is small, the wire refuses
+        // before any link runs): the same `(object, symbol)` key twice
+        // is two ranks for one symbol — the parse's own refusal, the
+        // lines carried so the report reads like the cold lane's. The
+        // same name global AND scoped is the parse's own shape (the
+        // scoped entry wins for its object), never a collision.
+        let mut seen: HashMap<(Option<&str>, &[u8]), usize> = HashMap::new();
+        for (idx, entry) in entries.iter().enumerate() {
+            let key = (entry.object.as_deref(), entry.symbol.as_bytes());
+            if let Some(&first) = seen.get(&key) {
+                return Err(OrderFileError::Duplicate {
+                    line: entry.line,
+                    symbol: entry.symbol.clone(),
+                    first: first.saturating_add(1),
+                });
+            }
+            seen.insert(key, idx);
+        }
+        Ok(Self {
+            global: entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.object.is_none())
+                .map(|(idx, e)| (e.symbol.clone().into_bytes(), idx))
+                .collect(),
+            scoped: entries
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, e)| {
+                    e.object
+                        .as_ref()
+                        .map(|obj| ((obj.clone(), e.symbol.clone().into_bytes()), idx))
+                })
+                .collect(),
+            entries,
+        })
+    }
+
     /// The entry index (rank) for `name` in the object named `object` —
     /// `None` when the name is unranked. Scoped entries win over global
     /// ones for their object.
@@ -274,5 +331,94 @@ mod tests {
         let order = SymbolOrder::build(&f);
         let names: Vec<&str> = order.entries().iter().map(|e| e.symbol.as_str()).collect();
         assert_eq!(names, ["_b", "_a"]);
+    }
+
+    // ---- M81: the rank table crosses the wire (from_entries) ------------
+
+    #[test]
+    fn from_entries_restores_the_ranks() {
+        // The wire's table is the entries in rank order — the rebuilt
+        // lookup answers exactly what the parsed file's table answers
+        // (the codec's round-trip contract; the `rank_of` faces agree).
+        let f = OrderFile::parse("_shared\nfirst.o:_shared\nfirst.o:_own\n").unwrap();
+        let built = SymbolOrder::build(&f);
+        let restored =
+            SymbolOrder::from_entries(built.entries().to_vec()).expect("the table rebuilds");
+        assert_eq!(built, restored, "the entries rebuild the same table");
+        assert_eq!(restored.rank_of("first.o", b"_shared"), Some(1));
+        assert_eq!(restored.rank_of("second.o", b"_shared"), Some(0));
+        assert_eq!(restored.rank_of("first.o", b"_own"), Some(2));
+        assert_eq!(restored.rank_of("second.o", b"_own"), None);
+    }
+
+    #[test]
+    fn from_entries_refuses_the_named_shapes() {
+        // An empty table cannot rank anything (the parse's own refusal,
+        // mirrored at the wire — the codec encodes `None` instead).
+        assert_eq!(
+            SymbolOrder::from_entries(Vec::new()),
+            Err(OrderFileError::Empty)
+        );
+        // Two ranks for one symbol is a contradiction — the same
+        // refusal the file parse carries, the lines named (the wire
+        // carries them, so the report reads like the cold lane's).
+        let dup = SymbolOrder::from_entries(vec![
+            OrderEntry {
+                symbol: "_main".into(),
+                object: None,
+                line: 1,
+            },
+            OrderEntry {
+                symbol: "_main".into(),
+                object: None,
+                line: 2,
+            },
+        ])
+        .unwrap_err();
+        assert_eq!(
+            dup,
+            OrderFileError::Duplicate {
+                line: 2,
+                symbol: "_main".into(),
+                first: 1
+            }
+        );
+        // The same name global AND scoped for one object is the parse's
+        // own shape (the scoped entry wins for its object) — a rebuilt
+        // table keeps it, the lookup faces agree with [`SymbolOrder::build`].
+        let mixed = SymbolOrder::from_entries(vec![
+            OrderEntry {
+                symbol: "_shared".into(),
+                object: None,
+                line: 1,
+            },
+            OrderEntry {
+                symbol: "_shared".into(),
+                object: Some("a.o".into()),
+                line: 2,
+            },
+        ])
+        .expect("the parse's own shape rebuilds");
+        assert_eq!(mixed.rank_of("a.o", b"_shared"), Some(1));
+        assert_eq!(mixed.rank_of("b.o", b"_shared"), Some(0));
+        // A scoped duplicate (same object, same symbol, twice) is the
+        // contradiction the file parse refuses — mirrored at the wire.
+        let dup = SymbolOrder::from_entries(vec![
+            OrderEntry {
+                symbol: "_own".into(),
+                object: Some("a.o".into()),
+                line: 1,
+            },
+            OrderEntry {
+                symbol: "_own".into(),
+                object: Some("a.o".into()),
+                line: 2,
+            },
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(dup, OrderFileError::Duplicate { line: 2, .. }),
+            "{dup:?}"
+        );
     }
 }
