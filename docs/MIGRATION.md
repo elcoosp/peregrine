@@ -45,7 +45,7 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | ld64 | Peregrine |
 |---|---|
 | executable (default) | default; `-static` accepted |
-| `-dylib` + `-install_name` + `-current_version` / `-compatibility_version` | same; the install name defaults to the output path |
+| `-dylib` + `-install_name` + `-current_version` / `-compatibility_version` | same; the install name defaults to the output path (`-final_output <path>` supplies the derived name when `-install_name` is absent — M44) |
 | `-bundle` | same |
 | `-r` (relocatable) | same (`MH_OBJECT` output: sections merged, relocation entries preserved and re-pointed at the output symbol table, undefineds stay open — M10) |
 | `-reexport_library <path>` | same (`LC_REEXPORT_DYLIB` + trie REEXPORT nodes) |
