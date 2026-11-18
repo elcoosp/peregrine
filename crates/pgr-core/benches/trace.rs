@@ -210,6 +210,43 @@ fn fixed_task_report() -> pgr_core::trace::TraceReport {
     report
 }
 
+/// The fixed report with the M68 emit half riding (the one-shot segmented
+/// link's timeline shape): the pipeline's spans plus the `emit` and
+/// `flush` spans — nine per run, no notes, the pipeline's lane alone.
+fn fixed_image_report() -> pgr_core::trace::TraceReport {
+    let span =
+        |phase: Phase, detail: PhaseDetail, start: u64, dur: u64| pgr_core::trace::TraceSpan {
+            phase,
+            detail,
+            lane: 1,
+            start_us: start,
+            dur_us: dur,
+        };
+    let mut report = fixed_report();
+    report.spans.extend([
+        span(
+            Phase::Emit,
+            PhaseDetail::Emitted {
+                tiles: 256,
+                bytes: 4_194_304,
+            },
+            1_364,
+            1_100,
+        ),
+        span(
+            Phase::Flush,
+            PhaseDetail::Flushed {
+                blocks: 1,
+                writers: 1,
+            },
+            2_464,
+            400,
+        ),
+    ]);
+    report.notes.clear();
+    report
+}
+
 fn bench_trace(c: &mut Criterion) {
     let mut group = c.benchmark_group("trace");
     let inputs = corpus();
@@ -276,6 +313,20 @@ fn bench_trace(c: &mut Criterion) {
     });
     group.bench_function("parse_12_rows_relink", |b| {
         let json = fixed_relink_report().render();
+        b.iter(|| {
+            let parsed = parse_trace_json(black_box(&json)).expect("the fixed trace parses");
+            black_box(parsed.spans.len());
+        });
+    });
+    // The M68 emit-half rows' price: the fused emit and the pooled flush
+    // ride the render and the reader beside the pipeline's (one one-shot
+    // segmented link's timeline is the 9-span shape).
+    group.bench_function("render_9_rows_image", |b| {
+        let report = fixed_image_report();
+        b.iter(|| black_box(black_box(&report).render()));
+    });
+    group.bench_function("parse_9_rows_image", |b| {
+        let json = fixed_image_report().render();
         b.iter(|| {
             let parsed = parse_trace_json(black_box(&json)).expect("the fixed trace parses");
             black_box(parsed.spans.len());
