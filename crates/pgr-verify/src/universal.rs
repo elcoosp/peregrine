@@ -2,7 +2,7 @@
 //! universal ("fat") container through its arm64 slice (M70), so the
 //! verifier owes the same container a *read-side* story. Every slice
 //! the table declares gets the strict pass over its own window
-//! ([`verify`] on the subslice — the container adds no contract the
+//! ([`crate::verify`] on the subslice — the container adds no contract the
 //! image does not already carry), and the table's row must agree with
 //! the slice's own header about the arch it names: the driver links by
 //! the table's row, so a row that lies (naming `x86_64` for an `arm64`
