@@ -18,6 +18,12 @@
 pub const MH_MAGIC_64: u32 = 0xfeed_facf;
 /// Byte-swapped 64-bit magic (big-endian files; rejected by `pgr-format`).
 pub const MH_CIGAM_64: u32 = 0xcffa_edfe;
+/// Universal ("fat") container magic (`0xCAFEBABE`; big-endian on disk,
+/// the M70 read seam decodes it).
+pub const FAT_MAGIC: u32 = 0xcafe_babe;
+/// Universal ("fat") 64-bit container magic (`0xCAFEBABF` — the
+/// `fat_arch_64` width, big-endian on disk).
+pub const FAT_MAGIC_64: u32 = 0xcafe_babf;
 /// CPU type for Apple Silicon.
 pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 /// `arm64` subtype: all Apple Silicon CPUs.
