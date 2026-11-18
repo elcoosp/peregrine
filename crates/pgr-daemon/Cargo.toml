@@ -34,6 +34,16 @@ workspace = true
 name = "wire_time"
 harness = false
 
+# The M62 trace-tail bench: the rendered timeline's encode/decode price
+# (the document rides the reply verbatim). Registered explicitly — the
+# M34/M61 pathology (auto-discovery compiles the bench under the libtest
+# harness, whose generated main shadows the criterion one, so it
+# "passes" and measures nothing), healed here like the M34 and M61
+# entries before it.
+[[bench]]
+name = "wire_trace"
+harness = false
+
 [[bin]]
 name = "pgrd"
 path = "src/main.rs"
