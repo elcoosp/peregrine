@@ -160,10 +160,13 @@ mod tests {
         // the request's flag asks the session to verify its own output,
         // the reply's tail carries the effective report in the M13
         // interchange form (the `-no_adhoc` carve-out applied the
-        // audit's way) — and v44 carries the verify gate's check
+        // audit's way) — v44 carries the verify gate's check
         // selection (M77, `verify_checks`): the M12 selector the
-        // session's served pass narrows to rides beside the flag.
-        assert_eq!(crate::PROTO_VERSION, 44);
+        // session's served pass narrows to rides beside the flag — and
+        // v45 carries the provenance queries (M79, `why_export`/
+        // `why_load`): the session's own full walk renders the answers,
+        // the tail carries the renders verbatim.
+        assert_eq!(crate::PROTO_VERSION, 45);
     }
 
     #[test]
@@ -183,6 +186,8 @@ mod tests {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
