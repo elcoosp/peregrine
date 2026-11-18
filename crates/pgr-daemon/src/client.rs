@@ -101,6 +101,14 @@ pub struct ResidentImage {
     /// unasked or on the fallback path (the one-shot link verifies
     /// through the driver's own gate).
     pub verify_report: Option<pgr_verify::Report>,
+    /// The served provenance answers (v45, M79): `Some` when the request
+    /// asked — the `-why_export` renders in flag order beside the
+    /// `-why_load` report, the session's own Pass-2 product rendered
+    /// verbatim (the M62 convention — the wire never re-shapes the face
+    /// the client prints). `None` when unasked (the tail rode absent) or
+    /// on the fallback path (the one-shot link prints the cold lane's
+    /// answers itself).
+    pub provenance: Option<crate::protocol::ServedProvenance>,
     /// How the image tail crossed (v5): [`Transport::Full`] or the tile
     /// summary (what the benches and the driver's outcome line record).
     pub transport: Transport,
@@ -201,6 +209,8 @@ impl LinkJob {
             trace: false,
             verify: false,
             verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
         };
         Self { request, blobs }
     }
@@ -415,6 +425,11 @@ impl DaemonClient {
                     // rides verbatim — its own strict reader validates
                     // it; a lying document refuses the reply).
                     let verify_report = crate::protocol::decode_verify_report(&mut r)?;
+                    // The v45 tail: the served provenance answers when
+                    // the request asked, absent otherwise (the renders
+                    // ride verbatim — a nameless answer refuses the
+                    // reply, like every malformed tail).
+                    let provenance = crate::protocol::decode_provenance(&mut r)?;
                     r.done()?;
                     return Ok(ResidentImage {
                         image,
@@ -429,6 +444,7 @@ impl DaemonClient {
                         time_report,
                         trace_json,
                         verify_report,
+                        provenance,
                         transport,
                     });
                 }
