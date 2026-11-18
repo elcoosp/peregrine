@@ -101,8 +101,14 @@ pub enum DepInfoError {
     },
     /// The linker-version string is not UTF-8 — the writer writes it from
     /// a valid string, so a file that carries anything else is broken.
-    #[error("the linker-version string is not UTF-8 — the writer writes it from a valid string")]
-    VersionNotUtf8,
+    #[error(
+        "the linker-version string is not UTF-8 at byte {offset} — the writer writes it from a valid string"
+    )]
+    VersionNotUtf8 {
+        /// The byte position where the UTF-8 walk stopped (the opcode
+        /// byte included, the siblings' convention).
+        offset: usize,
+    },
     /// A row's opcode is outside the ld64 family.
     #[error(
         "unknown dependency opcode {opcode:#04x} at byte {offset} — the ld64 family is 0x00 (version), 0x10 (input), 0x11 (not-found), 0x40 (output)"
@@ -284,7 +290,9 @@ impl DependencyRecord {
             .position(|&b| b == 0)
             .ok_or(DepInfoError::Truncated { offset: 0 })?;
         let linker_version = std::str::from_utf8(&rest[..version_end])
-            .map_err(|_| DepInfoError::VersionNotUtf8)?
+            .map_err(|e| DepInfoError::VersionNotUtf8 {
+                offset: 1 + e.valid_up_to(),
+            })?
             .to_owned();
         let mut entries = Vec::new();
         // The version row is the opcode byte, the version string and the
