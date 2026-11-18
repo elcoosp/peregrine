@@ -3,7 +3,9 @@
 //! Exit codes: 0 = clean (or warnings without `--strict`), 1 = issues, 2 =
 //! usage / IO error. `--json` emits a machine-readable report (the
 //! library's `report_json` shape — one writer for the binary and the
-//! library). `--baseline <file>` gates the run on the previous report:
+//! library). `--sarif` emits the M69 SARIF 2.1.0 document the
+//! ecosystem's triage reads natively (one machine face per run).
+//! `--baseline <file>` gates the run on the previous report:
 //! only *new* findings fail (`--fail-on any` restores the whole verdict).
 
 use std::io::Write as _;
@@ -32,6 +34,7 @@ fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut json = false;
+    let mut sarif = false;
     let mut strict = false;
     let mut quiet = false;
     let mut skip_hashes = false;
@@ -42,6 +45,7 @@ fn main() -> ExitCode {
     while i < argv.len() {
         match argv[i].as_str() {
             "--json" => json = true,
+            "--sarif" => sarif = true,
             "--strict" => strict = true,
             "--quiet" | "-q" => quiet = true,
             "--skip-hash-recompute" => skip_hashes = true,
@@ -126,6 +130,22 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // The machine faces are one writer per run (M75): the SARIF document
+    // and the M13 report are two shapes for one verdict, not two halves
+    // of one output.
+    if sarif && json {
+        eprintln!("{PROGRAM}: --sarif and --json are two machine faces; run one per invocation");
+        return ExitCode::from(2);
+    }
+    // The SARIF face renders the whole verdict: the baseline delta has
+    // no SARIF shape (introduced/surviving is the M13 report's story),
+    // so the face refuses instead of silently dropping the gate.
+    if sarif && baseline.is_some() {
+        eprintln!(
+            "{PROGRAM}: --sarif renders the whole verdict; the baseline delta has no SARIF shape — run without --baseline (the exit code keeps the whole-verdict gate)"
+        );
+        return ExitCode::from(2);
+    }
     // The gate the exit code answers: explicit --fail-on wins; a
     // baseline defaults to new-findings-only, no baseline keeps the
     // historical whole-verdict gate.
@@ -164,11 +184,47 @@ fn main() -> ExitCode {
                 continue;
             }
         };
+        // The M74 container face: a universal ("fat") container is not
+        // one image — the single-image pass would refuse the fat magic
+        // and never name the slice. The table's declared slices each get
+        // their own verdict (the check selection composes), and the exit
+        // gate is every slice's.
+        if pgr_format::universal::is_universal(&bytes) {
+            // The SARIF anchors name file bytes; a slice's issues ride
+            // their own window — re-anchoring would re-shape, so the
+            // face refuses with the slice story (M75).
+            if sarif {
+                eprintln!(
+                    "{PROGRAM}: {}: --sarif anchors name file bytes; a container's slices ride their own windows — verify the slices through the text or --json face",
+                    file.display()
+                );
+                return ExitCode::from(2);
+            }
+            if baseline.is_some() {
+                eprintln!(
+                    "{PROGRAM}: {}: --baseline gates one image's offsets; a container's slices ride their own windows — verify the container without --baseline, or one invocation per extracted slice",
+                    file.display()
+                );
+                return ExitCode::from(2);
+            }
+            if universal_face(file, &bytes, opts, checks, json, quiet, &mut out) {
+                any_bad = true;
+            }
+            continue;
+        }
         let report = verify_with_checks(&bytes, &opts, &checks);
         let delta = baseline_prev
             .as_deref()
             .map(|prev| BaselineDelta::between(prev, &report.issues, &OffsetIdentity));
-        if json {
+        if sarif {
+            // The M75 face: the M69 render, riding the CLI — one
+            // deterministic SARIF 2.1.0 document per verified image.
+            let body = pgr_verify::sarif::render(&report, &file.display().to_string());
+            if let Err(e) = writeln!(out, "{body}") {
+                eprintln!("{PROGRAM}: {e}");
+                any_io = true;
+            }
+        } else if json {
             let body = match &delta {
                 Some(delta) => pgr_verify::to_json_with_baseline(
                     &file.display().to_string(),
@@ -254,6 +310,72 @@ fn main() -> ExitCode {
     }
 }
 
+/// The M74 container face: one verdict per declared slice. The text face
+/// prints a `slice N` line per table row (the OK/FAILED words the
+/// single-image face rides) with the issues in the verifier's own words;
+/// the `--json` face serves one M13 document per slice, the `file` field
+/// naming the slice it rode — each line the strict reader's own shape.
+/// The malformed table refuses (`REFUSED`, the format reader's
+/// offset-tagged error verbatim — there is nothing to slice). Returns
+/// whether the gate fails (a refusing slice, or a refusal).
+fn universal_face(
+    file: &std::path::Path,
+    bytes: &[u8],
+    opts: Options,
+    checks: CheckSet,
+    json: bool,
+    quiet: bool,
+    out: &mut dyn std::io::Write,
+) -> bool {
+    let report = match pgr_verify::verify_universal_with_checks(bytes, &opts, &checks) {
+        Ok(report) => report,
+        Err(e) => {
+            if !quiet {
+                let _ = writeln!(out, "{}: REFUSED: {e}", file.display());
+            }
+            return true;
+        }
+    };
+    let mut any_bad = false;
+    for (i, slice) in report.slices.iter().enumerate() {
+        let label = format!(
+            "{}[slice {i} cputype {:#x} at {:#x}, {} bytes]",
+            file.display(),
+            slice.arch.cputype,
+            slice.arch.offset,
+            slice.arch.size,
+        );
+        let bad = !slice.report.is_ok(&opts);
+        if json {
+            let body = pgr_verify::to_json_with_file(&label, &slice.report);
+            if let Err(e) = writeln!(out, "{body}") {
+                eprintln!("{PROGRAM}: {e}");
+                return true;
+            }
+        } else if !quiet {
+            let _ = writeln!(out, "{label}: {}", if bad { "FAILED" } else { "OK" });
+            for issue in &slice.report.issues {
+                let sev = match issue.severity {
+                    Severity::Error => "error",
+                    Severity::Warning => "warning",
+                };
+                let at = issue
+                    .offset
+                    .map(|o| format!(" at {o:#x}"))
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    out,
+                    "  {sev} [{}] {}{at}",
+                    issue.code.as_str(),
+                    issue.message
+                );
+            }
+        }
+        any_bad |= bad;
+    }
+    any_bad
+}
+
 fn report_label(
     report: &pgr_verify::Report,
     opts: Options,
@@ -295,7 +417,7 @@ fn print_help() {
     println!(
         "{PROGRAM} {} — Peregrine read-side Mach-O verifier (M0)\n\n\
          USAGE:\n    pgr-verify [OPTIONS] <mach-o-file>...\n\n\
-         OPTIONS:\n    --json                  Machine-readable report\n    --strict                Treat warnings as failures\n    --quiet, -q             Only set the exit code\n    --skip-hash-recompute   Skip SHA-256 page-hash verification\n    --checks <a,b,...>      Run only the named families (e.g. segments,fixups)\n    --list-checks           Print the families and exit\n    --baseline <path>       Gate on a previous --json report: only NEW\n                            findings fail (one file per invocation)\n    --fail-on new|any       What fails: introduced findings only (default\n                            with --baseline) or the whole verdict\n    --help, -h              This help\n    --version, -V           Version\n\n\
+         OPTIONS:\n    --json                  Machine-readable report\n    --sarif                 SARIF 2.1.0 document (the triage tools'\n                            native shape; one machine face per run)\n    --strict                Treat warnings as failures\n    --quiet, -q             Only set the exit code\n    --skip-hash-recompute   Skip SHA-256 page-hash verification\n    --checks <a,b,...>      Run only the named families (e.g. segments,fixups)\n    --list-checks           Print the families and exit\n    --baseline <path>       Gate on a previous --json report: only NEW\n                            findings fail (one file per invocation)\n    --fail-on new|any       What fails: introduced findings only (default\n                            with --baseline) or the whole verdict\n    --help, -h              This help\n    --version, -V           Version\n\n\
          EXIT:\n    0 clean · 1 issues · 2 usage/IO error",
         env!("CARGO_PKG_VERSION")
     );
