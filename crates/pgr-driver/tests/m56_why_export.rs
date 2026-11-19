@@ -115,15 +115,16 @@ fn the_query_rides_the_resident_lane() {
 }
 
 #[test]
-fn the_query_refuses_the_incremental_lane() {
+fn the_query_serves_the_incremental_lane() {
+    // M84: the ladder's own walk is the Pass-2 product (the relink
+    // re-parses the inputs and runs the full Passes 1–3), so the M56
+    // incremental refusal flipped to service — the query rides either
+    // lane.
     let dir = scratch("incremental");
-    let err = parse(&dir, &["-why_export", "_greet", "-incremental"])
-        .expect_err("the incremental conflict refuses");
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("-why_export") && rendered.contains("-incremental"),
-        "the conflict names both flags: {rendered}"
-    );
+    let o = parse(&dir, &["-why_export", "_greet", "-incremental"])
+        .expect("the incremental lane serves the query");
+    assert!(o.incremental, "the lane rides");
+    assert_eq!(o.why_export, vec!["_greet".to_string()]);
 }
 
 // ---- the run ------------------------------------------------------------------
