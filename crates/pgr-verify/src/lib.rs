@@ -55,6 +55,7 @@ pub mod checks;
 pub mod dyld_info;
 pub mod dynamic;
 pub mod export_trie;
+pub mod init_offsets;
 pub mod misc;
 pub mod pair;
 pub mod report_json;
@@ -150,6 +151,15 @@ pub enum Code {
     /// descriptors must have thread-local data to point at — the contract
     /// dyld's load-time TLV allocation keys on.
     Tlv,
+    /// The initializer surface is inconsistent (M94): the
+    /// `S_INIT_FUNC_OFFSETS`/`S_MOD_INIT_FUNC_POINTERS` sections dyld's
+    /// load-time initializer walk consumes must ride whole strides, the
+    /// `__init_offsets` entries must name targets an executable segment
+    /// maps (dyld's own "initializer does not point within executable
+    /// segment" check, replayed read-side), and the offsets form must
+    /// not ride below the platform's chained-fixups floor (that dyld
+    /// cannot consume the section).
+    InitOffsets,
     /// Suspicious but non-fatal condition.
     Suspicious,
     /// A consumer-side check's own code (M67): the token a
@@ -166,7 +176,7 @@ impl Code {
     /// tooling can enumerate the surface the way `Check::ALL` enumerates
     /// the families). A consumer-side check's own tokens ride
     /// [`Code::Custom`] outside this table.
-    pub const ALL: [Code; 21] = [
+    pub const ALL: [Code; 22] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -187,6 +197,7 @@ impl Code {
         Code::FixupsFloor,
         Code::UnwindInfo,
         Code::Tlv,
+        Code::InitOffsets,
         Code::Suspicious,
     ];
 
@@ -214,6 +225,7 @@ impl Code {
             Code::FixupsFloor => "fixups_floor",
             Code::UnwindInfo => "unwind_info",
             Code::Tlv => "tlv",
+            Code::InitOffsets => "init_offsets",
             Code::Suspicious => "suspicious",
             Code::Custom(token) => token,
         }
