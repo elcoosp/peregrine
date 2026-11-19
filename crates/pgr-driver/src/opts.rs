@@ -263,6 +263,19 @@ pub struct Options {
     /// walk serves it since M88 (the session's re-pull is the honest
     /// record either lane).
     pub why_load: bool,
+    /// M92 `-why_live <symbol>` (repeatable): after a link, answer *why
+    /// is this symbol live under `-dead_strip`?* — the M5 mark phase's
+    /// own first-marker record, walked from the queried definition back
+    /// to its root (`pgr_core::why_live`; the record rides
+    /// `LinkResult::liveness` exactly when the strip ran). The default
+    /// (the empty list) queries nothing. The query reads the walk's own
+    /// product: the one-shot lane's and — the relink re-runs the full
+    /// Passes 1–3 — the incremental ladder's. The resident lane refuses
+    /// the flag this rung: the wire's provenance tail (v45) carries the
+    /// `-why_export`/`-why_load` asks, and a liveness ask has no wire
+    /// shape yet (the served rung is a later milestone — the M56
+    /// contract's own shape).
+    pub why_live: Vec<String>,
     /// M58 `--time`: after a one-shot link, print the per-pass wall
     /// report — the M54 observation seam's phase events collected into
     /// the TDD's instrumentation table (`pgr_core::time_report`). The
@@ -394,6 +407,7 @@ impl Default for Options {
             map_path: None,
             why_export: Vec::new(),
             why_load: false,
+            why_live: Vec::new(),
             time: false,
             time_json: false,
             trace_path: None,
@@ -575,6 +589,30 @@ pub enum OptsError {
     WhyExportValue {
         /// The refused value as written.
         value: String,
+    },
+    /// A `-why_live` value the grammar refuses (M92): an empty symbol
+    /// name — the query is the C symbol, underscore included.
+    #[error("invalid value for -why_live: {value}")]
+    #[diagnostic(help(
+        "the name is the C symbol, the leading underscore included — e.g. -why_live _greet"
+    ))]
+    WhyLiveValue {
+        /// The refused value as written.
+        value: String,
+    },
+    /// A `-why_live` surface conflict (M92): the resident wire's
+    /// provenance tail (v45) carries the `-why_export`/`-why_load`
+    /// asks — a liveness ask has no wire shape yet, and a resident
+    /// attempt could not answer it honestly (the served rung is a
+    /// later milestone, the M56 contract's own shape). The verdict
+    /// names the rung; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    WhyLiveConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The fix.
+        fix: String,
     },
     /// A `-headerpad` value the grammar refuses (M29): the floor is
     /// non-zero (zero names the absence of the knob), a multiple of 8
@@ -1722,6 +1760,19 @@ fn apply_flag(
         // conflicts are `finish`'s.
         "-why_load" => {
             opts.why_load = true;
+        }
+        // M92: the liveness-provenance query — the M5 mark phase's own
+        // first-marker record, walked from the queried definition back
+        // to its root. The names ride verbatim (C symbols carry the
+        // leading underscore); an empty name refuses here, the resident
+        // lane's refusal is `finish`'s (the wire has no liveness ask
+        // shape yet).
+        "-why_live" => {
+            let v = next_value(args, i, arg)?;
+            if v.is_empty() {
+                return Err(OptsError::WhyLiveValue { value: v });
+            }
+            opts.why_live.push(v);
         }
         // M58: the per-pass time report (the M54 observation seam's
         // phase events, collected into the TDD's instrumentation table).
@@ -3018,6 +3069,23 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     // (a query-bearing relink that runs the fusion lane hands over to the
     // in-process ladder — the session's patch serves bytes, not answers).
     // No lane refuses the queries any more: every lane that links, walks.
+    // M92: the liveness query's lane contract is the M56 shape this
+    // rung — the one-shot lane and the in-process ladder answer (the
+    // relink re-runs the full Passes 1–3, so `result.liveness` is the
+    // walk's own record), but the resident lanes refuse: the wire's
+    // provenance tail (v45) carries the `-why_export`/`-why_load` asks
+    // and a liveness ask has no wire shape yet — a resident attempt
+    // could not answer the question honestly. The served rung is a
+    // later milestone.
+    if !opts.why_live.is_empty() && opts.resident {
+        return Err(OptsError::WhyLiveConflict {
+            verdict: "-why_live asks the strip's own record, and the resident lanes serve \
+                     their answers on the wire — the provenance tail (v45) carries the \
+                     why_export/why_load asks, no liveness ask yet"
+                .into(),
+            fix: "drop -resident (the one-shot and the incremental ladder answer the query)".into(),
+        });
+    }
     // M60: the dependency record names the files the link read. The
     // one-shot, relocatable and resident lanes all read the files (the
     // resident client writes the record from its own request list; the
