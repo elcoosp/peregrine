@@ -161,6 +161,7 @@ cargo bench -p pgr-daemon --bench wire_verify
 cargo bench -p pgr-daemon --bench wire_provenance
 cargo bench -p pgr-daemon --bench wire_map
 cargo bench -p pgr-daemon --bench wire_order
+cargo bench -p pgr-daemon --bench wire_liveness
 # verify
 cargo bench -p pgr-verify --bench platform
 cargo bench -p pgr-verify --bench arm64e
@@ -692,8 +693,7 @@ link's hot path", recorded honestly:**
   the ladder's note instant) — `encode_trace/6_rows` and `decode_trace/6_rows` (one length
   prefix, one string push; the JSON rides verbatim). The tail rides an IMAGE reply that
   carries pages, so the honest expectation is noise beside the transfer.
-- `wire_verify` (`cargo bench -p pgr-daemon --bench wire_verify
-cargo bench -p pgr-daemon --bench wire_provenance`, M72): the served verdict's
+- `wire_verify` (`cargo bench -p pgr-daemon --bench wire_verify`, M72): the served verdict's
   wire-tail codec price over served-shape reports — `encode_report/clean` (the stats ride, no
   issues) **102.2 ns**, `decode_report/clean` (the strict reader restores the report)
   **386.8 ns**, `encode_report/refused` (a handful of issues ride the document) **946.6 ns**,
@@ -709,6 +709,16 @@ cargo bench -p pgr-daemon --bench wire_provenance`, M72): the served verdict's
   **281 ps** (dev-sandbox medians). The tail rides an IMAGE reply that carries pages, so the
   honest expectation is noise beside the transfer; the renders ride verbatim — the codec's
   own price is two length-prefixed string pushes and their reads, never a re-shape.
+- `wire_liveness` (`cargo bench -p pgr-daemon --bench wire_liveness`, M93): the liveness
+  ask's wire price — the request side `request_encode/eight_queries` (the C-symbol names)
+  **222.4 ns**, `request_decode/eight_queries` **445.5 ns**; the reply side
+  `encode/one_query` (the verdict line, the keeper row, the root decision) **33.6 ns**,
+  `decode/one_query` (the verbatim strings restore) **173.7 ns**, `encode/eight_queries`
+  (the repeatable flag's real shape) **195.0 ns**, `decode/eight_queries` **900.1 ns**
+  (dev-sandbox medians). The chains ride the provenance tail beside an IMAGE reply that
+  carries pages, so the honest expectation is noise beside the transfer; the renders ride
+  verbatim — the codec's own price is count-prefixed length-prefixed string pushes and
+  their reads, never a re-shape.
 - `wire_map` (`cargo bench -p pgr-daemon --bench wire_map`, M80): the served link map's
   wire-tail codec price over served-shape documents — `encode/small` (the hello shape's
   render, one length prefix) **17.0 ns**, `decode/small` (the verbatim document restores)
