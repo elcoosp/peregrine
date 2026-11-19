@@ -140,7 +140,9 @@ fn placed_literals(bytes: &[u8]) -> Vec<String> {
         }
     }
     let (_addr, off, size) = sect.expect("the cstring section places");
-    let raw = &bytes[off..off + usize::from(size)];
+    let off = usize::try_from(off).expect("the section offset fits");
+    let size = usize::try_from(size).expect("the section size fits");
+    let raw = &bytes[off..off + size];
     raw.split(|&b| b == 0)
         .filter(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).into_owned())
