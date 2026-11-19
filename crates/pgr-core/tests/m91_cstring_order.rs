@@ -124,7 +124,11 @@ fn the_parse_decodes_the_escape_set() {
     // The named escapes, hex, octal, and the verbatim unknown.
     let order =
         CstringOrder::parse("a\\tb\n\\x41\\x42\n\\101\\102x\nq\\\\r\n\\d\n").expect("parses");
-    let entries: Vec<&[u8]> = order.entries().iter().map(|e| e.as_slice()).collect();
+    let entries: Vec<&[u8]> = order
+        .entries()
+        .iter()
+        .map(std::vec::Vec::as_slice)
+        .collect();
     assert_eq!(
         entries,
         [
@@ -144,7 +148,11 @@ fn the_parse_follows_the_cstring_line_rules() {
     // whitespace trims, `#` comments only at column 0, blank lines
     // skip, mid-line `#` is literal.
     let order = CstringOrder::parse("# comment\n  padded  \nmid # hash\n\n").expect("parses");
-    let entries: Vec<&[u8]> = order.entries().iter().map(|e| e.as_slice()).collect();
+    let entries: Vec<&[u8]> = order
+        .entries()
+        .iter()
+        .map(std::vec::Vec::as_slice)
+        .collect();
     assert_eq!(
         entries,
         [b"  padded".as_slice(), b"mid # hash".as_slice()],
@@ -228,7 +236,7 @@ fn the_default_parity_keeps_the_pre_m91_bytes() {
 #[test]
 fn unmatched_entries_ride_the_advisory() {
     let order = CstringOrder::parse("nomatch\ngamma\n").expect("parses");
-    let mut cfg = LinkConfig {
+    let cfg = LinkConfig {
         entry_symbol: "_main".into(),
         cstring_order: Some(order),
         ..LinkConfig::default()
