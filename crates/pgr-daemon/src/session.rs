@@ -146,10 +146,10 @@ pub struct ServedLink {
     pub provenance: Option<crate::protocol::ServedProvenance>,
     /// The served link map (v46, M80): `Some` when the request asked —
     /// the placed image's report rendered from the session's own walk
-    /// (the full link's layout and interner; the ladder's replay serves
-    /// none — the map beside the `record` is refused at the wire, the
-    /// map reports the full emit's layout and the replay patches in
-    /// place). The document crosses verbatim; the client writes the
+    /// (the full link's layout and interner). M87: the ladder's replay
+    /// serves its own too — the walk ran the full Passes 1–3, so the
+    /// document is the replay's own Pass-3 product (never the previous
+    /// link's). The document crosses verbatim; the client writes the
     /// cold lane's file.
     pub map_text: Option<String>,
 }
@@ -955,11 +955,15 @@ impl ResidentSession {
                 // replay's Pass-2 product is the record's, not the
                 // walk's).
                 provenance: None,
-                // M80: the ladder's replay serves no map either (the
-                // map beside the `record` is refused at the wire — the
-                // map reports the full emit's layout, the replay
-                // patches the recorded plan in place).
-                map_text: None,
+                // M87: the ladder's replay serves its own map — the walk
+                // ran the full Passes 1–3, so `result.layout` is the
+                // replay's own Pass-3 product and the same pure function
+                // the cold lane's `-map` calls renders it (the v46 tail
+                // carries the document verbatim; the untouched walk
+                // re-derived the placed image, the document says so).
+                map_text: req.map.then(|| {
+                    pgr_core::map::build_link_map(&result.layout, &result.interner).render()
+                }),
             });
         }
         let patch_started = std::time::Instant::now();
@@ -1083,10 +1087,15 @@ impl ResidentSession {
             trace_json,
             verify_report,
             provenance: None,
-            // M80: the patched replay serves no map (the wire gate
-            // refuses the shape — the replay patches the recorded plan
-            // in place, the map reports the full emit's layout).
-            map_text: None,
+            // M87: the patched replay serves its own map — the walk's
+            // Pass-3 product is the layout the patch plan read, and the
+            // same pure function the cold lane's `-map` calls renders
+            // it (the v46 tail carries the document verbatim — the
+            // placed image the reply's bytes carry, the report cannot
+            // disagree with them).
+            map_text: req
+                .map
+                .then(|| pgr_core::map::build_link_map(&result.layout, &result.interner).render()),
         })
     }
 
@@ -1858,6 +1867,132 @@ mod fusion_tests {
             "the warm session decoded POIs, hits {} -> {}",
             warm_hits,
             session.hits
+        );
+    }
+
+    /// The in-process reference for the ladder's map: the anchored
+    /// config assembled from the record (the driver's exact mirror),
+    /// the plain pipeline's Pass-3 product, and
+    /// [`pgr_core::map::build_link_map`] over it — the served map must
+    /// equal it byte for byte.
+    fn map_reference(record: &LinkRecord, hello_bytes: &[u8], greet_bytes: &[u8]) -> String {
+        let mut cfg = link_config();
+        cfg.slack_anchor = record
+            .sections
+            .iter()
+            .map(|s| SlackAnchor {
+                seg: s.seg.clone(),
+                name: s.name.clone(),
+                padded: s.size,
+            })
+            .collect();
+        cfg.stable_imports = Some(record.imports.clone());
+        cfg.sig_anchor = (record.linkedit.sig_off > 0).then_some(record.linkedit.sig_off);
+        cfg.record_resolution = true;
+        if let Some(resolution) = &record.resolution {
+            cfg.resolve_reuse = Some(pgr_core::resolve_reuse::ResolveReuseSeed {
+                snapshot: resolution.clone(),
+                digests: record.section_digests.clone(),
+            });
+        }
+        let inputs = vec![
+            LinkInput {
+                name: "hello.o".into(),
+                bytes: hello_bytes.to_vec(),
+            },
+            LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.to_vec(),
+            },
+        ];
+        let result = link_cached(&inputs, &[], &cfg, Parallelism::Auto, None).unwrap();
+        pgr_core::map::build_link_map(&result.layout, &result.interner).render()
+    }
+
+    #[test]
+    fn the_fusion_ladder_serves_its_own_map() {
+        // M87: the map renders from the ladder's own walk — the session's
+        // relink runs the full Passes 1–3, so `result.layout` is the
+        // walk's Pass-3 product and the v46 tail carries the document
+        // verbatim (the M80 convention: the wire never re-shapes the
+        // face the client writes). The patched exit and the untouched
+        // one both answer; a map the session never planned is the only
+        // thing it never serves.
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        req.record_resolution = true;
+        req.map = true;
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        let cold = session.link(&req).unwrap();
+        let cold_map = cold
+            .map_text
+            .expect("the served map rides the full link's v46 tail");
+        assert!(
+            cold_map.contains("__TEXT") && cold_map.contains("__LINKEDIT"),
+            "the full link's map names the placed segments"
+        );
+        let record_bytes = cold.record.clone().expect("the cold capture");
+        let prev_image = cold.image.clone();
+
+        // The patched relink asks too: the document is the ladder's own
+        // Pass-3 product (the anchored relayout), byte-identical to the
+        // in-process render over the same anchored plan — never the
+        // previous link's document.
+        let edited_hello = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited_hello, &greet_bytes);
+        relink.record = Some(record_bytes.clone());
+        relink.prev_output = Some(content_hash(&prev_image));
+        relink.map = true;
+        session
+            .store_blob(&content_hash(&prev_image), prev_image)
+            .unwrap();
+        session
+            .store_blob(&content_hash(&edited_hello), edited_hello.clone())
+            .unwrap();
+        let served = session.link(&relink).unwrap();
+        assert!(
+            !served.patch.expect("the ladder patches in place").untouched,
+            "the edit patches"
+        );
+        let map = served
+            .map_text
+            .expect("the patched relink serves its own map");
+        let record = LinkRecord::decode(&record_bytes).unwrap();
+        assert_eq!(
+            map,
+            map_reference(&record, &edited_hello, &greet_bytes),
+            "either ladder, one walk, one document"
+        );
+
+        // The untouched relink asks too — the walk ran, the document is
+        // the same placed image re-derived (nothing moved).
+        let (mut again, _) = request(&link_config(), &edited_hello, &greet_bytes);
+        again.record = served.record.clone();
+        again.prev_output = Some(content_hash(&served.image));
+        again.map = true;
+        session
+            .store_blob(&content_hash(&served.image), served.image.clone())
+            .unwrap();
+        let warm = session.link(&again).unwrap();
+        assert!(
+            warm.patch.as_ref().expect("the relink plans").untouched,
+            "an identical corpus relinks untouched"
+        );
+        let warm_map = warm
+            .map_text
+            .expect("the untouched relink serves its own map");
+        assert_eq!(
+            warm_map, map,
+            "the untouched walk re-derived the same document"
         );
     }
 
