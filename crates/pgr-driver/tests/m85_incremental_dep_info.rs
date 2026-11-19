@@ -7,10 +7,10 @@
 //! reads happen (`PreparedLink::deps`, the same recording the one-shot's
 //! Pass 0 runs). The record the ladder writes names the files the
 //! ladder actually read, not the previous link's list; the output row
-//! joins at the write site. The fusion lane keeps its edge: the
-//! session's reads live inside the daemon and the wire carries no read
-//! set, so a record-bearing relink stands the resident attempt down to
-//! the in-process ladder — the next rung in order, always available.
+//! joins at the write site. The fusion lane serves its own cycle's
+//! record since M89 (the cycle's reads are the client's Pass 0 —
+//! `m89_fusion_dep_info.rs` pins that face); the in-process ladder here
+//! answers the cold lane either way.
 //!
 //! Gate matrix:
 //! * the surface — the argv that refused since M60 parses now;
@@ -18,9 +18,9 @@
 //!   own read set (the inputs the relink's Pass 0 mapped, the output
 //!   row beside them), and after an untouched relink it still rides
 //!   (the walk ran, the reads are real);
-//! * the fusion handover — a record beside `-resident -incremental`
-//!   stands the resident attempt down; the in-process ladder writes its
-//!   own record (the outcome rides no transport).
+//! * the fusion face — a record beside `-resident -incremental` rides
+//!   the session since M89 (the outcome's transport names the lane; the
+//!   pre-M89 handover is `m89_fusion_dep_info.rs`'s dead-socket row).
 
 use pgr_core::dep_info::{self, DependencyRecord};
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
@@ -257,15 +257,18 @@ fn the_untouched_relink_writes_the_record() {
     );
 }
 
-// ---- the fusion handover ----------------------------------------------------
+// ---- the fusion face --------------------------------------------------------
 
-/// The fusion lane keeps its edge: the session's reads live inside the
-/// daemon and the wire carries no read set, so a record beside
-/// `-resident -incremental` stands the resident attempt down — the
-/// in-process ladder writes its own record (the outcome rides no
-/// transport).
+/// The fusion lane serves the record now (M89): the cycle's reads are
+/// the client's own Pass 0 — `resident_relink` already runs
+/// `prepare_link` to build the job, so the read set it recorded is the
+/// relink cycle's real one (the daemon reads no files at all — the §7.2
+/// contract — so the M85 premise "the fusion ladder's reads live inside
+/// the daemon" names reads that never happen). The sidecar the fusion
+/// relink writes is the same document the in-process ladder writes over
+/// the same cycle (`m89_fusion_dep_info.rs` pins the parity).
 #[test]
-fn the_fusion_lane_hands_the_record_to_the_ladder() {
+fn the_fusion_lane_serves_the_record() {
     let dir = scratch("fusion");
     let (a, b) = corpus(&dir, false);
     let out = dir.join("out");
@@ -279,18 +282,25 @@ fn the_fusion_lane_hands_the_record_to_the_ladder() {
     let fusion = parse(
         &out,
         &[&a, &b],
-        &["-incremental", "-resident", "-dependency_info", &deps],
+        &[
+            "-incremental",
+            "-resident",
+            "-resident_socket",
+            &sock.display().to_string(),
+            "-dependency_info",
+            &deps,
+        ],
     )
     .expect("the fusion argv parses");
-    let outcome = pgr_driver::run(&fusion).expect("the record hands over and rides");
+    let outcome = pgr_driver::run(&fusion).expect("the record rides the session");
     assert!(
-        outcome.transport.is_none(),
-        "the in-process ladder served the record (the session's patch rides none)"
+        outcome.transport.is_some(),
+        "the session's ladder served the run (the M89 service)"
     );
-    let record = std::fs::read(&deps_path).expect("the ladder wrote the record");
+    let record = std::fs::read(&deps_path).expect("the fusion relink wrote the record");
     assert!(
         input_paths(&record).iter().any(|p| p.ends_with("hello.o")),
-        "the record names the ladder's read set"
+        "the record names the cycle's read set"
     );
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_dir_all(&dir);
