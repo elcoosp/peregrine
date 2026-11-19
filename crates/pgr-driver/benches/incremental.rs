@@ -15,12 +15,15 @@
 //!
 //! The correctness gate (patched == full emit, byte-identical) is asserted
 //! in `tests/m9_incremental.rs` and `pgr-emit/tests/incremental.rs`, not
-//! here. M84/M85 join two groups to the table: the queried relink
+//! here. M84–M86 join three groups to the table: the queried relink
 //! (`incremental_provenance_relink_8mib`) — the provenance faces riding
 //! the warm ladder, the answers' index-walk price beside the plain
-//! relink — and the record-bearing relink
+//! relink — the record-bearing relink
 //! (`incremental_dep_info_relink_8mib`) — the read-set sidecar's
-//! render/write price on the same warm ladder.
+//! render/write price on the same warm ladder — and the map-bearing
+//! relink (`incremental_map_relink_8mib`) — the link map's render/write
+//! price on the walk's own Pass-3 product, the same document the
+//! one-shot writes.
 
 use criterion::{Criterion, Throughput};
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
@@ -385,6 +388,33 @@ fn bench_incremental(c: &mut Criterion) {
             let patch = outcome
                 .patch
                 .expect("the record-bearing warm relink patches in place");
+            std::hint::black_box(patch);
+        });
+    });
+    // M86: the map-bearing relink — the same tier-1 alternation, with
+    // `-map` riding. The document is the walk's own Pass-3 product
+    // (`pgr_core::map::build_link_map` over the layout the patch plan
+    // read); the recorded mean beside `incremental_relink_8mib` is the
+    // map's render/write price on the warm ladder.
+    let mut mapped = inc.clone();
+    mapped.map_path = Some(dir.join("map_bench.map").display().to_string());
+    let mut map_alternator = 0u32;
+    group.bench_function("incremental_map_relink_8mib", |b| {
+        b.iter(|| {
+            map_alternator += 1;
+            let mut edited = mapped.clone();
+            edited.inputs[1] = dir
+                .join(if map_alternator % 2 == 0 {
+                    "inc_obj_1.o"
+                } else {
+                    "inc_obj_1_edited.o"
+                })
+                .display()
+                .to_string();
+            let outcome = pgr_driver::run(&edited).unwrap();
+            let patch = outcome
+                .patch
+                .expect("the map-bearing warm relink patches in place");
             std::hint::black_box(patch);
         });
     });
