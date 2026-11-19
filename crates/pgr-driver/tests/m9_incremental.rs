@@ -769,10 +769,12 @@ fn record_v5_carries_the_resolution_and_the_relink_renews_it() {
     let first = pgr_emit::incremental::LinkRecord::decode(&std::fs::read(c.record()).unwrap())
         .expect("the sidecar decodes");
     // M30: the data-in-code chunk joins the recorded `__LINKEDIT`
-    // plan — the resolve wiring's v5 gate rides, bumped to v6.
+    // plan — the resolve wiring's v5 gate rides, bumped to v6; M82: the
+    // chain word family joins the record, bumped to v7 (the sidecar the
+    // relink renews rides the fresh byte either way).
     assert_eq!(
-        first.format_version, 6,
-        "the M30 carriage bumps the record format to v6"
+        first.format_version, 7,
+        "the M30 carriage and the M82 family bump the record format to v7"
     );
     let snap = first
         .resolution
