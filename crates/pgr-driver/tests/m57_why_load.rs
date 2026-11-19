@@ -106,14 +106,14 @@ fn the_report_rides_the_resident_lane() {
 }
 
 #[test]
-fn the_report_refuses_the_incremental_lane() {
+fn the_report_serves_the_incremental_lane() {
+    // M84: the ladder's own walk collects the pull record (the relink
+    // re-parses the inputs and re-runs the S7 fixpoint), so the M57
+    // incremental refusal flipped to service — the report rides either
+    // lane.
     let dir = scratch("incremental");
-    let err = parse(&dir, &["-why_load", "-incremental"]).expect_err("the lane refuses");
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("-why_load") && rendered.contains("-incremental"),
-        "the conflict names both flags: {rendered}"
-    );
+    let o = parse(&dir, &["-why_load", "-incremental"]).expect("the lane serves");
+    assert!(o.incremental && o.why_load, "the flags ride");
 }
 
 // ---- the run ------------------------------------------------------------------
