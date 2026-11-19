@@ -212,7 +212,10 @@ pub struct Options {
     /// — the incremental ladder's own walk (the relink re-parses the
     /// inputs and runs the full Passes 1–3, so `result.resolution` is
     /// the walk's product; the answers serve from it either tier — the
-    /// patched relink and the untouched one both walked).
+    /// patched relink and the untouched one both walked). Since M88 the
+    /// fusion ladder's replay walk serves them too: the session's
+    /// relink runs the same Passes 1–3, so its own Pass-2 product
+    /// renders the answers over the same v45 tail.
     pub why_export: Vec<String>,
     /// M57 `-why_load`: after a link, report why each archive member
     /// was loaded (the S7 pull's per-member decision) and — under
@@ -222,7 +225,9 @@ pub struct Options {
     /// `-why_export`: the resident lane serves the report since M79
     /// (the pull's record is the session's own); the ladder's own walk
     /// serves it since M84 — the relink re-pulls, the report names the
-    /// members the relink's pull rode.
+    /// members the relink's pull rode — and the fusion ladder's replay
+    /// walk serves it since M88 (the session's re-pull is the honest
+    /// record either lane).
     pub why_load: bool,
     /// M58 `--time`: after a one-shot link, print the per-pass wall
     /// report — the M54 observation seam's phase events collected into
@@ -263,9 +268,10 @@ pub struct Options {
     /// re-reads every input it maps (the re-parse is the digest source)
     /// and records the read set while the reads happen, so the sidecar
     /// the relink rewrites names the files the ladder actually read, not
-    /// the previous link's list. The fusion lane stands a record-bearing
-    /// relink down to the in-process ladder (the session's reads live
-    /// inside the daemon; the wire carries no read set).
+    /// the previous link's list. Since M89 the fusion lane serves it too:
+    /// the daemon reads no files at all (the §7.2 contract), so the
+    /// cycle's reads are the client's own Pass 0 — the same document
+    /// either lane.
     pub dependency_info: Option<String>,
     /// M15: `-pagezero_size` was passed explicitly. The default (`false`)
     /// keeps the seam's own default on every non-executable output — the
