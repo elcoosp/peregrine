@@ -6,6 +6,41 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M89)
+
+- **M89** — the fusion ladder's dependency record: the M85 lane contract (a record-bearing
+  fusion relink stands the resident attempt down — "the fusion ladder's reads live inside
+  the daemon") flips to service the M88 way: the premise voids itself, because the §7.2
+  contract already forbids the daemon touching the filesystem — the reads the stand-down
+  worried about never happen, and the relink cycle's real reads are the client's own
+  Pass 0, which `resident_relink` already runs to build the job (`PreparedLink::deps`, the
+  read set recorded while the reads happen). The sidecar the fusion relink writes names the
+  files the cycle actually mapped — never the previous link's list — with the output rows
+  joining at the write site and the map landing first so the record's output row names a
+  sidecar that exists (the one-shot's own order); the parity gate is the rung's own
+  contract: either lane, one Pass 0, one document; the `resident` bench gains the
+  record-bearing fusion relink beside the plain one, and the `fusion_dep_info_link`
+  example walks the capture → edit → record-bearing relink beside the decoded rows
+
+### Added (M88)
+
+- **M88** — the fusion ladder's served provenance: the M84 lane contract (a query-bearing
+  fusion relink stands the resident attempt down — "the session's patch serves bytes, not
+  answers") flips to service the M87 way: the premise was outdated, because the session's
+  ladder is not a byte-replay either — `serve_relink` runs the full Passes 1–3
+  (`link_from_objects`), so `result.resolution`/`result.loads` are the walk's own Pass-2
+  products, in the session's memory, and the v45 provenance tail already has the shape to
+  carry them (no wire shape moves). The decode gate's refusal arm retires; the session
+  renders the M56/M57 answers over its own walk at both exits (the patched exit and the
+  untouched one — the answers name the resolution the patch plan read, never the record's
+  stale product; a vacuous query refuses the replay exactly as it refuses the full link),
+  the driver's fusion relink rides the ask on the request, and the client prints the
+  served renders beside the patched image exactly as the resident full link prints its own
+  — an old server's refusal is the `ERROR` reply the stand-down already speaks, the
+  in-process ladder answering either way; the `resident` bench gains the query-bearing
+  fusion relink beside the plain one, and the `fusion_provenance_link` example walks the
+  capture → edit → served fusion answers beside the vacuous refusal
+
 ### Added (M87)
 
 - **M87** — the fusion ladder's served map: the M86 lane contract (a map-bearing fusion
