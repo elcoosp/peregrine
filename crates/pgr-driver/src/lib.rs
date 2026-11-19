@@ -364,6 +364,14 @@ pub enum DriverError {
         /// The parse refusal (line-tagged).
         message: String,
     },
+    /// The order sources could not compose (M90): two sources rank one
+    /// name — the file parse's per-file refusal taken across the
+    /// sources, both sources and lines named.
+    #[error("{message}")]
+    OrderCompose {
+        /// The composed refusal (both sources named).
+        message: String,
+    },
     /// A `-why_export` query named a symbol nothing interned (M56): the
     /// vacuous query refuses the run — the misspelling is named, the
     /// C-underscore hint is the fix (`pgr_core::provenance`).
@@ -1140,6 +1148,19 @@ fn link_to_image_recorded(
             String::from_utf8_lossy(name)
         );
     }
+    // M91: the same advisory face for the cstring ranks — an entry whose
+    // content matched no placed literal is a typo, not an error. Warn
+    // once per unranked literal, in rank order.
+    for content in &result.layout.cstring_order_unmatched {
+        tracing::warn!(
+            literal = %String::from_utf8_lossy(content),
+            "the cstring rank entry matched no placed literal"
+        );
+        eprintln!(
+            "pgr: warning: order file literal {:?} not matched by any input",
+            String::from_utf8_lossy(content)
+        );
+    }
     // M14: the filter's advisory — a list pattern that matched no
     // symbol in the plan is a typo, not an error (the link is correct,
     // the intent is not; ld64 warns the same way on order files). Warn
@@ -1588,11 +1609,55 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         deps.record_input(&dep_path(path))?;
         config.unexported = read_symbol_patterns("-unexported_symbols_list", path)?;
     }
-    // M11: the order file — read, parse (typed, line-tagged refusals),
-    // and rank before Pass 3. The advisory for entries that rank nothing
-    // rides the finished layout (ld64 warns; Peregrine does the same
-    // after the link, where the symbol universe is known).
-    if let Some(path) = &opts.order_file {
+    // M11/M90: the order sources — read, parse (typed, line-tagged
+    // refusals), and compose into the ONE rank table before Pass 3, in
+    // command-line order (ld64 appends `-order_file`'s and every
+    // `-sectorder`'s entries as the flags parse). The advisory for
+    // entries that rank nothing rides the finished layout (ld64 warns;
+    // Peregrine does the same after the link, where the symbol universe
+    // is known). M91: the cstring face's files rank the literals
+    // instead — one content-keyed table beside the symbol table, the
+    // duplicate refusal carrying both files.
+    let mut order_sources: Vec<(String, pgr_core::order::OrderFile)> = Vec::new();
+    let mut cstring_sources: Vec<(String, pgr_core::order::CstringOrder)> = Vec::new();
+    for spec in &opts.order_specs {
+        // M90: the `-sectorder` pair names the face, never a layout
+        // scope (`pgr_core::order::classify_section_order`) — the
+        // rank-append files compose like `-order_file`, the literal
+        // face warns and never reads its file (ld64's own shape), and
+        // the cstring face's files rank the literals (M91).
+        let path = match spec {
+            opts::OrderSpec::File { path } => path,
+            opts::OrderSpec::Section {
+                segment,
+                section,
+                path,
+            } => match pgr_core::order::classify_section_order(segment, section) {
+                pgr_core::order::SectionOrderClass::RankAppend => path,
+                pgr_core::order::SectionOrderClass::LiteralNotSupported => {
+                    eprintln!("pgr: warning: sorting of __literal[4,8,16] sections not supported");
+                    continue;
+                }
+                pgr_core::order::SectionOrderClass::CstringLiteral => {
+                    let text = std::fs::read_to_string(path).map_err(|source| DriverError::Io {
+                        path: path.clone(),
+                        source,
+                    })?;
+                    // M60: the file rides the record (a file the link
+                    // read — the rank table is as much a build input as
+                    // any object).
+                    deps.record_input(&dep_path(path))?;
+                    let table = pgr_core::order::CstringOrder::parse(&text).map_err(|e| {
+                        DriverError::OrderFile {
+                            path: path.clone(),
+                            message: e.to_string(),
+                        }
+                    })?;
+                    cstring_sources.push((path.clone(), table));
+                    continue;
+                }
+            },
+        };
         let text = std::fs::read_to_string(path).map_err(|source| DriverError::Io {
             path: path.clone(),
             source,
@@ -1605,7 +1670,50 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
                 path: path.clone(),
                 message: e.to_string(),
             })?;
-        config.symbol_order = Some(pgr_core::order::SymbolOrder::build(&file));
+        order_sources.push((path.clone(), file));
+    }
+    if !order_sources.is_empty() {
+        let sources: Vec<pgr_core::order::OrderSource<'_>> = order_sources
+            .iter()
+            .map(|(name, file)| pgr_core::order::OrderSource { name, file })
+            .collect();
+        config.symbol_order = Some(pgr_core::order::SymbolOrder::compose(&sources).map_err(
+            |e| DriverError::OrderCompose {
+                message: e.to_string(),
+            },
+        )?);
+    }
+    if !cstring_sources.is_empty() {
+        // One rank per literal across the cstring order files — the
+        // file parse's own per-file refusal taken across them, both
+        // files and both ranks named (the M90 compose convention).
+        let mut seen: std::collections::HashMap<&[u8], (&str, usize)> =
+            std::collections::HashMap::new();
+        for (path, table) in &cstring_sources {
+            for (rank_idx, entry) in table.entries().iter().enumerate() {
+                if let Some(&(first_path, first_rank)) = seen.get(entry.as_slice()) {
+                    return Err(DriverError::OrderCompose {
+                        message: format!(
+                            "{first_path} rank {} and {path} rank {} both rank the literal \
+                             {:?}; one rank per literal across the cstring order files",
+                            first_rank + 1,
+                            rank_idx + 1,
+                            String::from_utf8_lossy(entry)
+                        ),
+                    });
+                }
+                seen.insert(entry.as_slice(), (path.as_str(), rank_idx));
+            }
+        }
+        let merged: Vec<Vec<u8>> = cstring_sources
+            .iter()
+            .flat_map(|(_, table)| table.entries().iter().cloned())
+            .collect();
+        config.cstring_order = Some(pgr_core::order::CstringOrder::from_entries(merged).map_err(
+            |e| DriverError::OrderCompose {
+                message: e.to_string(),
+            },
+        )?);
     }
     let force_load: Vec<Vec<u8>> = opts
         .force_load
@@ -3019,7 +3127,16 @@ pub fn usage() -> String {
     s.push_str("                               ranked pieces lead, unranked keep their\n");
     s.push_str("                               order (refused with -r; serves beside\n");
     s.push_str("                               -resident since M81 — wire v47 carries\n");
-    s.push_str("                               the rank table)\n");
+    s.push_str("                               the rank table; repeatable since M90 —\n");
+    s.push_str("                               the sources compose in flag order)\n");
+    s.push_str("  -sectorder <seg> <sect> <file>\n");
+    s.push_str("                               rank the named section's symbols (M90):\n");
+    s.push_str("                               ld64's per-section order flag — the pair\n");
+    s.push_str("                               names the face, the file's entries append\n");
+    s.push_str("                               to the rank table in flag order; the\n");
+    s.push_str("                               __TEXT,__cstring literal face and the\n");
+    s.push_str("                               __TEXT,__literal* no-op keep their named\n");
+    s.push_str("                               faces (refused with -r)\n");
     s.push_str("  -weak_library <path>         weak-load a dylib\n");
     s.push_str("  -lazy_library <path>         lazy-load a dylib (LC_LAZY_LOAD_DYLIB)\n");
     s.push_str("  -upward_library <path>       load a dylib as the umbrella relationship\n");
