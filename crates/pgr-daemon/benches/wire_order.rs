@@ -69,6 +69,7 @@ fn request(entries: usize) -> LinkRequest {
         why_export: Vec::new(),
         why_load: false,
         map: false,
+        why_live: Vec::new(),
     }
 }
 
