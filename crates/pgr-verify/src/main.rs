@@ -190,15 +190,38 @@ fn main() -> ExitCode {
         // their own verdict (the check selection composes), and the exit
         // gate is every slice's.
         if pgr_format::universal::is_universal(&bytes) {
-            // The SARIF anchors name file bytes; a slice's issues ride
-            // their own window — re-anchoring would re-shape, so the
-            // face refuses with the slice story (M75).
+            // The M95 container face: the M71 container verdict composed
+            // with the M69 render — one deterministic SARIF document, one
+            // run per declared slice, the anchors container-absolute (the
+            // slices ride inside the audited file, so the anchor names
+            // its own bytes). The M75 refusal retires with its premise.
             if sarif {
-                eprintln!(
-                    "{PROGRAM}: {}: --sarif anchors name file bytes; a container's slices ride their own windows — verify the slices through the text or --json face",
-                    file.display()
-                );
-                return ExitCode::from(2);
+                let report = match pgr_verify::verify_universal_with_checks(&bytes, &opts, &checks)
+                {
+                    Ok(report) => report,
+                    Err(e) => {
+                        if !quiet
+                            && !text_writeln(
+                                &mut out,
+                                format_args!("{}: REFUSED: {e}", file.display()),
+                            )
+                        {
+                            any_io = true;
+                        }
+                        any_bad = true;
+                        continue;
+                    }
+                };
+                let body =
+                    pgr_verify::sarif::render_universal(&report, &file.display().to_string());
+                if let Err(e) = writeln!(out, "{body}") {
+                    eprintln!("{PROGRAM}: {e}");
+                    any_io = true;
+                }
+                if !report.is_ok(&opts) {
+                    any_bad = true;
+                }
+                continue;
             }
             if baseline.is_some() {
                 eprintln!(
