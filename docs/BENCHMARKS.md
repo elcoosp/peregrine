@@ -466,6 +466,22 @@ answers' index walk and the sidecar's render are invisible beside an 8.5 MiB tie
 | `incremental_dep_info_relink_8mib` (M85)         | 32.5 ms     | 250 MiB/s — wash |
 | `untouched_relink_8mib`                          | 19.4 ms     | —           |
 
+**M86/M87 map faces on the warm ladders** (initial dev-sandbox run, this host only — the
+recording-pass convention above governs the comparable table; the map-bearing medians sit
+inside the plain lanes' noise band, so the honest verdict is a wash on both tiers: the
+document's render and write are invisible beside an 8.5 MiB tier-1 relink, and the served
+fusion document's render/encode is invisible beside a 596 ms session ladder. The served
+document is byte-identical to the in-process render either way — the parity gates in
+`m87_fusion_map.rs` and the session's `map_reference` carry that contract):
+
+| Bench (this host)                                     | Median      | Throughput  |
+| ----------------------------------------------------- | ----------- | ----------- |
+| `incremental_relink_8mib` (tier 1)                    | 35.5 ms     | 240 MiB/s   |
+| `incremental_map_relink_8mib` (M86)                   | 35.3 ms     | 241 MiB/s — wash |
+| `untouched_relink_8mib`                               | 18.8 ms     | —           |
+| `resident-fusion/fusion_relink_64_objects`            | 596.6 ms    | —           |
+| `resident-fusion/fusion_map_relink_64_objects` (M87)  | 583.9 ms    | — wash      |
+
 **Randomized edit gate**: seeded xorshift64* walk (body growth, import add, retarget, oversized
 growth, symtab churn, no-op), engine-level and real `-incremental -incremental-verify` driver
 loop. **10 000 engine steps in 11.4 s, every step byte-identical or an honest re-recording
