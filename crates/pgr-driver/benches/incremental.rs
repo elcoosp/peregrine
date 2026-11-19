@@ -15,7 +15,12 @@
 //!
 //! The correctness gate (patched == full emit, byte-identical) is asserted
 //! in `tests/m9_incremental.rs` and `pgr-emit/tests/incremental.rs`, not
-//! here.
+//! here. M84/M85 join two groups to the table: the queried relink
+//! (`incremental_provenance_relink_8mib`) — the provenance faces riding
+//! the warm ladder, the answers' index-walk price beside the plain
+//! relink — and the record-bearing relink
+//! (`incremental_dep_info_relink_8mib`) — the read-set sidecar's
+//! render/write price on the same warm ladder.
 
 use criterion::{Criterion, Throughput};
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
@@ -319,6 +324,67 @@ fn bench_incremental(c: &mut Criterion) {
             let outcome = pgr_driver::run(&inc).unwrap();
             let patch = outcome.patch.expect("the untouched relink still plans");
             assert!(patch.untouched, "the same inputs must be a no-op");
+            std::hint::black_box(patch);
+        });
+    });
+
+    // M84: the queried relink — the same tier-1 alternation, with the
+    // provenance faces riding (`-why_export` over every export of the
+    // edited object plus the extern it binds, `-why_load` beside them).
+    // The answers are the relink's own walk product (the reverse index
+    // builds once per run, the queries read it); the recorded mean beside
+    // `incremental_relink_8mib` is the queries' price on the warm ladder
+    // — the index walk the answers pay, never a second pipeline.
+    let mut queried = inc.clone();
+    for i in 0..16u32 {
+        queried.why_export.push(format!("_bench_fn_1_{i}"));
+    }
+    queried.why_export.push("_bench_ext_a".into());
+    queried.why_load = true;
+    let mut query_alternator = 0u32;
+    group.bench_function("incremental_provenance_relink_8mib", |b| {
+        b.iter(|| {
+            query_alternator += 1;
+            let mut edited = queried.clone();
+            edited.inputs[1] = dir
+                .join(if query_alternator % 2 == 0 {
+                    "inc_obj_1.o"
+                } else {
+                    "inc_obj_1_edited.o"
+                })
+                .display()
+                .to_string();
+            let outcome = pgr_driver::run(&edited).unwrap();
+            let patch = outcome
+                .patch
+                .expect("the queried warm relink patches in place");
+            std::hint::black_box(patch);
+        });
+    });
+    // M85: the record-bearing relink — the same tier-1 alternation, with
+    // `-dependency_info` riding. The read set is Pass 0's own recording
+    // (the mapping already built it); the recorded mean beside
+    // `incremental_relink_8mib` is the record's render/write price on
+    // the warm ladder.
+    let mut recorded = inc.clone();
+    recorded.dependency_info = Some(dir.join("dep_info_bench.deps").display().to_string());
+    let mut record_alternator = 0u32;
+    group.bench_function("incremental_dep_info_relink_8mib", |b| {
+        b.iter(|| {
+            record_alternator += 1;
+            let mut edited = recorded.clone();
+            edited.inputs[1] = dir
+                .join(if record_alternator % 2 == 0 {
+                    "inc_obj_1.o"
+                } else {
+                    "inc_obj_1_edited.o"
+                })
+                .display()
+                .to_string();
+            let outcome = pgr_driver::run(&edited).unwrap();
+            let patch = outcome
+                .patch
+                .expect("the record-bearing warm relink patches in place");
             std::hint::black_box(patch);
         });
     });
