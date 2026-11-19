@@ -255,8 +255,13 @@ use sha2::{Digest, Sha256};
 /// config tail; a table the core constructor refuses is a malformed
 /// request), and the M91 cstring face rides the same tail (a
 /// rebuild-refusing table is a malformed request, the absent-table
-/// shape byte-identical to pre-M91).
-pub const PROTO_VERSION: u32 = 47;
+/// shape byte-identical to pre-M91). **v48** appends the liveness
+/// queries (M93 — the request's `why_live` names ask the session's own
+/// mark record for the M92 chains, the provenance tail carrying the
+/// rendered text verbatim beside the M79 answers; a liveness ask beside
+/// a relocatable config is a malformed request — `-r` carries no strip,
+/// the M83 replay-face rule).
+pub const PROTO_VERSION: u32 = 48;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -545,6 +550,18 @@ pub struct LinkRequest {
     /// (never the previous link's), the same tail carrying it either
     /// lane.
     pub map: bool,
+    /// The liveness queries (v48, M93): the `-why_live` names in flag
+    /// order — the mark phase's own first-marker record
+    /// ([`pgr_core::LinkResult::liveness`], carried when the link ran
+    /// `-dead_strip`) walked from the queried definition back to its
+    /// root, the chains rendered by [`pgr_core::why_live`] and the
+    /// reply's provenance tail carrying them verbatim beside the M79
+    /// answers. The empty list (the default) queries nothing. The ask
+    /// rides the `record` too (the replay's own walk carries the mark
+    /// record), but never a relocatable config — `-r` preserves input
+    /// sections verbatim and carries no strip, so a liveness ask beside
+    /// `-r` is a malformed request (the M83 replay-face rule).
+    pub why_live: Vec<String>,
 }
 
 impl LinkRequest {
@@ -630,6 +647,13 @@ impl LinkRequest {
         // M80 (v46): the link-map request flag (M87 rides it beside the
         // record — the decode gates no longer refuse the shape).
         put_u8(&mut b, u8::from(self.map));
+        // M93 (v48): the liveness queries — the names in flag order (the
+        // empty list is the pre-M93 shape, byte-identical on the decode
+        // side).
+        put_u32(&mut b, self.why_live.len() as u32);
+        for name in &self.why_live {
+            put_str(&mut b, name);
+        }
         b
     }
 
@@ -725,6 +749,23 @@ impl LinkRequest {
         // outdated premise (an old server's `ERROR` is the reply the
         // client's stand-down already speaks — honest degradation).
         let map = r.u8()? != 0;
+        // M93 (v48): the liveness queries (see encode). An empty name is
+        // a malformed request — the same C-symbol grammar the provenance
+        // queries ride. The ask rides the `record` too (the replay's own
+        // walk carries the mark record), but never a relocatable config:
+        // `-r` preserves input sections verbatim and carries no strip,
+        // so no mark record exists to walk (the M83 replay-face rule —
+        // the surface refuses the knob, so the driver never asks).
+        let why_live = (0..r.u32()?)
+            .map(|_| r.str())
+            .collect::<Result<Vec<String>, DecodeError>>()?;
+        if why_live.iter().any(String::is_empty) {
+            return Err(DecodeError::Malformed(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the request's liveness query names no symbol (the name is the \
+                 C symbol, the leading underscore included)",
+            )));
+        }
         // M83: the relocatable shape's edges at the wire. The object
         // walk serves the full link and the provenance queries (the
         // object's Pass-2 product is the same arena the query reads);
@@ -732,7 +773,9 @@ impl LinkRequest {
         // audit, `-verify` or `-map` beside a relocatable config is a
         // malformed request, never a silently widened one (the surface
         // refuses the knobs beside `-r`, so the driver never asks; no
-        // wire caller can plan the shape either).
+        // wire caller can plan the shape either). M93: the liveness ask
+        // joins the refused set — `-r` carries no strip, no mark record
+        // exists to walk.
         if config.filetype == OutputType::Relocatable {
             let replay_face = record.is_some()
                 || prev_output.is_some()
@@ -740,13 +783,14 @@ impl LinkRequest {
                 || tiles
                 || verify
                 || map
-                || record_resolution;
+                || record_resolution
+                || !why_live.is_empty();
             if replay_face {
                 return Err(DecodeError::Malformed(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "the request carries a replay face beside a relocatable output: \
                      the object shape has no ladder — no record, no tiles, no audit, \
-                     no verify, no map beside -r",
+                     no verify, no map, no liveness ask beside -r",
                 )));
             }
         }
@@ -768,6 +812,7 @@ impl LinkRequest {
             why_export,
             why_load,
             map,
+            why_live,
         })
     }
 }
@@ -1164,10 +1209,27 @@ pub struct ServedExport {
     pub render: String,
 }
 
+/// One served `-why_live` answer (v48, M93): the queried name beside the
+/// rendered chain the cold lane prints — the mark phase's own record
+/// walked from the queried definition back to its root
+/// ([`pgr_core::why_live::WhyLiveExplanation::render`], the verdict line,
+/// one keeper per hop and the root decision). The wire carries the
+/// render verbatim (the M62 convention).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedLive {
+    /// The queried name (with the C underscore, verbatim).
+    pub name: String,
+    /// The answer's rendered text — the chain the strip kept (or the
+    /// drop verdict), the same deterministic text the cold lane prints.
+    pub render: String,
+}
+
 /// The served provenance answers (v45, M79): one entry per
 /// `-why_export` query, in flag order, beside the `-why_load` report
 /// when the request asked. `None` rides absent — an unasked query
-/// crosses nothing (the tail is one byte).
+/// crosses nothing (the tail is one byte). M93 (v48): the liveness
+/// answers ride beside them — one entry per `-why_live` query, in flag
+/// order (the empty list is the pre-M93 shape).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServedProvenance {
     /// The export answers, in the request's flag order.
@@ -1175,13 +1237,18 @@ pub struct ServedProvenance {
     /// The load report's rendered text (the S7 pull's per-member
     /// decision and the dylib carriage rows), when the request asked.
     pub loads: Option<String>,
+    /// The liveness chains, in the request's flag order (M93, v48).
+    pub lives: Vec<ServedLive>,
 }
 
 /// Encodes the reply's provenance tail (v45): a present byte, then —
 /// when the request asked and the session answered — the export answers
 /// (count-prefixed; per entry the name and the render, length-prefixed
 /// strings) and the load report (a present byte + the render). A
-/// request that asked nothing rides the absent byte.
+/// request that asked nothing rides the absent byte. M93 (v48): the
+/// liveness answers ride beside them — a count-prefixed list of
+/// (name, render) pairs, the same shape (the pre-M93 replies carry the
+/// empty list).
 pub fn encode_provenance(out: &mut Vec<u8>, served: Option<&ServedProvenance>) {
     let Some(served) = served else {
         put_u8(out, 0);
@@ -1199,6 +1266,11 @@ pub fn encode_provenance(out: &mut Vec<u8>, served: Option<&ServedProvenance>) {
             put_str(out, render);
         }
         None => put_u8(out, 0),
+    }
+    put_u32(out, served.lives.len() as u32);
+    for live in &served.lives {
+        put_str(out, &live.name);
+        put_str(out, &live.render);
     }
 }
 
@@ -1229,7 +1301,28 @@ pub(crate) fn decode_provenance(
         )));
     }
     let loads = if r.u8()? == 0 { None } else { Some(r.str()?) };
-    Ok(Some(ServedProvenance { exports, loads }))
+    // M93 (v48): the liveness answers (see encode). The same grammar:
+    // an empty name is a malformed tail.
+    let lives = (0..r.u32()?)
+        .map(|_| {
+            Ok(ServedLive {
+                name: r.str()?,
+                render: r.str()?,
+            })
+        })
+        .collect::<Result<Vec<ServedLive>, DecodeError>>()?;
+    if lives.iter().any(|l| l.name.is_empty()) {
+        return Err(DecodeError::Malformed(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the provenance tail's liveness answers include an entry that named \
+             no symbol",
+        )));
+    }
+    Ok(Some(ServedProvenance {
+        exports,
+        loads,
+        lives,
+    }))
 }
 
 /// Decodes the reply's provenance tail from a whole body (v45) — the
@@ -2175,10 +2268,10 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
 mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, ServedExport,
-        ServedProvenance, TAG_LINK, content_hash, decode_map_bytes, decode_provenance_bytes,
-        decode_time_report, decode_trace_bytes, decode_verify_report_bytes, encode_map,
-        encode_provenance, encode_time_report, encode_trace, encode_verify_report, put_str, put_u8,
-        put_u32, put_u64,
+        ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_map_bytes,
+        decode_provenance_bytes, decode_time_report, decode_trace_bytes,
+        decode_verify_report_bytes, encode_map, encode_provenance, encode_time_report,
+        encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
@@ -2549,6 +2642,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2578,6 +2672,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2608,6 +2703,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2640,6 +2736,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2675,16 +2772,18 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         // Hand-splice the malformed selection past the well-formed tail:
         // encode a plain request body, drop the trailing absent byte and
-        // the v45 provenance fields beside it plus the v46 map flag (the
-        // count u32, the load-report flag, the map flag — seven bytes),
-        // append the malformed one. The selection's parse refuses before
-        // the decoder reads past it — the spliced tail rides no further
+        // the v45 provenance fields beside it plus the v46 map flag and
+        // the v48 liveness count (the count u32, the load-report flag,
+        // the map flag, the liveness count u32 — eleven bytes), append
+        // the malformed one. The selection's parse refuses before the
+        // decoder reads past it — the spliced tail rides no further
         // fields.
         let mut wire = req.encode();
-        wire.truncate(wire.len() - 7);
+        wire.truncate(wire.len() - 11);
         put_u8(&mut wire, 1);
         put_str(&mut wire, "segmants");
         let err = LinkRequest::decode(&wire).unwrap_err();
@@ -2764,6 +2863,7 @@ mod tests {
             why_export: vec!["_greet".to_string(), "_msg".to_string()],
             why_load: true,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -2799,15 +2899,18 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         // Hand-splice a one-query tail with an empty name over the
         // no-query one: the encoded tail is the count u32 + the flag
-        // byte — rewrite both.
+        // bytes — rewrite the whole tail.
         let mut wire = req.encode();
-        wire.truncate(wire.len() - 5);
+        wire.truncate(wire.len() - 10);
         put_u32(&mut wire, 1);
         put_str(&mut wire, "");
         put_u8(&mut wire, 0);
+        put_u8(&mut wire, 0);
+        put_u32(&mut wire, 0);
         let err = LinkRequest::decode(&wire).unwrap_err();
         assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
@@ -2837,6 +2940,7 @@ mod tests {
             why_export: vec!["_greet".to_string()],
             why_load: true,
             map: false,
+            why_live: Vec::new(),
         };
         let back = LinkRequest::decode(&req.encode()).expect("the query-bearing record decodes");
         assert_eq!(back.why_export, req.why_export, "the names ride in order");
@@ -2860,6 +2964,7 @@ mod tests {
             loads: Some(
                 "libgreet.a(greet.o):\n  pulled for _greet (the lazy fixpoint)\n".to_string(),
             ),
+            lives: Vec::new(),
         };
         let mut body = Vec::new();
         encode_provenance(&mut body, Some(&served));
@@ -2870,6 +2975,159 @@ mod tests {
         let mut absent = Vec::new();
         encode_provenance(&mut absent, None);
         assert!(decode_provenance_bytes(&absent).unwrap().is_none());
+    }
+
+    #[test]
+    fn liveness_ask_round_trips_in_the_request() {
+        // M93 (wire v48): the liveness queries ride the request — the
+        // names in flag order, beside the provenance tail's asks (the
+        // empty list is the pre-M93 shape, byte-identical on the decode
+        // side).
+        let req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: vec!["_greet".to_string(), "_orphan".to_string()],
+        };
+        let body = req.encode();
+        let back = LinkRequest::decode(&body).unwrap();
+        assert_eq!(back.why_live, req.why_live, "the names ride in order");
+        // The empty list decodes to the no-query shape.
+        let mut quiet = req;
+        quiet.why_live.clear();
+        let plain = LinkRequest::decode(&quiet.encode()).unwrap();
+        assert!(plain.why_live.is_empty(), "the empty list decodes to the no-query shape");
+    }
+
+    #[test]
+    fn a_wire_garbage_liveness_name_is_malformed() {
+        // The names ride the C-symbol grammar the surface parses: an
+        // empty liveness name is a malformed request, never a silently
+        // widened query (the M77 selection's own convention).
+        let req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: Vec::new(),
+        };
+        // Hand-splice a one-name liveness tail with an empty name over
+        // the no-query one: the encoded liveness tail is the count u32 —
+        // rewrite it whole.
+        let mut wire = req.encode();
+        wire.truncate(wire.len() - 4);
+        put_u32(&mut wire, 1);
+        put_str(&mut wire, "");
+        let err = LinkRequest::decode(&wire).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn provenance_tail_round_trips_the_liveness_answers() {
+        // M93 (wire v48): the liveness chains ride the provenance tail
+        // beside the export answers — one entry per `-why_live` query, in
+        // flag order, the render verbatim (the M62 convention); an unasked
+        // liveness rides the empty list.
+        let served = ServedProvenance {
+            exports: Vec::new(),
+            loads: None,
+            lives: vec![
+                ServedLive {
+                    name: "_greet".to_string(),
+                    render: "_greet: kept by the strip\n  kept by _main (main.o,__TEXT,__text) \
+                             at 0x0 (via _greet)\n  rooted at the entry point (-e)\n"
+                        .to_string(),
+                },
+                ServedLive {
+                    name: "_orphan".to_string(),
+                    render: "_orphan: dropped by the strip\n".to_string(),
+                },
+            ],
+        };
+        let mut body = Vec::new();
+        encode_provenance(&mut body, Some(&served));
+        let back = decode_provenance_bytes(&body)
+            .unwrap()
+            .expect("the answers ride");
+        assert_eq!(back, served, "the chains ride verbatim, in flag order");
+    }
+
+    #[test]
+    fn provenance_tail_refuses_a_nameless_liveness_answer() {
+        // A liveness entry whose name rode empty is a malformed tail —
+        // the session never renders one (a query names its answer), so an
+        // empty name means the body is not ours.
+        let mut body = Vec::new();
+        put_u8(&mut body, 1);
+        put_u32(&mut body, 0); // no exports
+        put_u8(&mut body, 0); // no loads
+        put_u32(&mut body, 1); // one liveness answer
+        put_str(&mut body, ""); // ... that names nothing
+        put_str(&mut body, "_greet: kept by the strip\n");
+        let err = decode_provenance_bytes(&body).unwrap_err();
+        assert!(
+            err.to_string().contains("liveness"),
+            "the malformed shape is named: {err}"
+        );
+    }
+
+    #[test]
+    fn the_liveness_ask_refuses_beside_a_relocatable_output() {
+        // M93: `-r` preserves input sections verbatim and carries no
+        // strip — the query has no honest answer, and the surface refuses
+        // the knob beside `-r` (the driver never asks; no wire caller can
+        // plan the shape either — the M83 replay-face rule).
+        let mut req = LinkRequest {
+            config: rich_config(),
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: vec!["_greet".to_string()],
+        };
+        req.config.filetype = OutputType::Relocatable;
+        let err = LinkRequest::decode(&req.encode()).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("-r"),
+            "the relocatable premise is named: {err}"
+        );
     }
 
     #[test]
@@ -2906,6 +3164,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2938,6 +3197,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         assert!(LinkRequest::decode(&body[..body.len() / 2]).is_err());
@@ -2969,6 +3229,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
@@ -2999,6 +3260,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let back = LinkRequest::decode(&bare.encode()).unwrap();
         assert_eq!(back, bare);
@@ -3040,6 +3302,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert!(back.tiles, "the flag rides the wire");
@@ -3073,6 +3336,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         // The distinctive vmsize appears exactly once (every other field
@@ -3126,6 +3390,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the decisions cross byte-for-byte");
@@ -3164,6 +3429,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The segment name rides as a length-prefixed string exactly
@@ -3209,6 +3475,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the reserve crosses byte-for-byte");
@@ -3257,6 +3524,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The reserve rides as a present-byte + u64 exactly once (the
@@ -3302,6 +3570,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req, "the base crosses byte-for-byte");
@@ -3340,6 +3609,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The base rides as a present-byte + u64 exactly once (the
@@ -3396,6 +3666,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3435,6 +3706,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The member rides as (kind byte, u32 len, name bytes) exactly
@@ -3487,6 +3759,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3525,6 +3798,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The client rides as (u32 len, name bytes) exactly once; the
@@ -3575,6 +3849,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3614,6 +3889,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The pair rides as (u32 len, pair bytes) exactly once; the
@@ -3664,6 +3940,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3704,6 +3981,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3755,6 +4033,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3805,6 +4084,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3845,6 +4125,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3881,6 +4162,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3917,6 +4199,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3950,6 +4233,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -3987,6 +4271,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4024,6 +4309,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4058,6 +4344,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4096,6 +4383,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4132,6 +4420,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4166,6 +4455,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4203,6 +4493,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4237,6 +4528,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4273,6 +4565,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4313,6 +4606,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4348,6 +4642,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4410,6 +4705,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         let needle = b"__mydata";
@@ -4461,6 +4757,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4500,6 +4797,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4537,6 +4835,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4573,6 +4872,7 @@ mod tests {
                 why_export: Vec::new(),
                 why_load: false,
                 map: false,
+                why_live: Vec::new(),
             }
             .encode(),
         )
@@ -4606,6 +4906,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The marks are the wire tail's last section: the count rides
@@ -4643,6 +4944,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The floor rides the config tail as (present byte, u64); the
@@ -4686,6 +4988,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The last floor byte is `__TEXT,__text`'s exponent (12); the
@@ -4731,6 +5034,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         // The path rides as (u32 len, path bytes) exactly once; the
@@ -4767,6 +5071,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         }
         .encode();
         let rel_path = b"bin/dyld";
@@ -4806,6 +5111,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -4834,6 +5140,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let body = req.encode();
         let back = LinkRequest::decode(&body).unwrap();
@@ -5114,6 +5421,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: true,
+            why_live: Vec::new(),
         }
     }
 
