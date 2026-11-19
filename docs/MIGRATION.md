@@ -112,7 +112,7 @@ The flags that look like no-ops but actually shape the link (the default
 behavior already matches what they request on arm64) are mapped in the
 tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 `-no_fixup_chains`, `-fixup_chains_format`, `-flat_namespace`, `-undefined`,
-`-rpath`, `-source_version`, `-arch arm64`, `-platform_version`. The provenance queries (`-why_export <symbol>`, `-why_load`, M56/M57) ride the same driver surface: the definition and reference sites a symbol carries, the decision that admitted each archive member — reports beside the link, every lane serving its own walk's answer (the resident session since M79, the incremental ladder since M84, the fusion ladder since M88).
+`-rpath`, `-source_version`, `-arch arm64`, `-platform_version`. The provenance queries (`-why_export <symbol>`, `-why_load`, M56/M57) ride the same driver surface: the definition and reference sites a symbol carries, the decision that admitted each archive member — reports beside the link, every lane serving its own walk's answer (the resident session since M79, the incremental ladder since M84, the fusion ladder since M88). The liveness query (`-why_live <symbol>`, M92) joins them — the mark phase's own record walked from the queried definition back to its root — and serves beside `-resident` since M93 (wire v48 carries the names, the session's own mark record renders the chains; the relocatable output refuses the premise — `-r` carries no strip).
 
 ## Peregrine-specific: the per-pass time report
 
@@ -165,8 +165,6 @@ pgr -o app main.o -lgreet -L libs -incremental --trace t.json   # the ladder's r
 A linker that silently drops a flag it does not implement is worse than one
 that says so. The list is empty today — every flag that waited here shipped:
 (`-order_file` left this list when its rank-based subset shipped at M11,
-
-`-sectorder <seg> <sect> <file>` (M90/M91) — ld64's per-section order flag rides the M11 rank seam: an ordinary section's file appends its entries to the rank table in flag order, the `__TEXT,__cstring` face ranks the literal sections by escape-decoded content, and a `__TEXT,__literal*` section is the warned no-op (the file is never read). It composes with `-order_file` in command-line order and serves beside `-resident` on the same rank-table carriage.
 alongside `-map`; the weak/lazy dylib family — `-weak_framework`,
 `-lazy_framework`, `-lazy_library` — left it at M14, `-pagezero_size`
 left it at M15, the image base becoming a validated `LinkConfig` decision,
@@ -177,6 +175,14 @@ reference flat at load time — `-dylinker` left it at M26 (its stale entry
 here outlived the release and left with the M43 promotion), and `-ObjC`
 left it at M43 — the ObjC archive pull: members implementing an
 Objective-C class or category ride the pull without a reference.)
+
+`-sectorder <seg> <sect> <file>` (M90/M91) — ld64's per-section order flag
+rides the M11 rank seam: an ordinary section's file appends its entries to
+the rank table in flag order, the `__TEXT,__cstring` face ranks the literal
+sections by escape-decoded content, and a `__TEXT,__literal*` section is the
+warned no-op (the file is never read). It composes with `-order_file` in
+command-line order and serves beside `-resident` on the same rank-table
+carriage.
 
 ## Peregrine-specific: the Stage A link cache
 
