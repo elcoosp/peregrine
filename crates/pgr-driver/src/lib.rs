@@ -1010,6 +1010,10 @@ fn link_to_image_recorded(
         // same face).
         job.request.why_export.clone_from(&opts.why_export);
         job.request.why_load = opts.why_load;
+        // M93 (wire v48): a liveness-asking link asks the session's own
+        // mark record for the chains — the served renders print beside
+        // the resident link exactly as the cold lane prints its own.
+        job.request.why_live.clone_from(&opts.why_live);
         // M80 (wire v46): a map-asking link asks the session's own full
         // walk for the placed image's report — the served document is
         // written to the `-map` path below, verbatim (the daemon never
@@ -1056,6 +1060,11 @@ fn link_to_image_recorded(
                     }
                     if let Some(loads) = &served.loads {
                         print!("{loads}");
+                    }
+                    // M93: the served chains print beside the resident
+                    // link — the session's own renders, verbatim.
+                    for live in &served.lives {
+                        print!("{}", live.render);
                     }
                 }
                 // M80: the served map writes beside the resident link
@@ -2518,6 +2527,13 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
     // either way).
     job.request.why_export.clone_from(&opts.why_export);
     job.request.why_load = opts.why_load;
+    // M93 (wire v48): the liveness queries ride the request — the
+    // session's ladder runs the full Passes 1–3, so its own mark record
+    // renders the M92 chains the v48 tail carries verbatim (the M79
+    // face over the replay lane; a vacuous query's ERROR is the same
+    // stand-down cue — the in-process ladder names the misspelling
+    // either way).
+    job.request.why_live.clone_from(&opts.why_live);
     let socket = opts
         .resident_socket
         .clone()
@@ -2636,6 +2652,11 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
         }
         if let Some(loads) = &answers.loads {
             print!("{loads}");
+        }
+        // M93: the served chains print beside the fusion relink — the
+        // session's own renders, verbatim.
+        for live in &answers.lives {
+            print!("{}", live.render);
         }
     }
     // M66 (v42 in service): the served faces print/write beside the
@@ -3319,9 +3340,10 @@ pub fn usage() -> String {
     s.push_str("                               its root: one keeper per hop (the\n");
     s.push_str("                               referencing atom, the referenced\n");
     s.push_str("                               name, the site), the root decision\n");
-    s.push_str("                               named last (M92; repeatable; the\n");
-    s.push_str("                               resident lanes refuse the ask — the\n");
-    s.push_str("                               wire has no liveness tail yet)\n");
+    s.push_str("                               named last (M92; repeatable; every\n");
+    s.push_str("                               lane serves the ask since M93 —\n");
+    s.push_str("                               the relocatable output refuses it,\n");
+    s.push_str("                               -r carries no strip)\n");
     s.push_str("  --time                       after the link, print the per-pass\n");
     s.push_str("                               wall report — the passes the pipeline\n");
     s.push_str("                               ran (parse through layout), each\n");
