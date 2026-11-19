@@ -248,6 +248,14 @@ use sha2::{Digest, Sha256};
 /// walk for the M56/M57 answers, the reply's IMAGE tail carrying the
 /// rendered text verbatim; M88 retires the beside-the-`record` refusal —
 /// the replay's own walk answers honestly, the same tail either lane).
+/// **v46** appends the map ask (M80 — the request's `map` flag asks the
+/// session's own walk for the M55 document, the reply's IMAGE tail
+/// carrying the rendered text verbatim). **v47** appends the rank table
+/// (M81 — the composed `-order_file`/`-sectorder` table crosses the
+/// config tail; a table the core constructor refuses is a malformed
+/// request), and the M91 cstring face rides the same tail (a
+/// rebuild-refusing table is a malformed request, the absent-table
+/// shape byte-identical to pre-M91).
 pub const PROTO_VERSION: u32 = 47;
 
 // ---- message tags -----------------------------------------------------------
@@ -1676,7 +1684,7 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         }
         None => put_u8(out, 0),
     }
-    // M91 (v48): the cstring rank table rides the tail after the rank
+    // M91: the cstring rank table rides the v47 tail after the rank
     // table — a present byte, then a count-prefixed list of
     // length-prefixed decoded literal contents in rank order; a resident
     // link orders the `__cstring` literals the client named, never the
@@ -2059,7 +2067,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             })?,
         )
     };
-    // M91 (v48 wire): the cstring rank table (see encode). The absent
+    // M91: the cstring rank table (see encode), riding the v47 tail. The absent
     // byte is the pre-M91 shape; a table the rebuild refuses — two ranks
     // for one literal — is a malformed request (the parse's own
     // refusal, the rank positions named).
@@ -5248,7 +5256,7 @@ mod tests {
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
         // `rich_config` carries no tables: drop the two absent bytes the
-        // encoder just wrote (the v48 tail's slots at the config's end —
+        // encoder just wrote (the M91 tail's slots at the config's end —
         // the rank table, then the cstring table), the hand-spliced
         // rank table takes the first place and the cstring absence
         // follows.
@@ -5264,7 +5272,7 @@ mod tests {
         put_u8(&mut body, 0);
         put_str(&mut body, "_main");
         put_u32(&mut body, 9);
-        put_u8(&mut body, 0); // the v48 cstring rank table's absence
+        put_u8(&mut body, 0); // the M91 cstring rank table's absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
@@ -5292,7 +5300,7 @@ mod tests {
         );
     }
 
-    // ---- M91 (wire v48): the cstring rank table crosses the wire -----
+    // ---- M91: the cstring rank table crosses the wire (the v47 tail) -----
 
     #[test]
     fn the_cstring_rank_table_round_trips() {
@@ -5343,7 +5351,7 @@ mod tests {
         encode_config(&mut body, &rich_config());
         body.truncate(body.len() - 2);
         put_u8(&mut body, 0); // the rank table's absence
-        // The v48 cstring tail: present, two entries, the second a
+        // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
         put_u8(&mut body, 1);
         put_u32(&mut body, 2);
