@@ -80,10 +80,12 @@ pub mod trace;
 pub mod trie;
 pub mod umbrella;
 pub mod unwind;
+pub mod why_live;
 
 pub use alias::{Alias, AliasError, AliasTable};
 pub use bundle_loader::{BundleLoader, BundleLoaderError};
 pub use cache::PoiCache;
+pub use deadstrip::{LiveRootKind, LivenessIndex};
 pub use dep_info::{DepInfoError, DependencyEntry, DependencyRecord};
 pub use dyld_env::{DyldEnv, DyldEnvEntry, DyldEnvError};
 pub use dyld_info::DyldInfoPlan;
@@ -142,6 +144,7 @@ pub use unwind::{
     MAX_COMMON_ENCODINGS, SynthesisError, UnwindEntry, UnwindInfo, UnwindShape, plan_shape,
     synthesize, synthesized_size, synthesized_size_shape,
 };
+pub use why_live::{LiveVerdict, LiveWhyStep, WhyLiveError, WhyLiveExplanation, explain_live};
 
 /// A fatal link error (M1 surface: inputs, symbols, layout, encoding).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
