@@ -6,6 +6,44 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M87)
+
+- **M87** — the fusion ladder's served map: the M86 lane contract (a map-bearing fusion
+  relink stands the resident attempt down — "the session's patch serves bytes, not the
+  placed layout") flips to service the M80/M86 way: the premise was outdated, because the
+  session's ladder is not a byte-replay either — `serve_relink` runs the full Passes 1–3
+  (`link_from_objects`), so `result.layout` is the walk's own Pass-3 product, in the
+  session's memory, and the v46 map tail already has the shape to carry it (no wire shape
+  moves). The decode gate's refusal arm retires; the session renders
+  `pgr_core::map::build_link_map` over its own walk at both exits (the patched exit and
+  the untouched one — the document names the placed image the patch plan read, never the
+  previous link's), the driver's fusion relink rides the ask on the request, and the
+  client writes the served bytes to the `-map` path exactly as the in-process ladder
+  writes its own — an old server's refusal is the `ERROR` reply the stand-down already
+  speaks, the in-process ladder answering either way; the `resident` bench gains the
+  map-bearing fusion relink beside the plain one, and the `fusion_map_link` example walks
+  the capture → edit → served fusion map beside the transport that names the lane
+
+### Added (M86)
+
+- **M86** — the incremental ladder's link map: the M11/M80 lane contract (`-map`
+  refused beside `-incremental` — "the map reports the full emit's layout") flips to
+  service the M84/M85 way: the premise was outdated, because the relink is not a replay
+  of recorded bytes — its walk runs the full Passes 1–3 (`pgr_core::link_cached` inside
+  `incremental_relink`), so `LinkResult::layout` is the walk's own Pass-3 product, in the
+  relink's own memory, and `pgr_core::map::build_link_map` renders the same face the
+  one-shot writes. The map the ladder writes is the relink's own placed image — never
+  the previous link's document — at both success exits (the patched exit and the
+  untouched one; the map lands before the record write, so the dependency record's
+  output row names a sidecar that exists), and an untouched relink's map is the
+  capture's own document (nothing moved, the walk re-derived the same placed image).
+  The fusion lane keeps its edge — the session's patch serves bytes, not the placed
+  layout (no wire tail carries the ladder's map), so a map-bearing relink stands the
+  resident attempt down to the in-process ladder, whose own walk renders the document;
+  the `incremental` bench gains the map-bearing relink beside the plain one, and the
+  `incremental_map` example walks the capture → edit → map-bearing relink beside the
+  rendered segments
+
 ### Added (M85)
 
 - **M85** — the incremental ladder's dependency record: the M60 lane contract (`-dependency_info`
