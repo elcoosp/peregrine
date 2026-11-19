@@ -662,6 +662,21 @@ pub struct LinkConfig {
     /// output never reads the table (its section table is the input's,
     /// verbatim — the M41/M43/M47 inert-for-relocatable shape).
     pub renames: crate::rename::SectionRenames,
+    /// M91 — the cstring literal ranks: `-sectorder __TEXT __cstring
+    /// <file>` — ld64's cstring mode (`parseOrderFile` with
+    /// `cstring = true`, the face [`crate::order::classify_section_order`]
+    /// names) — ranks the `S_CSTRING_LITERALS` sections' literals by
+    /// their escape-decoded content (see [`crate::order::CstringOrder`]).
+    /// The D4 canonical instances sort by content rank — a stable pass,
+    /// the unranked literals keeping their first-use order behind them —
+    /// and the instance remap lands every duplicate on the single output
+    /// copy whatever the ranks say. The default (`None`) keeps every
+    /// pre-M91 link byte-identical — the merge and its order unchanged.
+    /// There is no output-kind conflict: the relocatable output refuses
+    /// the rank surface at parse (the M11 shape — no segment layout to
+    /// rank), and the resident lane serves the table since M91 (wire
+    /// v48 carries it beside the rank table).
+    pub cstring_order: Option<crate::order::CstringOrder>,
 }
 
 impl Default for LinkConfig {
@@ -714,6 +729,7 @@ impl Default for LinkConfig {
             allow_stack_execute: false,
             no_dead_strip_inits_and_terms: false,
             renames: crate::rename::SectionRenames::default(),
+            cstring_order: None,
             sect_aligns: crate::sect_align::SectAlignTable::default(),
             header_pad: None,
             data_in_code: true,
@@ -967,6 +983,11 @@ pub struct Layout {
     /// surfaces it as the ld64-style advisory (a rank that landed
     /// nowhere is a typo, not an error).
     pub order_unmatched: Vec<Vec<u8>>,
+    /// M91: the cstring rank entries that matched **no** placed
+    /// literal, in rank order (the decoded content bytes). Empty without
+    /// a `-sectorder __TEXT __cstring` table and whenever every entry
+    /// ranked something — the same advisory face, the literal's wording.
+    pub cstring_order_unmatched: Vec<Vec<u8>>,
     /// The image base (`__PAGEZERO` vmsize for executables, `0` for
     /// dylibs/bundles): every absolute fixup/trie address is relative to it.
     pub image_base: u64,
@@ -1512,6 +1533,10 @@ struct PlacedState {
     /// M11: the order-file entry indexes that matched at least one piece
     /// (the unmatched report's complement). Empty without an order file.
     order_matched: std::collections::BTreeSet<usize>,
+    /// M91: the cstring rank indexes that matched at least one placed
+    /// literal (the advisory's complement). Empty without a cstring rank
+    /// table.
+    cstring_matched: std::collections::BTreeSet<usize>,
 }
 
 /// One flat piece: output section, position within its piece list, absolute
@@ -2765,11 +2790,25 @@ pub fn layout(
         None => Vec::new(),
     };
 
+    // M91: the cstring advisory's data — rank entries whose content
+    // matched no placed literal (the same face, the literal's wording).
+    let cstring_order_unmatched = match &cfg.cstring_order {
+        Some(ranks) => ranks
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !state.cstring_matched.contains(idx))
+            .map(|(_, e)| e.clone())
+            .collect(),
+        None => Vec::new(),
+    };
+
     Ok(Layout {
         ident: cfg.ident.clone(),
         filetype: cfg.filetype.filetype(),
         image_base,
         order_unmatched,
+        cstring_order_unmatched,
         segments: state.segments,
         sections: state.sections,
         linkedit: LinkeditPlan {
@@ -2987,9 +3026,22 @@ fn build_bucket_pieces(
     fold: &crate::icf::FoldPlan,
     order_active: bool,
     dedup: bool,
-) -> Result<(Vec<Vec<Piece>>, Vec<(usize, Vec<CStringInstance>)>), LinkError> {
+    cstring_rank: Option<&crate::order::CstringOrder>,
+) -> Result<
+    (
+        Vec<Vec<Piece>>,
+        Vec<(usize, Vec<CStringInstance>)>,
+        std::collections::BTreeSet<usize>,
+    ),
+    LinkError,
+> {
     let mut pieces_of_bucket: Vec<Vec<Piece>> = vec![Vec::new(); buckets.len()];
     let mut cstring_instances: Vec<(usize, Vec<CStringInstance>)> = Vec::new();
+    // M91: the cstring ranks force atom granularity for the
+    // `S_CSTRING_LITERALS` sections (the whole-section piece cannot
+    // rank) — the D4 dedup path already splits per literal, and the
+    // `-no_deduplicate` fall-through splits when the ranks ride.
+    let cstring_rank_active = cstring_rank.is_some();
     // D4 dedup: per cstring bucket, content → canonical instance index.
     // Hash-map lookup keeps the pass linear (the M4 discipline: no O(n²)
     // scans).
@@ -3101,6 +3153,7 @@ fn build_bucket_pieces(
             // whole-section atom and rank through its offset-0 symbol).
             let atom_granular = live.is_active()
                 || order_active
+                || cstring_rank_active && in_sect.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS
                 || (!fold.is_empty() && in_sect.flags & S_ATTR_PURE_INSTRUCTIONS != 0);
             if in_sect.zerofill || !atom_granular {
                 pieces_of_bucket[bi].push(Piece {
@@ -3172,7 +3225,52 @@ fn build_bucket_pieces(
             synth: None,
         });
     }
-    Ok((pieces_of_bucket, cstring_instances))
+    // ---- M91: the cstring literal ranks ---------------------------------
+    // Applied to the `S_CSTRING_LITERALS` buckets' final piece lists —
+    // the D4 canonical instances (dedup on) and the atom-granular
+    // verbatim pieces (the M41 toggle off) alike, both carrying their
+    // content in the input bytes. The sort is stable and keyed on the
+    // entry index, so the unranked literals keep their first-use order
+    // behind the ranked ones and nothing reads a hash iteration order.
+    // The remap is untouched: the instances' canonical indexes point
+    // into their own vector, and the placed addresses follow the new
+    // piece order (the resolve reads the remap, never the piece list).
+    let mut cstring_matched: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    if let Some(ranks) = cstring_rank {
+        for (bi, (_, name, flags, zerofill)) in buckets.iter().enumerate() {
+            if *zerofill || flags & SECTION_TYPE_MASK != S_CSTRING_LITERALS {
+                continue;
+            }
+            let _ = name;
+            let pieces = &mut pieces_of_bucket[bi];
+            if pieces.len() < 2 {
+                if let Some(piece) = pieces.first() {
+                    let content = &objects[piece.file.0 as usize].bytes
+                        [piece.in_range.start as usize..piece.in_range.end as usize];
+                    if let Some(rank) = ranks.rank_of(content) {
+                        cstring_matched.insert(rank);
+                    }
+                }
+                continue;
+            }
+            let mut keyed: Vec<(Option<usize>, Piece)> = Vec::with_capacity(pieces.len());
+            for p in pieces.drain(..) {
+                let content = &objects[p.file.0 as usize].bytes
+                    [p.in_range.start as usize..p.in_range.end as usize];
+                let rank = ranks.rank_of(content);
+                if let Some(r) = rank {
+                    cstring_matched.insert(r);
+                }
+                keyed.push((rank, p));
+            }
+            // Ascending entry index, unranked last (the sentinel); the
+            // sort is stable, so the first-use order survives every tie
+            // (the M11 shape).
+            keyed.sort_by_key(|(rank, _)| rank.unwrap_or(usize::MAX));
+            pieces.extend(keyed.into_iter().map(|(_, p)| p));
+        }
+    }
+    Ok((pieces_of_bucket, cstring_instances, cstring_matched))
 }
 
 /// The arm64 stub prologue before patching: `adrp x16, <page>;
@@ -3203,7 +3301,7 @@ fn place(
     emit_dice: bool,
     unwind_size: usize,
 ) -> Result<PlacedState, LinkError> {
-    let (mut pieces_of_bucket, cstring_instances) = build_bucket_pieces(
+    let (mut pieces_of_bucket, cstring_instances, cstring_matched) = build_bucket_pieces(
         objects,
         buckets,
         bucket_of,
@@ -3212,6 +3310,7 @@ fn place(
         fold,
         cfg.symbol_order.is_some(),
         cfg.deduplicate,
+        cfg.cstring_order.as_ref(),
     )?;
     // ---- M11: the order file's ranks (TDD §8.4) -----------------------------
     // Applied *before* the synthetic pieces (whose buckets keep their
@@ -3650,6 +3749,7 @@ fn place(
         stub_addr,
         veneer_addr_of,
         order_matched,
+        cstring_matched,
     })
 }
 
