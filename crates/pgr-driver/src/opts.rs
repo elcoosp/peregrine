@@ -8,14 +8,44 @@
 //! linker that pretends to understand a flag it drops is worse than one
 //! that says "not yet". TLV thread-locals link since M37 (the input
 //! sections the parse validates ride the atom map onto the output).
-//! `-order_file` landed at M11 (the rank-based
-//! subset TDD §12 scoped from the start).
+//! `-order_file` landed at M11 and `-sectorder` rides the same rank
+//! seam since M90 (the rank-based subset TDD §12 scoped from the start;
+//! the sources compose in command-line order).
 
 use pgr_core::fixups::FixupPointerFormat;
 use pgr_core::layout::LinkConfig;
 use pgr_format::consts::{
     PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_VISIONOS, PLATFORM_WATCHOS,
 };
+
+/// One order-bearing flag instance, in command-line order (M90): ld64's
+/// order files append into ONE global rank table as the flags parse —
+/// the driver composes the sources in the order the flags appear, never
+/// last-wins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderSpec {
+    /// `-order_file <path>` (M11): the global rank file.
+    File {
+        /// The file's path (read and parsed at link time — the M11
+        /// convention; the read rides the M60 dependency record).
+        path: String,
+    },
+    /// `-sectorder <segment> <section> <path>` (M90): ld64's
+    /// per-section order flag. The pair names the face, never a layout
+    /// scope ([`pgr_core::order::classify_section_order`]): an ordinary
+    /// section's file appends its entries to the one rank table, the
+    /// `__TEXT,__cstring` face orders the section's literals by
+    /// escape-decoded content (M91's rung), and a `__TEXT,__literal*`
+    /// section is the warned no-op whose file is never read.
+    Section {
+        /// The named segment (`__TEXT` carries the special faces).
+        segment: String,
+        /// The named section.
+        section: String,
+        /// The file's path (read at link time, when the face reads).
+        path: String,
+    },
+}
 
 /// Maps a `-platform_version` platform name onto its `LC_BUILD_VERSION`
 /// constant (M10 rung 2). The five names are the platforms the pipeline
@@ -181,13 +211,17 @@ pub struct Options {
     /// named family the floor cannot carry is a refused knob, never a
     /// silently dropped one (the surface's own contract).
     pub chain_word_format_explicit: bool,
-    /// M11 `-order_file <path>`: the order file's path (read and ranked
-    /// by the driver before Pass 3 — see [`pgr_core::order`]). `None`
-    /// (the default) packs the layout exactly as before. The resident
-    /// lane serves the table since M81 (wire v47 carries it in the
-    /// config tail) — the session's own walk ranks the entries the
-    /// client named, either lane, the same layout.
-    pub order_file: Option<String>,
+    /// The order sources, in command-line order (M11/M90): ld64's
+    /// order files append into ONE rank table as the flags parse —
+    /// `-order_file`'s rows and every `-sectorder`'s rows rank in the
+    /// order the flags appear, never last-wins. Empty (the default)
+    /// packs the layout exactly as before. The driver reads, parses
+    /// (typed, line-tagged refusals) and composes the table before
+    /// Pass 3 — see [`pgr_core::order`]. The resident lane serves the
+    /// composed table since M81 (wire v47 carries it in the config
+    /// tail) — the session's own walk ranks the entries the client
+    /// named, either lane, the same layout.
+    pub order_specs: Vec<OrderSpec>,
     /// M11 `-map <path>`: write the link map (the placed image's
     /// segments/sections/symbols, rendered by [`pgr_core::map`]) next to
     /// the link. `None` (the default) writes no map. The resident lane
@@ -356,7 +390,7 @@ impl Default for Options {
             verify: false,
             verify_checks: None,
             chain_word_format_explicit: false,
-            order_file: None,
+            order_specs: Vec::new(),
             map_path: None,
             why_export: Vec::new(),
             why_load: false,
@@ -1647,11 +1681,25 @@ fn apply_flag(
             let file = next_value(args, i, arg)?;
             opts.sectcreate.push((seg, sect, file));
         }
-        // M11: the order file is read (and its parse refusals named) by
-        // the driver before Pass 3; the surface stores the path.
+        // M11/M90: the order sources are read (and their parse refusals
+        // named) by the driver before Pass 3; the surface stores the
+        // instances in command-line order — `-sectorder`'s pair names
+        // the face (`pgr_core::order::classify_section_order`), the
+        // rank-append files compose with `-order_file` into the one
+        // table.
         "-order_file" => {
             let v = next_value(args, i, arg)?;
-            opts.order_file = Some(v);
+            opts.order_specs.push(OrderSpec::File { path: v });
+        }
+        "-sectorder" => {
+            let segment = next_value(args, i, arg)?;
+            let section = next_value(args, i, arg)?;
+            let path = next_value(args, i, arg)?;
+            opts.order_specs.push(OrderSpec::Section {
+                segment,
+                section,
+                path,
+            });
         }
         // M11: the link map is rendered from the finished plan (the same
         // layout the fused emit writes) and written after the link.
@@ -2948,15 +2996,16 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     // it in the config tail — a resident ordered link ranks the
     // entries the client named, the ladder's replay beside the record
     // included), so the only remaining refusal is the relocatable
-    // output's (no segment layout to rank).
-    if opts.order_file.is_some()
+    // output's (no segment layout to rank). M90: the refusal covers
+    // every order source — the `-sectorder` files rank the same table.
+    if !opts.order_specs.is_empty()
         && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
     {
         return Err(OptsError::OrderFileConflict {
             verdict: "-r writes an input object: sections merge at their declared \
                      alignments and no segment layout exists to rank"
                 .into(),
-            fix: "drop -order_file".into(),
+            fix: "drop -order_file/-sectorder".into(),
         });
     }
     // M56/M57: the provenance queries read the link's own Pass-2 product.
@@ -3084,7 +3133,7 @@ pub fn parse_number(v: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OptsError, parse, parse_number, parse_version};
+    use super::{OptsError, OrderSpec, parse, parse_number, parse_version};
     use std::ffi::OsString;
 
     fn args(list: &[&str]) -> Vec<OsString> {
@@ -3209,9 +3258,33 @@ mod tests {
     fn later_milestone_flags_are_rejected_actionably() {
         // M11: `-order_file` left the later-milestone list — the rank
         // table rides the link (the acceptance is gated in
-        // tests/m11_order_file.rs); the surface stores its path.
+        // tests/m11_order_file.rs); M90: the surface stores every
+        // order source in command-line order (`-sectorder` beside it).
         let o = parse(&args(&["-o", "out", "-order_file", "f.txt", "a.o"])).unwrap();
-        assert_eq!(o.order_file.as_deref(), Some("f.txt"));
+        assert_eq!(
+            o.order_specs,
+            vec![OrderSpec::File {
+                path: "f.txt".into()
+            }]
+        );
+        let o = parse(&args(&[
+            "-o",
+            "out",
+            "-sectorder",
+            "__TEXT",
+            "__text",
+            "s.txt",
+            "a.o",
+        ]))
+        .unwrap();
+        assert_eq!(
+            o.order_specs,
+            vec![OrderSpec::Section {
+                segment: "__TEXT".into(),
+                section: "__text".into(),
+                path: "s.txt".into(),
+            }]
+        );
         // M14: the weak/lazy dylib family left the list too (the
         // acceptance is gated in tests/m14_lazy_dylibs.rs); M43
         // released the ObjC pull and emptied the list — the umbrella
