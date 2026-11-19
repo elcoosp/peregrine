@@ -325,6 +325,33 @@ fn bench_resident_fusion(
             std::hint::black_box(patch);
         });
     });
+    // M87: the map-bearing fusion relink — the same tier-1 alternation,
+    // with `-map` riding the request. The session's ladder renders its
+    // own Pass-3 product and the v46 tail carries the document verbatim
+    // (the client writes the file); the recorded mean beside
+    // `fusion_relink_64_objects` is the map's render/encode/write price
+    // on the served ladder.
+    let mut map_alternator = 0u32;
+    group.bench_function("fusion_map_relink_64_objects", |b| {
+        b.iter(|| {
+            map_alternator += 1;
+            let mut edited_opts = fusion.clone();
+            edited_opts.inputs[0] = dir
+                .join(if map_alternator % 2 == 0 {
+                    "resident_obj_0.o"
+                } else {
+                    "resident_obj_0_edited.o"
+                })
+                .display()
+                .to_string();
+            edited_opts.map_path = Some(dir.join("fusion_bench.map").display().to_string());
+            let outcome = pgr_driver::run(&edited_opts).unwrap();
+            let patch = outcome
+                .patch
+                .expect("the map-bearing warm fusion relink patches in place");
+            std::hint::black_box(patch);
+        });
+    });
     group.finish();
 }
 
