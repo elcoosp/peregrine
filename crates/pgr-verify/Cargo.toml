@@ -80,5 +80,12 @@ harness = false
 name = "universal_checks"
 harness = false
 
+# The M94 initializer-surface bench: the gate's price over the honest
+# offsets form, the honest pointer form and a hand-broken entry, beside
+# the whole-image pass (for scale).
+[[bench]]
+name = "init_offsets"
+harness = false
+
 [lints]
 workspace = true
