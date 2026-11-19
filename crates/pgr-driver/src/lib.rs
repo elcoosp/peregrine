@@ -2380,6 +2380,12 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
     let timing = opts.time || opts.time_json || opts.trace_path.is_some();
     job.request.time = timing;
     job.request.trace = opts.trace_path.is_some();
+    // M87: the map ask rides the request — the session's ladder runs the
+    // full Passes 1–3, so its own Pass-3 product renders the document
+    // the v46 tail carries verbatim (the M80 face over the replay lane;
+    // an old server's refusal is the ERROR reply the stand-down below
+    // already speaks — the in-process ladder answers either way).
+    job.request.map = opts.map_path.is_some();
     let socket = opts
         .resident_socket
         .clone()
@@ -2464,6 +2470,18 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
         store_record_bytes(opts, record_bytes);
     } else if std::env::var_os("PGR_INCREMENTAL_DEBUG").is_some() {
         eprintln!("pgr: the daemon's relink returned no record; keeping the old one");
+    }
+    // M87: the served map writes beside the fusion relink (the document
+    // rides the reply's v46 tail verbatim — the session's ladder rendered
+    // its own Pass-3 product; the daemon never touches the filesystem,
+    // the client does — the same `-map` contract the full-link lane and
+    // the one-shot ride). The write gates on the served verdict's write
+    // below ordering: the map lands with the image, once the run served.
+    if let (Some(path), Some(document)) = (&opts.map_path, &served.map_text) {
+        std::fs::write(Path::new(path), document).map_err(|source| DriverError::Io {
+            path: path.clone(),
+            source,
+        })?;
     }
     // M66 (v42 in service): the served faces print/write beside the
     // fusion relink — the report is the session's observed ladder run (no
@@ -2800,10 +2818,18 @@ fn incremental_relink(
     })
 }
 
-/// The ladder's own read faces (M84, M85), served at both relink exits —
+/// The ladder's own faces (M84, M85, M86), served at both relink exits —
 /// the patched exit and the untouched one, where the walk ran and
 /// nothing patched:
 ///
+/// * `-map` renders [`pgr_core::map::build_link_map`] over
+///   [`pgr_core::LinkResult::layout`] — the relink's own Pass-3 product,
+///   the same pure function the one-shot writes its document from (the
+///   map and the bytes cannot disagree — M11's rule). The document the
+///   ladder writes names the placed image the relink just planned, never
+///   the previous link's, and lands before the record write so the
+///   dependency record's output row names a sidecar that exists (the
+///   one-shot's own order — the map, then the record).
 /// * `-dependency_info` writes [`PreparedLink::deps`] — the M60 record
 ///   Pass 0 built while the relink's mapping read the inputs (the same
 ///   recording `prepare_link` runs for the one-shot; the re-parse is the
@@ -2826,12 +2852,25 @@ fn incremental_relink(
 ///
 /// # Errors
 /// [`RelinkAttempt::Error`] on a filesystem failure writing the record
-/// or a vacuous `-why_export` query.
+/// or the map, or a vacuous `-why_export` query.
 fn serve_relink_faces(
     opts: &opts::Options,
     prepared: &PreparedLink,
     result: &pgr_core::LinkResult,
 ) -> Result<(), RelinkAttempt> {
+    // M86: the map is the walk's own Pass-3 product — the relink ran the
+    // full Passes 1–3, so the placed image the report names is this
+    // relink's, at both exits (the patched one and the untouched one).
+    // The one-shot's order: the map lands, then the record names it.
+    if let Some(map_path) = &opts.map_path {
+        let map = pgr_core::map::build_link_map(&result.layout, &result.interner);
+        std::fs::write(Path::new(map_path), map.render()).map_err(|source| {
+            RelinkAttempt::Error(DriverError::Io {
+                path: map_path.clone(),
+                source,
+            })
+        })?;
+    }
     write_dependency_record(opts, &prepared.deps).map_err(RelinkAttempt::Error)?;
     print_why_export(
         &result.objects,
@@ -3006,10 +3045,14 @@ pub fn usage() -> String {
     s.push_str("                               (up to 0x4000); refused with -r\n");
     s.push_str("  -map <path>                  write the link map (segments,\n");
     s.push_str("                               sections, symbols — the placed\n");
-    s.push_str("                               image's report; refused with -r and\n");
-    s.push_str("                               -incremental; serves beside -resident\n");
-    s.push_str("                               since M80 — the session's own walk\n");
-    s.push_str("                               renders it, wire v46)\n");
+    s.push_str("                               image's report; refused with -r;\n");
+    s.push_str("                               serves beside -resident since M80\n");
+    s.push_str("                               (the session's own walk renders it,\n");
+    s.push_str("                               wire v46) and beside -incremental\n");
+    s.push_str("                               since M86 (the relink's own walk\n");
+    s.push_str("                               renders it — the fusion lane since\n");
+    s.push_str("                               M87, the served document riding the\n");
+    s.push_str("                               same tail)\n");
     s.push_str("  -syslibroot <dir>            SDK root prefixed onto every search\n");
     s.push_str("                               path (repeatable; ld64 pairing rule)\n");
     s.push_str("  @<response-file>             expand arguments from a file\n");
