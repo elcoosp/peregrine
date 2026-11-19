@@ -93,7 +93,10 @@ fn placed_literals(bytes: &[u8]) -> Vec<String> {
         }
     }
     let (off, size) = sect.expect("the cstring section places");
-    let (off, size) = (usize::try_from(off).unwrap_or(0), usize::try_from(size).unwrap_or(0));
+    let (off, size) = (
+        usize::try_from(off).unwrap_or(0),
+        usize::try_from(size).unwrap_or(0),
+    );
     bytes[off..off + size]
         .split(|&b| b == 0)
         .filter(|s| !s.is_empty())
