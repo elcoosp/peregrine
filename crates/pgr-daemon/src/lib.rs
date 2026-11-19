@@ -173,7 +173,12 @@ mod tests {
         // and v47 carries the order-file rank table (M81, the config
         // tail): a resident ordered link ranks the entries the client
         // named, a table the constructor refuses is a malformed request.
-        assert_eq!(crate::PROTO_VERSION, 47);
+        // v48 carries the liveness queries (M93, `why_live`): the
+        // session's own mark record renders the chains, the provenance
+        // tail carries them verbatim beside the M79 answers (a liveness
+        // ask beside a relocatable config is a malformed request — `-r`
+        // carries no strip).
+        assert_eq!(crate::PROTO_VERSION, 48);
     }
 
     #[test]
@@ -196,6 +201,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         assert!(req.blob_hashes().is_empty(), "no archives to hash");
         assert_ne!(content_hash(b"x"), [0u8; 32]);
