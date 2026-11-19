@@ -1,16 +1,17 @@
 //! M92 — the `-why_live <symbol>` driver surface: the liveness query
 //! joins the command line — repeatable, an empty name refuses (the
-//! flag-grammar convention), and the resident lanes refuse the flag
-//! (the wire's provenance tail v45 carries the `-why_export`/
-//! `-why_load` asks; the liveness ask joins at a later rung — the M56
-//! contract's own shape, the served rung a later milestone). A one-shot
-//! link under the flag completes with the chain answered (a misspelled
-//! name refuses the *run* with the misspelling named — a vacuous
-//! decision is never silently dropped), a link without `-dead_strip`
-//! refuses the query's premise (the strip is the question's subject),
-//! and the in-process incremental ladder answers from its own walk's
-//! record (the relink re-runs the full Passes 1–3, the record rides
-//! `LinkResult::liveness`).
+//! flag-grammar convention). The resident refusal this rung carried
+//! retired at M93 (the wire carries the ask; `m93_served_why_live.rs`
+//! pins the service), and the surface it named rides beside `-resident`
+//! here. The relocatable output refuses the flag (M93: `-r` carries no
+//! strip, the query has no honest answer — the pre-M93 silent-ignore
+//! closed with the served rung). A one-shot link under the flag
+//! completes with the chain answered (a misspelled name refuses the
+//! *run* with the misspelling named — a vacuous decision is never
+//! silently dropped), a link without `-dead_strip` refuses the query's
+//! premise (the strip is the question's subject), and the in-process
+//! incremental ladder answers from its own walk's record (the relink
+//! re-runs the full Passes 1–3, the record rides `LinkResult::liveness`).
 
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use std::path::{Path, PathBuf};
@@ -101,18 +102,30 @@ fn an_empty_name_refuses() {
 }
 
 #[test]
-fn the_resident_lane_refuses_the_flag() {
-    // The wire's provenance tail (v45) carries the why_export/why_load
-    // asks; the liveness ask joins at a later rung. The refusal is the
-    // M56 contract's own shape: the verdict names the rung, the fix
-    // names the lane.
+fn the_resident_lane_parses_the_flag() {
+    // M93: the resident refusal this rung carried retires when the wire
+    // (v48) carries the ask — the served rung (`m93_served_why_live.rs`)
+    // pins the service; here the surface rides.
     let dir = scratch("resident");
-    let err = parse(&dir, &["-why_live", "_greet", "-resident"])
-        .expect_err("the resident lane refuses the flag");
+    let o = parse(&dir, &["-why_live", "_greet", "-resident"]).expect("the flag rides");
+    assert!(o.resident, "the lane rides");
+    assert_eq!(o.why_live, vec!["_greet".to_string()]);
+}
+
+#[test]
+fn the_relocatable_output_refuses_the_flag() {
+    // M93: the served rung surfaces the reloc lane's silent-ignore gap —
+    // `-r` preserves input sections verbatim and carries no strip, so no
+    // record exists to walk and the query has no honest answer. The
+    // surface refuses the premise (the M56 contract's own shape: the
+    // verdict names the rung, the fix names the lane) instead of the
+    // pre-M93 silent-ignore.
+    let dir = scratch("reloc");
+    let err = parse(&dir, &["-why_live", "_greet", "-r"]).expect_err("the flag refuses");
     let rendered = err.to_string();
     assert!(
-        rendered.contains("resident"),
-        "the lane is named: {rendered}"
+        rendered.contains("-r"),
+        "the relocatable output is named: {rendered}"
     );
 }
 
