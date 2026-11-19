@@ -6,9 +6,10 @@
 //! wire v45 carries the rendered answers (the M62 convention — the wire
 //! never re-shapes). The client prints the served answers beside the
 //! resident link exactly as the cold lane prints its own; the fusion
-//! ladder keeps refusing (the replay is not the walk); a vacuous query
-//! is the `TAG_ERROR` the one-shot fallback reproduces — the same refusal
-//! either lane.
+//! ladder hands a query-bearing relink to the in-process ladder since
+//! M84 (the patch serves bytes, not answers — the in-process walk
+//! serves them); a vacuous query is the `TAG_ERROR` the one-shot
+//! fallback reproduces — the same refusal either lane.
 //!
 //! Gate matrix:
 //! * the served answers — a resident link asking both questions prints
@@ -19,8 +20,9 @@
 //! * the vacuous query — the misspelling refuses through the fallback
 //!   (the daemon's error is the fallback's cue, the cold refusal is the
 //!   answer);
-//! * the surface — the fusion lane (`-incremental`) keeps refusing the
-//!   queries (the ladder's replay cannot answer honestly).
+//! * the surface — a query-bearing fusion relink (`-incremental`)
+//!   hands over to the in-process ladder since M84, whose own walk
+//!   serves the answer (the run answers either way).
 
 use pgr_fixtures::{ArchiveBuilder, ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use std::os::unix::net::UnixStream;
@@ -234,13 +236,15 @@ fn the_vacuous_query_refuses_through_the_fallback() {
 }
 
 #[test]
-fn the_fusion_lane_still_refuses_the_queries() {
+fn the_fusion_lane_hands_the_queries_to_the_ladder() {
     let (dir, main, archive) = corpus("fusion");
     let sock = socket_for("fusion");
     start_daemon(&sock);
-    // `-incremental` beside `-resident` is the ladder lane: the replay
-    // cannot answer the query honestly (the surface's refusal, kept).
-    let (ok, _stdout, stderr) = run_pgr(
+    // M84: the fusion patch serves bytes, not answers (no wire tail
+    // carries the walk's Pass-2 product), so a query-bearing relink
+    // stands the resident attempt down to the in-process ladder — whose
+    // own walk serves the answer. The run answers either way.
+    let (ok, stdout, _stderr) = run_pgr(
         &dir,
         &main,
         &archive,
@@ -253,10 +257,10 @@ fn the_fusion_lane_still_refuses_the_queries() {
             "_greet",
         ],
     );
-    assert!(!ok, "the fusion lane refuses the query");
+    assert!(ok, "the fusion lane hands the query over and answers");
     assert!(
-        stderr.contains("-why_export") && stderr.contains("-incremental"),
-        "the refusal names both flags: {stderr}"
+        stdout.contains("_greet"),
+        "the in-process ladder answers the query: {stdout}"
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&sock);
