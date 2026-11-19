@@ -532,10 +532,11 @@ pub struct LinkRequest {
     /// segments/sections/symbols document the cold lane's `-map`
     /// writes), and the reply's IMAGE tail carries the rendered
     /// document verbatim — the client writes the file (the daemon never
-    /// touches the filesystem). The flag beside the `record` (the §7.3
-    /// ladder's replay) is a malformed request: the map reports the
-    /// full emit's layout, the replay patches the recorded plan in
-    /// place, so an answer would misreport the run.
+    /// touches the filesystem). M87: the flag rides the `record` too —
+    /// the §7.3 ladder's replay runs the full Passes 1–3, so its own
+    /// Pass-3 product renders the document the replay actually planned
+    /// (never the previous link's), the same tail carrying it either
+    /// lane.
     pub map: bool,
 }
 
@@ -619,7 +620,8 @@ impl LinkRequest {
             put_str(&mut b, name);
         }
         put_u8(&mut b, u8::from(self.why_load));
-        // M80 (v46): the link-map request flag.
+        // M80 (v46): the link-map request flag (M87 rides it beside the
+        // record — the decode gates no longer refuse the shape).
         put_u8(&mut b, u8::from(self.map));
         b
     }
@@ -706,12 +708,13 @@ impl LinkRequest {
             )));
         }
         let why_load = r.u8()? != 0;
-        // M80 (v46): the link-map request flag (see encode). A map
-        // beside the `record` is a malformed request — the ladder's
-        // replay patches the recorded plan in place, and the map
-        // reports the full emit's layout (the fusion lane's own
-        // refusal, enforced at the wire so no caller can plan the
-        // shape either).
+        // M80 (v46): the link-map request flag (see encode). M87: the
+        // flag rides the `record` too — the ladder's replay runs the
+        // full Passes 1–3, so its own Pass-3 product renders the
+        // document the replay actually planned; the tail answers either
+        // lane, and the refusal the M80 arm carried is retired with the
+        // outdated premise (an old server's `ERROR` is the reply the
+        // client's stand-down already speaks — honest degradation).
         let map = r.u8()? != 0;
         let queries_asked = !why_export.is_empty() || why_load;
         if queries_asked && record.is_some() {
@@ -720,14 +723,6 @@ impl LinkRequest {
                 "the request asks provenance beside a record: the §7.3 ladder's \
                  replay cannot answer the query honestly (the Pass-2 product is \
                  the record's, not the walk's)",
-            )));
-        }
-        if map && record.is_some() {
-            return Err(DecodeError::Malformed(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the request asks the link map beside a record: the §7.3 ladder's \
-                 replay patches the recorded plan in place, and the map reports \
-                 the full emit's layout",
             )));
         }
         // M83: the relocatable shape's edges at the wire. The object
@@ -5096,22 +5091,18 @@ mod tests {
     }
 
     #[test]
-    fn the_map_request_beside_a_record_refuses() {
-        // The ladder's replay cannot answer the map honestly: the map
-        // reports the full emit's layout, the fusion lane patches the
-        // recorded plan in place — the wire refuses the shape so no
-        // caller can plan it either (the M79 provenance rule, mirrored).
+    fn the_map_request_beside_a_record_serves_now() {
+        // M87: the map renders from the ladder's own walk — the session's
+        // relink runs the full Passes 1–3 (`link_from_objects`), so
+        // `result.layout` is the walk's Pass-3 product and the v46 tail
+        // carries the document verbatim (the M80 convention — the wire
+        // never re-shapes the face the client writes). The decode side
+        // admits the shape; the reply's tail answers it.
         let mut req = map_request();
         req.record = Some(vec![1, 2, 3]);
-        let err = LinkRequest::decode(&req.encode()).unwrap_err();
-        let DecodeError::Malformed(e) = err else {
-            panic!("the map-beside-record shape is malformed, got {err:?}");
-        };
-        let text = e.to_string();
-        assert!(
-            text.contains("map") && text.contains("record"),
-            "the refusal names the shape: {text}"
-        );
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        assert!(back.map, "the map ask rides the ladder's request");
+        assert!(back.record.is_some(), "the record rides beside it");
     }
 
     /// A served-shape map document: the render the cold lane's `-map`
