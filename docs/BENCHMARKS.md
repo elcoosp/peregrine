@@ -170,6 +170,7 @@ cargo bench -p pgr-verify --bench baseline
 cargo bench -p pgr-verify --bench sarif
 cargo bench -p pgr-verify --bench universal
 cargo bench -p pgr-verify --bench universal_checks
+cargo bench -p pgr-verify --bench init_offsets
 # the randomized edit gate (CI subsets: 80 engine / 24 driver steps)
 PGR_RANDOMIZED_STEPS=2000 cargo test -p pgr-emit --release --test incremental -- randomized
 ```
@@ -893,3 +894,18 @@ incremental requirement) · rig-bound: S1 writer matrix, S4 P-core sizing, PGO, 
 ## The order-surface groups (M90/M91)
 
 The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` groups (`cargo bench -p pgr-core --bench order`): `sectorder_compose/2|8` — the composition's own price (building the one rank table from N parsed sources, the cross-source duplicate walk plus the merged maps, over 128-entry sources at the per-subsystem file scale); `sectorder_link/layout/composed` — the composed table's link, the ranked shape the M11 `ranked` group gates (the compose is paid once per link, before Pass 3); `sectorder_cstring/layout/{no_order,ranked}` — the M91 cstring rank pass beside the plain D4 merge over 32 objects × 16 literals (the lookup is one linear probe per piece over the small rank vector, the sort the same stable pass the symbol ranks ride). All dev-sandbox numbers; the hardware gates own the comparable numbers.
+
+## The verifier's registry rungs (M94/M95)
+
+- `init_offsets` (`cargo bench -p pgr-verify --bench init_offsets`, M94): the initializer-surface
+  family's price over one at-floor executable — `honest` (the 64-entry `__init_offsets`
+  u32-offset section, every target mapped) **447 ns**, `broken_entry` (the finding path: one
+  target no segment maps) **646 ns**, `pointer_form` (the classic `__mod_init_func` stride
+  read) **338 ns**, beside the whole-image pass over the honest image **50.7 µs** — the
+  family is ~0.9 % of the pass, a per-section stride read plus a per-entry segment lookup
+  (dev-sandbox medians, 2-core KVM rig; the hardware gates own the comparable numbers).
+- `sarif_universal` (the `sarif` bench's M95 group, `cargo bench -p pgr-verify --bench sarif`):
+  the container face's render price — `render/2` (two-slice verdict) **6.8 µs**,
+  `render/4` (four-slice verdict) **13.0 µs**, beside one slice's single-image render of
+  the same 8-issue report **3.6 µs** — linear in the slices, the union rule table paid once
+  per run's document (dev-sandbox medians).
