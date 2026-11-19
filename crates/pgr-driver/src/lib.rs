@@ -2311,34 +2311,6 @@ fn stand_down_reason(source: &std::io::Error) -> String {
 /// cycle).
 fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt> {
     let _span = tracing::debug_span!("resident_relink", output = opts.output.as_str()).entered();
-    // M84: the provenance queries read the relink's own walk — and the
-    // fusion patch serves bytes, not answers (no wire tail carries the
-    // walk's Pass-2 product; the session holds it, the client cannot
-    // re-derive it from the tiles it replays). The honest lane is the
-    // in-process ladder, whose own walk serves the answers either tier:
-    // the resident attempt stands down, the next rung in order runs (the
-    // §7.2 transparency contract — the handover is named, never a
-    // silently unanswered question).
-    if !opts.why_export.is_empty() || opts.why_load {
-        return Err(ResidentAttempt::StandDown(
-            "the provenance queries read the relink's own walk; the fusion patch serves \
-             bytes, not answers — the in-process relink serves them"
-                .into(),
-        ));
-    }
-    // M85: the read set is the client's Pass 0 — the session's reads live
-    // inside the daemon and the wire carries no read set, so a
-    // record-bearing relink hands over to the in-process ladder, whose
-    // own Pass 0 records the files it mapped (the same stand-down
-    // contract: the handover is named, never a record that misreports
-    // the run).
-    if opts.dependency_info.is_some() {
-        return Err(ResidentAttempt::StandDown(
-            "the dependency record names the files the relink's Pass 0 read; the fusion \
-             ladder's reads live inside the daemon — the in-process relink records its own"
-                .into(),
-        ));
-    }
     let record_bytes = std::fs::read(record_path(opts))
         .map_err(|source| ResidentAttempt::StandDown(stand_down_reason(&source)))?;
     if pgr_emit::incremental::LinkRecord::decode(&record_bytes).is_none() {
@@ -2386,6 +2358,14 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
     // an old server's refusal is the ERROR reply the stand-down below
     // already speaks — the in-process ladder answers either way).
     job.request.map = opts.map_path.is_some();
+    // M88: the provenance queries ride the request — the session's
+    // ladder runs the full Passes 1–3, so its own Pass-2 product renders
+    // the M56/M57 answers the v45 tail carries verbatim (the M79 face
+    // over the replay lane; a vacuous query's ERROR is the same
+    // stand-down cue — the in-process ladder names the misspelling
+    // either way).
+    job.request.why_export.clone_from(&opts.why_export);
+    job.request.why_load = opts.why_load;
     let socket = opts
         .resident_socket
         .clone()
@@ -2482,6 +2462,29 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
             path: path.clone(),
             source,
         })?;
+    }
+    // M89: the dependency record writes beside the fusion relink — the
+    // cycle's reads are the client's own Pass 0 (`prepare_link`, the
+    // job-build mapping above; the daemon reads no files at all — the
+    // §7.2 contract — so the reads the M85 stand-down worried about
+    // never happen). The record is the same read-set-derived document
+    // the in-process ladder writes over the same cycle (the M60 rule:
+    // every lane that reads the files records them), the output rows
+    // join at the write site, and the map landed above so the record's
+    // output row names a sidecar that exists (the one-shot's own
+    // order — the map, then the record).
+    write_dependency_record(opts, &prepared.deps).map_err(ResidentAttempt::Error)?;
+    // M88: the served answers print beside the fusion relink — the
+    // session's own renders, verbatim (the wire never re-shapes the face
+    // the client prints; the vacuous query is the session's `ERROR` —
+    // the stand-down above refuses with the same message).
+    if let Some(answers) = &served.provenance {
+        for export in &answers.exports {
+            print!("{}", export.render);
+        }
+        if let Some(loads) = &answers.loads {
+            print!("{loads}");
+        }
     }
     // M66 (v42 in service): the served faces print/write beside the
     // fusion relink — the report is the session's observed ladder run (no
