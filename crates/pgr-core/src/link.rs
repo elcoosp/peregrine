@@ -115,6 +115,15 @@ pub struct LinkResult {
     /// record-side half of the M9 resolve wiring (the link record's v5
     /// section). `None` on every clean link.
     pub resolve_snapshot: Option<crate::resolve::ResolutionSnapshot>,
+    /// The M92 liveness record: the M5 mark phase's first-marker table
+    /// ([`crate::deadstrip::LivenessIndex`]), the `-why_live` query's
+    /// input — the mark recorded, from data it already had, the first
+    /// way each atom went live (the root that named it, or the
+    /// reference that reached it). `Some` exactly when the strip ran;
+    /// `None` otherwise (a link without `-dead_strip` has no strip to
+    /// explain). The record never feeds a pass: the layout is planned
+    /// before the extraction, the plan and the record cannot disagree.
+    pub liveness: Option<crate::deadstrip::LivenessIndex>,
 }
 
 /// Runs Passes 1–3 over the inputs, producing the emit plan (M4 default:
@@ -424,7 +433,11 @@ pub fn link_from_objects_observed(
 
     // ---- M5/D12 liveness, then M6 ICF over the live text atoms --------------
     let live_started = Instant::now();
-    let live = crate::deadstrip::compute(&objects, &res, &interner, cfg);
+    let mut live = crate::deadstrip::compute(&objects, &res, &interner, cfg);
+    // M92: the mark's why-record leaves the live set before the passes
+    // consume it (`std::mem::take` — the layout plans from the same
+    // grids it always did); the query reads it off the result.
+    let liveness = live.take_liveness();
     emit_phase(
         &mut observer,
         Phase::Liveness,
@@ -463,6 +476,7 @@ pub fn link_from_objects_observed(
         resolution: res,
         loads,
         resolve_snapshot,
+        liveness,
     })
 }
 
