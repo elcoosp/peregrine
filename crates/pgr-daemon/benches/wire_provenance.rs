@@ -33,6 +33,7 @@ fn one_query() -> ServedProvenance {
              defines: _greet\n  opens: \n"
                 .to_string(),
         ),
+        lives: Vec::new(),
     }
 }
 
@@ -50,6 +51,7 @@ fn eight_queries() -> ServedProvenance {
             })
             .collect(),
         loads: Some(one_query().loads.expect("the report rides")),
+        lives: Vec::new(),
     }
 }
 
