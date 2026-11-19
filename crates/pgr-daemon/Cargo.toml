@@ -80,6 +80,15 @@ harness = false
 name = "wire_order"
 harness = false
 
+# The M93 liveness bench: the served chains' encode/decode price (the
+# renders ride the provenance tail verbatim — count-prefixed entries
+# beside an image that carries pages) and the request-side liveness
+# names. Registered explicitly — the same M34/M61 pathology, healed
+# here like the entries before it.
+[[bench]]
+name = "wire_liveness"
+harness = false
+
 [[bin]]
 name = "pgrd"
 path = "src/main.rs"
