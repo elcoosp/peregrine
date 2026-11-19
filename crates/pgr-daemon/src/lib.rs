@@ -168,11 +168,11 @@ mod tests {
         // the tail carries the renders verbatim — v46 carries the
         // link-map ask (M80, `map`): the session's own walk renders the
         // placed image's report, the tail carries the document verbatim
-        // (the client writes the file; the map beside the `record`
-        // refuses at the wire, the replay is not the walk) — and v47
-        // carries the order-file rank table (M81, the config tail): a
-        // resident ordered link ranks the entries the client named, a
-        // table the constructor refuses is a malformed request.
+        // (the client writes the file; M87 rides it beside the `record`
+        // too — the ladder's replay renders its own walk's document) —
+        // and v47 carries the order-file rank table (M81, the config
+        // tail): a resident ordered link ranks the entries the client
+        // named, a table the constructor refuses is a malformed request.
         assert_eq!(crate::PROTO_VERSION, 47);
     }
 
