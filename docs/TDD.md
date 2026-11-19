@@ -2364,3 +2364,93 @@ object gate (`a_relocatable_request_serves_the_object_shape`), the
 `resident` bench's reloc group (the object shape's session cost beside
 the one-shot's), and the `resident_reloc_link` consumer example (the
 parity gate beside the two-step relink).
+
+---
+
+### 33 The incremental ladder's provenance queries (M84)
+
+The M56/M57 lane contract refused `-why_export`/`-why_load` beside
+`-incremental` because "the ladder's replay product is the record's, not
+the walk's" — a verdict the M9 GA rung outdated. The relink is not a
+replay of recorded bytes: `incremental_relink` re-parses the inputs
+(`prepare_link` — the read set is real) and runs the full Passes 1–3
+(`pgr_core::link_cached`), so `LinkResult::resolution` and
+`LinkResult::loads` are the walk's products, in the relink's own memory,
+and the driver never asked. M84 flips the refusal to service the M79 way.
+Design decisions:
+
+1. **The ladder's walk is the answer's source.** The queries serve from
+   the relink's own `result` at both success exits — the patched exit
+   and the untouched one (the walk ran; the plan is the walk's product,
+   so an untouched relink answers too). The same faces the one-shot
+   prints ([`print_why_export`], the `LoadReport` render) — one question,
+   one answer, either lane; a vacuous query refuses the relink exactly
+   as it refuses the cold link (the misspelling named, never silently
+   empty), with the faces ordered after `store_record` so a refusal
+   leaves the next relink re-planning from the renewed record.
+2. **The fusion lane keeps its edge, the run keeps its answer.** The
+   session's patch serves bytes, not answers: no wire tail carries the
+   walk's Pass-2 product, and the client cannot re-derive it from the
+   tiles it replays. A query beside `-resident -incremental` stands the
+   resident attempt down (the §7.2 transparency contract — the reason
+   names the handover) to the in-process ladder, whose own walk serves
+   the answers. The wire moves when a provenance tail is designed, not
+   by smuggling an unshaped render through the IMAGE reply.
+3. **The premise's correction is the docs' flip.** The knob contracts
+   (`opts.rs`), the usage rows, the README's Queries row, the M79 row's
+   "the fusion lane keeps refusing" clause and the COMPAT matrix rows
+   name the ladder as a serving lane now; the surface tests that pinned
+   the refusal (`m56_why_export`, `m57_why_load`) flip to pin the
+   service. `OptsError::WhyExportConflict` retires — dead the day the
+   gate flipped.
+
+Supporting pieces: the driver's flipped gate (`opts.rs` — the block and
+its variant deleted), the ladder's answer seam (`serve_relink_provenance`
+at both relink exits), the fusion stand-down (`resident_relink`'s named
+reason), the `m84_incremental_provenance.rs` gate matrix (the surface,
+the one-shot parity, the pulled member, the vacuous refusal, the
+untouched answer, the fusion handover), the `incremental` bench's
+provenance group (the queries' price beside the plain relink), and the
+`incremental_provenance` consumer example (the capture → edit → queried
+relink walk beside the vacuous refusal).
+
+---
+
+### 34 The incremental ladder's dependency record (M85)
+
+The M60 lane contract refused `-dependency_info` beside `-incremental`
+because "the relink patches the recorded plan and re-reads no input
+file" — the same outdated premise M84 corrected. The relink's Pass 0 is
+`prepare_link`, the one-shot's own front half: it reads every input it
+maps (the re-parse is the digest source the propagation gate compares)
+and records the read set while the reads happen (`PreparedLink::deps`).
+M85 flips the refusal to service. Design decisions:
+
+1. **The record stays read-set-derived — the ladder's read set is
+   real.** `serve_relink_faces` writes [`PreparedLink::deps`] at both
+   relink exits (the patched exit and the untouched one — both rode the
+   mapping): the sidecar the relink rewrites names the files the ladder
+   actually read, and the output row joins at the write site. Never the
+   previous link's list, never a post-hoc reconstruction — the M60 rule
+   holds on every lane.
+2. **The fusion lane hands over.** The session's reads live inside the
+   daemon and the wire carries no read set, so a record-bearing relink
+   stands the resident attempt down (the named reason) to the
+   in-process ladder, whose own Pass 0 records the files it mapped.
+   The client-side list the resident *full* link writes from is a
+   different face (the request's own list) — the fusion patch writes
+   no record at all rather than one that misreports the run.
+3. **The gate and its variant retire.** `OptsError::DependencyInfoConflict`
+   is dead the day the gate flips; the `m60_dependency_info.rs` surface
+   test pins the service, `m85_incremental_dep_info.rs` gates the
+   ladder's record (the read set, the output row, the untouched exit,
+   the fusion handover).
+
+Supporting pieces: the driver's flipped gate (`opts.rs` — the block and
+its variant deleted), the ladder's record seam (`serve_relink_faces`'s
+write at both exits), the fusion stand-down (`resident_relink`'s named
+reason), the `m85_incremental_dep_info.rs` gate matrix, the
+`incremental` bench's record group (the sidecar's render/write price
+beside the plain relink), and the `incremental_dep_info` consumer
+example (the capture → edit → record-bearing relink beside the decoded
+rows).
