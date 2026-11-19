@@ -2311,6 +2311,34 @@ fn stand_down_reason(source: &std::io::Error) -> String {
 /// cycle).
 fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt> {
     let _span = tracing::debug_span!("resident_relink", output = opts.output.as_str()).entered();
+    // M84: the provenance queries read the relink's own walk — and the
+    // fusion patch serves bytes, not answers (no wire tail carries the
+    // walk's Pass-2 product; the session holds it, the client cannot
+    // re-derive it from the tiles it replays). The honest lane is the
+    // in-process ladder, whose own walk serves the answers either tier:
+    // the resident attempt stands down, the next rung in order runs (the
+    // §7.2 transparency contract — the handover is named, never a
+    // silently unanswered question).
+    if !opts.why_export.is_empty() || opts.why_load {
+        return Err(ResidentAttempt::StandDown(
+            "the provenance queries read the relink's own walk; the fusion patch serves \
+             bytes, not answers — the in-process relink serves them"
+                .into(),
+        ));
+    }
+    // M85: the read set is the client's Pass 0 — the session's reads live
+    // inside the daemon and the wire carries no read set, so a
+    // record-bearing relink hands over to the in-process ladder, whose
+    // own Pass 0 records the files it mapped (the same stand-down
+    // contract: the handover is named, never a record that misreports
+    // the run).
+    if opts.dependency_info.is_some() {
+        return Err(ResidentAttempt::StandDown(
+            "the dependency record names the files the relink's Pass 0 read; the fusion \
+             ladder's reads live inside the daemon — the in-process relink records its own"
+                .into(),
+        ));
+    }
     let record_bytes = std::fs::read(record_path(opts))
         .map_err(|source| ResidentAttempt::StandDown(stand_down_reason(&source)))?;
     if pgr_emit::incremental::LinkRecord::decode(&record_bytes).is_none() {
@@ -2634,6 +2662,10 @@ fn incremental_relink(
     // relink's job is done), refresh the record, report the no-op.
     if plan.is_untouched() {
         store_record(opts, &record);
+        // M84: the answers ride the relink's own walk even when nothing
+        // patched — the walk ran (the plan is the walk's product), and a
+        // queried run answers from it.
+        serve_relink_faces(opts, &prepared, &result)?;
         return Ok(LinkOutcome {
             output: opts.output.clone(),
             file_size: record.file_size,
@@ -2750,6 +2782,10 @@ fn incremental_relink(
     }
 
     store_record(opts, &new_record);
+    // M84: the answers ride the relink's own walk — the same faces the
+    // one-shot prints, over the walk product this relink just patched
+    // from.
+    serve_relink_faces(opts, &prepared, &result)?;
     Ok(LinkOutcome {
         output: opts.output.clone(),
         // The patched state's size — the relayout tier grows the image, so
@@ -2762,6 +2798,52 @@ fn incremental_relink(
         transport: None,
         verify: None,
     })
+}
+
+/// The ladder's own read faces (M84, M85), served at both relink exits —
+/// the patched exit and the untouched one, where the walk ran and
+/// nothing patched:
+///
+/// * `-dependency_info` writes [`PreparedLink::deps`] — the M60 record
+///   Pass 0 built while the relink's mapping read the inputs (the same
+///   recording `prepare_link` runs for the one-shot; the re-parse is the
+///   digest source, so the read set is real). The sidecar the relink
+///   rewrites names the files the ladder actually read, and the output
+///   row joins at the write site — never the previous link's list.
+/// * `-why_export` renders [`pgr_core::LinkResult::resolution`] — the
+///   relink's own Pass-2 product, the same face [`print_why_export`]
+///   serves the one-shot. A vacuous query refuses the relink exactly as
+///   it refuses the cold link (the misspelling named, never silently
+///   empty).
+/// * `-why_load` renders [`pgr_core::LinkResult::loads`] — the pull
+///   record the relink's own walk collected (the re-pull rode the same
+///   fixpoint), not the previous link's.
+///
+/// The faces order after `store_record`: a refused face (a vacuous
+/// query) leaves the run's record already renewed, so the next relink
+/// re-plans from the fresh state (the one-shot's own order — the write,
+/// then the queries).
+///
+/// # Errors
+/// [`RelinkAttempt::Error`] on a filesystem failure writing the record
+/// or a vacuous `-why_export` query.
+fn serve_relink_faces(
+    opts: &opts::Options,
+    prepared: &PreparedLink,
+    result: &pgr_core::LinkResult,
+) -> Result<(), RelinkAttempt> {
+    write_dependency_record(opts, &prepared.deps).map_err(RelinkAttempt::Error)?;
+    print_why_export(
+        &result.objects,
+        &result.resolution,
+        &result.interner,
+        &opts.why_export,
+    )
+    .map_err(RelinkAttempt::Error)?;
+    if opts.why_load {
+        print!("{}", result.loads.render());
+    }
+    Ok(())
 }
 
 /// Emits one ladder rung through the observer slot (M65 — `None` = the
