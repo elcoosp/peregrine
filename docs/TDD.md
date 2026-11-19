@@ -2650,3 +2650,8 @@ gate matrix, the `resident` bench's fusion record group (the sidecar's
 render/write price beside the plain relink), and the
 `fusion_dep_info_link` consumer example (the capture → edit →
 record-bearing relink beside the decoded rows).
+
+
+## The order-surface records (M90/M91)
+
+**M90 — `-sectorder` rides the rank seam.** The classification mirrors ld64's `parseSectionOrderFile` (the `__TEXT,__cstring` strcmp pair, the `__literal` 9-char prefix, everything else the rank append — "ignore section information and append all symbol names to global order file"). The order sources compose into ONE table in command-line order (`SymbolOrder::compose`, the cross-source duplicate refused with both sources and lines named); the composed table consumes the v47 wire and the ladder exactly as the single file's table did. **M91 — the cstring mode.** The literal contents rank the `S_CSTRING_LITERALS` buckets through the D4 canonical sort (a stable pass keyed on the escape-decoded content, the NUL exclusive; the remap untouched — the placed addresses follow the new piece order); the table crosses the wire as v48 (a rebuild-refusing table is a malformed request). The escape set follows `cstringSymbolName` with two named divergences: `\'` decodes as the quote (ld64 maps it to `\r`), and blank lines skip (ld64 pushes an empty entry that ranks nothing).
