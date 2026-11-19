@@ -8,10 +8,9 @@
 //! probed-but-missing `-l` candidate as `0x11`, and the output (the
 //! `-map` beside it) as `0x40`. The record is the link's read set —
 //! never plan-derived — so it composes with every lane that actually
-//! reads the files (the resident lane's client-side list included) and
-//! refuses the one that does not (`-incremental`: the relink patches
-//! the recorded plan; the input files are not re-read, so a record
-//! naming them would misreport the run).
+//! reads the files (the resident lane's client-side list included) and —
+//! since M85 — the incremental ladder (the relink's Pass 0 re-reads
+//! every input it maps and records the read set while the reads happen).
 //!
 //! Gate matrix:
 //! * the record — a real link writes the file; the parsed rows name the
@@ -21,8 +20,9 @@
 //!   (the fallback keeps the one link's record);
 //! * the parity — a record-writing link plans the identical image the
 //!   plain link does (a sidecar never moves a byte);
-//! * the refusals — `-incremental` refuses with the fix; an empty path
-//!   refuses at parse.
+//! * the refusals — an empty path refuses at parse; the M60
+//!   `-incremental` refusal flipped to service in M85 (`m85_incremental_dep_info.rs`
+//!   gates the ladder's own record).
 
 use pgr_core::dep_info::{DependencyRecord, INPUT, NOT_FOUND, OUTPUT};
 use pgr_fixtures::{ArchiveBuilder, ObjectBuilder, ObjectSection, ObjectSymbol};
@@ -246,7 +246,11 @@ fn the_map_rides_the_output_opcode() {
 // ---- the lanes ----------------------------------------------------------------
 
 #[test]
-fn the_incremental_lane_refuses_the_record() {
+fn the_incremental_lane_serves_the_record() {
+    // M85: the relink's Pass 0 re-reads every input it maps (the
+    // re-parse is the digest source) and records the read set while the
+    // reads happen, so the M60 incremental refusal flipped to service —
+    // the record rides either lane.
     let dir = scratch("refuse");
     let deps = dir.join("app.deps");
     let mut argv: Vec<std::ffi::OsString> = vec![
@@ -257,18 +261,10 @@ fn the_incremental_lane_refuses_the_record() {
         deps.as_os_str().to_os_string(),
     ];
     argv.push(std::ffi::OsString::from("x.o"));
-    let err = pgr_driver::opts::parse(&argv).expect_err("the lane refuses");
-    let rendered = err.to_string();
+    let o = pgr_driver::opts::parse(&argv).expect("the lane serves the record");
     assert!(
-        rendered.contains("-dependency_info") && rendered.contains("-incremental"),
-        "the conflict names both flags: {rendered}"
-    );
-    // The miette help names the fix.
-    let report = miette::Report::new(err);
-    let text = format!("{report:?}");
-    assert!(
-        text.contains("drop -dependency_info or -incremental"),
-        "the help names the fix: {text}"
+        o.incremental && o.dependency_info.is_some(),
+        "the record rides"
     );
 }
 
