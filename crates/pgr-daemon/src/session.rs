@@ -85,6 +85,13 @@ pub enum SessionError {
     /// reproduces (the same refusal either lane).
     #[error(transparent)]
     Provenance(#[from] pgr_core::provenance::ProvenanceError),
+    /// A liveness query the link's own record refused (M93): the same
+    /// vacuous decision — a name nothing interned, a link that never
+    /// carried `-dead_strip` — is the cold lane's refusal, surfaced as
+    /// the `ERROR` the client's one-shot fallback reproduces (the same
+    /// refusal either lane).
+    #[error(transparent)]
+    Live(#[from] pgr_core::why_live::WhyLiveError),
 }
 
 /// One cached POI frame: the encoded Pass 1 product plus its last-use
@@ -395,6 +402,9 @@ impl ResidentSession {
         // beside `-r`, so the driver never asks — no wire caller can
         // plan the shape either); the provenance queries ride (the
         // object's Pass-2 product is the same arena the query reads).
+        // M93: the liveness ask joins the refused set — `-r` preserves
+        // input sections verbatim and carries no strip, so no mark
+        // record exists to walk.
         if req.config.filetype == pgr_core::layout::OutputType::Relocatable {
             if req.record.is_some()
                 || req.prev_output.is_some()
@@ -402,10 +412,11 @@ impl ResidentSession {
                 || req.tiles
                 || req.verify
                 || req.map
+                || !req.why_live.is_empty()
             {
                 return Err(SessionError::Link(pgr_core::LinkError::Layout {
                     message: "the relocatable output has no ladder shape: no record, no tiles, \
-                              no audit, no verify, no map beside -r"
+                              no audit, no verify, no map, no liveness ask beside -r"
                         .into(),
                 }));
             }
@@ -569,8 +580,11 @@ impl ResidentSession {
     /// the link's own Pass-2 product — one `-why_export` answer per name
     /// in flag order (a vacuous query refuses with the misspelling
     /// named), the `-why_load` report beside them when the flag asked.
-    /// `None` when the request asked nothing (the pre-M79 shape — an
-    /// unasked query crosses nothing).
+    /// M93: the `-why_live` chains beside them — the mark phase's own
+    /// record walked from the queried definition back to its root (a
+    /// vacuous query refuses the same way). `None` when the request
+    /// asked nothing (the pre-M79 shape — an unasked query crosses
+    /// nothing).
     fn serve_provenance(
         req: &crate::protocol::LinkRequest,
         result: &pgr_core::LinkResult,
@@ -581,6 +595,7 @@ impl ResidentSession {
             &result.resolution,
             &result.interner,
             &result.loads,
+            result.liveness.as_ref(),
         )
     }
 
@@ -588,14 +603,19 @@ impl ResidentSession {
     /// relocatable walk (M83) carries the same members on
     /// [`pgr_core::link_reloc`]'s own product, so the queries read the
     /// object's Pass-2 arena the way the cold lane's `-why_export` does.
+    /// M93: the liveness chains read the walk's own mark record — the
+    /// relocatable shape carries none (`-r` preserves input sections
+    /// verbatim and refuses the strip), and the wire refuses the ask
+    /// beside `-r` before it reaches here.
     fn serve_provenance_from(
         req: &crate::protocol::LinkRequest,
         objects: &[pgr_core::object::InputObject],
         resolution: &pgr_core::resolve::Resolution,
         interner: &pgr_core::Interner,
         loads: &pgr_core::provenance::LoadReport,
+        liveness: Option<&pgr_core::deadstrip::LivenessIndex>,
     ) -> Result<Option<crate::protocol::ServedProvenance>, SessionError> {
-        if req.why_export.is_empty() && !req.why_load {
+        if req.why_export.is_empty() && !req.why_load && req.why_live.is_empty() {
             return Ok(None);
         }
         let index = pgr_core::ReverseIndex::build_all(objects);
@@ -608,7 +628,24 @@ impl ResidentSession {
             });
         }
         let loads = req.why_load.then(|| loads.render());
-        Ok(Some(crate::protocol::ServedProvenance { exports, loads }))
+        let mut lives = Vec::with_capacity(req.why_live.len());
+        for name in &req.why_live {
+            let Some(record) = liveness else {
+                return Err(
+                    pgr_core::why_live::WhyLiveError::NotStripped { name: name.clone() }.into(),
+                );
+            };
+            let answer = pgr_core::explain_live(record, objects, resolution, interner, name)?;
+            lives.push(crate::protocol::ServedLive {
+                name: name.clone(),
+                render: answer.render(),
+            });
+        }
+        Ok(Some(crate::protocol::ServedProvenance {
+            exports,
+            loads,
+            lives,
+        }))
     }
 
     /// Assembles the request's archives over the session's blobs — the
@@ -720,6 +757,10 @@ impl ResidentSession {
             &linked.resolution,
             &linked.interner,
             &linked.loads,
+            // The relocatable walk carries no mark record (`-r` refuses
+            // the strip) — and the wire refuses the liveness ask beside
+            // `-r` before it reaches here (the M83 replay-face rule).
+            None,
         )?;
         Ok(ServedLink {
             image,
@@ -949,6 +990,7 @@ impl ResidentSession {
                 &result.resolution,
                 &result.interner,
                 &result.loads,
+                result.liveness.as_ref(),
             )
             .map_err(RelinkDecline::Error)?;
             return Ok(ServedLink {
@@ -1101,6 +1143,7 @@ impl ResidentSession {
             &result.resolution,
             &result.interner,
             &result.loads,
+            result.liveness.as_ref(),
         )
         .map_err(RelinkDecline::Error)?;
         Ok(ServedLink {
@@ -1262,6 +1305,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         (req.clone(), req.blob_hashes())
     }
@@ -1466,6 +1510,7 @@ mod tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1517,6 +1562,7 @@ mod tests {
             why_export: vec!["_greet".to_string()],
             why_load: true,
             map: false,
+            why_live: Vec::new(),
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1584,6 +1630,7 @@ mod tests {
             why_export: vec!["_nope".to_string()],
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let mut session = ResidentSession::default();
         session.store_blob(&content_hash(&hello), hello).unwrap();
@@ -1592,6 +1639,166 @@ mod tests {
         assert!(
             err.to_string().contains("_nope"),
             "the refusal names the misspelling: {err}"
+        );
+    }
+
+    #[test]
+    fn the_served_liveness_answers_ride_the_link() {
+        // M93 (v48): a `-why_live` query over a `-dead_strip` link serves
+        // the chain the mark phase's own record walks — the queried
+        // definition's keeper rows and the root decision, rendered the
+        // face the cold lane prints (`pgr_core::why_live`); an unasked
+        // query rides nothing.
+        let hello = hello_main_only();
+        let greet = greet();
+        let req = LinkRequest {
+            config: LinkConfig {
+                ident: "session-liveness".into(),
+                dead_strip: true,
+                ..LinkConfig::default()
+            },
+            force_load: Vec::new(),
+            inputs: vec![
+                InputEntry {
+                    name: "hello.o".into(),
+                    hash: content_hash(&hello),
+                },
+                InputEntry {
+                    name: "greet.o".into(),
+                    hash: content_hash(&greet),
+                },
+            ],
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: vec!["_greet".to_string()],
+        };
+        let mut session = ResidentSession::default();
+        session.store_blob(&content_hash(&hello), hello).unwrap();
+        session.store_blob(&content_hash(&greet), greet).unwrap();
+        let served = session.link(&req).unwrap();
+        let prov = served
+            .provenance
+            .expect("the asked liveness query serves its answer");
+        assert_eq!(prov.lives.len(), 1, "one answer per query, in order");
+        assert_eq!(prov.lives[0].name, "_greet");
+        assert!(
+            prov.lives[0].render.contains("_greet: kept by the strip"),
+            "the chain states the verdict: {}",
+            prov.lives[0].render
+        );
+        assert!(
+            prov.lives[0].render.contains("hello.o"),
+            "the chain names the keeper's file: {}",
+            prov.lives[0].render
+        );
+        // An unasked query rides nothing (the pre-M93 shape).
+        let mut quiet = req.clone();
+        quiet.why_live.clear();
+        let quiet_served = session.link(&quiet).unwrap();
+        assert!(quiet_served.provenance.is_none());
+    }
+
+    #[test]
+    fn a_vacuous_liveness_query_refuses_the_served_link() {
+        // The vacuous liveness decision is the cold lane's own refusal
+        // (the misspelling named, never silently empty): the session
+        // errors, the reply is the TAG_ERROR the client's one-shot
+        // fallback reproduces — the same refusal either lane.
+        let hello = hello_main_only();
+        let greet = greet();
+        let req = LinkRequest {
+            config: LinkConfig {
+                ident: "session-liveness-miss".into(),
+                dead_strip: true,
+                ..LinkConfig::default()
+            },
+            force_load: Vec::new(),
+            inputs: vec![
+                InputEntry {
+                    name: "hello.o".into(),
+                    hash: content_hash(&hello),
+                },
+                InputEntry {
+                    name: "greet.o".into(),
+                    hash: content_hash(&greet),
+                },
+            ],
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: vec!["_nope".to_string()],
+        };
+        let mut session = ResidentSession::default();
+        session.store_blob(&content_hash(&hello), hello).unwrap();
+        session.store_blob(&content_hash(&greet), greet).unwrap();
+        let err = session.link(&req).unwrap_err();
+        assert!(
+            err.to_string().contains("_nope"),
+            "the refusal names the misspelling: {err}"
+        );
+    }
+
+    #[test]
+    fn the_liveness_ask_refuses_the_relocatable_shape() {
+        // M93: `-r` preserves input sections verbatim and carries no
+        // strip — the query has no honest answer (no mark record to
+        // walk), and the shape refuses the ask beside `-r` like the
+        // replay faces (the surface refuses the knob, so the driver
+        // never asks; no wire caller plans the shape either).
+        let hello = hello_main_only();
+        let req = LinkRequest {
+            config: LinkConfig {
+                ident: "session-liveness-reloc".into(),
+                filetype: pgr_core::layout::OutputType::Relocatable,
+                ..LinkConfig::default()
+            },
+            force_load: Vec::new(),
+            inputs: vec![InputEntry {
+                name: "hello.o".into(),
+                hash: content_hash(&hello),
+            }],
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: vec!["_greet".to_string()],
+        };
+        let mut session = ResidentSession::default();
+        session.store_blob(&content_hash(&hello), hello).unwrap();
+        let err = session.link(&req).unwrap_err();
+        assert!(
+            err.to_string().contains("-r"),
+            "the relocatable premise is named: {err}"
         );
     }
 
@@ -1757,6 +1964,7 @@ mod fusion_tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let hashes = req.blob_hashes();
         (req, hashes)
@@ -2083,6 +2291,7 @@ mod fusion_tests {
         crate::protocol::ServedProvenance {
             exports,
             loads: Some(result.loads.render()),
+            lives: Vec::new(),
         }
     }
 
@@ -3062,6 +3271,7 @@ mod family_tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let hashes = req.blob_hashes();
         (req, hashes)
@@ -3255,6 +3465,7 @@ mod reloc_tests {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         let hashes = req.blob_hashes();
         (
