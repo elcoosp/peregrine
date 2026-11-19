@@ -934,6 +934,23 @@ impl ResidentSession {
             let verify_report = req
                 .verify
                 .then(|| serve_verify(prev, cfg.adhoc, req.verify_checks.as_ref()));
+            // M88: the ladder's replay serves its own answers — the walk
+            // ran the full Passes 1–3, so `result.resolution`/`result.loads`
+            // are the replay's Pass-2 products and the same index-and-query
+            // render the cold lane calls produces the M56/M57 answers (the
+            // v45 tail carries the renders verbatim; the untouched walk
+            // re-derived the capture's own product, and the answers say
+            // so). A vacuous query refuses the replay exactly as it
+            // refuses the full link — the `ERROR` reply is the client's
+            // stand-down cue.
+            let provenance = Self::serve_provenance_from(
+                req,
+                &result.objects,
+                &result.resolution,
+                &result.interner,
+                &result.loads,
+            )
+            .map_err(RelinkDecline::Error)?;
             return Ok(ServedLink {
                 image: prev.to_vec(),
                 entryoff: result.layout.entryoff,
@@ -950,11 +967,7 @@ impl ResidentSession {
                 time_report,
                 trace_json,
                 verify_report,
-                // M79: the ladder's replay serves no provenance (the
-                // fusion lane's request is refused at the wire — the
-                // replay's Pass-2 product is the record's, not the
-                // walk's).
-                provenance: None,
+                provenance,
                 // M87: the ladder's replay serves its own map — the walk
                 // ran the full Passes 1–3, so `result.layout` is the
                 // replay's own Pass-3 product and the same pure function
@@ -1075,6 +1088,21 @@ impl ResidentSession {
         let verify_report = req
             .verify
             .then(|| serve_verify(&image, cfg.adhoc, req.verify_checks.as_ref()));
+        // M88: the patched replay serves its own answers — the walk's
+        // Pass-2 product is the resolution the patch plan read, and the
+        // same index-and-query render the cold lane calls produces the
+        // M56/M57 answers (the v45 tail carries the renders verbatim —
+        // the wire never re-shapes the face the client prints). A
+        // vacuous query refuses the replay exactly as it refuses the
+        // full link — the `ERROR` reply is the client's stand-down cue.
+        let provenance = Self::serve_provenance_from(
+            req,
+            &result.objects,
+            &result.resolution,
+            &result.interner,
+            &result.loads,
+        )
+        .map_err(RelinkDecline::Error)?;
         Ok(ServedLink {
             image,
             entryoff: result.layout.entryoff,
@@ -1086,7 +1114,7 @@ impl ResidentSession {
             time_report,
             trace_json,
             verify_report,
-            provenance: None,
+            provenance,
             // M87: the patched replay serves its own map — the walk's
             // Pass-3 product is the layout the patch plan read, and the
             // same pure function the cold lane's `-map` calls renders
@@ -1993,6 +2021,172 @@ mod fusion_tests {
         assert_eq!(
             warm_map, map,
             "the untouched walk re-derived the same document"
+        );
+    }
+
+    /// The in-process reference for the ladder's provenance: the anchored
+    /// config assembled from the record (the driver's exact mirror), the
+    /// plain pipeline's Pass-2 product, and the same index-and-query
+    /// render `Self::serve_provenance_from` calls — the served answers
+    /// must equal it byte for byte.
+    fn provenance_reference(
+        record: &LinkRecord,
+        hello_bytes: &[u8],
+        greet_bytes: &[u8],
+    ) -> crate::protocol::ServedProvenance {
+        let mut cfg = link_config();
+        cfg.slack_anchor = record
+            .sections
+            .iter()
+            .map(|s| SlackAnchor {
+                seg: s.seg.clone(),
+                name: s.name.clone(),
+                padded: s.size,
+            })
+            .collect();
+        cfg.stable_imports = Some(record.imports.clone());
+        cfg.sig_anchor = (record.linkedit.sig_off > 0).then_some(record.linkedit.sig_off);
+        cfg.record_resolution = true;
+        if let Some(resolution) = &record.resolution {
+            cfg.resolve_reuse = Some(pgr_core::resolve_reuse::ResolveReuseSeed {
+                snapshot: resolution.clone(),
+                digests: record.section_digests.clone(),
+            });
+        }
+        let inputs = vec![
+            LinkInput {
+                name: "hello.o".into(),
+                bytes: hello_bytes.to_vec(),
+            },
+            LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.to_vec(),
+            },
+        ];
+        let result = link_cached(&inputs, &[], &cfg, Parallelism::Auto, None).unwrap();
+        let index = pgr_core::ReverseIndex::build_all(&result.objects);
+        let mut exports = Vec::new();
+        for name in ["_main", "_greet"] {
+            let answer = pgr_core::explain_export(
+                &index,
+                &result.objects,
+                &result.resolution,
+                &result.interner,
+                name,
+            )
+            .unwrap();
+            exports.push(crate::protocol::ServedExport {
+                name: name.to_string(),
+                render: answer.render(),
+            });
+        }
+        crate::protocol::ServedProvenance {
+            exports,
+            loads: Some(result.loads.render()),
+        }
+    }
+
+    #[test]
+    fn the_fusion_ladder_serves_its_own_provenance() {
+        // M88: the answers render from the ladder's own walk — the
+        // session's relink runs the full Passes 1–3, so
+        // `result.resolution`/`result.loads` are the walk's Pass-2
+        // products and the v45 tail carries the renders verbatim (the
+        // M79 convention: the wire never re-shapes the face the client
+        // prints). The patched exit and the untouched one both answer; a
+        // vacuous query refuses the replay exactly as it refuses the
+        // full link.
+        let hello_bytes = hello(false);
+        let greet_bytes = greet(16);
+        let (mut req, hashes) = request(&link_config(), &hello_bytes, &greet_bytes);
+        req.record_resolution = true;
+        req.why_export = vec!["_main".into(), "_greet".into()];
+        req.why_load = true;
+        let mut session = ResidentSession::default();
+        store(
+            &mut session,
+            &hashes
+                .into_iter()
+                .zip([hello_bytes.clone(), greet_bytes.clone()])
+                .collect::<Vec<_>>(),
+        );
+
+        let cold = session.link(&req).unwrap();
+        let cold_answers = cold
+            .provenance
+            .expect("the served answers ride the full link's v45 tail");
+        assert!(
+            cold_answers.loads.is_some(),
+            "the full link's load report rides the ask"
+        );
+        let record_bytes = cold.record.clone().expect("the cold capture");
+        let prev_image = cold.image.clone();
+
+        // The patched relink asks too: the answers are the ladder's own
+        // Pass-2 product (the anchored relayout), byte-identical to the
+        // in-process render over the same anchored plan — never the
+        // record's stale product.
+        let edited_hello = hello(true);
+        let (mut relink, _) = request(&link_config(), &edited_hello, &greet_bytes);
+        relink.record = Some(record_bytes.clone());
+        relink.prev_output = Some(content_hash(&prev_image));
+        relink.why_export = req.why_export.clone();
+        relink.why_load = true;
+        session
+            .store_blob(&content_hash(&prev_image), prev_image)
+            .unwrap();
+        session
+            .store_blob(&content_hash(&edited_hello), edited_hello.clone())
+            .unwrap();
+        let served = session.link(&relink).unwrap();
+        assert!(
+            !served.patch.expect("the ladder patches in place").untouched,
+            "the edit patches"
+        );
+        let record = LinkRecord::decode(&record_bytes).unwrap();
+        let answers = served
+            .provenance
+            .expect("the patched relink serves its own answers");
+        assert_eq!(
+            answers,
+            provenance_reference(&record, &edited_hello, &greet_bytes),
+            "either ladder, one walk, one answer"
+        );
+
+        // The untouched relink asks too — the walk ran, the answers are
+        // the same placed image's Pass-2 product (nothing moved).
+        let (mut again, _) = request(&link_config(), &edited_hello, &greet_bytes);
+        again.record = served.record.clone();
+        again.prev_output = Some(content_hash(&served.image));
+        again.why_export = vec!["_greet".into()];
+        again.why_load = true;
+        session
+            .store_blob(&content_hash(&served.image), served.image.clone())
+            .unwrap();
+        let warm = session.link(&again).unwrap();
+        assert!(
+            warm.patch.as_ref().expect("the relink plans").untouched,
+            "an identical corpus relinks untouched"
+        );
+        let warm_answers = warm
+            .provenance
+            .expect("the untouched relink serves its own answers");
+        assert!(
+            warm_answers.exports.iter().any(|e| e.name == "_greet"),
+            "the untouched walk answers the query"
+        );
+        assert!(warm_answers.loads.is_some(), "the load report rides too");
+
+        // A vacuous query refuses the replay (the cold lane's own
+        // refusal — the misspelling named, never silently empty).
+        let (mut vacuous, _) = request(&link_config(), &edited_hello, &greet_bytes);
+        vacuous.record = served.record.clone();
+        vacuous.prev_output = Some(content_hash(&served.image));
+        vacuous.why_export = vec!["_nope".into()];
+        let err = session.link(&vacuous).unwrap_err();
+        assert!(
+            err.to_string().contains("_nope"),
+            "the refusal names the misspelling: {err}"
         );
     }
 
