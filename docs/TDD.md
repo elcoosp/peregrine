@@ -2654,7 +2654,7 @@ record-bearing relink beside the decoded rows).
 
 ## The order-surface records (M90/M91)
 
-**M90 — `-sectorder` rides the rank seam.** The classification mirrors ld64's `parseSectionOrderFile` (the `__TEXT,__cstring` strcmp pair, the `__literal` 9-char prefix, everything else the rank append — "ignore section information and append all symbol names to global order file"). The order sources compose into ONE table in command-line order (`SymbolOrder::compose`, the cross-source duplicate refused with both sources and lines named); the composed table consumes the v47 wire and the ladder exactly as the single file's table did. **M91 — the cstring mode.** The literal contents rank the `S_CSTRING_LITERALS` buckets through the D4 canonical sort (a stable pass keyed on the escape-decoded content, the NUL exclusive; the remap untouched — the placed addresses follow the new piece order); the table crosses the wire as v48 (a rebuild-refusing table is a malformed request). The escape set follows `cstringSymbolName` with two named divergences: `\'` decodes as the quote (ld64 maps it to `\r`), and blank lines skip (ld64 pushes an empty entry that ranks nothing).
+**M90 — `-sectorder` rides the rank seam.** The classification mirrors ld64's `parseSectionOrderFile` (the `__TEXT,__cstring` strcmp pair, the `__literal` 9-char prefix, everything else the rank append — "ignore section information and append all symbol names to global order file"). The order sources compose into ONE table in command-line order (`SymbolOrder::compose`, the cross-source duplicate refused with both sources and lines named); the composed table consumes the v47 wire and the ladder exactly as the single file's table did. **M91 — the cstring mode.** The literal contents rank the `S_CSTRING_LITERALS` buckets through the D4 canonical sort (a stable pass keyed on the escape-decoded content, the NUL exclusive; the remap untouched — the placed addresses follow the new piece order); the table crosses the wire as v47 (a rebuild-refusing table is a malformed request). The escape set follows `cstringSymbolName` with two named divergences: `\'` decodes as the quote (ld64 maps it to `\r`), and blank lines skip (ld64 pushes an empty entry that ranks nothing).
 
 **M92 — the liveness-provenance query (`pgr_core::why_live`, `-why_live <symbol>`).** ld64's
 flag (`Options::printWhyLive`) is the third provenance face: the M5 mark phase records, from
@@ -2685,3 +2685,32 @@ read-only contract, the schedule independence, the interchange; driver: the surf
 conflict, the run, the premise), the `why_live` bench (the walk's O(depth) price beside the
 corpus's own depth), and the `why_live_link` consumer example (both faces beside both
 refusals).
+
+**M93 — the served liveness ask (wire v48, the provenance tail carries the chains).** The
+M92 lane contract (the resident lanes refuse — "the wire's provenance tail v45 carries the
+why_export/why_load asks, a liveness ask has no wire shape yet") flips to service the
+M79/M88 way: the premise was outdated, because the session's walk runs the full Passes 1–3
+(`link_from_objects`), so `result.liveness` is the walk's own mark record, in the session's
+memory, and v48 gives the ask its shape — the request's `why_live` names ride beside the
+provenance asks (count-prefixed, the same C-symbol grammar; an empty name is a malformed
+request), and the reply's provenance tail carries the chains verbatim beside the M79
+answers (the M62 convention: the wire never re-shapes the face the client prints). The
+decode gate refuses the ask beside a relocatable config — `-r` preserves input sections
+verbatim and refuses the strip, no mark record exists to walk (the M83 replay-face rule;
+the session's shape gate names it too). `serve_provenance_from` renders
+`pgr_core::why_live` over its own walk at every exit (the full link, the untouched relink,
+the patched relink), `SessionError::Live` carries the vacuous refusals (the `ERROR` reply
+is the client's fallback cue — the cold lane's refusal speaks the same verdict), the
+driver's resident lanes ride the ask on the request (`request.why_live` — the full-link
+and the fusion lane both set it) and print the served chains beside the image exactly as
+the cold lane prints its own. The M92 surface refusal retires; `OptsError::WhyLiveConflict`
+survives with its premise renamed — the relocatable output (the pre-M93 reloc lane
+silently ignored the query; the served rung closes the gap the M56 contract's own shape —
+"a vacuous answer is never silently empty" — names at parse time). Tests:
+`m93_served_why_live.rs` (the served chain, the dead answer, the vacuous refusal through
+the fallback, the premise mismatch, the fusion relink), `m92_why_live.rs` (the surface:
+the flag rides `-resident`, `-r` refuses), the wire round-trip gates (the request tail,
+the provenance tail's liveness entries, the nameless-answer refusals, the relocatable
+refusal), the session gates (the served chains, the vacuous refusal, the relocatable
+shape), the `wire_liveness` bench (the codec's price), and the `why_live_session` consumer
+example (the capture → edit → relink cycle whose verdict flips with the edit).
