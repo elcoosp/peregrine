@@ -6,6 +6,50 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M95)
+
+- **M95** — the SARIF face for the universal container: the M75 CLI refusal ("SARIF anchors
+  name file bytes; a container's slices ride their own windows — re-anchoring would
+  re-shape") had its premise backwards — the slices ride *inside* the audited file, so
+  re-anchoring is not re-shaping. `pgr_verify::sarif::render_universal` renders the M71
+  container verdict as one deterministic SARIF 2.1.0 document: one run per declared slice, in
+  table order, the rule table the union of the slices' codes (the built-ins in `Code::ALL`
+  canonical order, the custom tokens after them, named once however many slices carry them),
+  and every anchored result riding a container-absolute `region.byteOffset`
+  (`slice.offset + anchor`) — the anchor names the audited file's own bytes, which is what a
+  triage tool reads; an unanchored issue rides no location and the severity map is the M69
+  one (the only two severities the verifier reports). `pgr-verify <fat> --sarif` rides the
+  same render (the refusal retires with its premise; the whole-verdict exit gate keeps, a
+  malformed container's `REFUSED` rides the face the report would have), the two-machine-face
+  and baseline refusals stay, the `sarif_universal` bench group pins the render's price
+  beside the single-image face (linear in the slices), and the `universal_sarif` example
+  walks the two-slice container beside its document. The render's shared writer keeps the
+  M69 single-image document byte-identical (the refactor is the same shape, one run).
+
+### Added (M94)
+
+- **M94** — the verifier's initializer-surface gate: the rung the M16 design record named
+  ("the verifier's own `init_offsets` gate — a hand-broken section is named — is the next
+  rung") joins the M12 registry as the twelfth family (`Check::InitOffsets`, code
+  `init_offsets`, module `pgr_verify::init_offsets`). The sections dyld's load-time
+  initializer walk consumes must ride whole strides — the `__init_offsets` u32-offset form
+  on the 4-byte stride, the classic `__mod_init_func` pointer form on the 8-byte stride —
+  each `__init_offsets` entry must name a target an executable segment maps (dyld's own
+  "initializer does not point within executable segment" check replayed read-side, entry by
+  entry against the segments the image actually maps: an unmapped target and a target inside
+  a never-executable segment each name themselves, the entry index and the resolved address
+  riding the message), and the offsets form below the platform's chained-fixups floor names
+  the floor (`pgr_format::consts::chained_fixups_floor`, the one table — the producer refuses
+  the same premise at link time; the gate is the read-side backstop for shapes built
+  independently of it). The classic pointer form's file bytes are fixup words, so the gate
+  reads its stride and leaves the slot walk to the `fixups` family; an `MH_OBJECT` carries
+  no dyld walk, so the family self-gates to the kinds dyld loads (the object contract owns
+  the relocatable shape). Shapes are built by hand in the gate matrix (`m94_init_offsets.rs`,
+  the §11 different-code-path rule), the `init_offsets` bench pins the family's price beside
+  the whole pass (a per-section stride read plus a per-entry segment lookup — ~0.9% of the
+  pass on the bench fixture), and the `init_offsets_gate` consumer example walks the honest
+  shapes beside the broken one and the `--checks init_offsets` selection.
+
 ### Added (M93)
 
 - **M93** — the served liveness ask: the M92 resident refusal retires — the wire (v48) carries the `-why_live` names beside the provenance asks, the session's own walk carries the mark record (`LinkResult::liveness`, `Some` exactly when the strip ran), and the reply's provenance tail carries the rendered chains verbatim beside the M79 answers (the M62 convention — the wire never re-shapes the face the client prints). Every lane serves the query: the one-shot and the in-process ladder from their own walks (M92), the resident full link from the session's warm pipeline, and the fusion ladder's replay from its own walk (`serve_relink` runs the full Passes 1–3, so `result.liveness` is the replay's mark record — the M88 shape; the v48 tail already had the shape to carry it, no wire shape moves); the client prints the served chains beside the resident link exactly as the cold lane prints its own, a vacuous query's `ERROR` is the fallback cue the cold lane's refusal speaks (the misspelling named either lane), and the decode gate refuses the ask beside a relocatable config (the M83 replay-face rule — `-r` preserves input sections verbatim and carries no strip, no mark record exists to walk). M93 also closes the gap the served rung surfaced: the pre-M93 relocatable lane silently ignored the query — the surface now refuses the premise (`OptsError::WhyLiveConflict`, the verdict names `-r`'s missing strip), instead of a vacuously empty answer. The `wire_liveness` bench pins the codec's price (the request-side names, the reply-side chains), and the `why_live_session` example drives the capture → edit → relink cycle whose verdict flips with the edit (dropped cold, kept warm, the chain naming the keeper the new reference introduced).
