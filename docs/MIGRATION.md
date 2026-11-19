@@ -112,7 +112,7 @@ The flags that look like no-ops but actually shape the link (the default
 behavior already matches what they request on arm64) are mapped in the
 tables above: `-adhoc` / `-no_adhoc`, `-segalign`, `-fixup_chains` /
 `-no_fixup_chains`, `-fixup_chains_format`, `-flat_namespace`, `-undefined`,
-`-rpath`, `-source_version`, `-arch arm64`, `-platform_version`. The provenance queries (`-why_export <symbol>`, `-why_load`, M56/M57) ride the same driver surface: the definition and reference sites a symbol carries, the decision that admitted each archive member — reports beside the link, the one-shot lanes only.
+`-rpath`, `-source_version`, `-arch arm64`, `-platform_version`. The provenance queries (`-why_export <symbol>`, `-why_load`, M56/M57) ride the same driver surface: the definition and reference sites a symbol carries, the decision that admitted each archive member — reports beside the link, every lane serving its own walk's answer (the resident session since M79, the incremental ladder since M84, the fusion ladder since M88).
 
 ## Peregrine-specific: the per-pass time report
 
