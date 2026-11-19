@@ -200,10 +200,12 @@ pub struct Options {
     /// installed and every reference site the M8-a reverse index
     /// recorded (`pgr_core::provenance`). The default (the empty list)
     /// queries nothing. The query reads the link's own Pass-2 product:
-    /// the one-shot lane's, and — since M79 (wire v45) — the resident
-    /// session's own full walk (the rendered answers cross the wire
-    /// verbatim); the incremental lane still refuses it (`finish` — the
-    /// §7.3 ladder's replay product is the record's, not the walk's).
+    /// the one-shot lane's, the resident session's since M79 (wire v45
+    /// — the rendered answers cross the wire verbatim), and — since M84
+    /// — the incremental ladder's own walk (the relink re-parses the
+    /// inputs and runs the full Passes 1–3, so `result.resolution` is
+    /// the walk's product; the answers serve from it either tier — the
+    /// patched relink and the untouched one both walked).
     pub why_export: Vec<String>,
     /// M57 `-why_load`: after a link, report why each archive member
     /// was loaded (the S7 pull's per-member decision) and — under
@@ -211,8 +213,9 @@ pub struct Options {
     /// (`pgr_core::provenance::LoadReport`, carried on the link result).
     /// The default (`false`) reports nothing. The lane contract mirrors
     /// `-why_export`: the resident lane serves the report since M79
-    /// (the pull's record is the session's own); the incremental lane
-    /// still refuses it (the ladder's replay carries no pull record).
+    /// (the pull's record is the session's own); the ladder's own walk
+    /// serves it since M84 — the relink re-pulls, the report names the
+    /// members the relink's pull rode.
     pub why_load: bool,
     /// M58 `--time`: after a one-shot link, print the per-pass wall
     /// report — the M54 observation seam's phase events collected into
@@ -248,9 +251,14 @@ pub struct Options {
     /// default (`None`) writes nothing. The record is the link's read set
     /// — never plan-derived — so it rides every lane that actually reads
     /// the input files (the resident lane writes it client-side from the
-    /// request's own list; the daemon never touches the filesystem) and
-    /// refuses the one that does not (`-incremental`: the relink patches
-    /// the recorded plan and re-reads no input file).
+    /// request's own list; the daemon never touches the filesystem) —
+    /// and, since M85, the incremental ladder: the relink's Pass 0
+    /// re-reads every input it maps (the re-parse is the digest source)
+    /// and records the read set while the reads happen, so the sidecar
+    /// the relink rewrites names the files the ladder actually read, not
+    /// the previous link's list. The fusion lane stands a record-bearing
+    /// relink down to the in-process ladder (the session's reads live
+    /// inside the daemon; the wire carries no read set).
     pub dependency_info: Option<String>,
     /// M15: `-pagezero_size` was passed explicitly. The default (`false`)
     /// keeps the seam's own default on every non-executable output — the
@@ -494,22 +502,6 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
-    /// A `-why_export` surface conflict (M56, incremental-only since
-    /// M79): the query reads the link's own Pass-2 product (the parsed
-    /// arena, the resolution, the pull record), and the incremental
-    /// engine's relink rides the §7.3 ladder's replay — a Pass-2 product
-    /// that is the record's, not the walk's, and an answer naming it
-    /// would misreport the run. (The resident lane served since M79: the
-    /// session's warm pipeline *is* the walk, wire v45 carries the
-    /// answers.) The verdict names the lane; the help is the fix.
-    #[error("{verdict}")]
-    #[diagnostic(help("{fix}"))]
-    WhyExportConflict {
-        /// What conflicts with what.
-        verdict: String,
-        /// The fix — the house convention.
-        fix: String,
-    },
     /// A `--trace` value refusal (M61): an empty path writes the
     /// timeline nowhere — the same honest refusal `-dependency_info`
     /// pays (the file is the surface's whole point).
@@ -518,21 +510,6 @@ pub enum OptsError {
     TraceValue {
         /// The refused value (the empty string, verbatim).
         value: String,
-    },
-    /// A `-dependency_info` surface conflict (M60): the dependency record
-    /// names the files the link *read* — the incremental engine's relink
-    /// patches the recorded plan inside the ladder and re-reads no input
-    /// file, so a record beside it would misreport the run (the record is
-    /// read-set-derived; the `-map` conflict is plan-derived, the same
-    /// honest-refusal shape). The verdict names the lane; the help is
-    /// the fix.
-    #[error("{verdict}")]
-    #[diagnostic(help("{fix}"))]
-    DependencyInfoConflict {
-        /// What conflicts with what.
-        verdict: String,
-        /// The fix — the house convention.
-        fix: String,
     },
     /// A `-dependency_info` value the grammar refuses (M60): an empty
     /// path — the record is a file the build system reads back.
@@ -2969,46 +2946,27 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             fix: "drop -order_file".into(),
         });
     }
-    // M56: the provenance query reads the link's own Pass-2 product — a
-    // refusal where the lane never carries it, never a silently
-    // unanswered question (the surface's contract). M57: the load report
-    // rides the same contract. M79: the resident lane serves both (the
-    // session's warm pipeline *is* the walk — wire v45 carries the
-    // rendered answers), so the only remaining refusal is the ladder's.
-    if !opts.why_export.is_empty() || opts.why_load {
-        // The refusal names every flag the run carried — a run asking
-        // both questions is refused for both, not for whichever came
-        // first (the label rides the comma, the fix names both).
-        let lanes = match (opts.why_export.is_empty(), opts.why_load) {
-            (false, false) => "-why_export, -why_load",
-            (false, true) => "-why_export",
-            (true, _) => "-why_load",
-        };
-        if opts.incremental {
-            return Err(OptsError::WhyExportConflict {
-                verdict: format!(
-                    "{lanes} reads the link's own Pass-2 product; -incremental's relink \
-                     patches the recorded plan inside the engine's ladder"
-                ),
-                fix: format!("drop {lanes} or -incremental"),
-            });
-        }
-    }
-    // M60: the dependency record names the files the link read — the
-    // incremental engine's relink patches the recorded plan and re-reads
-    // no input file, so a record beside the ladder would misreport the
-    // run. The one-shot, relocatable and resident lanes all read the
-    // files (the resident client writes the record from its own request
-    // list; the daemon never touches the filesystem), so they ride.
-    if opts.dependency_info.is_some() && opts.incremental {
-        return Err(OptsError::DependencyInfoConflict {
-            verdict: "-dependency_info names the files the link read; -incremental's relink \
-                      patches the recorded plan inside the engine's ladder and re-reads none \
-                      of them (the record would misreport the run)"
-                .into(),
-            fix: "drop -dependency_info or -incremental".into(),
-        });
-    }
+    // M56/M57: the provenance queries read the link's own Pass-2 product.
+    // M79: the resident lane serves both (the session's warm pipeline is
+    // the walk — wire v45 carries the rendered answers). M84: the ladder
+    // serves both too — the relink re-parses the inputs and runs the full
+    // Passes 1–3 (`pgr_core::link_cached` inside `incremental_relink`),
+    // so `result.resolution` and `result.loads` are the walk's products,
+    // in the relink's own memory; the answers serve from them either tier
+    // (a query-bearing relink that runs the fusion lane hands over to the
+    // in-process ladder — the session's patch serves bytes, not answers).
+    // No lane refuses the queries any more: every lane that links, walks.
+    // M60: the dependency record names the files the link read. The
+    // one-shot, relocatable and resident lanes all read the files (the
+    // resident client writes the record from its own request list; the
+    // daemon never touches the filesystem). M85: the ladder rides too —
+    // the relink's Pass 0 (`prepare_link`) re-reads every input it maps
+    // (the re-parse is the digest source) and records the read set while
+    // the reads happen (`PreparedLink::deps`), so the sidecar the relink
+    // rewrites names the files the ladder actually read. A record-bearing
+    // relink on the fusion lane hands over to the in-process ladder (the
+    // session's reads live inside the daemon; the wire carries no read
+    // set) — the run answers either way.
     Ok(opts.clone())
 }
 
