@@ -150,6 +150,7 @@ cargo bench -p pgr-core --bench time_report
 cargo bench -p pgr-core --bench trace
 cargo bench -p pgr-core --bench provenance
 cargo bench -p pgr-core --bench why_load
+cargo bench -p pgr-core --bench why_live
 cargo bench -p pgr-core --bench dep_info
 cargo bench -p pgr-driver --bench final_output
 cargo bench -p pgr-driver --bench verify_gate
@@ -158,6 +159,8 @@ cargo bench -p pgr-daemon --bench wire_time
 cargo bench -p pgr-daemon --bench wire_trace
 cargo bench -p pgr-daemon --bench wire_verify
 cargo bench -p pgr-daemon --bench wire_provenance
+cargo bench -p pgr-daemon --bench wire_map
+cargo bench -p pgr-daemon --bench wire_order
 # verify
 cargo bench -p pgr-verify --bench platform
 cargo bench -p pgr-verify --bench arm64e
