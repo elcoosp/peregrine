@@ -8,7 +8,7 @@
 //! wants exactly the fixup walk on a known-corrupt page. This module makes
 //! that selection a nameable value instead of a private dispatch:
 //!
-//! * [`Check`] enumerates the nine families in canonical verify order;
+//! * [`Check`] enumerates the families in canonical verify order;
 //! * [`CheckSet`] is the selector (parse `"segments,fixups"`, build with
 //!   [`CheckSet::with`]/[`CheckSet::all`]/[`CheckSet::empty`], render
 //!   back with `Display`);
@@ -127,6 +127,13 @@ pub enum Check {
     /// sections the image carries, the `__thread_vars` descriptor
     /// stride, and the descriptors' thread-local data.
     Tlv,
+    /// The initializer-surface contract (M94): the
+    /// `S_INIT_FUNC_OFFSETS`/`S_MOD_INIT_FUNC_POINTERS` sections dyld's
+    /// load-time initializer walk consumes ride whole strides, the
+    /// `__init_offsets` entries name targets an executable segment maps,
+    /// and the offsets form stays at or above the platform's
+    /// chained-fixups floor.
+    InitOffsets,
     /// The `B`/`BL` branch-range decode pass (the veneer gate).
     BranchRange,
     /// The classic `LC_DYLD_INFO(_ONLY)` rebase/bind opcode streams.
@@ -138,7 +145,7 @@ pub enum Check {
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 11] = [
+    pub const ALL: [Check; 12] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
@@ -147,6 +154,7 @@ impl Check {
         Check::ChainStarts,
         Check::Unwind,
         Check::Tlv,
+        Check::InitOffsets,
         Check::BranchRange,
         Check::DyldInfo,
         Check::Signature,
@@ -164,6 +172,7 @@ impl Check {
             Check::ChainStarts => "chain_starts",
             Check::Unwind => "unwind",
             Check::Tlv => "tlv",
+            Check::InitOffsets => "init_offsets",
             Check::BranchRange => "branch_range",
             Check::DyldInfo => "dyld_info",
             Check::Signature => "signature",
@@ -181,9 +190,10 @@ impl Check {
             Check::ChainStarts => 5,
             Check::Unwind => 6,
             Check::Tlv => 7,
-            Check::BranchRange => 8,
-            Check::DyldInfo => 9,
-            Check::Signature => 10,
+            Check::InitOffsets => 8,
+            Check::BranchRange => 9,
+            Check::DyldInfo => 10,
+            Check::Signature => 11,
         }
     }
 }
@@ -438,6 +448,30 @@ impl ImageCheck for UnwindCheck {
 /// The M37 thread-local surface contract.
 struct TlvCheck;
 
+/// The M94 initializer-surface contract.
+struct InitOffsetsCheck;
+
+impl ImageCheck for InitOffsetsCheck {
+    fn check(&self) -> Check {
+        Check::InitOffsets
+    }
+    fn summary(&self) -> &'static str {
+        "initializer surface: S_INIT_FUNC_OFFSETS/S_MOD_INIT_FUNC_POINTERS strides, \
+         __init_offsets targets in an executable segment, the chained-fixups floor"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::InitOffsets]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        if matches!(
+            ctx.parsed.header.filetype,
+            MH_EXECUTE | MH_DYLIB | MH_BUNDLE
+        ) {
+            crate::init_offsets::check_init_offsets(ctx.bytes, ctx.parsed, ctx.report);
+        }
+    }
+}
+
 impl ImageCheck for TlvCheck {
     fn check(&self) -> Check {
         Check::Tlv
@@ -581,7 +615,7 @@ pub trait CustomCheck: Sync {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 11] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 12] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
@@ -590,6 +624,7 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 11] = [
     &ChainStartsCheck,
     &UnwindCheck,
     &TlvCheck,
+    &InitOffsetsCheck,
     &BranchRangeCheck,
     &DyldInfoCheck,
     &SignatureCheck,
