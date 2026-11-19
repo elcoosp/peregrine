@@ -440,3 +440,14 @@ harness = false
 [[bench]]
 name = "trace"
 harness = false
+
+# The M92 why-live bench: the `-why_live` query's price — the mark
+# phase's why-record (one store per newly-marked atom, riding the M5
+# mark's own walk, never a second pass) and the query's own O(depth)
+# walk over the recorded grid, over the resolve bench's 64-object
+# corpus turned into a call chain (the deep query walks 63 hops, the
+# shallow one, and the unreferenced body answers `Dead` off the same
+# grid's miss). A shape gate, not a link-cost knob.
+[[bench]]
+name = "why_live"
+harness = false
