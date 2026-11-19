@@ -194,7 +194,10 @@ fn an_order_file_refuses_the_combinations_that_cannot_carry_it() {
         "-resident",
     ]);
     let o = opts::parse(&argv).expect("the resident lane serves the rank table");
-    assert!(o.order_file.is_some(), "the rank ask rides the surface");
+    assert!(
+        !o.order_specs.is_empty(),
+        "the rank ask rides the surface (M90: the sources list carries it)"
+    );
 }
 
 #[test]
