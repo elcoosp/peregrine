@@ -207,8 +207,13 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(2);
             }
-            if universal_face(file, &bytes, opts, checks, json, quiet, &mut out) {
+            let (bad, io_failed) =
+                universal_face(file, &bytes, opts, checks, json, quiet, &mut out);
+            if bad {
                 any_bad = true;
+            }
+            if io_failed {
+                any_io = true;
             }
             continue;
         }
@@ -239,12 +244,16 @@ fn main() -> ExitCode {
                 any_io = true;
             }
         } else if !quiet {
-            let _ = writeln!(
-                out,
-                "{}: {}",
-                file.display(),
-                report_label(&report, opts, delta.as_ref(), fail_on)
-            );
+            if !text_writeln(
+                &mut out,
+                format_args!(
+                    "{}: {}",
+                    file.display(),
+                    report_label(&report, opts, delta.as_ref(), fail_on)
+                ),
+            ) {
+                any_io = true;
+            }
             for issue in &report.issues {
                 let sev = match issue.severity {
                     Severity::Error => "error",
@@ -254,38 +263,50 @@ fn main() -> ExitCode {
                     .offset
                     .map(|o| format!(" at {o:#x}"))
                     .unwrap_or_default();
-                let _ = writeln!(
-                    out,
-                    "  {sev} [{}] {}{at}",
-                    issue.code.as_str(),
-                    issue.message
-                );
+                if !text_writeln(
+                    &mut out,
+                    format_args!("  {sev} [{}] {}{at}", issue.code.as_str(), issue.message),
+                ) {
+                    any_io = true;
+                }
             }
             if let Some(delta) = &delta {
                 for issue in &delta.introduced {
-                    let _ = writeln!(
-                        out,
-                        "  + [{}] {} (new since the baseline)",
-                        issue.code.as_str(),
-                        issue.message
-                    );
+                    if !text_writeln(
+                        &mut out,
+                        format_args!(
+                            "  + [{}] {} (new since the baseline)",
+                            issue.code.as_str(),
+                            issue.message
+                        ),
+                    ) {
+                        any_io = true;
+                    }
                 }
                 for issue in &delta.resolved {
-                    let _ = writeln!(
-                        out,
-                        "  - [{}] {} (resolved since the baseline)",
-                        issue.code.as_str(),
-                        issue.message
-                    );
+                    if !text_writeln(
+                        &mut out,
+                        format_args!(
+                            "  - [{}] {} (resolved since the baseline)",
+                            issue.code.as_str(),
+                            issue.message
+                        ),
+                    ) {
+                        any_io = true;
+                    }
                 }
-                let _ = writeln!(
-                    out,
-                    "  baseline: {} new, {} resolved, {} surviving ({})",
-                    delta.introduced.len(),
-                    delta.resolved.len(),
-                    delta.surviving,
-                    OffsetIdentity.name(),
-                );
+                if !text_writeln(
+                    &mut out,
+                    format_args!(
+                        "  baseline: {} new, {} resolved, {} surviving ({})",
+                        delta.introduced.len(),
+                        delta.resolved.len(),
+                        delta.surviving,
+                        OffsetIdentity.name(),
+                    ),
+                ) {
+                    any_io = true;
+                }
             }
         }
         let bad = match &delta {
@@ -310,6 +331,17 @@ fn main() -> ExitCode {
     }
 }
 
+/// The text faces' write helper (the json/sarif faces' own convention):
+/// a failed write prints the error beside the run instead of a silently
+/// dropped line — a broken pipe is an exit-code matter, never noise.
+fn text_writeln(out: &mut dyn std::io::Write, line: std::fmt::Arguments<'_>) -> bool {
+    if let Err(e) = writeln!(out, "{line}") {
+        eprintln!("{PROGRAM}: {e}");
+        return false;
+    }
+    true
+}
+
 /// The M74 container face: one verdict per declared slice. The text face
 /// prints a `slice N` line per table row (the OK/FAILED words the
 /// single-image face rides) with the issues in the verifier's own words;
@@ -317,7 +349,9 @@ fn main() -> ExitCode {
 /// naming the slice it rode — each line the strict reader's own shape.
 /// The malformed table refuses (`REFUSED`, the format reader's
 /// offset-tagged error verbatim — there is nothing to slice). Returns
-/// whether the gate fails (a refusing slice, or a refusal).
+/// (gate fails, a write failed) — the caller's exit code honors both, the
+/// text face's write errors the json face's own convention (printed, the
+/// run marked, never a silently dropped line).
 fn universal_face(
     file: &std::path::Path,
     bytes: &[u8],
@@ -326,14 +360,15 @@ fn universal_face(
     json: bool,
     quiet: bool,
     out: &mut dyn std::io::Write,
-) -> bool {
+) -> (bool, bool) {
+    let mut io_failed = false;
     let report = match pgr_verify::verify_universal_with_checks(bytes, &opts, &checks) {
         Ok(report) => report,
         Err(e) => {
-            if !quiet {
-                let _ = writeln!(out, "{}: REFUSED: {e}", file.display());
+            if !quiet && !text_writeln(out, format_args!("{}: REFUSED: {e}", file.display())) {
+                io_failed = true;
             }
-            return true;
+            return (true, io_failed);
         }
     };
     let mut any_bad = false;
@@ -350,10 +385,15 @@ fn universal_face(
             let body = pgr_verify::to_json_with_file(&label, &slice.report);
             if let Err(e) = writeln!(out, "{body}") {
                 eprintln!("{PROGRAM}: {e}");
-                return true;
+                return (true, true);
             }
         } else if !quiet {
-            let _ = writeln!(out, "{label}: {}", if bad { "FAILED" } else { "OK" });
+            if !text_writeln(
+                out,
+                format_args!("{label}: {}", if bad { "FAILED" } else { "OK" }),
+            ) {
+                io_failed = true;
+            }
             for issue in &slice.report.issues {
                 let sev = match issue.severity {
                     Severity::Error => "error",
@@ -363,17 +403,17 @@ fn universal_face(
                     .offset
                     .map(|o| format!(" at {o:#x}"))
                     .unwrap_or_default();
-                let _ = writeln!(
+                if !text_writeln(
                     out,
-                    "  {sev} [{}] {}{at}",
-                    issue.code.as_str(),
-                    issue.message
-                );
+                    format_args!("  {sev} [{}] {}{at}", issue.code.as_str(), issue.message),
+                ) {
+                    io_failed = true;
+                }
             }
         }
         any_bad |= bad;
     }
-    any_bad
+    (any_bad, io_failed)
 }
 
 fn report_label(
