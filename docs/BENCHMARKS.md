@@ -481,6 +481,17 @@ document is byte-identical to the in-process render either way — the parity ga
 | `untouched_relink_8mib`                               | 18.8 ms     | —           |
 | `resident-fusion/fusion_relink_64_objects`            | 596.6 ms    | —           |
 | `resident-fusion/fusion_map_relink_64_objects` (M87)  | 583.9 ms    | — wash      |
+| `resident-fusion/fusion_provenance_relink_64_objects` (M88) | see note | — expected wash |
+| `resident-fusion/fusion_dep_info_relink_64_objects` (M89)   | see note | — expected wash |
+
+**M88/M89 served faces on the fusion ladder** — the query-bearing and record-bearing relink
+groups joined `resident-fusion` beside the map group (M87) and the plain relink: the session's
+replay walk renders the answers and the client's Pass 0 records the read set, so the honest
+expectation is the same wash the M84–M87 faces recorded (a per-relink reverse-index build and
+query, a per-relink sidecar render and write, beside a 596 ms session ladder). This host's
+medians belong to the perf-rig run (the recording-pass convention above governs the comparable
+table; the dev sandbox built the groups but the release-ladder recording outruns its disk —
+the compile gate is `cargo test --benches`, green).
 
 **Randomized edit gate**: seeded xorshift64* walk (body growth, import add, retarget, oversized
 growth, symtab churn, no-op), engine-level and real `-incremental -incremental-verify` driver
