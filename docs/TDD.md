@@ -2714,3 +2714,54 @@ the provenance tail's liveness entries, the nameless-answer refusals, the reloca
 refusal), the session gates (the served chains, the vacuous refusal, the relocatable
 shape), the `wire_liveness` bench (the codec's price), and the `why_live_session` consumer
 example (the capture → edit → relink cycle whose verdict flips with the edit).
+
+## The verifier's registry rungs (M94/M95)
+
+**M94 — the initializer-surface gate (`Check::InitOffsets`, the M16 record's named next
+rung).** The `pgr-verify` registry gains its twelfth family (`pgr_verify::init_offsets`,
+code `init_offsets`, sitting between `tlv` and `branch_range` in the canonical order): the
+sections dyld's load-time initializer walk consumes must be shapes the walk can actually
+read. The offsets form (`S_INIT_FUNC_OFFSETS` — the M16 transform's
+`__TEXT,__init_offsets`) rides three checks: the section size is whole on the 4-byte u32
+stride; every entry, interpreted as its distance from the load address (the `__TEXT`
+vmaddr, where the mach header maps), must name a target an executable segment maps —
+dyld's own "initializer does not point within executable segment" load-time check replayed
+read-side, the containment walk over the segments the image carries (an unmapped target and
+a target inside a never-executable segment each name themselves, the entry index and the
+resolved address riding the message); and the floor rule — the offsets form below the
+platform's chained-fixups floor (`pgr_format::consts::chained_fixups_floor`, the one table)
+names the floor, because that dyld cannot consume the section and every initializer would
+silently never run (the producer refuses the same premise; the gate is the read-side
+backstop for shapes built independently of it). The classic pointer form
+(`S_MOD_INIT_FUNC_POINTERS`) rides the 8-byte stride and nothing else: its file bytes are
+fixup words (chained rebase encodings under `LC_DYLD_CHAINED_FIXUPS`, opcode-driven rebases
+under the legacy streams), so the raw slots stay unread and the chain walk the `fixups`
+family owns remains the target's arbiter. The family self-gates to the kinds dyld loads (an
+`MH_OBJECT` carries no initializer walk — the `-r` object contract owns the relocatable
+shape). Shapes are built by hand (`m94_init_offsets.rs`, the §11 different-code-path rule);
+the `init_offsets` bench prices the family beside the whole pass (honest 447 ns,
+broken-entry 646 ns, pointer-form 338 ns against the 50.7 µs pass — the per-section stride
+read plus per-entry segment lookup the doc promises); the `init_offsets_gate` consumer
+example walks the honest shapes beside the broken one and the `--checks init_offsets`
+selection.
+
+**M95 — the SARIF face for the universal container (`pgr_verify::sarif::render_universal`).**
+The M75 CLI refusal ("SARIF anchors name file bytes; a container's slices ride their own
+windows — re-anchoring would re-shape") had its premise backwards: the slices ride *inside*
+the audited file, so re-anchoring is not re-shaping. `render_universal` renders the M71
+container verdict as one deterministic SARIF 2.1.0 document — one run per declared slice,
+in table order (the same order `verify_universal` walks), the rule table the union of the
+slices' codes (the built-ins in `Code::ALL` canonical order, the custom tokens after them,
+named once however many slices carry them — the union computed across the verdict, never
+per run), and every anchored result riding a container-absolute `region.byteOffset`
+(`slice.offset + anchor`): the anchor names the audited file's own bytes, which is what a
+triage tool reads. The M69 conventions hold unchanged (one line, fixed key order, the M13
+escape rules, an unanchored issue riding no location, the two severities' SARIF levels),
+and the single-image `render` keeps its byte-identical document through the shared writer
+(the run prefix and the results stream are the one shape both faces compose). The CLI's
+`--sarif` face rides the render — the refusal retires, the whole-verdict exit gate keeps,
+and a malformed container's `REFUSED` rides the stdout face the report would have; the
+two-machine-face and baseline refusals stay (the delta has no SARIF shape). The
+`sarif_universal` bench group pins the render's price beside the single-image face (2
+slices 6.8 µs, 4 slices 13.0 µs against one 8-issue slice's 3.6 µs — linear in the slices);
+the `universal_sarif` consumer example walks the two-slice container beside its document.
