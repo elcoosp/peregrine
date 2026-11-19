@@ -193,7 +193,14 @@ pub struct Options {
     /// the link. `None` (the default) writes no map. The resident lane
     /// serves the document since M80 (wire v46) — the session's own walk
     /// renders it, the client writes the file; the one-shot lane renders
-    /// its own (either lane, the same face).
+    /// its own (either lane, the same face). The incremental ladder
+    /// renders the map since M86 — the relink's walk runs the full
+    /// Passes 1–3, so the document is the relink's own placed image at
+    /// either exit (the patched one and the untouched one) — and the
+    /// fusion lane serves it too since M87: the session's ladder renders
+    /// its own walk's document, the v46 tail carrying it verbatim (an
+    /// old server's refusal is the stand-down the in-process ladder
+    /// answers).
     pub map_path: Option<String>,
     /// M56 `-why_export <symbol>` (repeatable): after a link, answer
     /// *why is this symbol exported?* — the definition the resolution
@@ -2906,28 +2913,28 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
         }
     }
     // M11: the map reports the placed image — the surfaces that do not
-    // produce one (an input object, the patch tiers' in-place plan)
-    // refuse the knob instead of dropping it. M80: the resident lane
-    // serves the map (the session's own walk renders the placed image's
-    // report — wire v46 carries the document verbatim), so the only
-    // remaining refusals are the lanes that produce no segment layout.
-    if opts.map_path.is_some() {
-        if opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
-            return Err(OptsError::OrderFileConflict {
-                verdict: "-r writes an input object: no segment layout exists for the map to \
-                         report"
-                    .into(),
-                fix: "drop -map".into(),
-            });
-        }
-        if opts.incremental {
-            return Err(OptsError::OrderFileConflict {
-                verdict: "-incremental's patch tiers plan inside the relink engine; the map \
-                          reports the full emit's layout"
-                    .into(),
-                fix: "drop -map or -incremental".into(),
-            });
-        }
+    // produce one refuse the knob instead of dropping it. M80: the
+    // resident lane serves the map (the session's own walk renders the
+    // placed image's report — wire v46 carries the document verbatim).
+    // M86: the ladder serves the map too — the relink is not a replay of
+    // recorded bytes, its walk runs the full Passes 1–3
+    // (`pgr_core::link_cached` inside `incremental_relink`), and
+    // `LinkResult::layout` is the walk's own Pass-3 product: the map the
+    // ladder writes names the placed image the relink just planned, the
+    // same face the one-shot writes (either lane, one walk, one
+    // document). M87: the fusion lane serves it as well — the session's
+    // ladder renders its own walk's document over the same v46 tail (an
+    // old server's refusal is the stand-down the in-process ladder
+    // answers). The only remaining refusal is the relocatable output's
+    // (an input object produces no segment layout).
+    if opts.map_path.is_some() && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::OrderFileConflict {
+            verdict: "-r writes an input object: no segment layout exists for the map to \
+                     report"
+                .into(),
+            fix: "drop -map".into(),
+        });
     }
     // M11: the order file must be appliable where it was requested — a
     // refusal, never a silently dropped knob (the surface's contract).
