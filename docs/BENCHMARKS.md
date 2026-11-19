@@ -875,3 +875,8 @@ The "30 CPU-days clean" gate formally closes on the rig.
 parameterized corpus generator behind an `xtask` for nightly shape sweeps · D7 canonical import
 order remains optional (M4 shipped without needing it; M8's insertion-stable ordinals cover the
 incremental requirement) · rig-bound: S1 writer matrix, S4 P-core sizing, PGO, the G1 gate.
+
+
+## The order-surface groups (M90/M91)
+
+The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` groups (`cargo bench -p pgr-core --bench order`): `sectorder_compose/2|8` — the composition's own price (building the one rank table from N parsed sources, the cross-source duplicate walk plus the merged maps, over 128-entry sources at the per-subsystem file scale); `sectorder_link/layout/composed` — the composed table's link, the ranked shape the M11 `ranked` group gates (the compose is paid once per link, before Pass 3); `sectorder_cstring/layout/{no_order,ranked}` — the M91 cstring rank pass beside the plain D4 merge over 32 objects × 16 literals (the lookup is one linear probe per piece over the small rank vector, the sort the same stable pass the symbol ranks ride). All dev-sandbox numbers; the hardware gates own the comparable numbers.
