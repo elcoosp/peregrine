@@ -18,7 +18,8 @@
 //! family holds) — and names the form on the surface (`-init_offsets`
 //! / `-no_init_offsets`) exactly like the chain word family names its
 //! encoding. The verifier's own `init_offsets` gate (a hand-broken
-//! section is named) is the next rung.
+//! section is named) rides since M94 (`pgr_verify::init_offsets`, the
+//! strides, the executable-segment targets, the floor).
 //!
 //! The refusals are the M10 rung-4 slice-5 shape (a named form that
 //! cannot apply is a refusal, never a silently dropped knob):
