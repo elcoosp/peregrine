@@ -2454,3 +2454,102 @@ reason), the `m85_incremental_dep_info.rs` gate matrix, the
 beside the plain relink), and the `incremental_dep_info` consumer
 example (the capture → edit → record-bearing relink beside the decoded
 rows).
+
+---
+
+### 35 The incremental ladder's link map (M86)
+
+The M11/M80 lane contract refused `-map` beside `-incremental` because
+"the map reports the full emit's layout" — the same outdated premise
+M84/M85 corrected. The relink is not a replay of recorded bytes: its
+walk runs the full Passes 1–3 (`pgr_core::link_cached` inside
+`incremental_relink`), so `LinkResult::layout` is the walk's own Pass-3
+product, in the relink's own memory, and `pgr_core::map::build_link_map`
+— the same pure function the one-shot writes its document from — renders
+it. M86 flips the refusal to service. Design decisions:
+
+1. **The map is the relink's own placed image.** `serve_relink_faces`
+   writes [`pgr_core::map::build_link_map`] over
+   [`pgr_core::LinkResult::layout`] at both success exits — the patched
+   exit and the untouched one (the walk ran; the plan is the walk's
+   product, so an untouched relink renders its document too — and it is
+   the capture's own: nothing moved, the walk re-derived the same placed
+   image). The document the ladder writes is never the previous link's,
+   and the map lands before the record write so the dependency record's
+   output row names a sidecar that exists (the one-shot's own order —
+   the map, then the record).
+2. **The fusion lane keeps its edge, the run keeps its answer.** The
+   session's patch serves bytes, not the placed layout: no wire tail
+   carries the ladder's map, and the client cannot re-derive the
+   document from the tiles it replays. A map beside
+   `-resident -incremental` stands the resident attempt down (the §7.2
+   transparency contract — the reason names the handover) to the
+   in-process ladder, whose own walk renders the answers. The wire
+   moves when a map tail for the replay face is designed, not by
+   smuggling an unshaped render through the IMAGE reply.
+3. **The premise's correction is the docs' flip.** The knob contract
+   (`opts.rs`'s map gate), the usage rows, the README's Order & report
+   row, the M80 row's "the fusion lane keeps refusing" clause and the
+   COMPAT matrix row name the ladder as a serving lane now; the surface
+   tests that pinned the refusal (`m11_map`, `m80_served_map`) flip to
+   pin the service. The relocatable output keeps its refusal (an input
+   object produces no segment layout) — the one refusal whose premise
+   still holds.
+
+Supporting pieces: the driver's flipped gate (`opts.rs` — the
+incremental arm deleted), the ladder's map seam (`serve_relink_faces`'s
+render/write at both exits, ahead of the record), the fusion stand-down
+(`resident_relink`'s named reason), the `m86_incremental_map.rs` gate
+matrix (the surface, the ladder's own document, the untouched parity,
+the fusion handover), the `incremental` bench's map group (the map's
+render/write price beside the plain relink), and the `incremental_map`
+consumer example (the capture → edit → map-bearing relink beside the
+rendered segments).
+
+---
+
+### 36 The fusion ladder's served map (M87)
+
+The M86 lane contract stood a map-bearing fusion relink down because
+"the session's patch serves bytes, not the placed layout" — the same
+outdated premise the M80/M86 pair corrected, still holding one lane
+back. The session's ladder is not a byte-replay: `serve_relink` runs the
+full Passes 1–3 (`link_from_objects`), so `result.layout` is the walk's
+own Pass-3 product, in the session's memory — and the v46 map tail
+already has the shape to carry it. M87 flips the contract to service.
+Design decisions:
+
+1. **No wire shape moves.** The request flag (`map`), the reply tail
+   (`map_text`, the verbatim document) and the codec are the v46 faces
+   the full-link lane has carried since M80; the decode gate's refusal
+   arm — "the map reports the full emit's layout, the replay patches the
+   recorded plan in place" — is the only thing that changes: the ladder's
+   replay runs the walk, so its own Pass-3 product is the honest answer.
+   An old server's refusal is the `ERROR` reply the client's stand-down
+   already speaks (the in-process ladder answers either way — honest
+   degradation, never a silently unanswered ask).
+2. **The document is the replay's own walk.** `serve_relink` renders
+   [`pgr_core::map::build_link_map`] over its own walk at both exits —
+   the patched exit and the untouched one (the walk ran; the plan is the
+   walk's product) — the same pure function the cold lane's `-map` and
+   the M86 ladder call. The map names the placed image the patch plan
+   read, never the previous link's document, and the parity gate is the
+   rung's own contract: the served document is byte-identical to the
+   in-process ladder's render over the same anchored plan.
+3. **The driver rides the ask and writes the served bytes.**
+   `resident_relink` sets `request.map` beside the audit/timing faces
+   (the M86 stand-down arm retires with the contract), and the client
+   writes `served.map_text` to the `-map` path beside the patched image
+   — the same `-map` contract the full-link lane and the one-shot ride:
+   the daemon never touches the filesystem, the client does.
+
+Supporting pieces: the wire's retired arm (`protocol.rs` — the decode
+gate's map-beside-record refusal deleted, the round-trip gate flipped),
+the session's map seam (`serve_relink`'s render at both exits), the
+driver's ride (`resident_relink`'s request flag, the served-map write,
+the stand-down arm deleted), the `m87_fusion_map.rs` gate matrix (the
+served face, the parity, the dead-socket handover), the session's
+`the_fusion_ladder_serves_its_own_map` gate (both exits against the
+in-process reference), the `resident` bench's fusion map group, and the
+`fusion_map_link` consumer example (the capture → edit → served fusion
+map beside the transport that names the lane).
