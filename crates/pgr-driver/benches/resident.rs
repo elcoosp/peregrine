@@ -352,6 +352,61 @@ fn bench_resident_fusion(
             std::hint::black_box(patch);
         });
     });
+    // M88: the query-bearing fusion relink — the same tier-1 alternation,
+    // with `-why_export` riding the request. The session's ladder renders
+    // its own Pass-2 product (the reverse index rebuilt per relink, the
+    // query over it) and the v45 tail carries the rendered answer
+    // verbatim (the client prints it); the recorded mean beside
+    // `fusion_relink_64_objects` is the answers' index/query/encode price
+    // on the served ladder.
+    let mut prov_alternator = 0u32;
+    group.bench_function("fusion_provenance_relink_64_objects", |b| {
+        b.iter(|| {
+            prov_alternator += 1;
+            let mut edited_opts = fusion.clone();
+            edited_opts.inputs[0] = dir
+                .join(if prov_alternator % 2 == 0 {
+                    "resident_obj_0.o"
+                } else {
+                    "resident_obj_0_edited.o"
+                })
+                .display()
+                .to_string();
+            edited_opts.why_export = vec!["_bench_fn_1_0".to_string()];
+            let outcome = pgr_driver::run(&edited_opts).unwrap();
+            let patch = outcome
+                .patch
+                .expect("the query-bearing warm fusion relink patches in place");
+            std::hint::black_box(patch);
+        });
+    });
+    // M89: the record-bearing fusion relink — the same tier-1 alternation,
+    // with `-dependency_info` riding the run. The cycle's read set is the
+    // client's own Pass 0 (already paid for the job build), so the
+    // sidecar's render/write price is the only addition; the recorded
+    // mean beside `fusion_relink_64_objects` is the record's
+    // render/write price on the served ladder.
+    let mut deps_alternator = 0u32;
+    group.bench_function("fusion_dep_info_relink_64_objects", |b| {
+        b.iter(|| {
+            deps_alternator += 1;
+            let mut edited_opts = fusion.clone();
+            edited_opts.inputs[0] = dir
+                .join(if deps_alternator % 2 == 0 {
+                    "resident_obj_0.o"
+                } else {
+                    "resident_obj_0_edited.o"
+                })
+                .display()
+                .to_string();
+            edited_opts.dependency_info = Some(dir.join("fusion_bench.deps").display().to_string());
+            let outcome = pgr_driver::run(&edited_opts).unwrap();
+            let patch = outcome
+                .patch
+                .expect("the record-bearing warm fusion relink patches in place");
+            std::hint::black_box(patch);
+        });
+    });
     group.finish();
 }
 
