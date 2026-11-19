@@ -217,7 +217,7 @@ fn the_fallback_writes_the_one_shot_map() {
 }
 
 #[test]
-fn the_map_beside_incremental_still_refuses() {
+fn the_map_beside_incremental_serves_now() {
     let (dir, main, greet) = corpus("surface");
     let argv: Vec<String> = vec![
         "-o".into(),
@@ -234,11 +234,12 @@ fn the_map_beside_incremental_still_refuses() {
             std::ffi::OsString::from(greet),
         ])
         .collect();
-    let err = pgr_driver::opts::parse(&argv).unwrap_err();
-    assert!(
-        err.to_string().contains("patch tiers"),
-        "the surface refusal names the lane: {err}"
-    );
+    // M86: the ladder serves the map — the relink's walk runs the full
+    // Passes 1–3, so `LinkResult::layout` is the walk's own Pass-3
+    // product; the ladder face is the `m86_incremental_map` gate
+    // matrix's subject.
+    let o = pgr_driver::opts::parse(&argv).expect("the ladder serves the map");
+    assert!(o.map_path.is_some(), "the map ask rides the surface");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
