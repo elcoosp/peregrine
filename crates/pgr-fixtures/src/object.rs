@@ -930,24 +930,26 @@ pub fn read_sym(bytes: &[u8], index: usize) -> Result<Nlist64, pgr_format::Forma
 /// `seg.fileoff + sect.offset` under the one-section-per-segment convention).
 ///
 /// # Errors
-/// Returns a string error when the object is malformed.
-pub fn read_section(bytes: &[u8], ordinal: usize) -> Result<(Section64, u64), String> {
-    let header = pgr_format::MachHeader64::parse(bytes).map_err(|e| e.to_string())?;
+/// Returns the format error when the object is malformed or the ordinal
+/// is out of range (the sibling [`read_sym`]'s typed face — a fixture
+/// read-back refuses with the offset and the what, never a bare
+/// string).
+pub fn read_section(
+    bytes: &[u8],
+    ordinal: usize,
+) -> Result<(Section64, u64), pgr_format::FormatError> {
+    let header = pgr_format::MachHeader64::parse(bytes)?;
     let mut it = pgr_format::LoadCommandIter::new(
         bytes,
         pgr_format::MachHeader64::SIZE,
         header.ncmds,
         header.sizeofcmds,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let mut seen = 0usize;
-    while let Some(cmd) = it.next_command().map_err(|e| e.to_string())? {
+    while let Some(cmd) = it.next_command()? {
         if cmd.kind == pgr_format::LoadCommandKind::Segment64 {
-            let seg =
-                pgr_format::SegmentCommand64::parse(cmd.bytes, 0).map_err(|e| e.to_string())?;
-            let sects = seg
-                .sections(cmd.bytes, pgr_format::SegmentCommand64::SIZE)
-                .map_err(|e| e.to_string())?;
+            let seg = pgr_format::SegmentCommand64::parse(cmd.bytes, 0)?;
+            let sects = seg.sections(cmd.bytes, pgr_format::SegmentCommand64::SIZE)?;
             for s in sects {
                 if seen == ordinal {
                     return Ok((*s, seg.fileoff));
@@ -956,19 +958,25 @@ pub fn read_section(bytes: &[u8], ordinal: usize) -> Result<(Section64, u64), St
             }
         }
     }
-    Err(format!("section ordinal {ordinal} out of range"))
+    Err(pgr_format::FormatError::Invalid {
+        offset: 0,
+        what: "section ordinal out of range",
+        value: u64::try_from(ordinal).unwrap_or(u64::MAX),
+    })
 }
 
 /// Parses the relocation table of the section with the given 0-based ordinal.
 ///
 /// # Errors
-/// Returns a string error when the table is out of bounds.
-pub fn read_relocs(bytes: &[u8], ordinal: usize) -> Result<Vec<RelocationInfo>, String> {
+/// Returns the format error when the table is out of bounds.
+pub fn read_relocs(
+    bytes: &[u8],
+    ordinal: usize,
+) -> Result<Vec<RelocationInfo>, pgr_format::FormatError> {
     let (sect, _) = read_section(bytes, ordinal)?;
     let mut out = Vec::with_capacity(sect.nreloc as usize);
     for i in 0..sect.nreloc as usize {
-        let r = RelocationInfo::parse(bytes, sect.reloff as usize + i * 8)
-            .map_err(|e| e.to_string())?;
+        let r = RelocationInfo::parse(bytes, sect.reloff as usize + i * 8)?;
         out.push(r);
     }
     Ok(out)
