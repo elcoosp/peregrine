@@ -157,6 +157,12 @@ fn compose_of_a_single_source_builds_the_same_table() {
 fn compose_matches_the_merged_file() {
     // The composition of two files and the parse of the merged text
     // carry the same rows — the entries with their scopes, in order.
+    fn strip_line(entries: &[OrderEntry]) -> Vec<(Option<String>, String)> {
+        entries
+            .iter()
+            .map(|e| (e.object.clone(), e.symbol.clone()))
+            .collect()
+    }
     let a = OrderFile::parse("_a_second\na.o:_a_tail\n").expect("parses");
     let b = OrderFile::parse("_b_third\n").expect("parses");
     let composed = SymbolOrder::compose(&[
@@ -172,12 +178,6 @@ fn compose_matches_the_merged_file() {
     .expect("composes");
     let merged = OrderFile::parse("_a_second\na.o:_a_tail\n_b_third\n").expect("parses");
     let built = SymbolOrder::build(&merged);
-    fn strip_line(entries: &[OrderEntry]) -> Vec<(Option<String>, String)> {
-        entries
-            .iter()
-            .map(|e| (e.object.clone(), e.symbol.clone()))
-            .collect()
-    }
     assert_eq!(
         strip_line(composed.entries()),
         strip_line(built.entries()),
