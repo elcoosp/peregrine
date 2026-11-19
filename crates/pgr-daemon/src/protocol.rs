@@ -246,9 +246,8 @@ use sha2::{Digest, Sha256};
 /// widen). **v45** appends the provenance queries (M79 — the request's
 /// `why_export` names and `why_load` flag ask the session's own full
 /// walk for the M56/M57 answers, the reply's IMAGE tail carrying the
-/// rendered text verbatim; a query the §7.3 ladder's replay cannot
-/// answer honestly — beside the `record` — is a malformed request, the
-/// fusion lane's own refusal enforced at the wire).
+/// rendered text verbatim; M88 retires the beside-the-`record` refusal —
+/// the replay's own walk answers honestly, the same tail either lane).
 pub const PROTO_VERSION: u32 = 47;
 
 // ---- message tags -----------------------------------------------------------
@@ -512,15 +511,15 @@ pub struct LinkRequest {
     /// the selection narrows is the only gate it means.
     pub verify_checks: Option<pgr_verify::CheckSet>,
     /// The provenance queries (v45, M79): the `-why_export` names in
-    /// flag order and the `-why_load` flag — the session's own full walk
-    /// (the warm pipeline *is* the one-shot shape: parse from resident
-    /// POIs, intern, resolve, layout) renders the M56/M57 answers, and
-    /// the reply's IMAGE tail carries the rendered text verbatim. The
-    /// empty list (the default) queries nothing. A query beside the
-    /// `record` (the §7.3 ladder's replay — the fusion lane's request)
-    /// is a malformed request: the replay's Pass-2 product is the
-    /// record's, not the walk's, and an answer naming it would misreport
-    /// the run.
+    /// flag order and the `-why_load` flag — the session's own walk (the
+    /// warm pipeline *is* the one-shot shape: parse from resident POIs,
+    /// intern, resolve, layout) renders the M56/M57 answers, and the
+    /// reply's IMAGE tail carries the rendered text verbatim. The empty
+    /// list (the default) queries nothing. M88: a query rides the
+    /// `record` too — the §7.3 ladder's replay runs the full Passes 1–3,
+    /// so its own Pass-2 product is the honest answer (never the
+    /// record's stale one), the same tail carrying the renders either
+    /// lane.
     pub why_export: Vec<String>,
     /// The load-report flag (v45, M79): `-why_load` — the S7 pull's
     /// per-member decision (and, under `-dead_strip_dylibs`, every input
@@ -693,10 +692,12 @@ impl LinkRequest {
         };
         // M79 (v45): the provenance queries (see encode). An empty name
         // is a malformed request — the surface's grammar the driver
-        // parses before the wire (a query names a C symbol); a query
-        // beside the `record` is malformed too — the ladder's replay
-        // cannot answer it honestly (the fusion lane's own refusal,
-        // enforced at the wire so no caller can plan the shape either).
+        // parses before the wire (a query names a C symbol). M88: the
+        // queries ride the `record` too — the ladder's replay runs the
+        // full Passes 1–3, so its own Pass-2 product answers honestly;
+        // the refusal the M80-era arm carried is retired with the
+        // outdated premise (an old server's `ERROR` is the reply the
+        // client's stand-down already speaks — honest degradation).
         let why_export = (0..r.u32()?)
             .map(|_| r.str())
             .collect::<Result<Vec<String>, DecodeError>>()?;
@@ -716,15 +717,6 @@ impl LinkRequest {
         // outdated premise (an old server's `ERROR` is the reply the
         // client's stand-down already speaks — honest degradation).
         let map = r.u8()? != 0;
-        let queries_asked = !why_export.is_empty() || why_load;
-        if queries_asked && record.is_some() {
-            return Err(DecodeError::Malformed(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the request asks provenance beside a record: the §7.3 ladder's \
-                 replay cannot answer the query honestly (the Pass-2 product is \
-                 the record's, not the walk's)",
-            )));
-        }
         // M83: the relocatable shape's edges at the wire. The object
         // walk serves the full link and the provenance queries (the
         // object's Pass-2 product is the same arena the query reads);
@@ -2772,11 +2764,13 @@ mod tests {
     }
 
     #[test]
-    fn provenance_queries_beside_a_record_refuse() {
-        // The §7.3 ladder's replay cannot answer the query honestly (the
-        // Pass-2 product is the record's, not the walk's — the fusion
-        // lane's own refusal, enforced at the wire): a request carrying
-        // both is malformed, never silently answered.
+    fn provenance_queries_ride_the_record() {
+        // M88: the queries ride the record — the §7.3 ladder's replay
+        // runs the full Passes 1–3 (`link_from_objects` inside
+        // `serve_relink`), so its own Pass-2 product is the honest
+        // answer, and the v45 tail carries the renders either lane (the
+        // M87 precedent: the decode gate's refusal arm retired with the
+        // outdated premise — no wire shape moves).
         let req = LinkRequest {
             config: rich_config(),
             force_load: Vec::new(),
@@ -2792,20 +2786,16 @@ mod tests {
             verify: false,
             verify_checks: None,
             why_export: vec!["_greet".to_string()],
-            why_load: false,
+            why_load: true,
             map: false,
         };
-        let err = LinkRequest::decode(&req.encode()).unwrap_err();
-        match err {
-            DecodeError::Malformed(e) => {
-                let text = e.to_string();
-                assert!(
-                    text.contains("record"),
-                    "the refusal names the ladder it cannot serve: {text}"
-                );
-            }
-            other => panic!("expected a malformed body, got {other:?}"),
-        }
+        let back = LinkRequest::decode(&req.encode()).expect("the query-bearing record decodes");
+        assert_eq!(back.why_export, req.why_export, "the names ride in order");
+        assert!(
+            back.why_load,
+            "the load-report flag rides beside the record"
+        );
+        assert!(back.record.is_some(), "the record rides beside the queries");
     }
 
     #[test]
