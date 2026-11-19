@@ -397,7 +397,7 @@ pub enum SectionOrderClass {
     /// orders the section's literals by the file's escape-decoded lines.
     CstringLiteral,
     /// The literal no-op face (every `__TEXT,__literal*` section): ld64
-    /// warns ("sorting of __literal[4,8,16] sections not supported") and
+    /// warns ("sorting of __literal\[4,8,16\] sections not supported") and
     /// ranks nothing — the file is never read.
     LiteralNotSupported,
 }
