@@ -222,8 +222,8 @@ use sha2::{Digest, Sha256};
 /// (M65 — the phase tokens `relink_gate`/`relink_plan`/`relink_patch`/
 /// `relink_audit` and their detail payloads ride the tail's own shape,
 /// so a captured tail carrying them restores exactly; the session's own
-/// ladder reports through the seam at the next rung — a warm run's
-/// report today carries the pipeline phases alone). M68 extends the
+/// ladder reports through the seam since M66 — a warm relink's report
+/// carries the rungs beside the pipeline phases). M68 extends the
 /// tail's vocabulary with the emit half's tokens (`emit`/`flush` and
 /// their detail payloads, ordinals 12/13) **without a version bump**:
 /// the served content is unchanged — the session's warm run has no
@@ -3009,7 +3009,10 @@ mod tests {
         let mut quiet = req;
         quiet.why_live.clear();
         let plain = LinkRequest::decode(&quiet.encode()).unwrap();
-        assert!(plain.why_live.is_empty(), "the empty list decodes to the no-query shape");
+        assert!(
+            plain.why_live.is_empty(),
+            "the empty list decodes to the no-query shape"
+        );
     }
 
     #[test]
@@ -5203,8 +5206,8 @@ mod tests {
     fn the_time_report_tail_round_trips_the_ladder_rungs() {
         // M65 (v42): the §7.3 rung vocabulary rides the tail's own shape —
         // a captured tail carrying the ladder's rows restores exactly (the
-        // session's own ladder reports through the seam at the next rung;
-        // the vocabulary is the tail's, not the session's yet).
+        // session's own ladder reports through the seam since M66 — wire
+        // v42 in service).
         use pgr_core::observe::{Phase, PhaseDetail, PhaseEvent};
         use std::time::Duration;
         let row = |phase: Phase, detail: PhaseDetail, us: u64| PhaseEvent {
