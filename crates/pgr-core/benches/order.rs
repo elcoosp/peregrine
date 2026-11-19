@@ -198,11 +198,11 @@ fn bench_cstring(c: &mut Criterion) {
     let literals_n = 16usize;
     let inputs: Vec<LinkInput> = (0..objects_n)
         .map(|o| {
-            let mut b =
-                ObjectBuilder::new(format!("obj{o:02}.o")).set_subsections_via_symbols(true);
+            let name = format!("obj{o:02}.o");
+            let mut b = ObjectBuilder::new(&name).set_subsections_via_symbols(true);
             let text = b.add_section(ObjectSection::text(
                 "__text",
-                [0xC0u8, 0x03, 0x5F, 0xD6],
+                vec![0xC0u8, 0x03, 0x5F, 0xD6],
                 Vec::new(),
             ));
             let mut data = Vec::new();
