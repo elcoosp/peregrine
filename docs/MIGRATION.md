@@ -165,6 +165,8 @@ pgr -o app main.o -lgreet -L libs -incremental --trace t.json   # the ladder's r
 A linker that silently drops a flag it does not implement is worse than one
 that says so. The list is empty today — every flag that waited here shipped:
 (`-order_file` left this list when its rank-based subset shipped at M11,
+
+`-sectorder <seg> <sect> <file>` (M90/M91) — ld64's per-section order flag rides the M11 rank seam: an ordinary section's file appends its entries to the rank table in flag order, the `__TEXT,__cstring` face ranks the literal sections by escape-decoded content, and a `__TEXT,__literal*` section is the warned no-op (the file is never read). It composes with `-order_file` in command-line order and serves beside `-resident` on the same rank-table carriage.
 alongside `-map`; the weak/lazy dylib family — `-weak_framework`,
 `-lazy_framework`, `-lazy_library` — left it at M14, `-pagezero_size`
 left it at M15, the image base becoming a validated `LinkConfig` decision,
