@@ -6,6 +6,44 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M85)
+
+- **M85** — the incremental ladder's dependency record: the M60 lane contract (`-dependency_info`
+  refused beside `-incremental` — "the relink patches the recorded plan and re-reads no input
+  file") flips to service the M84 way: the premise was outdated, because the relink's Pass 0
+  (`prepare_link`) re-reads every input it maps — the re-parse is the digest source the
+  propagation gate compares — and records the read set while the reads happen
+  (`PreparedLink::deps`, the same recording the one-shot's Pass 0 runs). The sidecar the relink
+  rewrites names the files the ladder actually read, never the previous link's list, and the
+  output row joins at the write site — the record stays read-set-derived on either tier (the
+  patched exit and the untouched one both rode the mapping). The fusion lane keeps its edge —
+  the session's reads live inside the daemon and the wire carries no read set, so a
+  record-bearing relink stands the resident attempt down to the in-process ladder, whose own
+  Pass 0 records the files it mapped. `OptsError::DependencyInfoConflict` retires with the
+  gate; the `incremental` bench gains the record-bearing relink beside the plain one, and the
+  `incremental_dep_info` example walks the capture → edit → record-bearing relink beside the
+  decoded rows
+
+### Added (M84)
+
+- **M84** — the incremental ladder's provenance queries: the M56/M57 lane contract
+  (`-why_export`/`-why_load` refused beside `-incremental` — "the ladder's replay product is the
+  record's, not the walk's") flips to service the M79 way: the verdict was the M9 GA rung's
+  outdated premise, because the relink is not a replay of recorded bytes — `incremental_relink`
+  re-parses the inputs and runs the full Passes 1–3 (`pgr_core::link_cached`), so
+  `LinkResult::resolution` and `LinkResult::loads` are the walk's products, in the relink's own
+  memory. The answers serve from the relink's own walk at both success exits (the patched exit
+  and the untouched one — the walk ran either way, one question, one answer, either lane), the
+  same faces the one-shot prints; a vacuous query refuses the relink exactly as it refuses the
+  cold link (the misspelling named, never silently empty), the faces ordered after `store_record`
+  so a refusal leaves the next relink re-planning from the renewed record. The fusion lane keeps
+  its edge — the session's patch serves bytes, not answers (no wire tail carries the walk's
+  Pass-2 product), so a query beside `-resident -incremental` stands the resident attempt down
+  to the in-process ladder, whose own walk serves the answers. `OptsError::WhyExportConflict`
+  retires with the gate; the `incremental` bench gains the queried relink beside the plain one,
+  and the `incremental_provenance` example walks the capture → edit → queried relink beside the
+  vacuous refusal
+
 ### Added (M83)
 
 - **M83** — the resident lane's relocatable shape: the M8 lane contract (`-r` named "no
