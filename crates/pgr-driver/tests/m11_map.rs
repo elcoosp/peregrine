@@ -124,7 +124,7 @@ fn two_links_render_identical_maps() {
 }
 
 #[test]
-fn the_map_refuses_the_surfaces_without_a_full_emit_layout() {
+fn the_map_refuses_the_surface_without_a_full_emit_layout() {
     let dir = scratch("m11");
     let obj = hello_o(&dir);
 
@@ -140,7 +140,10 @@ fn the_map_refuses_the_surfaces_without_a_full_emit_layout() {
     let err = opts::parse(&argv).unwrap_err();
     assert!(err.to_string().contains("no segment layout"), "{err}");
 
-    // `-incremental`: the patch tiers plan inside the engine.
+    // `-incremental`: the surface serves since M86 — the relink's walk
+    // runs the full Passes 1–3, so `LinkResult::layout` is the walk's
+    // own Pass-3 product; the ladder face is the
+    // `m86_incremental_map` gate matrix's subject.
     let argv = args(&[
         "-o",
         "out",
@@ -149,8 +152,8 @@ fn the_map_refuses_the_surfaces_without_a_full_emit_layout() {
         "out.map",
         "-incremental",
     ]);
-    let err = opts::parse(&argv).unwrap_err();
-    assert!(err.to_string().contains("patch tiers"), "{err}");
+    let o = opts::parse(&argv).expect("the ladder serves the map");
+    assert!(o.map_path.is_some(), "the map ask rides the surface");
 
     // `-resident`: the surface serves since M80 (wire v46 — the
     // session's own walk renders the map); the served face is the
