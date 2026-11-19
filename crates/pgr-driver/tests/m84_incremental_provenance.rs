@@ -7,11 +7,9 @@
 //! (`pgr_core::link_cached`), so `result.resolution` and `result.loads`
 //! are the walk's products, in the relink's own memory, and the answers
 //! serve from them exactly as the one-shot serves its own. The fusion
-//! lane keeps its edge: the session's patch serves bytes, not answers
-//! (no wire tail carries the walk's product), so a query-bearing
-//! relink stands the resident attempt down to the in-process ladder —
-//! the next rung in order, every one always available — and the
-//! in-process walk serves the answers either way.
+//! lane serves its own replay's answers since M88 (the session's ladder
+//! runs the same walk — `m88_fusion_provenance.rs` pins that face); the
+//! in-process walk here answers the cold ladder either way.
 //!
 //! Gate matrix:
 //! * the surface — the argv that refused since M56 parses now;
@@ -22,9 +20,10 @@
 //! * the edges — a vacuous query refuses the relink (the misspelling
 //!   named, never silently empty), and an untouched relink (the walk
 //!   ran, nothing patched) still answers;
-//! * the fusion handover — a query beside `-resident -incremental`
-//!   stands the resident attempt down; the in-process ladder serves the
-//!   answer (the outcome rides no transport).
+//! * the fusion face — a query beside `-resident -incremental` rides
+//!   the session since M88 (the outcome's transport names the lane; the
+//!   pre-M88 stand-down is `m88_fusion_provenance.rs`'s dead-socket
+//!   row).
 
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use std::path::{Path, PathBuf};
@@ -306,13 +305,14 @@ fn the_untouched_relink_still_answers() {
 
 // ---- the fusion handover ----------------------------------------------------
 
-/// The fusion lane keeps its edge: the session's patch serves bytes, not
-/// answers (no wire tail carries the walk's product), so a query beside
-/// `-resident -incremental` stands the resident attempt down to the
-/// in-process ladder — which serves the answer (the outcome rides no
-/// transport).
+/// The fusion lane serves the queries now (M88): the session's ladder is
+/// not a byte-replay — `serve_relink` runs the full Passes 1–3, so its
+/// own Pass-2 product renders the answers the v45 tail carries verbatim
+/// (the M87 precedent over the M84 stand-down). The in-process ladder
+/// answers either way — a dead server's refusal is the handover it
+/// always was (pinned in `m88_fusion_provenance.rs`).
 #[test]
-fn the_fusion_lane_hands_the_queries_to_the_ladder() {
+fn the_fusion_lane_serves_the_queries() {
     let dir = scratch("fusion");
     let (a, b) = corpus(&dir, false);
     let out = dir.join("out");
@@ -324,17 +324,24 @@ fn the_fusion_lane_hands_the_queries_to_the_ladder() {
     let fusion = parse(
         &out,
         &[&a, &b],
-        &["-incremental", "-resident", "-why_export", "_greet"],
+        &[
+            "-incremental",
+            "-resident",
+            "-resident_socket",
+            &sock.display().to_string(),
+            "-why_export",
+            "_greet",
+        ],
     )
     .expect("the fusion argv parses");
     assert!(
         fusion.resident && fusion.incremental,
         "the fusion surface rides"
     );
-    let outcome = pgr_driver::run(&fusion).expect("the query hands over and answers");
+    let outcome = pgr_driver::run(&fusion).expect("the query rides the session and answers");
     assert!(
-        outcome.transport.is_none(),
-        "the in-process ladder served the answer (the session's patch rides none)"
+        outcome.transport.is_some(),
+        "the session's ladder served the answer (the M88 service)"
     );
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_dir_all(&dir);
