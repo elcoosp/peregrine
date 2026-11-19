@@ -3,11 +3,11 @@
 //! CLI — one deterministic SARIF 2.1.0 document per verified image, the
 //! shape GitHub Code Scanning, IDE problem panels and CI triage read
 //! natively. The face refuses where it cannot apply honestly: beside the
-//! other machine face (`--json`), beside the baseline gate (the delta
-//! has no SARIF shape), and on a universal container (the SARIF
-//! `region.byteOffset` names file bytes; a slice's anchors ride its own
-//! window — re-anchoring would re-shape, so the face refuses with the
-//! fix).
+//! other machine face (`--json`) and beside the baseline gate (the delta
+//! has no SARIF shape). (The M75 container refusal — "a slice's anchors
+//! ride their own windows" — retired with its premise at M95: the slices
+//! ride *inside* the audited file, so `render_universal` re-anchors
+//! honestly; the container's gates live in `m95_sarif_universal.rs`.)
 //!
 //! Gate matrix:
 //! * the clean image's document rides an empty `results` array, one
@@ -16,8 +16,7 @@
 //!   stable code token, `level` the severity, the anchor offset) and
 //!   fails the exit gate;
 //! * the two machine faces refuse each other;
-//! * the baseline gate refuses the face;
-//! * the container face refuses the face, naming the slice story.
+//! * the baseline gate refuses the face.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -171,7 +170,11 @@ fn the_sarif_face_refuses_the_baseline_gate() {
 }
 
 #[test]
-fn the_sarif_face_refuses_a_container() {
+fn the_sarif_face_serves_the_container_since_m95() {
+    // The M75 refusal retired with its premise (the slices ride inside
+    // the audited file); the served face's gates live in
+    // m95_sarif_universal.rs — this rung keeps one honest pin: the
+    // container renders the SARIF document instead of the refusal.
     let dir = scratch("container");
     let a = dylib_image(0x75);
     let b = dylib_image(0x76);
@@ -183,10 +186,10 @@ fn the_sarif_face_refuses_a_container() {
     let path = write_image(&dir, "fat.dylib", &container);
     let path_str = path.display().to_string();
     let out = run(&["--sarif", &path_str]);
-    assert_eq!(out.status.code(), Some(2), "usage refusal");
-    let text = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "the honest container passes");
+    let doc = stdout(&out);
     assert!(
-        text.contains("slice"),
-        "the fix names the per-slice story: {text}"
+        doc.contains("\"version\":\"2.1.0\""),
+        "the container rides the SARIF document: {doc}"
     );
 }
