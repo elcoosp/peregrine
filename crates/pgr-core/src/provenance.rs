@@ -163,8 +163,10 @@ pub fn explain_export(
 /// The resolution's winner, named (the def's ids resolved through the
 /// arena the link already parsed). A dylib export never installs a
 /// `Def` — the two-level bind rides the resolution's ordinal map — so
-/// the provider is named through [`Resolution::dylib_ordinal`].
-fn definition_source(
+/// the provider is named through [`Resolution::dylib_ordinal`]. The
+/// M92 liveness query (`crate::why_live`) rides the same naming for its
+/// definition row.
+pub(crate) fn definition_source(
     id: crate::ids::StringId,
     objects: &[InputObject],
     res: &Resolution,
@@ -243,6 +245,51 @@ impl DefinitionSource {
     }
 }
 
+/// The definition object's JSON face (the M56 writer, shared with the
+/// M92 liveness query's `definition` key — one definition shape, both
+/// queries render it identically).
+pub(crate) fn definition_source_json(definition: &DefinitionSource) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(128);
+    match definition {
+        DefinitionSource::Input {
+            file,
+            section,
+            rank,
+            weak,
+            value,
+        } => {
+            let _ = write!(
+                s,
+                "{{\"kind\":\"input\",\"file\":{},\"segment\":{},\"section\":{},\
+                 \"rank\":\"{}\",\"weak\":{},\"value\":{}}}",
+                crate::map::escape_json(file),
+                section
+                    .as_ref()
+                    .map_or("null".to_string(), |(seg, _)| crate::map::escape_json(seg)),
+                section.as_ref().map_or("null".to_string(), |(_, name)| {
+                    crate::map::escape_json(name)
+                }),
+                rank_str(*rank),
+                weak,
+                value,
+            );
+        }
+        DefinitionSource::Dylib { install_name, weak } => {
+            let _ = write!(
+                s,
+                "{{\"kind\":\"dylib\",\"install_name\":{},\"weak\":{}}}",
+                crate::map::escape_json(install_name),
+                weak,
+            );
+        }
+        DefinitionSource::DynamicLookup | DefinitionSource::Unresolved => {
+            let _ = write!(s, "{{\"kind\":\"{}\"}}", definition.kind());
+        }
+    }
+    s
+}
+
 impl RefExplanation {
     /// Renders the answer as deterministic text: the definition line,
     /// then every site in the index's order, then the site count — a
@@ -318,46 +365,13 @@ impl RefExplanation {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(128 + self.sites.len() * 96);
         let _ = write!(s, "{{\"name\":{},", crate::map::escape_json(&self.name));
-        match &self.definition {
-            DefinitionSource::Input {
-                file,
-                section,
-                rank,
-                weak,
-                value,
-            } => {
-                let _ = write!(
-                    s,
-                    "\"definition\":{{\"kind\":\"input\",\"file\":{},\"segment\":{},\"section\":{},\
-                     \"rank\":\"{}\",\"weak\":{},\"value\":{}}}",
-                    crate::map::escape_json(file),
-                    section
-                        .as_ref()
-                        .map_or("null".to_string(), |(seg, _)| crate::map::escape_json(seg)),
-                    section.as_ref().map_or("null".to_string(), |(_, name)| {
-                        crate::map::escape_json(name)
-                    }),
-                    rank_str(*rank),
-                    weak,
-                    value,
-                );
-            }
-            DefinitionSource::Dylib { install_name, weak } => {
-                let _ = write!(
-                    s,
-                    "\"definition\":{{\"kind\":\"dylib\",\"install_name\":{},\"weak\":{}}}",
-                    crate::map::escape_json(install_name),
-                    weak,
-                );
-            }
-            DefinitionSource::DynamicLookup | DefinitionSource::Unresolved => {
-                let _ = write!(
-                    s,
-                    "\"definition\":{{\"kind\":\"{}\"}}",
-                    self.definition.kind()
-                );
-            }
-        }
+        // The definition object is the shared writer (the M92 liveness
+        // query renders the same shape — one definition, both faces).
+        let _ = write!(
+            s,
+            "\"definition\":{}",
+            definition_source_json(&self.definition)
+        );
         s.push_str(",\"sites\":[");
         for (i, site) in self.sites.iter().enumerate() {
             if i > 0 {
