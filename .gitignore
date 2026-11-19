@@ -17,3 +17,7 @@ docs/launch.md
 /core
 # the link cache's default directory name when a test runs from a crate root
 .pgr-cache/
+
+# ship ceremony (generated locally, never committed)
+ship.toml
+.github/pr-body.md
