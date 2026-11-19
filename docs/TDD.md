@@ -2553,3 +2553,100 @@ served face, the parity, the dead-socket handover), the session's
 in-process reference), the `resident` bench's fusion map group, and the
 `fusion_map_link` consumer example (the capture → edit → served fusion
 map beside the transport that names the lane).
+
+---
+
+### 37 The fusion ladder's served provenance (M88)
+
+The M84 lane contract stood a query-bearing fusion relink down because
+"the session's patch serves bytes, not answers" — the same outdated
+premise the M80/M86/M87 chain corrected, still holding the v45 face one
+lane back. The session's ladder is not a byte-replay: `serve_relink`
+runs the full Passes 1–3 (`link_from_objects`), so
+`result.resolution`/`result.loads` are the walk's own Pass-2 products,
+in the session's memory — and the v45 provenance tail already has the
+shape to carry them. M88 flips the contract to service. Design
+decisions:
+
+1. **No wire shape moves.** The request fields (`why_export`,
+   `why_load`), the reply tail (the renders verbatim) and the codec are
+   the v45 faces the full-link lane has carried since M79; the decode
+   gate's refusal arm — "the ladder's replay cannot answer the query
+   honestly (the Pass-2 product is the record's, not the walk's)" — is
+   the only thing that changes: the replay's walk runs, so its own
+   Pass-2 product is the honest answer. An old server's refusal is the
+   `ERROR` reply the client's stand-down already speaks (the in-process
+   ladder answers either way — honest degradation, never a silently
+   unanswered ask).
+2. **The answers are the replay's own walk.** `serve_relink` renders
+   [`Self::serve_provenance_from`] over its own walk at both exits —
+   the patched exit and the untouched one (the walk ran; the answers
+   name the resolution the patch plan read, never the record's stale
+   product) — the same index-and-query render the cold lane and the
+   M84 ladder call, and the parity gate is the rung's own contract:
+   the served answers are byte-identical to the in-process render over
+   the same anchored plan. A vacuous query refuses the replay exactly
+   as it refuses the full link (the misspelling named, never silently
+   empty).
+3. **The driver rides the ask and prints the served renders.**
+   `resident_relink` sets `request.why_export`/`request.why_load`
+   beside the map ask (the M84 stand-down arm retires with the
+   contract), and the client prints the served renders beside the
+   patched image — the same print face the full-link lane and the
+   one-shot ride: the daemon never touches the filesystem, the client
+   prints what it received.
+
+Supporting pieces: the wire's retired arm (`protocol.rs` — the decode
+gate's queries-beside-record refusal deleted, the round-trip gate
+flipped), the session's answer seam (`serve_relink`'s render at both
+exits), the driver's ride (`resident_relink`'s request fields, the
+served-answers print, the stand-down arm deleted), the
+`m88_fusion_provenance.rs` gate matrix (the served face, the vacuous
+refusal, the untouched answer, the dead-socket handover), the session's
+`the_fusion_ladder_serves_its_own_provenance` gate (both exits against
+the in-process reference), the `resident` bench's fusion provenance
+group, and the `fusion_provenance_link` consumer example (the capture →
+edit → served fusion answers beside the vacuous refusal).
+
+---
+
+### 38 The fusion ladder's dependency record (M89)
+
+The M85 lane contract stood a record-bearing fusion relink down because
+"the fusion ladder's reads live inside the daemon" — a premise the §7.2
+contract itself voids: the daemon never touches the filesystem, so the
+reads the stand-down worried about never happen. The relink cycle's
+real reads are the client's own Pass 0 — `resident_relink` already runs
+`prepare_link` to build the job (`PreparedLink::deps`, the read set
+recorded while the reads happen), the same recording the in-process
+ladder's record writes from. M89 flips the contract to service. Design
+decisions:
+
+1. **The record stays read-set-derived — the cycle's read set is the
+   client's Pass 0.** `resident_relink` writes
+   [`write_dependency_record`] over `prepared.deps` beside the patched
+   image: the sidecar names the files the cycle actually mapped — never
+   the previous link's list — and the output rows join at the write
+   site, the map landing first so the record's output row names a
+   sidecar that exists (the one-shot's own order — the map, then the
+   record). The M60 rule holds on every lane: every lane that reads the
+   files records them.
+2. **The parity is the rung's own contract.** The fusion lane's record
+   and the in-process ladder's record over the same cycle name the same
+   read set — either lane, one Pass 0, one document (the daemon reads
+   nothing, so the client's read set is the complete honest answer, not
+   a misreport; the M85 concern named a record the client could not
+   ground, and `prepared.deps` is the grounding).
+3. **The gate and its stand-down retire.** The `resident_relink`
+   refusal arm is dead the day the gate flips; the `m85` surface tests
+   that pinned the handover flip to pin the service, and
+   `m89_fusion_dep_info.rs` gates the ladder's record (the served face,
+   the parity, the untouched exit, the dead-socket handover).
+
+Supporting pieces: the driver's flipped gate (`resident_relink` — the
+M85 stand-down arm deleted), the record seam (`write_dependency_record`
+beside the served image, after the map), the `m89_fusion_dep_info.rs`
+gate matrix, the `resident` bench's fusion record group (the sidecar's
+render/write price beside the plain relink), and the
+`fusion_dep_info_link` consumer example (the capture → edit →
+record-bearing relink beside the decoded rows).
