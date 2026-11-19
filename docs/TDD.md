@@ -2655,3 +2655,33 @@ record-bearing relink beside the decoded rows).
 ## The order-surface records (M90/M91)
 
 **M90 — `-sectorder` rides the rank seam.** The classification mirrors ld64's `parseSectionOrderFile` (the `__TEXT,__cstring` strcmp pair, the `__literal` 9-char prefix, everything else the rank append — "ignore section information and append all symbol names to global order file"). The order sources compose into ONE table in command-line order (`SymbolOrder::compose`, the cross-source duplicate refused with both sources and lines named); the composed table consumes the v47 wire and the ladder exactly as the single file's table did. **M91 — the cstring mode.** The literal contents rank the `S_CSTRING_LITERALS` buckets through the D4 canonical sort (a stable pass keyed on the escape-decoded content, the NUL exclusive; the remap untouched — the placed addresses follow the new piece order); the table crosses the wire as v48 (a rebuild-refusing table is a malformed request). The escape set follows `cstringSymbolName` with two named divergences: `\'` decodes as the quote (ld64 maps it to `\r`), and blank lines skip (ld64 pushes an empty entry that ranks nothing).
+
+**M92 — the liveness-provenance query (`pgr_core::why_live`, `-why_live <symbol>`).** ld64's
+flag (`Options::printWhyLive`) is the third provenance face: the M5 mark phase records, from
+data it already had, the first way each atom went live — a root (`LiveWhy::Root`, the decision
+and the naming symbol: the entry point, the export surface, `-u`, an alias, `-export_dynamic`,
+the init/term/no-dead-strip sections, the unwind anchors) or the reference that reached it
+first (`LiveWhy::ReferencedBy`, the referrer node, the referenced name, the M8-a `RefSite`) —
+and the record leaves the live set through `LiveSet::take_liveness` before the passes consume
+it (`std::mem::take`; the layout plans from the grids it always did, so the record never feeds
+a pass). The record rides the link result (`LinkResult::liveness`, `Some` exactly when the
+strip ran) and `explain_live` walks it from the queried definition back to its root: the name
+resolves through the interner (the M56 refusal convention), the definition atom is the arena's
+own atom tables (the same containment the piece builder queries), the keeper names come from
+the resolution's definition map (first name wins, the map's own id order), and the walk
+terminates at the root decision — the parents strictly precede the marked, so the walk cannot
+cycle, and a grid miss (an unmarked atom) answers `Dead`, the honest verdict. The refusals
+name their premise: `UnknownSymbol` (the misspelling, the C-underscore hint),
+`NotDefinedHere` (a dylib export or a link-time common — no link-time atom walks),
+`NotStripped` (the link never carried `-dead_strip` — the fix is the flag). The faces follow
+the house twins (`render` the diffable text, `render_json` the M55 escape rules with the M56
+definition object shared through `provenance::definition_source_json`). The lane contract is
+the M56 shape this rung: the one-shot lane and the in-process ladder answer (the relink
+re-runs the full Passes 1–3, `result.liveness` is the walk's own record), the resident lanes
+refuse (`OptsError::WhyLiveConflict` — the wire's provenance tail v45 carries the
+why_export/why_load asks, a liveness ask has no wire shape yet; the served rung is a later
+milestone). Tests: `m92_why_live.rs` (core: the chain, the verdicts, the refusals, the
+read-only contract, the schedule independence, the interchange; driver: the surface, the
+conflict, the run, the premise), the `why_live` bench (the walk's O(depth) price beside the
+corpus's own depth), and the `why_live_link` consumer example (both faces beside both
+refusals).
