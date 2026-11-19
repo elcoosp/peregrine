@@ -454,6 +454,18 @@ Record v4's per-section content digests exempt byte-identical moves from the pro
 the digest hash adds no measurable full-link cost (17.4 vs 17.4 back-to-back; copy-vs-rehash
 32.0 vs 32.2 ms — noise).
 
+**M84/M85 read faces on the warm ladder** (initial dev-sandbox run, this host only — the
+recording-pass convention above governs the comparable table; the queried/record-bearing
+medians sit inside the plain relink's noise band, so the honest verdict is a wash: the
+answers' index walk and the sidecar's render are invisible beside an 8.5 MiB tier-1 relink):
+
+| Bench (this host)                                | Median      | Throughput  |
+| ------------------------------------------------ | ----------- | ----------- |
+| `incremental_relink_8mib` (tier 1)               | 36.6 ms     | 222 MiB/s   |
+| `incremental_provenance_relink_8mib` (M84)       | 33.3 ms     | 244 MiB/s — wash |
+| `incremental_dep_info_relink_8mib` (M85)         | 32.5 ms     | 250 MiB/s — wash |
+| `untouched_relink_8mib`                          | 19.4 ms     | —           |
+
 **Randomized edit gate**: seeded xorshift64* walk (body growth, import add, retarget, oversized
 growth, symtab churn, no-op), engine-level and real `-incremental -incremental-verify` driver
 loop. **10 000 engine steps in 11.4 s, every step byte-identical or an honest re-recording
