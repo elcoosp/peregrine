@@ -236,31 +236,49 @@ fn the_vacuous_query_refuses_through_the_fallback() {
 }
 
 #[test]
-fn the_fusion_lane_hands_the_queries_to_the_ladder() {
+fn the_fusion_relink_prints_the_served_answers() {
     let (dir, main, archive) = corpus("fusion");
     let sock = socket_for("fusion");
     start_daemon(&sock);
-    // M84: the fusion patch serves bytes, not answers (no wire tail
-    // carries the walk's Pass-2 product), so a query-bearing relink
-    // stands the resident attempt down to the in-process ladder — whose
-    // own walk serves the answer. The run answers either way.
-    let (ok, stdout, _stderr) = run_pgr(
+    let sock_arg = sock.display().to_string();
+    // The capture: a full link through the session (the record rides the
+    // reply; the queries ride nothing yet).
+    let (ok, _stdout, stderr) = run_pgr(
+        &dir,
+        &main,
+        &archive,
+        &["-resident", "-resident_socket", &sock_arg, "-incremental"],
+    );
+    assert!(ok, "the capture link runs: {stderr}");
+    // M88: a query-bearing fusion relink rides the session's replay —
+    // the ladder's own Pass-2 product renders the answers the v45 tail
+    // carries verbatim, and the client prints the served renders beside
+    // the patched image (the same print face the full-link lane rides).
+    // (The pre-M88 stand-down handed the queries to the in-process
+    // ladder, which answered identically — the transport named the lane,
+    // `m88_fusion_provenance.rs` pins it.)
+    let (ok, stdout, stderr) = run_pgr(
         &dir,
         &main,
         &archive,
         &[
             "-resident",
             "-resident_socket",
-            &sock.display().to_string(),
+            &sock_arg,
             "-incremental",
             "-why_export",
             "_greet",
+            "-why_load",
         ],
     );
-    assert!(ok, "the fusion lane hands the query over and answers");
+    assert!(ok, "the fusion relink answers: {stderr}");
     assert!(
         stdout.contains("_greet"),
-        "the in-process ladder answers the query: {stdout}"
+        "the served export answer names the query: {stdout}"
+    );
+    assert!(
+        stdout.contains("libgreet.a") && stdout.contains("pulled for _greet"),
+        "the served load report names the pulled member: {stdout}"
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&sock);
