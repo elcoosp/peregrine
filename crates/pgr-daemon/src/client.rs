@@ -220,6 +220,7 @@ impl LinkJob {
             why_export: Vec::new(),
             why_load: false,
             map: false,
+            why_live: Vec::new(),
         };
         Self { request, blobs }
     }
