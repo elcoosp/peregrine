@@ -2737,6 +2737,7 @@ mod tests {
             entryoff: 0x10,
             ident: "x".into(),
             code_limit: 0x3000,
+            chain_word_format: pgr_core::fixups::FixupPointerFormat::Offset64,
             linkedit: pgr_core::layout::LinkeditPlan {
                 sig_off: 0x3000,
                 sig_size: 0x100,
