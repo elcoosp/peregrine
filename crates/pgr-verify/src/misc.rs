@@ -12,8 +12,10 @@ use pgr_format::consts::{
 use pgr_format::load_command::LoadCommandKind;
 
 /// Formats a packed `X.Y.Z` build-version word (`(X<<16)|(Y<<8)|Z`) the
-/// way the verifier's issue messages name it.
-fn fmt_packed_version(v: u32) -> String {
+/// way the verifier's issue messages name it. `pub(crate)`: the
+/// initializer-surface gate's floor message shares the renderer (one
+/// renderer, never two).
+pub(crate) fn fmt_packed_version(v: u32) -> String {
     format!("{}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff)
 }
 
