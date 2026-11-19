@@ -1676,6 +1676,22 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         }
         None => put_u8(out, 0),
     }
+    // M91 (v48): the cstring rank table rides the tail after the rank
+    // table — a present byte, then a count-prefixed list of
+    // length-prefixed decoded literal contents in rank order; a resident
+    // link orders the `__cstring` literals the client named, never the
+    // default absence.
+    match &cfg.cstring_order {
+        Some(ranks) => {
+            put_u8(out, 1);
+            put_u32(out, ranks.entries().len() as u32);
+            for entry in ranks.entries() {
+                put_u32(out, entry.len() as u32);
+                out.extend_from_slice(entry);
+            }
+        }
+        None => put_u8(out, 0),
+    }
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -2043,6 +2059,29 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             })?,
         )
     };
+    // M91 (v48 wire): the cstring rank table (see encode). The absent
+    // byte is the pre-M91 shape; a table the rebuild refuses — two ranks
+    // for one literal — is a malformed request (the parse's own
+    // refusal, the rank positions named).
+    let cstring_order = if r.u8()? == 0 {
+        None
+    } else {
+        let count = r.u32()?;
+        let mut entries = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let len = r.u32()? as usize;
+            let bytes = r.take(len)?;
+            entries.push(bytes.to_vec());
+        }
+        Some(
+            pgr_core::order::CstringOrder::from_entries(entries).map_err(|e| {
+                DecodeError::Malformed(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("the request's cstring rank table does not parse: {e}"),
+                ))
+            })?,
+        )
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -2118,6 +2157,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         allow_stack_execute,
         no_dead_strip_inits_and_terms,
         renames,
+        cstring_order,
     })
 }
 
@@ -2471,6 +2511,7 @@ mod tests {
                 renames
             },
             symbol_order: None,
+            cstring_order: None,
         }
     }
 
@@ -5206,10 +5247,12 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        // `rich_config` carries no table: drop the absent byte the
-        // encoder just wrote, the hand-spliced table takes its place
-        // (the v47 tail's slot at the config's end).
-        body.truncate(body.len() - 1);
+        // `rich_config` carries no tables: drop the two absent bytes the
+        // encoder just wrote (the v48 tail's slots at the config's end —
+        // the rank table, then the cstring table), the hand-spliced
+        // rank table takes the first place and the cstring absence
+        // follows.
+        body.truncate(body.len() - 2);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -5221,6 +5264,7 @@ mod tests {
         put_u8(&mut body, 0);
         put_str(&mut body, "_main");
         put_u32(&mut body, 9);
+        put_u8(&mut body, 0); // the v48 cstring rank table's absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
@@ -5244,6 +5288,92 @@ mod tests {
         let text = e.to_string();
         assert!(
             text.contains("rank") && text.contains("_main"),
+            "the refusal names the contradiction: {text}"
+        );
+    }
+
+    // ---- M91 (wire v48): the cstring rank table crosses the wire -----
+
+    #[test]
+    fn the_cstring_rank_table_round_trips() {
+        // The M91 rung: the decoded literal contents ride the config
+        // tail — a resident link orders the `__cstring` literals the
+        // client named (never the default absence), and the rebuilt
+        // table's lookup answers exactly what the client's table
+        // answers (the NUL-exclusive content match).
+        let mut req = map_request();
+        req.map = false;
+        req.config.cstring_order =
+            Some(pgr_core::order::CstringOrder::parse("first\ngamma\n").expect("the table parses"));
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        let ranks = back.config.cstring_order.expect("the table rides the wire");
+        let entries = ranks.entries();
+        assert_eq!(
+            entries,
+            [b"first".to_vec(), b"gamma".to_vec()],
+            "the decoded contents ride in rank order: {entries:?}"
+        );
+        assert_eq!(
+            ranks.rank_of(b"gamma\0"),
+            Some(1),
+            "the NUL strips before the lookup"
+        );
+        assert_eq!(ranks.rank_of(b"gamma"), Some(1));
+        assert_eq!(ranks.rank_of(b"unranked"), None);
+        // The empty flag (the pre-M91 shape) is byte-identical on the
+        // decode side.
+        let mut plain = req.clone();
+        plain.config.cstring_order = None;
+        let back = LinkRequest::decode(&plain.encode()).unwrap();
+        assert!(back.config.cstring_order.is_none(), "the absence rides");
+    }
+
+    #[test]
+    fn a_wire_garbage_cstring_table_is_malformed() {
+        // Two ranks for one literal is a contradiction — the wire never
+        // carries a table the pipeline would silently misread (the
+        // rebuild's refusal, the rank positions named). The encode side
+        // cannot produce the shape (a [`CstringOrder`] cannot hold a
+        // duplicate), so the body is hand-spliced: a well-formed config
+        // tail whose cstring table carries the duplicate, then the
+        // plain request fields.
+        use super::encode_config;
+        let mut body = Vec::new();
+        put_u32(&mut body, PROTO_VERSION);
+        encode_config(&mut body, &rich_config());
+        body.truncate(body.len() - 2);
+        put_u8(&mut body, 0); // the rank table's absence
+        // The v48 cstring tail: present, two entries, the second a
+        // duplicate of the first.
+        put_u8(&mut body, 1);
+        put_u32(&mut body, 2);
+        for _ in 0..2 {
+            put_u32(&mut body, 5);
+            body.extend_from_slice(b"gamma");
+        }
+        // The plain request fields behind the config.
+        put_u32(&mut body, 0); // force_load
+        put_u32(&mut body, 0); // inputs
+        put_u32(&mut body, 0); // archives
+        put_u8(&mut body, 0); // record
+        put_u8(&mut body, 0); // record_resolution
+        put_u8(&mut body, 0); // prev_output
+        put_u8(&mut body, 0); // audit
+        put_u8(&mut body, 0); // tiles
+        put_u8(&mut body, 0); // time
+        put_u8(&mut body, 0); // trace
+        put_u8(&mut body, 0); // verify
+        put_u8(&mut body, 0); // verify_checks
+        put_u32(&mut body, 0); // why_export count
+        put_u8(&mut body, 0); // why_load
+        put_u8(&mut body, 0); // map
+        let err = LinkRequest::decode(&body).unwrap_err();
+        let DecodeError::Malformed(e) = err else {
+            panic!("a duplicate cstring table is malformed, got {err:?}");
+        };
+        let text = e.to_string();
+        assert!(
+            text.contains("literal") && text.contains("rank"),
             "the refusal names the contradiction: {text}"
         );
     }
