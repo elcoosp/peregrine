@@ -270,11 +270,11 @@ pub struct Options {
     /// `LinkResult::liveness` exactly when the strip ran). The default
     /// (the empty list) queries nothing. The query reads the walk's own
     /// product: the one-shot lane's and — the relink re-runs the full
-    /// Passes 1–3 — the incremental ladder's. The resident lane refuses
-    /// the flag this rung: the wire's provenance tail (v45) carries the
-    /// `-why_export`/`-why_load` asks, and a liveness ask has no wire
-    /// shape yet (the served rung is a later milestone — the M56
-    /// contract's own shape).
+    /// Passes 1–3 — the incremental ladder's. M93: the resident lanes
+    /// serve it too (wire v48 carries the ask; the session's own walk
+    /// carries the mark record, the chains ride the provenance tail) —
+    /// the relocatable output refuses the flag at the surface (`-r`
+    /// carries no strip, no chain exists to name).
     pub why_live: Vec<String>,
     /// M58 `--time`: after a one-shot link, print the per-pass wall
     /// report — the M54 observation seam's phase events collected into
@@ -600,12 +600,13 @@ pub enum OptsError {
         /// The refused value as written.
         value: String,
     },
-    /// A `-why_live` surface conflict (M92): the resident wire's
-    /// provenance tail (v45) carries the `-why_export`/`-why_load`
-    /// asks — a liveness ask has no wire shape yet, and a resident
-    /// attempt could not answer it honestly (the served rung is a
-    /// later milestone, the M56 contract's own shape). The verdict
-    /// names the rung; the help is the fix — the house convention.
+    /// A `-why_live` surface conflict (M93; the resident refusal the
+    /// variant carried at M92 retired when wire v48 carried the ask —
+    /// the session's own walk serves the chains). The surviving premise:
+    /// the relocatable output (`-r`) preserves input sections verbatim
+    /// and refuses the strip, so no mark record exists to walk — the
+    /// verdict names the premise; the help is the fix — the house
+    /// convention.
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     WhyLiveConflict {
@@ -3069,21 +3070,29 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     // (a query-bearing relink that runs the fusion lane hands over to the
     // in-process ladder — the session's patch serves bytes, not answers).
     // No lane refuses the queries any more: every lane that links, walks.
-    // M92: the liveness query's lane contract is the M56 shape this
-    // rung — the one-shot lane and the in-process ladder answer (the
-    // relink re-runs the full Passes 1–3, so `result.liveness` is the
-    // walk's own record), but the resident lanes refuse: the wire's
-    // provenance tail (v45) carries the `-why_export`/`-why_load` asks
-    // and a liveness ask has no wire shape yet — a resident attempt
-    // could not answer the question honestly. The served rung is a
-    // later milestone.
-    if !opts.why_live.is_empty() && opts.resident {
+    // M92: the liveness query's lane contract is the M56 shape — every
+    // lane that carries `-dead_strip` answers it. M93: the served rung
+    // retires the resident refusal (wire v48 carries the ask; the
+    // session's own walk carries the mark record, the chains ride the
+    // provenance tail) — the resident lanes serve the query like the
+    // one-shot and the ladder do. M93 also closes the gap the served
+    // rung surfaced: `-r` preserves input sections verbatim and refuses
+    // the strip, so no mark record exists to walk and the query has no
+    // honest answer there — the relocatable output refuses the premise
+    // at the surface (the M83 replay-face rule: the driver never asks,
+    // no wire caller can plan the shape either), instead of the
+    // pre-M93 silent-ignore.
+    if !opts.why_live.is_empty()
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
         return Err(OptsError::WhyLiveConflict {
-            verdict: "-why_live asks the strip's own record, and the resident lanes serve \
-                     their answers on the wire — the provenance tail (v45) carries the \
-                     why_export/why_load asks, no liveness ask yet"
+            verdict: "-why_live asks the strip's own record, and the relocatable output \
+                     (-r) preserves input sections verbatim — it carries no strip, so \
+                     no liveness chain exists to name"
                 .into(),
-            fix: "drop -resident (the one-shot and the incremental ladder answer the query)".into(),
+            fix: "drop -r (the image and relocatable-free lanes answer the query under \
+                  -dead_strip)"
+                .into(),
         });
     }
     // M60: the dependency record names the files the link read. The
