@@ -417,6 +417,7 @@ mod tests {
             entryoff: 0x4000,
             ident: "minimal".into(),
             code_limit: 0,
+            chain_word_format: pgr_core::fixups::FixupPointerFormat::Offset64,
             linkedit: pgr_core::layout::LinkeditPlan::default(),
             header_sha: [0; 32],
             segments: vec![crate::incremental::RecordedSegment {
