@@ -121,6 +121,7 @@ fn request(hello_bytes: &[u8], greet_bytes: &[u8], time: bool, trace: bool) -> L
         why_export: Vec::new(),
         why_load: false,
         map: false,
+        why_live: Vec::new(),
     }
 }
 
