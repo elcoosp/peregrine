@@ -6,6 +6,14 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M91)
+
+- **M91** — the `-sectorder __TEXT __cstring` cstring face serves: the M90 rung's refusal retires — the file's escape-decoded literal contents (`pgr_core::order::CstringOrder`, the ld64 `cstringSymbolName` escape set with the named divergences) rank the `S_CSTRING_LITERALS` sections' literals through the D4 canonical sort (the remap lands every duplicate on the single output copy whatever the ranks say), the unmatched entry rides the `cstring_order_unmatched` advisory, the table crosses the wire (v48 — the rebuild-refusing table is a malformed request), and the default keeps every pre-M91 link byte-identical (the `sectorder_cstring` bench group and the `cstring_order_link` example ride along).
+
+### Added (M90)
+
+- **M90** — ld64's per-section order flag rides the M11 rank seam: `-sectorder <seg> <sect> <file>` (`pgr_core::order::classify_section_order` mirroring `parseSectionOrderFile`) — the rank-append face composes every order source into the ONE rank table in command-line order (`SymbolOrder::compose`, the cross-source duplicate refusing with both sources named; the repeated `-order_file` last-wins read retires), the `__TEXT,__literal*` face is the warned no-op (the file never read), and the cstring face refuses this rung with the mode named (M91 hands it its own rung); the composed table rides the v47 wire and the ladder unchanged (the `sectorder_compose`/`sectorder_link` bench groups and the `sectorder_link` example ride along).
+
 ### Added (M89)
 
 - **M89** — the fusion ladder's dependency record: the M85 lane contract (a record-bearing
