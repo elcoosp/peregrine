@@ -377,6 +377,11 @@ pub enum DriverError {
     /// C-underscore hint is the fix (`pgr_core::provenance`).
     #[error("{0}")]
     WhyExport(#[from] pgr_core::provenance::ProvenanceError),
+    /// A `-why_live` query refused (M92): the misspelling is named, the
+    /// premise named (`pgr_core::why_live` — a vacuous query or a link
+    /// without `-dead_strip` is never silently empty).
+    #[error("{0}")]
+    WhyLive(#[from] pgr_core::why_live::WhyLiveError),
     /// The M60 dependency record refused a row (a NUL or an empty path —
     /// the format is NUL-terminated): the seam's typed error, the row
     /// named.
@@ -899,6 +904,34 @@ fn print_why_export(
     Ok(())
 }
 
+/// The M92 `-why_live` answers (the driver's consumer face): one text
+/// chain per queried name, in flag order — the mark phase's own
+/// first-marker record (`LinkResult::liveness`), walked from the
+/// queried definition back to its root (`pgr_core::why_live` renders
+/// both faces; the driver prints the text one). The record rides
+/// exactly when the strip ran: a link without `-dead_strip` refuses
+/// the query's premise (the strip is the question's subject — a
+/// vacuous answer is never silently empty), a dead definition answers
+/// the verdict it states.
+fn print_why_live(
+    liveness: Option<&pgr_core::deadstrip::LivenessIndex>,
+    objects: &[pgr_core::object::InputObject],
+    resolution: &pgr_core::resolve::Resolution,
+    interner: &pgr_core::interner::Interner,
+    queries: &[String],
+) -> Result<(), DriverError> {
+    for name in queries {
+        let Some(index) = liveness else {
+            return Err(
+                pgr_core::why_live::WhyLiveError::NotStripped { name: name.clone() }.into(),
+            );
+        };
+        let answer = pgr_core::explain_live(index, objects, resolution, interner, name)?;
+        print!("{}", answer.render());
+    }
+    Ok(())
+}
+
 /// [`link_to_image`] plus the M9 record: when `-incremental` is active and
 /// the one-shot pipeline produced the image, the link's record is built in
 /// the same pass (no pipeline re-run). The resident daemon path returns the
@@ -1231,6 +1264,17 @@ fn link_to_image_recorded(
     if opts.why_load {
         print!("{}", result.loads.render());
     }
+    // M92: the liveness chains — the mark phase's own first-marker
+    // record, walked from each queried definition back to its root (a
+    // link without `-dead_strip` refuses the query's premise: the
+    // misspelling convention and the premise naming are the seam's).
+    print_why_live(
+        result.liveness.as_ref(),
+        &result.objects,
+        &result.resolution,
+        &result.interner,
+        &opts.why_live,
+    )?;
     // M68: the pending faces ride out to the caller — the flush (Pass 5,
     // the pooled atomic write) joins the same collection before the faces
     // build (one collection per run; the report's rows stay in link
@@ -2993,6 +3037,18 @@ fn serve_relink_faces(
     if opts.why_load {
         print!("{}", result.loads.render());
     }
+    // M92: the liveness chains ride the ladder too — the relink re-ran
+    // the full Passes 1–3, so `result.liveness` is the walk's own mark
+    // record (the same face the one-shot prints; a query without
+    // `-dead_strip` refuses the premise either lane).
+    print_why_live(
+        result.liveness.as_ref(),
+        &result.objects,
+        &result.resolution,
+        &result.interner,
+        &opts.why_live,
+    )
+    .map_err(RelinkAttempt::Error)?;
     Ok(())
 }
 
@@ -3256,6 +3312,16 @@ pub fn usage() -> String {
     s.push_str("                               -ObjC) and — under\n");
     s.push_str("                               -dead_strip_dylibs — every input\n");
     s.push_str("                               dylib's carriage (M57)\n");
+    s.push_str("  -why_live <symbol>           after a -dead_strip link, answer\n");
+    s.push_str("                               *why is this symbol still live?* —\n");
+    s.push_str("                               the mark phase's own record, walked\n");
+    s.push_str("                               from the queried definition back to\n");
+    s.push_str("                               its root: one keeper per hop (the\n");
+    s.push_str("                               referencing atom, the referenced\n");
+    s.push_str("                               name, the site), the root decision\n");
+    s.push_str("                               named last (M92; repeatable; the\n");
+    s.push_str("                               resident lanes refuse the ask — the\n");
+    s.push_str("                               wire has no liveness tail yet)\n");
     s.push_str("  --time                       after the link, print the per-pass\n");
     s.push_str("                               wall report — the passes the pipeline\n");
     s.push_str("                               ran (parse through layout), each\n");
@@ -3276,9 +3342,10 @@ pub fn usage() -> String {
     s.push_str("                               version, every file the link read\n");
     s.push_str("                               (objects, archives, libraries,\n");
     s.push_str("                               payloads, list files), the probed\n");
-    s.push_str("                               misses, the output (M60; refused\n");
-    s.push_str("                               with -incremental — the relink\n");
-    s.push_str("                               re-reads no input file)\n");
+    s.push_str("                               misses, the output (M60; the\n");
+    s.push_str("                               incremental ladder rides since M85 —\n");
+    s.push_str("                               the sidecar names the files the\n");
+    s.push_str("                               relink actually read)\n");
     s.push_str("  -help, -h                    this text\n");
     s.push_str("  -version, -V                 version banner\n\n");
     s.push_str("M5 — real-world link surface: .a archives with ranlib-guided lazy\n");
