@@ -137,15 +137,6 @@ fn main() -> ExitCode {
         eprintln!("{PROGRAM}: --sarif and --json are two machine faces; run one per invocation");
         return ExitCode::from(2);
     }
-    // The SARIF face renders the whole verdict: the baseline delta has
-    // no SARIF shape (introduced/surviving is the M13 report's story),
-    // so the face refuses instead of silently dropping the gate.
-    if sarif && baseline.is_some() {
-        eprintln!(
-            "{PROGRAM}: --sarif renders the whole verdict; the baseline delta has no SARIF shape — run without --baseline (the exit code keeps the whole-verdict gate)"
-        );
-        return ExitCode::from(2);
-    }
     // The gate the exit code answers: explicit --fail-on wins; a
     // baseline defaults to new-findings-only, no baseline keeps the
     // historical whole-verdict gate.
@@ -159,16 +150,12 @@ fn main() -> ExitCode {
         skip_hash_recompute: skip_hashes,
     };
     let checks = checks.unwrap_or_else(CheckSet::all);
-    let baseline_prev: Option<Vec<pgr_verify::Issue>> = match baseline.as_deref() {
-        Some(path) => match load_baseline(path) {
-            Ok(issues) => Some(issues),
-            Err(e) => {
-                eprintln!("{PROGRAM}: {e}");
-                return ExitCode::from(2);
-            }
-        },
-        None => None,
-    };
+    // The baseline loads at the face that reads it (M96): a universal
+    // container's document is the container's own --json output — one
+    // report line per declared slice — which the single-image reader
+    // cannot parse, so the container face loads it through the
+    // container reader and the single-image face keeps its own. (The
+    // gate is one file per invocation — the load runs once either way.)
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -212,8 +199,31 @@ fn main() -> ExitCode {
                         continue;
                     }
                 };
-                let body =
-                    pgr_verify::sarif::render_universal(&report, &file.display().to_string());
+                // The M97 face: the M95 whole-verdict document, or the
+                // M96 baseline gate stated per slice (SARIF 2.1.0's own
+                // `baselineState` — the M75 refusal's premise retired).
+                let body = match &baseline {
+                    Some(baseline_path) => {
+                        match load_container_baseline(baseline_path).and_then(|document| {
+                            pgr_verify::sarif::render_universal_with_baseline(
+                                &report,
+                                &document,
+                                &OffsetIdentity,
+                                &file.display().to_string(),
+                            )
+                            .map_err(|e| e.to_string())
+                        }) {
+                            Ok(body) => body,
+                            Err(e) => {
+                                eprintln!("{PROGRAM}: {}: {e}", file.display());
+                                return ExitCode::from(2);
+                            }
+                        }
+                    }
+                    None => {
+                        pgr_verify::sarif::render_universal(&report, &file.display().to_string())
+                    }
+                };
                 if let Err(e) = writeln!(out, "{body}") {
                     eprintln!("{PROGRAM}: {e}");
                     any_io = true;
@@ -223,12 +233,136 @@ fn main() -> ExitCode {
                 }
                 continue;
             }
-            if baseline.is_some() {
-                eprintln!(
-                    "{PROGRAM}: {}: --baseline gates one image's offsets; a container's slices ride their own windows — verify the container without --baseline, or one invocation per extracted slice",
-                    file.display()
-                );
-                return ExitCode::from(2);
+            // The M96 container baseline face: the M74 refusal ("the
+            // baseline identity gates one image's offsets, never a slice
+            // table") retires with its premise — the slices ride *inside*
+            // the audited file and every slice's verdict is its own M13
+            // report, so the container's own --json output is the
+            // baseline document, paired slice by slice
+            // (`UniversalDelta::between_slices`: positional, window-checked).
+            if let Some(baseline_path) = &baseline {
+                let baseline_prev = match load_container_baseline(baseline_path) {
+                    Ok(document) => document,
+                    Err(e) => {
+                        eprintln!("{PROGRAM}: {e}");
+                        return ExitCode::from(2);
+                    }
+                };
+                let report = match pgr_verify::verify_universal_with_checks(&bytes, &opts, &checks)
+                {
+                    Ok(report) => report,
+                    Err(e) => {
+                        if !quiet
+                            && !text_writeln(
+                                &mut out,
+                                format_args!("{}: REFUSED: {e}", file.display()),
+                            )
+                        {
+                            any_io = true;
+                        }
+                        any_bad = true;
+                        continue;
+                    }
+                };
+                let universal_delta = match pgr_verify::UniversalDelta::between_slices(
+                    &report,
+                    &baseline_prev,
+                    &OffsetIdentity,
+                ) {
+                    Ok(delta) => delta,
+                    Err(e) => {
+                        eprintln!("{PROGRAM}: {}: {e}", file.display());
+                        return ExitCode::from(2);
+                    }
+                };
+                let stdout_file = file.display().to_string();
+                for (i, verdict) in report.slices.iter().enumerate() {
+                    let slice_delta = &universal_delta.slices[i].delta;
+                    let label = pgr_verify::universal::slice_label(&stdout_file, i, &verdict.arch);
+                    let bad = match fail_on {
+                        FailOn::New => !slice_delta.is_clean(),
+                        FailOn::Any => !verdict.report.is_ok(&opts),
+                    };
+                    if json {
+                        let body = pgr_verify::to_json_with_baseline(
+                            &label,
+                            &verdict.report,
+                            slice_delta,
+                            OffsetIdentity.name(),
+                        );
+                        if let Err(e) = writeln!(out, "{body}") {
+                            eprintln!("{PROGRAM}: {e}");
+                            any_io = true;
+                        }
+                    } else if !quiet {
+                        if !text_writeln(
+                            &mut out,
+                            format_args!("{label}: {}", if bad { "FAILED" } else { "OK" }),
+                        ) {
+                            any_io = true;
+                        }
+                        for issue in &verdict.report.issues {
+                            let sev = match issue.severity {
+                                Severity::Error => "error",
+                                Severity::Warning => "warning",
+                            };
+                            let at = issue
+                                .offset
+                                .map(|o| format!(" at {o:#x}"))
+                                .unwrap_or_default();
+                            if !text_writeln(
+                                &mut out,
+                                format_args!(
+                                    "  {sev} [{}] {}{at}",
+                                    issue.code.as_str(),
+                                    issue.message
+                                ),
+                            ) {
+                                any_io = true;
+                            }
+                        }
+                        for issue in &slice_delta.introduced {
+                            if !text_writeln(
+                                &mut out,
+                                format_args!(
+                                    "  + [{}] {} (new since the baseline)",
+                                    issue.code.as_str(),
+                                    issue.message
+                                ),
+                            ) {
+                                any_io = true;
+                            }
+                        }
+                        for issue in &slice_delta.resolved {
+                            if !text_writeln(
+                                &mut out,
+                                format_args!(
+                                    "  - [{}] {} (resolved since the baseline)",
+                                    issue.code.as_str(),
+                                    issue.message
+                                ),
+                            ) {
+                                any_io = true;
+                            }
+                        }
+                        if !text_writeln(
+                            &mut out,
+                            format_args!(
+                                "  baseline: {} new, {} resolved, {} surviving ({})",
+                                slice_delta.introduced.len(),
+                                slice_delta.resolved.len(),
+                                slice_delta.surviving,
+                                OffsetIdentity.name(),
+                            ),
+                        ) {
+                            any_io = true;
+                        }
+                    }
+                    if bad {
+                        any_bad = true;
+                    }
+                }
+                continue;
             }
             let (bad, io_failed) =
                 universal_face(file, &bytes, opts, checks, json, quiet, &mut out);
@@ -241,13 +375,36 @@ fn main() -> ExitCode {
             continue;
         }
         let report = verify_with_checks(&bytes, &opts, &checks);
-        let delta = baseline_prev
-            .as_deref()
-            .map(|prev| BaselineDelta::between(prev, &report.issues, &OffsetIdentity));
+        // The M13 baseline gate, loaded at its own face: the previous
+        // report's issues classify the fresh ones (the delta is `Some`
+        // exactly when a baseline rides — the exit gate's contract).
+        let delta = match baseline.as_deref() {
+            Some(path) => match load_baseline(std::path::Path::new(path)) {
+                Ok(prev) => Some(BaselineDelta::between(
+                    &prev,
+                    &report.issues,
+                    &OffsetIdentity,
+                )),
+                Err(e) => {
+                    eprintln!("{PROGRAM}: {e}");
+                    return ExitCode::from(2);
+                }
+            },
+            None => None,
+        };
         if sarif {
-            // The M75 face: the M69 render, riding the CLI — one
-            // deterministic SARIF 2.1.0 document per verified image.
-            let body = pgr_verify::sarif::render(&report, &file.display().to_string());
+            // The M75 face, stated since M97: the M69 render, or the M13
+            // delta carried on SARIF 2.1.0's own `baselineState` when a
+            // baseline rides — the refusal's premise retired.
+            let body = match &delta {
+                Some(delta) => pgr_verify::sarif::render_with_baseline(
+                    &report,
+                    delta,
+                    &OffsetIdentity,
+                    &file.display().to_string(),
+                ),
+                None => pgr_verify::sarif::render(&report, &file.display().to_string()),
+            };
             if let Err(e) = writeln!(out, "{body}") {
                 eprintln!("{PROGRAM}: {e}");
                 any_io = true;
@@ -469,6 +626,16 @@ fn load_baseline(path: &std::path::Path) -> Result<Vec<pgr_verify::Issue>, Strin
     Ok(report.issues)
 }
 
+/// The container baseline's loader (M96): the document is the
+/// container's own `--json` face output — one whole-output report line
+/// per declared slice — and the reader names the line it died at.
+fn load_container_baseline(
+    path: &std::path::Path,
+) -> Result<pgr_verify::ContainerBaseline, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    pgr_verify::parse_container_baseline(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// The selector surface, one line per family (the `--list-checks` view).
 fn print_checks() {
     for unit in pgr_verify::image_checks() {
@@ -480,7 +647,7 @@ fn print_help() {
     println!(
         "{PROGRAM} {} — Peregrine read-side Mach-O verifier (M0)\n\n\
          USAGE:\n    pgr-verify [OPTIONS] <mach-o-file>...\n\n\
-         OPTIONS:\n    --json                  Machine-readable report\n    --sarif                 SARIF 2.1.0 document (the triage tools'\n                            native shape; one machine face per run)\n    --strict                Treat warnings as failures\n    --quiet, -q             Only set the exit code\n    --skip-hash-recompute   Skip SHA-256 page-hash verification\n    --checks <a,b,...>      Run only the named families (e.g. segments,fixups)\n    --list-checks           Print the families and exit\n    --baseline <path>       Gate on a previous --json report: only NEW\n                            findings fail (one file per invocation)\n    --fail-on new|any       What fails: introduced findings only (default\n                            with --baseline) or the whole verdict\n    --help, -h              This help\n    --version, -V           Version\n\n\
+         OPTIONS:\n    --json                  Machine-readable report\n    --sarif                 SARIF 2.1.0 document (the triage tools'\n                            native shape; one machine face per run)\n    --strict                Treat warnings as failures\n    --quiet, -q             Only set the exit code\n    --skip-hash-recompute   Skip SHA-256 page-hash verification\n    --checks <a,b,...>      Run only the named families (e.g. segments,fixups)\n    --list-checks           Print the families and exit\n    --baseline <path>       Gate on a previous --json report: only NEW\n                            findings fail (one file per invocation; a\n                            universal container's baseline is its own\n                            --json output, paired slice by slice)\n    --fail-on new|any       What fails: introduced findings only (default\n                            with --baseline) or the whole verdict\n    --help, -h              This help\n    --version, -V           Version\n\n\
          EXIT:\n    0 clean · 1 issues · 2 usage/IO error",
         env!("CARGO_PKG_VERSION")
     );
