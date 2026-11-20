@@ -1408,6 +1408,99 @@ mod tests {
     }
 
     #[test]
+    fn the_drop_local_symbols_shape_serves_byte_identical() {
+        // M104: the symtab-shaping decision rides the config tail — the
+        // warm pipeline plans the same locals-free shape the cold lane
+        // plans (the parity gate is byte-identical; the shape is
+        // config, not a lane product — the M81 pattern).
+        let hello = hello_main();
+        let greet_bytes = greet();
+        let (mut req, hashes) = request(&hello, &greet_bytes);
+        req.config.keep_local_symbols = false;
+        let mut session = ResidentSession::default();
+        for h in &hashes {
+            let bytes = if *h == content_hash(&hello) {
+                hello.clone()
+            } else {
+                greet_bytes.clone()
+            };
+            session.store_blob(h, bytes).unwrap();
+        }
+        let cold = session.link(&req).unwrap().image;
+        let warm = session.link(&req).unwrap().image;
+        assert_eq!(cold, warm, "the shaped symtab is the session's own plan");
+        let inputs: Vec<pgr_core::LinkInput> = vec![
+            pgr_core::LinkInput {
+                name: "hello.o".into(),
+                bytes: hello.clone(),
+            },
+            pgr_core::LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.clone(),
+            },
+        ];
+        let one_shot =
+            pgr_core::link_cached(&inputs, &[], &req.config, pgr_core::Parallelism::Auto, None)
+                .unwrap();
+        let image = pgr_emit::build_image_fused(&one_shot.layout, &one_shot.objects).unwrap();
+        assert_eq!(image, cold, "session link == one-shot link, byte for byte");
+        assert_eq!(
+            one_shot
+                .layout
+                .symbols
+                .iter()
+                .filter(|s| !s.external)
+                .count(),
+            0,
+            "the served shape is the locals-free one the client asked for"
+        );
+    }
+
+    #[test]
+    fn the_strip_debug_shape_serves_byte_identical() {
+        // M105: the debug-section suppression rides the config tail —
+        // the warm pipeline plans the same debug-free shape the cold
+        // lane plans (the parity gate is byte-identical; the shape is
+        // config, not a lane product — the M81 pattern).
+        let hello = hello_main();
+        let greet_bytes = greet();
+        let (mut req, hashes) = request(&hello, &greet_bytes);
+        req.config.strip_debug = true;
+        let mut session = ResidentSession::default();
+        for h in &hashes {
+            let bytes = if *h == content_hash(&hello) {
+                hello.clone()
+            } else {
+                greet_bytes.clone()
+            };
+            session.store_blob(h, bytes).unwrap();
+        }
+        let cold = session.link(&req).unwrap().image;
+        let warm = session.link(&req).unwrap().image;
+        assert_eq!(cold, warm, "the debug-free shape is the session's own plan");
+        let inputs: Vec<pgr_core::LinkInput> = vec![
+            pgr_core::LinkInput {
+                name: "hello.o".into(),
+                bytes: hello.clone(),
+            },
+            pgr_core::LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.clone(),
+            },
+        ];
+        let one_shot =
+            pgr_core::link_cached(&inputs, &[], &req.config, pgr_core::Parallelism::Auto, None)
+                .unwrap();
+        let image = pgr_emit::build_image_fused(&one_shot.layout, &one_shot.objects).unwrap();
+        assert_eq!(image, cold, "session link == one-shot link, byte for byte");
+        assert!(
+            one_shot.layout.func_starts.is_empty(),
+            "the served shape carries no function-starts stream (the LC_FUNCTION_STARTS \
+             suppression rides the strip)"
+        );
+    }
+
+    #[test]
     fn changed_input_reuses_the_unchanged_poi() {
         let hello = hello_main();
         let greet_bytes = greet();
