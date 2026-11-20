@@ -782,6 +782,37 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M104: the symtab-shaping decision's drop face (`-x`) is a final
+    // image decision — the relocatable output's symtab is the input's,
+    // verbatim (its tables ride the inputs untouched; there is no
+    // locals subrange to shape). The keep face is the default's mirror
+    // and never refuses. The re-check backs the driver surface's
+    // earlier refusal: no library caller can plan the shape either.
+    if !cfg.keep_local_symbols {
+        return Err(LinkError::Layout {
+            message: "-x drops the output's plain local symbols (the symtab's \
+                      N_SECT & ~N_EXT rows), but the relocatable output's symtab is \
+                      the input's, verbatim — nothing to shape: drop -x or link an \
+                      image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M105: the debug-section suppression's `-S` face is a final image
+    // decision — the relocatable output's sections are the input's,
+    // verbatim (its sections ride the inputs untouched; there is no
+    // debug classification to apply). The re-check backs the driver
+    // surface's earlier refusal: no library caller can plan the shape
+    // either.
+    if cfg.strip_debug {
+        return Err(LinkError::Layout {
+            message: "-S drops the output's debug sections (the __DWARF segments, \
+                      the __debug_* and S_ATTR_DEBUG shapes), but the relocatable \
+                      output's sections are the input's, verbatim — nothing to \
+                      strip: drop -S or link an image (an executable, dylib or \
+                      bundle)"
+                .into(),
+        });
+    }
     // M103: the non-escalating undefined policies are a load-time-bind
     // exit decision — the relocatable output's undefineds stay open in
     // its symbol table by design (an object carries no load-time bind to
