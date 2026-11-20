@@ -793,6 +793,7 @@ mod tests {
         };
         Layout {
             ident: "tiny".into(),
+            named_uuid: None,
             filetype: 2,
             order_unmatched: Vec::new(),
             cstring_order_unmatched: Vec::new(),
