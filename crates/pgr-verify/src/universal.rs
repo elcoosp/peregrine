@@ -25,7 +25,7 @@ use crate::{CheckSet, Code, Options, Report, verify_with_checks};
 /// run was handed, the table position the slice rode, and the window the
 /// table declared for it. The label is the identity the JSON face writes
 /// ([`slice_label`]) and the container baseline's reader restores
-/// ([`parse_slice_label`]) — one grammar, one writer, one reader, so a
+/// (`parse_slice_label`) — one grammar, one writer, one reader, so a
 /// recorded baseline pairs its lines with the rows they vouch for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SliceLabel {
