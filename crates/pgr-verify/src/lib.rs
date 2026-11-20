@@ -450,12 +450,6 @@ pub fn verify_with_extra_checks(
     report
 }
 
-/// Convenience: verifies and returns only whether the image is acceptable.
-#[must_use]
-pub fn verify_ok(bytes: &[u8], opts: &Options) -> bool {
-    verify(bytes, opts).is_ok(opts)
-}
-
 /// Symbol count from the parsed symtab (0 when stripped).
 fn img_nsyms(img: &structural::ParsedImage<'_>) -> u32 {
     img.symtab.map_or(0, |st| st.nsyms)
