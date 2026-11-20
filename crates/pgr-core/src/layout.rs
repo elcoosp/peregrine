@@ -691,6 +691,45 @@ pub struct LinkConfig {
     /// earlier refusal; the same shape the M27 PIE and M51
     /// stack-execution decisions ride, one flag word over).
     pub bind_at_load: bool,
+    /// M104 — the symtab-shaping decision: `-keep_local_symbols` / `-x`
+    /// — the other half of the local-symbol contract (M33 named the
+    /// filter-hidden shape). The output symtab's plain local-symbol
+    /// subrange — the rows without `N_EXT` set (`N_SECT & ~N_EXT`: the
+    /// section-defined statics plus the name-only locals that ride
+    /// absolute) — rides by default (`true`, ld64's own default:
+    /// `kLocalSymbolsAll`), and `-x` names the drop: the subrange
+    /// leaves the output symtab, the string table shrinks with the
+    /// names, and the subrange math follows. The keep face is the
+    /// default's mirror, so every pre-knob link is byte-identical (the
+    /// last flag wins at the parse). The drop touches the symtab only —
+    /// the function-starts stream still covers the local functions
+    /// (ld64 strips the symtab rows, never the start addresses). The
+    /// filter-hidden rows (the M3 export filter's and M33's
+    /// `N_SECT | N_PEXT` shapes) are the export machinery's product,
+    /// never input locals: they ride either way. The relocatable
+    /// output's symtab is the input's, verbatim — the drop face refuses
+    /// there (the layout's re-check and `link_reloc` back the driver
+    /// refusal, the M102/M39 pattern); the keep face never refuses.
+    pub keep_local_symbols: bool,
+    /// M105 — the debug-section suppression: `-S` — ld64's flag ("Strip
+    /// debug symbols") names the Pass-1 classification's debug shapes.
+    /// The `__LLVM*`/`__LD`/`__DWARF` segments the M1 sweep already kept
+    /// out are debug metadata always; the `__debug_*` section names and
+    /// the `S_ATTR_DEBUG` attribute widen the class to the shapes the
+    /// segment-name rule misses, under the named decision. The default
+    /// (`false`) keeps every pre-M105 link byte-identical: the
+    /// name/attribute sections bucket as normal load-time bytes, their
+    /// symtab entries ride. Under `-S` the debug pieces drop (no
+    /// bucket, no placed bytes), the symtab's entries into them drop
+    /// with them (a row whose section never ships must not dangle), and
+    /// the `LC_FUNCTION_STARTS` and `LC_DATA_IN_CODE` commands drop —
+    /// the M31/M30 suppression pattern composed under one decision. The
+    /// synthetic `__unwind_info` still synthesizes (the runtime's walk
+    /// table is load-time metadata, not debug). The relocatable
+    /// output's sections are the input's, verbatim — the decision
+    /// refuses there (the layout's re-check and `link_reloc` back the
+    /// driver refusal, the M102/M39 pattern).
+    pub strip_debug: bool,
     /// M52 — the dead-strip init/term roots: `-no_dead_strip_inits_and_terms`
     /// — ld64's flag ("The linker never dead strips initialization and
     /// termination routines") is the Pass-2 decision the dead-strip root
@@ -788,6 +827,8 @@ impl Default for LinkConfig {
             no_pie: false,
             allow_stack_execute: false,
             bind_at_load: false,
+            keep_local_symbols: true,
+            strip_debug: false,
             no_dead_strip_inits_and_terms: false,
             renames: crate::rename::SectionRenames::default(),
             cstring_order: None,
@@ -1389,6 +1430,7 @@ fn bucket_inputs(
     res: &Resolution,
     init_skip: &std::collections::HashSet<(u32, usize)>,
     renames: &crate::rename::SectionRenames,
+    strip_debug: bool,
 ) -> Result<(BucketTable, Vec<Vec<usize>>, usize), LinkError> {
     let mut buckets: Vec<(String, String, u32, bool)> = Vec::new(); // (seg, name, flags, zerofill)
     let mut bucket_of: Vec<Vec<usize>> = Vec::with_capacity(objects.len());
@@ -1403,7 +1445,14 @@ fn bucket_inputs(
                 per_sect.push(usize::MAX);
                 continue;
             }
-            let bucket = bucket_for(in_sect, obj, &mut buckets, &mut fixup_slot_count, renames)?;
+            let bucket = bucket_for(
+                in_sect,
+                obj,
+                &mut buckets,
+                &mut fixup_slot_count,
+                renames,
+                strip_debug,
+            )?;
             per_sect.push(bucket);
         }
         bucket_of.push(per_sect);
@@ -1418,6 +1467,22 @@ fn bucket_inputs(
     Ok((buckets, bucket_of, fixup_slot_count))
 }
 
+/// M105: the debug-section classification — the shapes the `-S`
+/// decision names and drops. The `__LLVM*`/`__LD`/`__DWARF` segments
+/// the M1 sweep already kept out are debug metadata always; the
+/// `__debug_*` section names and the `S_ATTR_DEBUG` attribute widen
+/// the class to the shapes the segment-name rule misses, under the
+/// named decision. The Pass-1 sweep consults this (no bucket, no
+/// placed bytes) and the symtab builder consults the same rule for the
+/// rows that point into the dropped shapes — one classification, both
+/// passes.
+pub(crate) fn is_debug_section(segment: &str, name: &str, flags: u32, strip_debug: bool) -> bool {
+    if segment.starts_with("__LLVM") || matches!(segment, "__LD" | "__DWARF") {
+        return true;
+    }
+    strip_debug && (name.starts_with("__debug_") || flags & pgr_format::consts::S_ATTR_DEBUG != 0)
+}
+
 /// Classifies one input section into its output bucket.
 fn bucket_for(
     in_sect: &crate::object::InputSection,
@@ -1425,6 +1490,7 @@ fn bucket_for(
     buckets: &mut BucketTable,
     fixup_slot_count: &mut usize,
     renames: &crate::rename::SectionRenames,
+    strip_debug: bool,
 ) -> Result<usize, LinkError> {
     if in_sect.size == 0 {
         return Ok(usize::MAX);
@@ -1450,9 +1516,14 @@ fn bucket_for(
             .apply(&in_sect.segment, &in_sect.name)
             .unwrap_or((in_sect.segment.as_str(), in_sect.name.as_str()))
     };
-    let debugish = seg.starts_with("__LLVM") || matches!(seg, "__LD" | "__DWARF");
-    if debugish {
-        return Ok(usize::MAX); // no load-time bytes at M1
+    // M105: the debug classification — the shapes the `-S` decision
+    // drops. The `__LLVM*`/`__LD`/`__DWARF` segments the M1 sweep
+    // already kept out are debug metadata always; the `__debug_*`
+    // names and the `S_ATTR_DEBUG` attribute widen the class under the
+    // named decision (the default buckets them as normal load-time
+    // bytes, the pre-M105 shape).
+    if is_debug_section(seg, name, in_sect.flags, strip_debug) {
+        return Ok(usize::MAX); // the Debug class: no load-time bytes
     }
     if !matches!(seg, "__TEXT" | "__DATA_CONST" | "__DATA") {
         return Err(LinkError::Unsupported {
@@ -2113,6 +2184,41 @@ pub fn layout(
             message: format!("{verdict} — {fix}"),
         });
     }
+    // M104: the symtab-shaping decision's drop face (`-x`) is a final
+    // image decision — the relocatable output's symtab is the input's,
+    // verbatim (an object carries its inputs' tables untouched; there
+    // is no locals subrange to shape). The keep face is the default's
+    // mirror and never refuses. The refusal rides here (not only on
+    // the driver surface) so every caller pays it: a silently inert
+    // drop would claim a shaped symtab the object cannot carry (the
+    // same shape the M39 make-undefined and M40 export-trie refusals
+    // ride on the relocatable path).
+    if !cfg.keep_local_symbols && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-x drops the output's plain local symbols (the symtab's \
+                      N_SECT & ~N_EXT rows), but the relocatable output's symtab is \
+                      the input's, verbatim — nothing to shape: drop -x or link an \
+                      image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M105: the debug-section suppression's `-S` face is a final image
+    // decision — the relocatable output's sections are the input's,
+    // verbatim (an object carries its inputs' sections untouched; there
+    // is no debug classification to apply). The refusal rides here
+    // (not only on the driver surface) so every caller pays it: a
+    // silently inert strip would claim debug-free bytes the object
+    // cannot carry (the same shape the M39 make-undefined and M40
+    // export-trie refusals ride on the relocatable path).
+    if cfg.strip_debug && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-S drops the output's debug sections (the __DWARF segments, the \
+                      __debug_* and S_ATTR_DEBUG shapes), but the relocatable output's \
+                      sections are the input's, verbatim — nothing to strip: drop -S or \
+                      link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
     // M40: the export-trie suppression is an executable decision — a
     // main executable's trie is the `dlsym`/debugger surface (its dylib
     // partners bind into their own tries, never the exe's), while a
@@ -2205,7 +2311,7 @@ pub fn layout(
         .sum();
     // ---- bucketing ---------------------------------------------------------
     let (mut buckets, mut bucket_of, _pre_strip_slots) =
-        bucket_inputs(objects, res, &init_skip, &cfg.renames)?;
+        bucket_inputs(objects, res, &init_skip, &cfg.renames, cfg.strip_debug)?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
     let needs = scan_needs(objects, res, interner, live)?;
     // The fixups payload exists when *any* slot is planned: input pointer
@@ -2297,7 +2403,8 @@ pub fn layout(
     // decision and the inputs alone (the stream itself translates
     // after placement) — computed once, shared by `place`'s sizing and
     // `build_header`'s assembly so the two never disagree.
-    let emit_dice = cfg.data_in_code && objects.iter().any(|o| !o.data_in_code.is_empty());
+    let emit_dice =
+        cfg.data_in_code && !cfg.strip_debug && objects.iter().any(|o| !o.data_in_code.is_empty());
     for _ in 0..16 {
         let mut state = place(
             cfg,
@@ -2463,8 +2570,11 @@ pub fn layout(
         live,
         fold,
         keep_private_externs: cfg.keep_private_externs,
+        keep_local_symbols: cfg.keep_local_symbols,
+        strip_debug: cfg.strip_debug,
     };
-    let mut symbols = build_symtab(objects, res, interner, &commons, &visible, &symtab_ctx);
+    let (mut symbols, dropped_locals) =
+        build_symtab(objects, res, interner, &commons, &visible, &symtab_ctx);
     // `__mh_execute_header`: the image's own exported header symbol (ld64
     // and lld both emit it; the M2 trie lists it).
     // `link()` always interns the name; direct `layout()` callers without
@@ -2647,7 +2757,10 @@ pub fn layout(
     let str_offsets: Vec<u32> = symbols.iter().map(|sym| str_by_id[&sym.name.0]).collect();
 
     // ---- function starts ---------------------------------------------------------
-    let func_starts = build_func_starts(cfg, &state.sections, &symbols);
+    // M104: the stream still covers the local functions — the source
+    // chains the plain-local rows the `-x` face dropped from the symtab
+    // (ld64 strips the symtab rows, never the start addresses).
+    let func_starts = build_func_starts(cfg, &state.sections, &symbols, &dropped_locals);
 
     // ---- data-in-code carriage (M30) --------------------------------------------
     // The inputs' `LC_DATA_IN_CODE` streams translated onto the output
@@ -4777,6 +4890,13 @@ struct SymtabContext<'a> {
     /// M33: the private-extern keep decision (the conversion is the
     /// default) — the input `N_PEXT` bit names it.
     keep_private_externs: bool,
+    /// M104: the symtab-shaping decision (the keep is the default) —
+    /// the plain local-symbol subrange drops or rides on it.
+    keep_local_symbols: bool,
+    /// M105: the debug-section suppression (the off state is the
+    /// default) — the symtab's entries into the debug-classified
+    /// sections drop with their bytes under the decision.
+    strip_debug: bool,
 }
 
 /// Builds the output symbol table: locals (file order), ext defs (file
@@ -4785,7 +4905,16 @@ struct SymtabContext<'a> {
 /// (`N_SECT | N_PEXT`, `external: false`) merged into the locals range in
 /// (file, sym) order — ld64's `-exported_symbols_list` behavior. M33:
 /// input private externs (`N_PEXT`) convert into the same locals shape
-/// unless `-keep_private_externs` holds them external.
+/// unless `-keep_private_externs` holds them external. M104: the plain
+/// local-symbol subrange (the `N_SECT & ~N_EXT` rows) drops or rides on
+/// the `-keep_local_symbols`/`-x` decision — the filter-hidden rows are
+/// the export machinery's product and ride either way. The plain rows
+/// return beside the table either way: the function-starts stream still
+/// covers the local functions the `-x` face strips from the symtab
+/// (ld64 strips the symtab rows, never the start addresses).
+///
+/// Returns `(symtab rows, plain-local rows dropped from the table —
+/// empty under the keep face)`.
 fn build_symtab(
     objects: &[InputObject],
     res: &Resolution,
@@ -4793,14 +4922,25 @@ fn build_symtab(
     commons: &[(StringId, &Def)],
     visible: &dyn Fn(&[u8]) -> bool,
     ctx: &SymtabContext<'_>,
-) -> Vec<OutputSymbol> {
-    let (sections, addr_of, atom_addr, live, fold, keep_private_externs) = (
+) -> (Vec<OutputSymbol>, Vec<OutputSymbol>) {
+    let (
+        sections,
+        addr_of,
+        atom_addr,
+        live,
+        fold,
+        keep_private_externs,
+        keep_local_symbols,
+        strip_debug,
+    ) = (
         ctx.sections,
         ctx.addr_of,
         ctx.atom_addr,
         ctx.live,
         ctx.fold,
         ctx.keep_private_externs,
+        ctx.keep_local_symbols,
+        ctx.strip_debug,
     );
     // Output section lookup by (file, input section): (index, base).
     let mut sect_of: std::collections::HashMap<(u32, usize), usize> =
@@ -4875,6 +5015,18 @@ fn build_symtab(
     for obj in objects {
         for (sym_i, sym) in obj.symbols.iter().enumerate() {
             if sym.stab || sym.external {
+                continue;
+            }
+            // M105: the symtab's debug entries drop under `-S` — a row
+            // whose section the decision classifies Debug never ships
+            // bytes; the row must not dangle absolute (the default
+            // keeps every pre-M105 row, the byte-identical lock).
+            if strip_debug
+                && sym.section.is_some_and(|sect| {
+                    let s = &obj.sections[sect];
+                    is_debug_section(&s.segment, &s.name, s.flags, true)
+                })
+            {
                 continue;
             }
             if !sym_live(obj, sym) {
@@ -5019,14 +5171,27 @@ fn build_symtab(
             out.push(entry);
         }
     }
+    // M104: the symtab-shaping decision — the plain local-symbol
+    // subrange drops or rides on it; the filter-hidden rows ride either
+    // way. The plain rows ride back out beside the table either way:
+    // the function-starts stream still covers the local functions (the
+    // `-x` face strips the symtab rows, never the start addresses).
+    let (merged_locals, stream_locals) = if keep_local_symbols {
+        (locals, Vec::new())
+    } else {
+        (
+            Vec::new(),
+            locals.into_iter().map(|(_, s)| s).collect::<Vec<_>>(),
+        )
+    };
     // Merge hidden defs into the locals range (both sides already sorted by
     // (file, sym); a stable merge keeps the canonical order).
     if hidden.is_empty() {
-        out.splice(0..0, locals.into_iter().map(|(_, s)| s));
+        out.splice(0..0, merged_locals.into_iter().map(|(_, s)| s));
     } else {
-        let mut merged: Vec<OutputSymbol> = Vec::with_capacity(locals.len() + hidden.len());
+        let mut merged: Vec<OutputSymbol> = Vec::with_capacity(merged_locals.len() + hidden.len());
         let mut h = hidden.into_iter().peekable();
-        for (key, sym) in locals {
+        for (key, sym) in merged_locals {
             while let Some((hk, _)) = h.peek() {
                 if *hk <= key {
                     merged.push(h.next().expect("peeked").1);
@@ -5039,18 +5204,31 @@ fn build_symtab(
         merged.extend(h.map(|(_, s)| s));
         out.splice(0..0, merged);
     }
-    out
+    (out, stream_locals)
+}
+
+/// M105: the composed function-starts carriage — the M31 decision
+/// minus the `-S` debug suppression (the command is debug-adjacent
+/// metadata the strip drops; the M31 suppression pattern composed).
+/// `build_func_starts`'s stream, the header's command gate, the `ncmds`
+/// count and `command_size` all read this one predicate — the
+/// two-pass `sizeofcmds` contract holds by construction.
+fn emit_func_starts(cfg: &LinkConfig) -> bool {
+    cfg.function_starts && !cfg.strip_debug
 }
 
 /// Function-starts ULEB delta stream over `__TEXT,__text` symbols.
 /// M31: the suppression decision skips the stream entirely — no
-/// `__LINKEDIT` slot rides either.
+/// `__LINKEDIT` slot rides either. M104: the source carries the plain
+/// local rows beside the shaped symtab (`locals`) — the `-x` face
+/// strips the symtab rows, never the start addresses.
 fn build_func_starts(
     cfg: &LinkConfig,
     sections: &[PlacedSection],
     symbols: &[OutputSymbol],
+    locals: &[OutputSymbol],
 ) -> Vec<u8> {
-    if !cfg.function_starts {
+    if !emit_func_starts(cfg) {
         return Vec::new();
     }
     let Some(t) = sections
@@ -5062,6 +5240,7 @@ fn build_func_starts(
     let base = sections[t].vm_addr;
     let mut starts: Vec<u64> = symbols
         .iter()
+        .chain(locals.iter())
         .filter(|s| s.n_sect == (t + 1) as u8 && s.value >= base)
         .map(|s| s.value - base)
         .collect();
@@ -5094,7 +5273,9 @@ fn build_func_starts(
 /// offset (the LINKEDIT order the verifier's contract reads). Empty
 /// when the decision suppresses the carriage or no input names data.
 fn build_data_in_code(cfg: &LinkConfig, objects: &[InputObject], state: &PlacedState) -> Vec<u8> {
-    if !cfg.data_in_code {
+    // M105: the `-S` face composes the M30 suppression — the command
+    // drops and the stream drops with it (no slot, no entries).
+    if !cfg.data_in_code || cfg.strip_debug {
         return Vec::new();
     }
     let text_vmaddr = state
@@ -5500,8 +5681,8 @@ fn build_header(
         + 1 // LC_DYSYMTAB
         + u32::from(!matches!(fixup_lc, FixupLc::None))
         + u32::from(cfg.exported_symbols) // LC_DYLD_EXPORTS_TRIE (M40)
-        + u32::from(cfg.function_starts) // LC_FUNCTION_STARTS (M31)
-        + u32::from(hi.emit_dice) // LC_DATA_IN_CODE (M30)
+        + u32::from(emit_func_starts(cfg)) // LC_FUNCTION_STARTS (M31; M105 composes -S)
+        + u32::from(hi.emit_dice) // LC_DATA_IN_CODE (M30; M105 composes -S)
         + u32::from(cfg.uuid) // LC_UUID (M32)
         + u32::from(cfg.adhoc)
         + u32::try_from(hi.dylibs.len()).map_err(|_| LinkError::Internal {
@@ -5544,7 +5725,7 @@ fn build_header(
             + 80 // LC_DYSYMTAB
             + fixup_lc.size()
             + usize::from(cfg.exported_symbols) * 16 // LC_DYLD_EXPORTS_TRIE (M40)
-            + usize::from(cfg.function_starts) * 16 // LC_FUNCTION_STARTS (M31)
+            + usize::from(emit_func_starts(cfg)) * 16 // LC_FUNCTION_STARTS (M31; M105 composes -S)
             + if hi.emit_dice { 16 } else { 0 } // LC_DATA_IN_CODE (M30)
             + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
             + if cfg.adhoc { 16 } else { 0 } // LC_CODE_SIGNATURE
@@ -5883,7 +6064,7 @@ fn build_header(
         w32(&mut buf, lc + 12, hi.trie_len as u32);
         lc += 16;
     }
-    if cfg.function_starts {
+    if emit_func_starts(cfg) {
         w32(&mut buf, lc, pgr_format::consts::LC_FUNCTION_STARTS);
         w32(&mut buf, lc + 4, 16);
         w32(&mut buf, lc + 8, hi.func_off as u32);
@@ -5970,7 +6151,7 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice
         + usize::from(fixup_lc == FixupLc::Chained) * 16 // LC_DYLD_CHAINED_FIXUPS
         + usize::from(fixup_lc == FixupLc::DyldInfo) * 48 // LC_DYLD_INFO_ONLY
         + usize::from(cfg.exported_symbols) * 16 // LC_DYLD_EXPORTS_TRIE (M40)
-        + usize::from(cfg.function_starts) * 16 // LC_FUNCTION_STARTS (M31)
+        + usize::from(emit_func_starts(cfg)) * 16 // LC_FUNCTION_STARTS (M31; M105 composes -S)
         + usize::from(emit_dice) * 16 // LC_DATA_IN_CODE (M30)
         + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
         + usize::from(cfg.adhoc) * 16 // LC_CODE_SIGNATURE
