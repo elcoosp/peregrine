@@ -926,6 +926,20 @@ pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
                     Some(24),
                 ));
             }
+            // M102: the bind-at-load bit is an executable decision —
+            // dyld binds the exec'd main executable's undefineds before
+            // `main` runs (the `dlopen(RTLD_NOW)` contract); an image
+            // the kernel loads itself rides its own load contract. The
+            // flag is dyld's to consume, never a format defect — the
+            // warning face, the `-no_adhoc` carve-out pattern, never a
+            // refusal.
+            if img.header.flags & pgr_format::consts::MH_BINDATLOAD != 0 {
+                report.issues.push(Issue::warning(
+                    Code::HeaderInvalid,
+                    "MH_BINDATLOAD is only meaningful for executables",
+                    Some(24),
+                ));
+            }
             if let Some(id) = &img.id_dylib {
                 if id.current_version < id.compatibility_version {
                     report.issues.push(Issue::warning(
@@ -995,6 +1009,18 @@ pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
                 report.issues.push(Issue::warning(
                     Code::HeaderInvalid,
                     "MH_ALLOW_STACK_EXECUTION is only meaningful for executables",
+                    Some(24),
+                ));
+            }
+            // M102: the bind-at-load bit is an executable decision — a
+            // bundle dlopens without an exec'd main executable whose
+            // undefineds could bind before `main`. The flag is dyld's to
+            // consume, never a format defect — the warning face, never a
+            // refusal.
+            if img.header.flags & pgr_format::consts::MH_BINDATLOAD != 0 {
+                report.issues.push(Issue::warning(
+                    Code::HeaderInvalid,
+                    "MH_BINDATLOAD is only meaningful for executables",
                     Some(24),
                 ));
             }
