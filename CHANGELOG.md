@@ -6,6 +6,49 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M101)
+
+- **M101** — the alias list file: the file form of M24's `-alias` — `-alias_list <file>` reads one
+  `alias definition` pair per line (the house list-file grammar — blank lines and `#` comments skip,
+  the M11/M14 convention; a malformed line refuses naming itself, the fix local), and the pairs
+  append to the ONE alias table in command-line order beside the `-alias` flags (the M90 compose
+  pattern — the source list carries the validated pairs and the file paths in flag order, the
+  composition walking it once at link time). The M24 refusal contracts ride unchanged: an alias of
+  a name no input defines refuses with the misspelling named, an alias name already defined or
+  referenced refuses (a file pair duplicating a flag pair is the same refusal — the table is one,
+  the parse catches the flag-vs-flag repeats, the composition the file-borne ones), the alias keeps
+  its definition alive under `-dead_strip` (the root rides the composed table), and the relocatable
+  output refuses the knob (the source list is the knob's presence). The composed table rides the
+  v16 alias wire carriage and the ladder exactly as the single flags' pairs always did — the
+  resident cycle plans the byte-identical composed table, the symtab rows landing in composed order
+  — and a config the caller pre-shaped composes beside its own values (the empty source list leaves
+  it alone). The daemon wire v52 names the round; the `alias_list` bench pins the composed-table
+  shape, and the `alias_list_link` example walks the file form, the flag+file compose and the three
+  refusals. Drift heal riding along: the M99 round bumped the link record to v8 and its own gates
+  followed, but the `m9_incremental` renewal gate still pinned v7 — healed to v8 (the M30/M82/M99
+  carriage chain named in the assertion).
+
+### Added (M100)
+
+- **M100** — the singular export filters: ld64's `-exported_symbol <name>` /
+  `-unexported_symbol <name>`, the command-line siblings of the M14 list files. Each occurrence
+  appends ONE validated entry to the ONE composed filter table in command-line order (the M90
+  compose pattern — the ordered source list carries the singular entries and the list-file paths in
+  flag order, the singular flags and the list files interleaving; the list files keep their
+  once-per-kind contract, the singular flags are the repeatable face), and the same pattern grammar
+  the lists widened to validates at the parse (an exact name, or a `*` glob — a typo refuses with
+  the fix named, the `-alias` shape). The composed table feeds the unchanged M14 seam — the glob
+  matcher, the `N_PEXT` symtab marking and the trie exclusion exactly as the lists shaped them (an
+  alias hidden by the filter does not land, the seam's existing rule) — and the empty default keeps
+  every pre-knob link byte-identical. The composed table is config and crosses the wire (the v7
+  pattern carriage — a rebuild-refusing pattern is a malformed request, never a silently misread
+  filter): the resident cycle plans the byte-identical composed surface, the ladder's replay rides
+  the table, and a pre-shaped config composes beside its own values. The daemon wire v51 names the
+  round; the `exported_symbol` bench pins the shape-parity gate (the composed only-list and
+  hide-list beside the default over the 64-object rebase corpus), and the `exported_symbol_link`
+  example walks the default, the singular face, the flag+list compose, the glob form and the parse
+  refusals.
+
 ### Added (M99)
 
 - **M99** — the named output UUID: the other half of M32's `-no_uuid` — `-uuid <uuid>`
