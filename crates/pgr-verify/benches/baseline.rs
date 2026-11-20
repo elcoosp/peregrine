@@ -11,10 +11,15 @@
 //! past the linear scan's comfort zone, the shape changes here first.
 //! Numbers live in docs/BENCHMARKS.md (M13 section).
 
+use std::hint::black_box;
+
 use criterion::{BenchmarkId, Criterion, Throughput};
+use pgr_format::consts::CPU_TYPE_ARM64;
+use pgr_format::universal::FatArch;
 use pgr_verify::{
     BaselineDelta, Code, CodeIdentity, Issue, OffsetIdentity, Options, Report, Severity,
-    parse_report_json, to_json, verify,
+    SliceVerdict, UniversalDelta, UniversalReport, parse_container_baseline, parse_report_json,
+    to_json, to_json_with_file, verify,
 };
 
 /// A synthetic report with `n` findings spread across the issue codes
@@ -147,10 +152,93 @@ fn bench_verify_for_scale(c: &mut Criterion) {
     });
 }
 
+/// The M96 container baseline group: the document's read (one labeled
+/// report line per declared slice) and the pairing's own price — the
+/// window agreement plus one per-slice [`BaselineDelta::between`] —
+/// beside the single-image delta over the same slice report (for
+/// scale: the container gate is N single-image deltas plus one linear
+/// window walk, never a second verifier pass).
+fn bench_container_baseline(c: &mut Criterion) {
+    // One slice's report, shaped like the single-image group's small
+    // corpus (the container's rows are slice reports — the same shape).
+    let slice_report = || synthetic_report(8);
+    let fat_arch = || FatArch {
+        cputype: CPU_TYPE_ARM64,
+        cpusubtype: 0,
+        offset: 0x1000,
+        size: 0x4000,
+        align_log2: 12,
+    };
+    for slices in [2usize, 4] {
+        let report = UniversalReport {
+            slices: (0..slices)
+                .map(|_| SliceVerdict {
+                    arch: fat_arch(),
+                    report: slice_report(),
+                })
+                .collect(),
+        };
+        let document: String = report
+            .slices
+            .iter()
+            .enumerate()
+            .map(|(i, verdict)| {
+                to_json_with_file(
+                    &pgr_verify::slice_label("fat.dylib", i, &verdict.arch),
+                    &verdict.report,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let baseline = parse_container_baseline(&document).expect("the writer's own output parses");
+
+        let mut group = c.benchmark_group("container_baseline");
+        group.throughput(Throughput::Elements(slices as u64));
+        group.bench_function(BenchmarkId::new("parse", slices), |b| {
+            b.iter(|| {
+                black_box(parse_container_baseline(black_box(&document)).expect("parses"));
+            });
+        });
+        group.bench_function(BenchmarkId::new("between_slices", slices), |b| {
+            b.iter(|| {
+                black_box(
+                    UniversalDelta::between_slices(
+                        black_box(&report),
+                        black_box(&baseline),
+                        &OffsetIdentity,
+                    )
+                    .expect("the pairing agrees"),
+                );
+            });
+        });
+        group.finish();
+    }
+    // For scale: one slice's single-image delta over the same 8-issue
+    // report pair (the container gate's per-slice work, unbundled).
+    let prev_issues: Vec<Issue> = slice_report().issues;
+    let next_issues: Vec<Issue> = shifted_report(&Report {
+        issues: prev_issues.clone(),
+        stats: pgr_verify::Stats::default(),
+    })
+    .issues;
+    let mut group = c.benchmark_group("container_baseline");
+    group.bench_function("one_slice_delta_for_scale", |b| {
+        b.iter(|| {
+            BaselineDelta::between(
+                black_box(&prev_issues),
+                black_box(&next_issues),
+                &OffsetIdentity,
+            )
+        });
+    });
+    group.finish();
+}
+
 /// Bench entry point (macro-free so the workspace `missing_docs` lint holds).
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     bench_baseline(&mut criterion);
+    bench_container_baseline(&mut criterion);
     bench_verify_for_scale(&mut criterion);
     criterion.final_summary();
 }
