@@ -190,8 +190,16 @@ mod tests {
         // and v52 names the M101 round: `-alias_list <file>` composes
         // into the ONE alias table the v16 pair carriage carries (the
         // same validation the flag parse pays; a resident relink ships
-        // the composed aliases the client named).
-        assert_eq!(crate::PROTO_VERSION, 52);
+        // the composed aliases the client named) — and v53 carries the
+        // bind-at-load decision (M102, the config tail): a resident
+        // relink carries the flag word the client asked for, never the
+        // pre-M102 bitless default — and v54 names the M103 round: the
+        // `-undefined` policy byte widens to the four-value alphabet
+        // (warning and suppress cross byte-for-byte; an unknown value is
+        // a malformed frame) and the reply gains the warning-policy tail
+        // (the session's own unresolved-open render — the exit-policy
+        // face the client prints).
+        assert_eq!(crate::PROTO_VERSION, 54);
     }
 
     #[test]
