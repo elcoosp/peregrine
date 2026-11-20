@@ -260,8 +260,14 @@ use sha2::{Digest, Sha256};
 /// mark record for the M92 chains, the provenance tail carrying the
 /// rendered text verbatim beside the M79 answers; a liveness ask beside
 /// a relocatable config is a malformed request — `-r` carries no strip,
-/// the M83 replay-face rule).
-pub const PROTO_VERSION: u32 = 48;
+/// the M83 replay-face rule). **v49** appends the dylib terminator (M98
+/// — the config tail carries the `-term` name beside the M48 `-init`
+/// name; a resident relink carries the terminator the client named,
+/// never the pre-M98 absence). **v50** appends the named output UUID
+/// (M99 — the config tail carries the 16 bytes beside the names; a
+/// resident relink carries the identity the client named, never the
+/// content-derived default).
+pub const PROTO_VERSION: u32 = 50;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1734,6 +1740,27 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     } else {
         put_u8(out, 0);
     }
+    // M98 (v49 wire): the dylib terminator rides the tail after the
+    // initializer — a present byte, then the `-term` symbol name; a
+    // resident relink carries the terminator the client named, never
+    // the pre-M98 absence (the M48 v35 shape, one field over).
+    if let Some(name) = &cfg.term_symbol {
+        put_u8(out, 1);
+        put_str(out, name);
+    } else {
+        put_u8(out, 0);
+    }
+    // M99 (v50 wire): the named output UUID rides the tail after the
+    // terminator — a present byte, then the 16 bytes; a resident relink
+    // carries the identity the client named, never the content-derived
+    // default.
+    match cfg.named_uuid {
+        Some(bytes) => {
+            put_u8(out, 1);
+            out.extend_from_slice(&bytes);
+        }
+        None => put_u8(out, 0),
+    }
     // M50 (v36 wire): the weak-import refusal rides the tail after the
     // initializer — one byte; a resident relink carries the decision the
     // client asked for, never the pre-M50 runtime-lookup fallthrough.
@@ -2094,6 +2121,22 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // (the unresolved one is the core's Symbol refusal, the output-kind
     // conflicts its re-check's).
     let init_symbol = if r.u8()? != 0 { Some(r.str()?) } else { None };
+    // M98 (v49 wire): the dylib terminator (see encode) — a present
+    // byte, then the name (the v35 initializer shape); the name
+    // resolves at link time (the unresolved one is the core's Symbol
+    // refusal, the output-kind conflicts its re-check's).
+    let term_symbol = if r.u8()? != 0 { Some(r.str()?) } else { None };
+    // M99 (v50 wire): the named output UUID (see encode) — a present
+    // byte, then the 16 bytes; any value the parse could produce rides
+    // (the bytes are the identity, no further grammar to validate on
+    // the wire).
+    let named_uuid = if r.u8()? != 0 {
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(r.take(16)?);
+        Some(bytes)
+    } else {
+        None
+    };
     // M50 (v36 wire): the weak-import refusal — one byte, no validation
     // beyond the bool (the decision reads in the resolve's undefined
     // walk; the refusal is the core's typed Symbol error, a link-time
@@ -2254,6 +2297,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         export_dynamic,
         branch_islands: !no_branch_islands,
         init_symbol,
+        term_symbol,
+        named_uuid,
         no_weak_imports,
         allow_stack_execute,
         no_dead_strip_inits_and_terms,
@@ -2278,6 +2323,13 @@ mod tests {
     use pgr_core::layout::{LinkConfig, OutputType};
     use pgr_core::observe::LinkObserver;
     use pgr_core::resolve::Dylib;
+
+    /// The M99 example value's raw bytes (the round-trip gate's named
+    /// identity).
+    const NAMED_BYTES: [u8; 16] = [
+        0x7d, 0x1e, 0x6f, 0x2a, 0x93, 0xc4, 0x4b, 0x8d, 0xa1, 0xe2, 0x3f, 0x4c, 0x5d, 0x6e, 0x7f,
+        0x80,
+    ];
 
     /// A representative config: every field set, dylibs included.
     fn rich_config() -> LinkConfig {
@@ -2571,6 +2623,12 @@ mod tests {
             // The v35 tail: the dylib initializer rides the default
             // here — the name the round-trip test names.
             init_symbol: None,
+            // The v49 tail: the dylib terminator rides the default
+            // here — the name the round-trip test names.
+            term_symbol: None,
+            // The v50 tail: the named output UUID rides the default
+            // here — the bytes the round-trip test names.
+            named_uuid: None,
             // The v36 tail: the weak-import refusal rides the default
             // here — the round-trip test names the set decision.
             no_weak_imports: false,
@@ -4884,6 +4942,82 @@ mod tests {
             back.config.init_symbol.as_deref(),
             Some("_my_init"),
             "the initializer crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_dylib_terminator_round_trips() {
+        // v49: a named `-term` must survive the round trip verbatim (a
+        // resident relink carries the terminator the client named,
+        // never the pre-M98 absence).
+        let mut cfg = rich_config();
+        assert!(cfg.term_symbol.is_none(), "rich_config carries the default");
+        cfg.term_symbol = Some("_my_term".into());
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.term_symbol.as_deref(),
+            Some("_my_term"),
+            "the terminator crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_named_uuid_round_trips() {
+        // v50: a named output UUID must survive the round trip verbatim
+        // (a resident relink carries the identity the client named,
+        // never the content-derived default).
+        let mut cfg = rich_config();
+        assert!(cfg.named_uuid.is_none(), "rich_config carries the default");
+        cfg.named_uuid = Some(NAMED_BYTES);
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.named_uuid,
+            Some(NAMED_BYTES),
+            "the identity crosses byte-for-byte"
         );
     }
 
