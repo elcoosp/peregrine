@@ -204,7 +204,7 @@ pub fn parse_report_json(s: &str) -> Result<Report, ReportJsonError> {
 /// Parses one whole-output report line (`"file"` first) and captures the
 /// label the writer rode beside the report (M96): the container
 /// baseline's reader pairs the label's slice identity
-/// ([`crate::universal::parse_slice_label`]) with the table row its
+/// (`parse_slice_label`) with the table row its
 /// findings vouch for, so the label is part of the document's meaning —
 /// the plain reader's unknown-key skip loses it. The same body shapes as
 /// [`parse_report_json`] (unknown keys still ignored), plus the `file`
