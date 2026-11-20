@@ -291,8 +291,8 @@ pub enum ContainerBaselineError {
 /// produces them; a trailing newline is not content), every other line
 /// parses as the labeled form ([`crate::parse_labeled_report`], its
 /// `file` key required) and its label must name a slice window
-/// ([`crate::universal::parse_slice_label`]) — a hand-authored line
-/// cannot vouch for a row it does not name.
+/// (`parse_slice_label` — a hand-authored line cannot vouch for a row
+/// it does not name).
 ///
 /// # Errors
 /// [`ContainerBaselineError::Empty`] when no report lines ride;
@@ -351,7 +351,7 @@ pub struct SliceDelta {
 /// The container's classification against a baseline (M96): one
 /// [`SliceDelta`] per declared slice, in table order. `is_clean` is
 /// every slice's — the container gate ships nothing a slice introduces,
-/// the same rule [`UniversalReport::is_ok`] applies to the verdict.
+/// the same rule [`crate::UniversalReport::is_ok`] applies to the verdict.
 ///
 /// The pairing is positional and window-checked: line *i* pairs with
 /// table row *i* (the M71 walk's order — the order the recording face
