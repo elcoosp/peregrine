@@ -337,6 +337,26 @@ harness = false
 name = "dylib_init"
 harness = false
 
+# The M98 dylib-terminator bench: the link across the -term <symbol>
+# decision (the no-command default, the named LC_ROUTINES_64) over the
+# same 64-object dylib corpus — a shape-parity gate, the decision is one
+# 72-byte identity-block command (shared with M48's -init: one command,
+# two fields) and one interner lookup (the fixed header delta the smoke
+# gate pins).
+[[bench]]
+name = "dylib_term"
+harness = false
+
+# The M99 named-UUID bench: the link across the -uuid <uuid> decision
+# (the content-derived default, the named value) over the same 64-object
+# corpus the M32 uuid bench shares — a shape-parity gate, the decision
+# is an emit-side identity write (the plan never moves; the smoke gate
+# pins the header blocks byte-identical), and the named lane drops the
+# derivation for the config's own 16 bytes.
+[[bench]]
+name = "named_uuid"
+harness = false
+
 # The M49 GCC-era ObjC-pull bench: the link across the -ObjC decision
 # over the M43 corpus shape with the metadata half split into the two
 # families (16 modern `_OBJC_CLASS_$_` members, 16 GCC-era
