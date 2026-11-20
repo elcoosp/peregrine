@@ -63,6 +63,61 @@ pub(crate) fn platform_const(name: &str) -> Option<u32> {
     }
 }
 
+/// One export-filter source, in command-line order (M100): the
+/// singular flags carry their validated entry (the same pattern grammar
+/// the list files widened to — an exact name, or a `*` glob), the list
+/// files carry their path (read and parsed at link time, the M3/M14
+/// convention, the read riding the M60 dependency record). The list
+/// files keep their once-per-kind contract (the M3 surface pinned it;
+/// the singular flags are the repeatable face).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportFilterSpec {
+    /// `-exported_symbol <name>`: one exported-only entry.
+    Exported {
+        /// The validated pattern (exact or `*` glob).
+        pattern: pgr_core::SymbolPattern,
+    },
+    /// `-unexported_symbol <name>`: one hide-and-mark-`N_PEXT` entry.
+    Unexported {
+        /// The validated pattern (exact or `*` glob).
+        pattern: pgr_core::SymbolPattern,
+    },
+    /// `-exported_symbols_list <path>`: the file's lines join the
+    /// only-list (once per kind).
+    ExportedList {
+        /// The file's path (read at link time).
+        path: String,
+    },
+    /// `-unexported_symbols_list <path>`: the file's lines join the
+    /// hide-list (once per kind).
+    UnexportedList {
+        /// The file's path (read at link time).
+        path: String,
+    },
+}
+
+/// One alias source, in command-line order (M101): the `-alias` flag
+/// carries its validated pair (the M24 grammar, paid at the parse), the
+/// `-alias_list` file carries its path (read and validated at link time,
+/// the M11/M14 list-file convention — the read rides the M60 dependency
+/// record). Every source composes into the ONE alias table in flag
+/// order, the M90 pattern, and the composed table feeds the unchanged
+/// [`pgr_core::alias`] seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasSource {
+    /// `-alias <alias_name> <definition_name>`: one validated pair.
+    Pair {
+        /// The validated pair (the M24 seam's own type).
+        alias: pgr_core::Alias,
+    },
+    /// `-alias_list <path>`: the file's pairs join the table (the file
+    /// form of M24's `-alias`).
+    ListFile {
+        /// The file's path (read at link time).
+        path: String,
+    },
+}
+
 /// Parsed driver options (the current milestone surface; M10 adds `-r`).
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -102,10 +157,24 @@ pub struct Options {
     /// Indices into `inputs` loaded as `LC_REEXPORT_DYLIB`
     /// (`-reexport_library`, M3).
     pub reexport_library_inputs: Vec<usize>,
-    /// Path of the `-exported_symbols_list` file (read by the driver).
-    pub exported_list_path: Option<String>,
-    /// Path of the `-unexported_symbols_list` file (read by the driver).
-    pub unexported_list_path: Option<String>,
+    /// The export-filter sources, in command-line order (M100): each
+    /// `-exported_symbol <name>` / `-unexported_symbol <name>`
+    /// occurrence appends one validated entry, and each
+    /// `-exported_symbols_list <f>` / `-unexported_symbols_list <f>`
+    /// records its file (read at link time, the M3 convention) — every
+    /// source composes into the ONE filter table in flag order, the
+    /// M90 pattern, and the composed table feeds the unchanged
+    /// [`pgr_core::export_filter`] seam. Empty (the default) keeps
+    /// every pre-knob link byte-identical.
+    pub export_filter_specs: Vec<ExportFilterSpec>,
+    /// The alias sources, in command-line order (M101): each `-alias`
+    /// occurrence carries its validated pair, each `-alias_list <f>`
+    /// records its file (the file form of M24's `-alias`, read at link
+    /// time) — every source composes into the ONE alias table in flag
+    /// order (the M90 pattern; the table rides the config to the
+    /// unchanged M24 seam, the wire's v16 carriage and the ladder).
+    /// Empty (the default) keeps every pre-knob link byte-identical.
+    pub alias_sources: Vec<AliasSource>,
     /// M5 `-all_load`: pull every archive member regardless of liveness.
     pub all_load: bool,
     /// M5 `-force_load <archive>`: pull every member of the named archive.
@@ -379,8 +448,8 @@ impl Default for Options {
             lazy_library_inputs: Vec::new(),
             upward_library_inputs: Vec::new(),
             reexport_library_inputs: Vec::new(),
-            exported_list_path: None,
-            unexported_list_path: None,
+            export_filter_specs: Vec::new(),
+            alias_sources: Vec::new(),
             all_load: false,
             force_load_archives: Vec::new(),
             filelists: Vec::new(),
@@ -1078,6 +1147,21 @@ pub enum OptsError {
         /// What was repeated.
         message: String,
     },
+    /// A `-exported_symbol`/`-unexported_symbol` value the pattern
+    /// grammar refuses (M100): the same grammar the M14 list files pay
+    /// — an empty value matches nothing, interior whitespace is not a
+    /// Mach-O symbol name. The refusal rides the help (the fix, not
+    /// just the verdict — the house convention).
+    #[error("invalid value for {flag}: {raw}")]
+    #[diagnostic(help("{message}"))]
+    ExportSymbolValue {
+        /// The refused flag (`-exported_symbol` or `-unexported_symbol`).
+        flag: String,
+        /// The refused value as written.
+        raw: String,
+        /// The pattern grammar's refusal (the fix).
+        message: String,
+    },
     /// A `@response-file` could not be read, nested too deeply, or contained
     /// a malformed token (exit code 2).
     #[error("response file {path}: {message}")]
@@ -1666,21 +1750,61 @@ fn apply_flag(
         }
         "-exported_symbols_list" => {
             let v = next_value(args, i, arg)?;
-            if opts.exported_list_path.is_some() {
+            if opts
+                .export_filter_specs
+                .iter()
+                .any(|s| matches!(s, ExportFilterSpec::ExportedList { .. }))
+            {
                 return Err(OptsError::Repeated {
                     message: "-exported_symbols_list given more than once".into(),
                 });
             }
-            opts.exported_list_path = Some(v);
+            opts.export_filter_specs
+                .push(ExportFilterSpec::ExportedList { path: v });
         }
         "-unexported_symbols_list" => {
             let v = next_value(args, i, arg)?;
-            if opts.unexported_list_path.is_some() {
+            if opts
+                .export_filter_specs
+                .iter()
+                .any(|s| matches!(s, ExportFilterSpec::UnexportedList { .. }))
+            {
                 return Err(OptsError::Repeated {
                     message: "-unexported_symbols_list given more than once".into(),
                 });
             }
-            opts.unexported_list_path = Some(v);
+            opts.export_filter_specs
+                .push(ExportFilterSpec::UnexportedList { path: v });
+        }
+        // M100: the singular export filters — ld64's command-line
+        // siblings of the list files. The same pattern grammar the
+        // M14 lists widened to validates here (an exact name, or a `*`
+        // glob), so a typo refuses at the parse with the fix named;
+        // each occurrence appends one entry to the ONE composed filter
+        // table in flag order (the M90 compose pattern).
+        "-exported_symbol" => {
+            let v = next_value(args, i, arg)?;
+            let pattern = pgr_core::SymbolPattern::parse(v.as_bytes()).map_err(|e| {
+                OptsError::ExportSymbolValue {
+                    flag: "-exported_symbol".into(),
+                    raw: v.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            opts.export_filter_specs
+                .push(ExportFilterSpec::Exported { pattern });
+        }
+        "-unexported_symbol" => {
+            let v = next_value(args, i, arg)?;
+            let pattern = pgr_core::SymbolPattern::parse(v.as_bytes()).map_err(|e| {
+                OptsError::ExportSymbolValue {
+                    flag: "-unexported_symbol".into(),
+                    raw: v.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            opts.export_filter_specs
+                .push(ExportFilterSpec::Unexported { pattern });
         }
         "-mark_dead_strippable_dylib" => opts.config.dead_strippable = true,
         "-dead_strip" => opts.config.dead_strip = true,
@@ -2247,9 +2371,16 @@ fn apply_flag(
         "-no_weak_imports" => {
             opts.config.no_weak_imports = true;
         }
-        // M24: the symbol aliases. The same validation the core seam
-        // pays runs here, so the refusal names the grammar; the output
-        // kind conflict is `finish`'s (it sees the whole surface).
+        // M24: the symbol aliases, M101 the file form. The same
+        // validation the core seam pays runs here, so the refusal names
+        // the grammar; each occurrence records one ordered source (the
+        // M101 compose list — pairs and files compose into the ONE
+        // alias table in flag order at link time), and the output kind
+        // conflict is `finish`'s (it sees the whole surface). A
+        // repeated alias name across the flag occurrences refuses at
+        // the parse (one decision per name, the M24 contract); a file
+        // pair's duplicate is the link-time composition's (the file
+        // content is not parse-known).
         "-alias" => {
             let alias = next_value(args, i, arg)?;
             let definition = next_value(args, i, arg)?;
@@ -2259,13 +2390,31 @@ fn apply_flag(
                     message: e.to_string(),
                 }
             })?;
-            opts.config
-                .aliases
-                .push(a)
-                .map_err(|e| OptsError::AliasValue {
-                    raw: format!("{alias} {definition}"),
-                    message: e.to_string(),
-                })?;
+            if opts
+                .alias_sources
+                .iter()
+                .any(|s| matches!(s, AliasSource::Pair { alias: p } if p.alias() == a.alias()))
+            {
+                let raw = format!("{alias} {definition}");
+                return Err(OptsError::AliasValue {
+                    raw,
+                    message: pgr_core::AliasError::Duplicate {
+                        name: a.alias().to_string(),
+                    }
+                    .to_string(),
+                });
+            }
+            opts.alias_sources.push(AliasSource::Pair { alias: a });
+        }
+        // M101: the alias list file — the file form of M24's `-alias`.
+        // One `alias definition` pair per line (the house list-file
+        // grammar: blank lines and `#` comments skip); the pairs ride
+        // the ordered source list and compose beside the `-alias`
+        // flags. The file is read (and its pairs validated) at link
+        // time, the M11/M14 convention.
+        "-alias_list" => {
+            let v = next_value(args, i, arg)?;
+            opts.alias_sources.push(AliasSource::ListFile { path: v });
         }
         // M25: the bundle's host. The path is scanned at link time (the
         // host's export trie is the surface the linker itself emits);
@@ -2689,8 +2838,10 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     // output carries the input symtab verbatim, so a named pair has no
     // symtab row to grow — the same refusal shape as the M22
     // environment above: an explicitly named knob that cannot apply is
-    // a refusal, never a silently dropped one.
-    if !opts.config.aliases.is_empty()
+    // a refusal, never a silently dropped one. M101: the file form
+    // rides the same contract (the source list, flag or file, is the
+    // knob's presence).
+    if !opts.alias_sources.is_empty()
         && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
     {
         return Err(OptsError::AliasConflict {
@@ -3396,7 +3547,7 @@ pub fn parse_number(v: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OptsError, OrderSpec, parse, parse_number, parse_version};
+    use super::{ExportFilterSpec, OptsError, OrderSpec, parse, parse_number, parse_version};
     use std::ffi::OsString;
 
     fn args(list: &[&str]) -> Vec<OsString> {
@@ -3645,7 +3796,14 @@ mod tests {
         assert_eq!(o.config.current_version, (1 << 16) | (2 << 8));
         assert_eq!(o.config.compatibility_version, 1 << 16);
         assert!(o.config.dead_strippable);
-        assert_eq!(o.exported_list_path.as_deref(), Some("/tmp/exports.txt"));
+        // M100: the list file rides the ordered spec list (the compose
+        // source; the M90 shape).
+        assert_eq!(
+            o.export_filter_specs,
+            vec![ExportFilterSpec::ExportedList {
+                path: "/tmp/exports.txt".into()
+            }]
+        );
     }
 
     #[test]
