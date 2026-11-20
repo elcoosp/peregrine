@@ -113,16 +113,23 @@ fn the_flag_parses_repeatable_in_flag_order() {
     .map(std::ffi::OsString::from)
     .collect();
     let o = pgr_driver::opts::parse(&argv).expect("the argv parses");
+    // M101: the pairs ride the ordered source list (the compose list —
+    // pairs and files compose into the ONE table in flag order at link
+    // time), so the parse surface is the sources, not the composed
+    // table; the composed order is the end-to-end gate's (the m101
+    // suite reads the symtab rows).
     let aliases: Vec<(&str, &str)> = o
-        .config
-        .aliases
+        .alias_sources
         .iter()
-        .map(|a| (a.alias(), a.definition()))
+        .map(|s| match s {
+            pgr_driver::opts::AliasSource::Pair { alias } => (alias.alias(), alias.definition()),
+            pgr_driver::opts::AliasSource::ListFile { .. } => ("<file>", "<file>"),
+        })
         .collect();
     assert_eq!(
         aliases,
         [("_shim_a", "_lib_fn"), ("_shim_b", "_main")],
-        "the aliases ride the config in flag order"
+        "the alias sources ride in flag order"
     );
 }
 
