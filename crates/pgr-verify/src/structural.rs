@@ -387,16 +387,20 @@ pub(crate) fn check_load_commands(img: &ParsedImage<'_>, report: &mut Report) {
     check_load_dylinker(img, report);
 }
 
-/// The M48 dylib-initializer contract: `LC_ROUTINES_64` is the dylib
+/// The M48/M98 dylib routines contract: `LC_ROUTINES_64` is the dylib
 /// command dyld's `hasInitializer` walk reads first — the resolved
-/// initializer's image-space vaddr rides `init_address` (byte 8). The
-/// invariants the fixture knob can break are named: a routines command
+/// initializer's image-space vaddr rides `init_address` (byte 8), and
+/// the M98 terminator's rides `term_address` (byte 16, the legacy
+/// `init_module` slot — a fixed-point image has no module table). The
+/// invariants the fixture knobs can break are named: a routines command
 /// off a dylib (an executable's initializer surface is `LC_MAIN`, a
 /// bundle dlopens without one, a relocatable object carries no load
 /// commands), the 32-bit family opcode (`LC_ROUTINES`, 40 bytes — no
 /// place in a 64-bit arm64 image), an undersized command, a duplicate
-/// (dyld calls the initializer once), and an `init_address` that names
-/// no executable mapping (dyld would jump into nowhere at load time).
+/// (dyld calls the pair once), an `init_address` naming no executable
+/// mapping (dyld would jump into nowhere at load time), and a
+/// `term_address` naming no executable mapping (dyld calls the address
+/// when the image unloads).
 fn check_routines_region(img: &ParsedImage<'_>, report: &mut Report) {
     let is_dylib = img.header.filetype == MH_DYLIB;
     let mut seen: usize = 0;
@@ -458,24 +462,61 @@ fn check_routines_region(img: &ParsedImage<'_>, report: &mut Report) {
         // is a hostile or mis-derived initializer — the shape the
         // `-init` seam can break when the symbol resolves somewhere
         // unexpected.
-        let in_exec = img.segments.iter().any(|seg| {
-            seg.initprot & pgr_format::consts::VM_PROT_EXECUTE
-                == pgr_format::consts::VM_PROT_EXECUTE
-                && seg.vmsize > 0
-                && init_addr >= seg.vmaddr
-                && init_addr < seg.vmaddr.saturating_add(seg.vmsize)
-        });
-        if !in_exec {
-            report.issues.push(Issue::error(
-                Code::LoadCommandMalformed,
-                format!(
-                    "LC_ROUTINES_64 init_address {init_addr:#x} names no executable \
-                     mapping — dyld calls the address at load time, so the initializer \
-                     must ride a VM_PROT_EXECUTE segment"
-                ),
-                Some(cmd.offset as u64),
-            ));
-        }
+        gate_exec_mapping(
+            img,
+            report,
+            cmd.offset,
+            init_addr,
+            "init_address",
+            "at load time",
+        );
+        // M98: the terminator rides the legacy `init_module` slot
+        // (byte 16) — dyld calls it when the image unloads, so the same
+        // executable-mapping contract gates it (the `-term` seam's
+        // hostile shape: a mis-derived or tampered terminator).
+        let term_addr = u64::from_le_bytes(
+            cmd.bytes[16..24]
+                .try_into()
+                .expect("term_address rides byte 16"),
+        );
+        gate_exec_mapping(
+            img,
+            report,
+            cmd.offset,
+            term_addr,
+            "term_address",
+            "when the image unloads",
+        );
+    }
+}
+
+/// The routines contract's shared mapping gate: the named address field
+/// (`init_address` — load time — or `term_address` — unload time) must
+/// land inside a `VM_PROT_EXECUTE` segment; a vaddr outside every
+/// mapping is the hostile shape the `-init`/`-term` seams can break.
+fn gate_exec_mapping(
+    img: &ParsedImage<'_>,
+    report: &mut Report,
+    offset: usize,
+    addr: u64,
+    field: &str,
+    when: &str,
+) {
+    let in_exec = img.segments.iter().any(|seg| {
+        seg.initprot & pgr_format::consts::VM_PROT_EXECUTE == pgr_format::consts::VM_PROT_EXECUTE
+            && seg.vmsize > 0
+            && addr >= seg.vmaddr
+            && addr < seg.vmaddr.saturating_add(seg.vmsize)
+    });
+    if !in_exec {
+        report.issues.push(Issue::error(
+            Code::LoadCommandMalformed,
+            format!(
+                "LC_ROUTINES_64 {field} {addr:#x} names no executable mapping — dyld calls \
+                 the address {when}, so the address must ride a VM_PROT_EXECUTE segment"
+            ),
+            Some(offset as u64),
+        ));
     }
 }
 
