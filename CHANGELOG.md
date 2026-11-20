@@ -6,6 +6,51 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M99)
+
+- **M99** — the named output UUID: the other half of M32's `-no_uuid` — `-uuid <uuid>`
+  names the image's identity, and the named 16 bytes ride the `LC_UUID` field the emit
+  two-pass patch already writes, replacing the content-derived derivation (the page
+  hashes still hash the zeroed field — the signature's content contract is unchanged;
+  the identity is the name, not the content: two different corpora under the same name
+  ride the same bytes). The 8-4-4-4-12 hex form validates at the parse (36 chars,
+  hyphens at 8/13/18/23, case-insensitive hex — malformed refuses with the fix);
+  `-no_uuid` × `-uuid` refuse each other (two answers to one question,
+  order-independent) and `-r` refuses (the object carries no `LC_UUID` command at all —
+  the M32 shape), the layout's re-checks and `link_reloc` backing the driver surface.
+  Every fused emit path writes the named value — the classic `write_signature`, the
+  fused `tile` emit, the incremental ladder's page-0 rebuild — and the record carries
+  the decision (v8): a flip — named ↔ derived, or one name ↔ another — refuses through
+  `LinkRecord::admits` (`FallbackReason::NamedUuid`), the full link re-writing the
+  decision on either lane (the M82 pattern). The verifier's UUID contract stays
+  structural — a named value is the config's own choice, never a defect (the
+  `-no_adhoc` carve-out pattern); the daemon wire v50 carries the 16 bytes; the
+  `named_uuid` bench pins the plan-identical shape, and the `named_uuid_link` example
+  walks the derived default, the content-independent name, the uppercase form and the
+  three refusals.
+
+### Added (M98)
+
+- **M98** — the dylib terminator: the sibling decision M48's `-init` left empty —
+  `-term <symbol>` names the load-time terminator dyld calls when the image unloads,
+  and the resolved terminator's image-space vaddr rides `term_address` in the SAME
+  `LC_ROUTINES_64` the initializer composes into (one command, two fields — `-init` +
+  `-term` never plan a duplicate; the command rides exactly when either half names a
+  symbol, so every pre-M98 link stays byte-identical). The field slot is byte 16, the
+  legacy `init_module` — a fixed-point layout has no module table to index (M48 wrote
+  the slot zero), so the two addresses stay adjacent and the command keeps the 72-byte
+  shape dyld already walks. The name resolves like the entry seam's (an unresolved one
+  refuses with the `Symbol` error); the knob is a dylib decision like `-init` — an
+  executable, a bundle and `-r` refuse it with the fix (the layout's re-check and
+  `link_reloc` back the driver surface's refusal), and the verifier's routines contract
+  extends to the terminator (a `term_address` naming no `VM_PROT_EXECUTE` mapping is
+  the hostile shape, the shared mapping gate covering both fields). The daemon wire
+  v49 carries the name beside the initializer's; the `dylib_term` bench pins the fixed
+  72-byte header delta, and the `dylib_term_link` example walks the default, the named
+  terminator, the composed command and the refusals. Drift heal riding along: the M48
+  layout re-check's three `-init` refusal strings carried runs of internal spaces (the
+  driver's mirrored text was clean) — healed to the driver's exact wording.
+
 ### Added (M97)
 
 - **M97** — the SARIF `baselineState` face: the M75 CLI refusal ("`--sarif` renders the whole
