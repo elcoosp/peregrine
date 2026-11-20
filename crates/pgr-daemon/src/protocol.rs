@@ -289,8 +289,15 @@ use sha2::{Digest, Sha256};
 /// client's request refuses it (the M82 admits pattern, reversed), and
 /// the reply gains the warning-policy tail (a present byte, then the
 /// session's own unresolved-open render — the exit-policy face the
-/// client prints, the M62 convention).
-pub const PROTO_VERSION: u32 = 54;
+/// client prints, the M62 convention). **v55** names the M104 round:
+/// the symtab-shaping decision (`-keep_local_symbols`/`-x`) rides the
+/// tail after the bind-at-load byte — one byte; a resident relink
+/// carries the symtab shape the client asked for, never the pre-M104
+/// kept default. **v56** names the M105 round: the debug-section
+/// suppression (`-S`) rides the tail after the symtab-shaping byte —
+/// one byte; a resident relink carries the debug-free shape the client
+/// asked for, never the pre-M105 debug-carrying default.
+pub const PROTO_VERSION: u32 = 56;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1876,6 +1883,16 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // flag word the client asked for, never the pre-M102 bitless
     // default.
     put_u8(out, u8::from(cfg.bind_at_load));
+    // M104 (v55 wire): the symtab-shaping decision rides the tail after
+    // the bind-at-load byte — one byte; a resident relink carries the
+    // symtab shape the client asked for, never the pre-M104 kept
+    // default.
+    put_u8(out, u8::from(cfg.keep_local_symbols));
+    // M105 (v56 wire): the debug-section suppression rides the tail
+    // after the symtab-shaping byte — one byte; a resident relink
+    // carries the debug-free shape the client asked for, never the
+    // pre-M105 debug-carrying default.
+    put_u8(out, u8::from(cfg.strip_debug));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -2289,6 +2306,16 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // decision; the output-kind conflicts the core re-checks refuse at
     // link time).
     let bind_at_load = r.u8()? != 0;
+    // M104 (v55 wire): the symtab-shaping decision — one byte, no
+    // validation beyond the bool (the symtab builder reads the
+    // decision; the relocatable-shape conflict the core re-checks
+    // refuse at link time).
+    let keep_local_symbols = r.u8()? != 0;
+    // M105 (v56 wire): the debug-section suppression — one byte, no
+    // validation beyond the bool (the Pass-1 classification reads the
+    // decision; the relocatable-shape conflict the core re-checks
+    // refuse at link time).
+    let strip_debug = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -2365,6 +2392,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         no_weak_imports,
         allow_stack_execute,
         bind_at_load,
+        keep_local_symbols,
+        strip_debug,
         no_dead_strip_inits_and_terms,
         renames,
         cstring_order,
@@ -2603,6 +2632,16 @@ mod tests {
             // the flag word the client asked for, never the pre-M102
             // bitless default).
             bind_at_load: true,
+            // The v55 tail: a non-default symtab-shaping decision must
+            // survive the round trip verbatim (a resident relink carries
+            // the symtab shape the client asked for, never the pre-M104
+            // kept default).
+            keep_local_symbols: false,
+            // The v56 tail: a non-default debug-section suppression must
+            // survive the round trip verbatim (a resident relink carries
+            // the debug-free shape the client asked for, never the
+            // pre-M105 debug-carrying default).
+            strip_debug: true,
             // The v19 tail: non-default section-alignment floors must
             // survive the round trip verbatim, in flag order (a
             // resident relink aligns the sections the client named,
@@ -4866,6 +4905,143 @@ mod tests {
     }
 
     #[test]
+    fn the_keep_local_symbols_decision_round_trips() {
+        // v55: a non-default symtab-shaping decision must survive the
+        // round trip verbatim (a resident relink carries the symtab
+        // shape the client asked for, never the pre-M104 kept default).
+        let cfg = rich_config();
+        assert!(
+            !cfg.keep_local_symbols,
+            "rich_config carries the named drop face"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.keep_local_symbols,
+            "the symtab shape crosses byte-for-byte"
+        );
+        // The kept face rides too (the default and the pair's
+        // `-keep_local_symbols`).
+        let mut cfg = rich_config();
+        cfg.keep_local_symbols = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.keep_local_symbols,
+            "the kept face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_strip_debug_decision_round_trips() {
+        // v56: a non-default debug-section suppression must survive the
+        // round trip verbatim (a resident relink carries the debug-free
+        // shape the client asked for, never the pre-M105
+        // debug-carrying default).
+        let cfg = rich_config();
+        assert!(cfg.strip_debug, "rich_config carries the named strip face");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.strip_debug,
+            "the debug-free shape crosses byte-for-byte"
+        );
+        // The debug-carrying face rides too (the default).
+        let mut cfg = rich_config();
+        cfg.strip_debug = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.strip_debug,
+            "the debug-carrying face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
     fn the_widened_undefined_policies_round_trip() {
         // v54: the `-undefined` policy byte widens to the four-value
         // alphabet — warning and suppress cross byte-for-byte (a
@@ -6011,12 +6187,13 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        // `rich_config` carries no tables: drop the three absent bytes the
+        // `rich_config` carries no tables: drop the five absent bytes the
         // encoder just wrote (the M91 tail's slots at the config's end —
         // the rank table, then the cstring table, then the M102
-        // bind-at-load byte), the hand-spliced rank table takes the
-        // first place and the cstring absence follows.
-        body.truncate(body.len() - 3);
+        // bind-at-load byte, then the M104 keep-local-symbols byte, then
+        // the M105 strip-debug byte), the hand-spliced rank table takes
+        // the first place and the cstring absence follows.
+        body.truncate(body.len() - 5);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -6030,6 +6207,8 @@ mod tests {
         put_u32(&mut body, 9);
         put_u8(&mut body, 0); // the M91 cstring rank table's absence
         put_u8(&mut body, 0); // the M102 bind-at-load absence
+        put_u8(&mut body, 0); // the M104 keep-local-symbols drop face
+        put_u8(&mut body, 0); // the M105 strip-debug absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
@@ -6106,7 +6285,7 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        body.truncate(body.len() - 3);
+        body.truncate(body.len() - 5);
         put_u8(&mut body, 0); // the rank table's absence
         // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
@@ -6117,6 +6296,8 @@ mod tests {
             body.extend_from_slice(b"gamma");
         }
         put_u8(&mut body, 0); // the M102 bind-at-load absence
+        put_u8(&mut body, 0); // the M104 keep-local-symbols drop face
+        put_u8(&mut body, 0); // the M105 strip-debug absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
