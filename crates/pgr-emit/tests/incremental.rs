@@ -1382,11 +1382,11 @@ fn record_v5_round_trips_the_resolution_snapshot() {
 
     // The resolution snapshot rides the record since v5 (the M9
     // resolve wiring); M30's `__LINKEDIT` plan bump moved the format
-    // to v6, M82's family byte to v7 — the snapshot contract crosses
-    // them unchanged.
+    // to v6, M82's family byte to v7, M99's named-UUID byte to v8 —
+    // the snapshot contract crosses them unchanged.
     assert_eq!(
-        record.format_version, 7,
-        "the record format is v7 (the M82 bump)"
+        record.format_version, 8,
+        "the record format is v8 (the M99 bump)"
     );
     let snap = record
         .resolution
@@ -1764,5 +1764,166 @@ fn the_record_admits_its_own_family_and_refuses_a_flip() {
     assert!(
         matches!(reason, FallbackReason::ChainFamily { .. }),
         "the refusal names the family move: {reason}"
+    );
+}
+
+/// The image's `LC_UUID` payload when the command rides (the M99 read).
+fn uuid_of(image: &[u8]) -> Option<[u8; 16]> {
+    let hdr = pgr_format::MachHeader64::parse(image).expect("the image parses");
+    let mut it = pgr_format::LoadCommandIter::new(
+        image,
+        pgr_format::MachHeader64::SIZE,
+        hdr.ncmds,
+        hdr.sizeofcmds,
+    )
+    .expect("the load commands parse");
+    while let Some(cmd) = it.next_command().expect("the command chain walks") {
+        if let pgr_format::LoadCommandKind::Uuid = cmd.kind {
+            let st = pgr_format::UuidCommand::parse(cmd.bytes).expect("the lc parses");
+            return Some(st.uuid);
+        }
+    }
+    None
+}
+
+/// The M99 example values (the two named identities the flip gates ride).
+const NAMED_A: [u8; 16] = [
+    0x7d, 0x1e, 0x6f, 0x2a, 0x93, 0xc4, 0x4b, 0x8d, 0xa1, 0xe2, 0x3f, 0x4c, 0x5d, 0x6e, 0x7f, 0x80,
+];
+const NAMED_B: [u8; 16] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+];
+
+/// The record carries the named-UUID decision (M99, v8): the plan echoes
+/// the config's named value, the record inherits it — one source (the
+/// plan), no re-derivation — and the codec is lossless over the value.
+/// The fused emit writes the named bytes into `LC_UUID` (the named value
+/// replaced the content-derived derivation).
+#[test]
+fn record_v8_carries_the_named_uuid() {
+    let mut cfg1 = cfg(OutputType::Dylib, false, Vec::new());
+    cfg1.named_uuid = Some(NAMED_A);
+    let (layout1, objects1) = link(&inputs(&hello(64, false)), &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    assert_eq!(
+        uuid_of(&image1),
+        Some(NAMED_A),
+        "the fused emit writes the named value, not the derivation"
+    );
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+    assert_eq!(
+        record.named_uuid,
+        Some(NAMED_A),
+        "the record carries the decision the plan echoed"
+    );
+    let decoded = LinkRecord::decode(&record.encode()).expect("the v8 record decodes");
+    assert_eq!(
+        decoded.named_uuid,
+        Some(NAMED_A),
+        "the codec is lossless over the value"
+    );
+}
+
+/// The relink ladder's named-UUID admission (M99): a record admits the
+/// config whose named value matches its own and refuses a flip with the
+/// named fallback reason — the patch cannot renegotiate the image's
+/// identity in place, so a flipped relink is the full link's job, never
+/// a silent identity swap (the M82 family pattern).
+#[test]
+fn the_record_admits_its_own_named_uuid_and_refuses_a_flip() {
+    let mut cfg1 = cfg(OutputType::Dylib, false, Vec::new());
+    cfg1.named_uuid = Some(NAMED_A);
+    let (layout1, objects1) = link(&inputs(&hello(64, false)), &cfg1);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+    assert_eq!(
+        record.named_uuid,
+        Some(NAMED_A),
+        "the record rides the decision its plan echoed"
+    );
+
+    let mut matching = cfg(OutputType::Dylib, true, anchors_of(&layout1));
+    matching.named_uuid = Some(NAMED_A);
+    assert!(
+        record.admits(&matching).is_ok(),
+        "a config naming the record's own value is admitted"
+    );
+
+    let mut flipped = cfg(OutputType::Dylib, true, anchors_of(&layout1));
+    flipped.named_uuid = Some(NAMED_B);
+    let reason = record.admits(&flipped).expect_err("a flip refuses");
+    assert!(
+        matches!(reason, FallbackReason::NamedUuid { .. }),
+        "the refusal names the identity move: {reason}"
+    );
+
+    // A flip to the content-derived default refuses the same way.
+    let derived = cfg(OutputType::Dylib, true, anchors_of(&layout1));
+    let reason = record
+        .admits(&derived)
+        .expect_err("the flip to the default refuses");
+    assert!(
+        matches!(reason, FallbackReason::NamedUuid { .. }),
+        "the default is a different identity decision: {reason}"
+    );
+}
+
+/// The ladder's page-0 rebuild carries the named value (M99): a relink
+/// over an edited body keeps the named identity — the patched output is
+/// byte-identical to the full fused emit of the same plan (the engine's
+/// central contract), whose `LC_UUID` is the named value, not a fresh
+/// derivation of the edited content.
+#[test]
+fn the_in_place_patch_writes_the_named_uuid() {
+    let mut cfg_old = cfg(OutputType::Dylib, false, Vec::new());
+    cfg_old.named_uuid = Some(NAMED_A);
+    let (layout1, objects1) = link(&inputs(&hello(64, false)), &cfg_old);
+    let image1 = build_image_fused(&layout1, &objects1).unwrap();
+
+    let dir = workdir("m99_named_uuid");
+    let prev = dir.join("out");
+    write_image(&image1, &prev).unwrap();
+
+    let record = LinkRecord::record(&layout1, &objects1, &image1, None).unwrap();
+
+    let mut cfg_new = cfg(OutputType::Dylib, true, anchors_of(&layout1));
+    cfg_new.named_uuid = Some(NAMED_A);
+    cfg_new.sig_anchor = layout1
+        .linkedit
+        .sig_off
+        .gt(&0)
+        .then_some(layout1.linkedit.sig_off);
+    let (layout2, objects2) = link(&inputs(&hello(64, true)), &cfg_new);
+    let image2_full = build_image_fused(&layout2, &objects2).unwrap();
+    assert_eq!(
+        uuid_of(&image2_full),
+        Some(NAMED_A),
+        "the full emit of the edited relink keeps the named identity"
+    );
+
+    let decision = plan_patch(&record, &layout2, &objects2, cfg_new.layout_slack.as_ref()).unwrap();
+    let plan = match &decision {
+        PatchDecision::InPlace(p) => p.clone(),
+        PatchDecision::Fallback(r) => panic!("expected in place, fell back: {r}"),
+    };
+
+    let (outcome, next_record) =
+        apply_patch(&prev, &record, &plan, &layout2, &objects2, &prev, None).unwrap();
+    assert!(!outcome.untouched, "the body edit patched in place");
+
+    let patched = std::fs::read(&prev).unwrap();
+    assert_eq!(
+        patched, image2_full,
+        "the patched output must be byte-identical to the full fused emit"
+    );
+    assert_eq!(
+        uuid_of(&patched),
+        Some(NAMED_A),
+        "the ladder's page-0 rebuild carries the named value (the content changed)"
+    );
+    assert_eq!(
+        next_record.named_uuid,
+        Some(NAMED_A),
+        "the next record carries the same decision"
     );
 }
