@@ -984,3 +984,22 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
   plan byte-identical outputs (the flat-lookup binds ride whatever the exit prints; the policy is
   the exit's, never the image's). The `undefined_warning_link` and `undefined_suppress_link`
   examples walk the two faces beside the M2 defaults.
+
+## The symtab-shaping and debug-suppression round (M104/M105)
+
+- `keep_local_symbols` (`cargo bench -p pgr-core --bench keep_local_symbols`, M104): the link
+  across the `-keep_local_symbols`/`-x` decisions over the 64-object corpus whose every object
+  carries two section-defined statics and two name-only locals beside its externals —
+  `kept_default` **1.0548 ms** beside `x_dropped` **1.0234 ms** (dev-sandbox medians,
+  `--measurement-time 1` — the sandbox's bounded run; inside the run-to-run span) — the shape
+  gate, the drop moving the symtab builder's subrange and the strtab's tail, never the
+  function-starts stream. The `keep_local_symbols_link` example walks the default, the drop,
+  the named keep and the refusal.
+- `strip_debug` (`cargo bench -p pgr-core --bench strip_debug`, M105): the link across the
+  `-S` decisions over the 64-object corpus whose every object carries a `__TEXT,__debug_info`
+  `S_ATTR_DEBUG` section with a local in it, a `__DWARF` segment section, and data-in-code
+  inputs — `debug_carrying_default` **1.0564 ms** beside `s_stripped` **1.0010 ms**
+  (dev-sandbox medians, `--measurement-time 1` — the sandbox's bounded run; inside the
+  run-to-run span) — the shape gate, the strip moving the classification's Debug class, the
+  symtab's debug entries and the two metadata commands, never the `__unwind_info` synthesis.
+  The `strip_debug_link` example walks the carried default, the stripped face and the refusal.
