@@ -471,3 +471,20 @@ harness = false
 [[bench]]
 name = "why_live"
 harness = false
+
+# The M100 singular-export-filter bench: the link across the composed
+# filter table (the no-filter default, a composed 64-entry only-list,
+# a composed 64-entry hide-list) over the 64-object rebase corpus — a
+# shape-parity gate, the composed table feeds the unchanged M14
+# visibility closure.
+[[bench]]
+name = "exported_symbol"
+harness = false
+
+# The M101 alias-list bench: the link across the alias table the
+# `-alias_list` file form composes (the empty default, 8 and 64 pairs)
+# over the alias bench's corpus — a shape-parity gate, the composed
+# table rides the same AliasTable seam the flag form pushed.
+[[bench]]
+name = "alias_list"
+harness = false
