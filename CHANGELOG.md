@@ -6,6 +6,54 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M97)
+
+- **M97** — the SARIF `baselineState` face: the M75 CLI refusal ("`--sarif` renders the whole
+  verdict; the baseline delta has no SARIF shape") had its premise backwards — SARIF 2.1.0 gives
+  a result its own `baselineState` (`new` / `unchanged` / `absent`), which is exactly the M13
+  delta's three-way classification, so the whole-verdict document the gate audited states the
+  gate's own story. `pgr_verify::sarif::render_with_baseline` renders the M69 document with
+  every current finding riding `unchanged` or `new` under the policy the delta ran under (the
+  classification is a multiset consumption — a key the baseline carried twice and the fresh
+  report thrice rides one `unchanged` and two `new`) and the delta's `resolved` findings riding
+  `absent` after them, anchored at the baseline image's own offsets (the gate audits the same
+  artifact; a moved cleared site rides under `CodeIdentity`), and the rule table is the union of
+  both sides' codes (a resolved-only code still names itself). The container composes through
+  the M96 pairing (`render_universal_with_baseline`: one run per declared slice, each stated
+  against its own slice delta, the absent anchors container-absolute — the window agreement
+  holds for the baseline's offsets too). `pgr-verify --sarif --baseline` rides the renders for
+  both image shapes (the refusal retires; the two-machine-face refusal keeps; the exit gate is
+  the delta's under `--fail-on`), the plain documents stay byte-identical (the states ride the
+  shared writer as an optional slot), the `sarif_baseline` bench group pins the stated face's
+  price beside the plain render, and the `sarif_baseline` example walks the three states
+  (unchanged ships, absent passes, the fresh corruption's `new` refuses).
+
+### Added (M96)
+
+- **M96** — the container's baseline gate: the M74 CLI refusal ("`--baseline` gates one image's
+  offsets; a container's slices ride their own windows — verify the container without
+  `--baseline`, or one invocation per extracted slice") had its premise backwards, the M95 way —
+  the slices ride *inside* the audited file and every slice's verdict is its own M13 report, so
+  the container's own `--json` output (one whole-output report line per declared slice, the
+  label naming the window it rode) *is* the baseline document.
+  `pgr_verify::parse_container_baseline` reads it (blank lines skip; every other line parses
+  through the new labeled reader `parse_labeled_report`, whose `file` key is required — the
+  plain reader's unknown-key skip loses the identity), and each line's label must name a slice
+  window: the M74 label grammar is promoted into the library (`universal::slice_label` writes
+  it, `parse_slice_label` reads it — one grammar, one writer, one reader, the face's bytes do
+  not move; a hand-authored line cannot vouch for a row it does not name).
+  `pgr_verify::UniversalDelta::between_slices` pairs the lines with the table rows — positional
+  (the M71 walk's order, the recording face's write order) and window-checked (every paired
+  suffix must name the row's exact cputype/offset/size triple: slices added, dropped, or windows
+  moved refuse — `SliceCount` and `WindowMismatch` name both sides, the fix the re-record) —
+  then one `BaselineDelta::between` per slice under the same `IssueIdentity` policies, the
+  container's gate every slice's. The CLI's `--json` and text faces ride the delta per slice
+  (the json face emits one `to_json_with_baseline` line per slice — the recording shape, so a
+  gate's output re-records verbatim) and the M74 refusal retires; the `container_baseline` bench
+  group pins the document read and the pairing beside one slice's delta, and the
+  `universal_baseline` example walks record → untouched ships → the corrupted twin refused by
+  its own slice → the moved windows refuse.
+
 ### Added (M95)
 
 - **M95** — the SARIF face for the universal container: the M75 CLI refusal ("SARIF anchors
