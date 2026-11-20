@@ -9,7 +9,11 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion};
-use pgr_verify::{Code, Issue, Report, sarif};
+use pgr_format::consts::CPU_TYPE_ARM64;
+use pgr_format::universal::FatArch;
+use pgr_verify::{
+    BaselineDelta, Code, Issue, OffsetIdentity, Report, SliceVerdict, UniversalReport, sarif,
+};
 
 /// The issues a fixed report carries (half errors, half warnings, two
 /// anchored — the shapes the SARIF writer branches on).
@@ -103,10 +107,93 @@ fn bench_sarif_universal(c: &mut Criterion) {
     group.finish();
 }
 
+/// The M97 baseline face's price: the whole-verdict document with the
+/// delta stated on every result — the state consumption pass (the same
+/// deliberate O(issues × introduced) shape the delta itself runs) beside
+/// the plain render, over the 8-issue triage shape (half introduced, one
+/// resolved), and the container's stated face over a 2-slice verdict.
+fn bench_sarif_baseline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sarif_baseline");
+    let report = fixed_report(8);
+    // The baseline side: two of the report's findings survive (matched by
+    // their keys), two are fresh, one cleared finding rides absent — the
+    // gate shapes the writer actually branches on.
+    let prev_report = fixed_report(8);
+    let mut prev_issues = prev_report.issues;
+    prev_issues.truncate(2);
+    prev_issues.push(Issue::error(
+        Code::LinkeditPayload,
+        "the cleared finding",
+        Some(0x9000),
+    ));
+    let delta = BaselineDelta::between(&prev_issues, &report.issues, &OffsetIdentity);
+    group.bench_function("render_with_baseline_8", |b| {
+        b.iter(|| {
+            let doc = sarif::render_with_baseline(
+                black_box(&report),
+                black_box(&delta),
+                &OffsetIdentity,
+                "app.bin",
+            );
+            black_box(doc.len());
+        });
+    });
+    group.bench_function("render_plain_8_for_scale", |b| {
+        b.iter(|| {
+            black_box(sarif::render(black_box(&report), "app.bin").len());
+        });
+    });
+    let fat_arch = FatArch {
+        cputype: CPU_TYPE_ARM64,
+        cpusubtype: 0,
+        offset: 0x1000,
+        size: 0x4000,
+        align_log2: 12,
+    };
+    let universal = UniversalReport {
+        slices: (0..2)
+            .map(|_| SliceVerdict {
+                arch: fat_arch,
+                report: fixed_report(8),
+            })
+            .collect(),
+    };
+    // The container baseline document: one labeled line per slice, the
+    // pairing's own prerequisite (the same shape the CLI records).
+    let document: String = universal
+        .slices
+        .iter()
+        .enumerate()
+        .map(|(i, verdict)| {
+            pgr_verify::to_json_with_file(
+                &pgr_verify::slice_label("fat.bin", i, &verdict.arch),
+                &verdict.report,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let baseline =
+        pgr_verify::parse_container_baseline(&document).expect("the writer's own output parses");
+    group.bench_function("render_universal_with_baseline_2", |b| {
+        b.iter(|| {
+            let doc = sarif::render_universal_with_baseline(
+                black_box(&universal),
+                black_box(&baseline),
+                &OffsetIdentity,
+                "fat.bin",
+            )
+            .expect("the pairing agrees");
+            black_box(doc.len());
+        });
+    });
+    group.finish();
+}
+
 /// Bench entry point (macro-free so the workspace `missing_docs` lint holds).
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     bench_sarif(&mut criterion);
     bench_sarif_universal(&mut criterion);
+    bench_sarif_baseline(&mut criterion);
     criterion.final_summary();
 }
