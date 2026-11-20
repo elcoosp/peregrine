@@ -801,6 +801,33 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M98: the dylib terminator is a dylib decision — the relocatable
+    // output carries no load commands at all, so a named `-term` has no
+    // command to land on (the same shape the M48 re-check rides, one
+    // field over). The re-check backs the driver surface's earlier
+    // refusal: no library caller can plan the shape either.
+    if cfg.term_symbol.is_some() {
+        return Err(LinkError::Layout {
+            message: "-term names a load-time terminator dyld calls when the image unloads, \
+                      but the relocatable output carries no load commands — drop -term \
+                      or link a dylib"
+                .into(),
+        });
+    }
+    // M99: the named output UUID's relocatable refusal — the object
+    // carries no `LC_UUID` command at all (the M32 shape), so a named
+    // value has no field to land on. The re-check backs the driver
+    // surface's earlier refusal: no library caller can plan the shape
+    // either. (The `-no_uuid` pair refusal is the layout's — the
+    // relocatable output never reaches a uuid field to patch.)
+    if cfg.named_uuid.is_some() {
+        return Err(LinkError::Layout {
+            message: "-uuid names the output's LC_UUID identity, but the relocatable \
+                      output carries no LC_UUID command at all — drop -uuid or link an \
+                      executable/dylib/bundle"
+                .into(),
+        });
+    }
     let parse_started = Instant::now();
     let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None, &mut observer)?;
     emit_phase(
