@@ -422,6 +422,7 @@ dependencies = [
  "criterion",
  "pgr-fixtures",
  "pgr-format",
+ "pgr-verify",
  "rayon",
  "sha2",
  "thiserror",
