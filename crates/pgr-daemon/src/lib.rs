@@ -198,8 +198,14 @@ mod tests {
         // (warning and suppress cross byte-for-byte; an unknown value is
         // a malformed frame) and the reply gains the warning-policy tail
         // (the session's own unresolved-open render — the exit-policy
-        // face the client prints).
-        assert_eq!(crate::PROTO_VERSION, 54);
+        // face the client prints) — and v55 carries the symtab-shaping
+        // decision (M104, the config tail): a resident relink carries
+        // the symtab shape the client asked for, never the pre-M104
+        // kept default — and v56 carries the debug-section suppression
+        // (M105, the config tail): a resident relink carries the
+        // debug-free shape the client asked for, never the pre-M105
+        // debug-carrying default.
+        assert_eq!(crate::PROTO_VERSION, 56);
     }
 
     #[test]
