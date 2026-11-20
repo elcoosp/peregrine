@@ -6,6 +6,55 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M104)
+
+- **M104** — the symtab-shaping decision: `-keep_local_symbols` / `-x`, ld64's symtab knob and
+  the other half of the local-symbol contract (M33 named the filter-hidden shape). The output
+  symtab's plain local-symbol subrange — the rows without `N_EXT` set (`N_SECT & ~N_EXT`: the
+  section-defined statics plus the name-only locals that ride absolute) — rides by default
+  (ld64's own default, `kLocalSymbolsAll`; the man page's "usually they are stripped when the
+  final linked output is produced" is the final-output face the `-x` flag names), so every
+  pre-knob link is byte-identical. `-x` names the drop: the rows leave the symtab, the string
+  table shrinks with the names, and the subrange math follows (`iextdefsym` starts where the
+  locals subrange ended). `-keep_local_symbols` names the keep explicitly — the default's
+  mirror, the last flag wins at the parse. The drop touches the symtab only: the
+  function-starts stream still covers the local functions (ld64 strips the symtab rows, never
+  the start addresses — the stream's source chains the dropped rows), and the filter-hidden
+  rows (the M3 export filter's and M33's `N_SECT | N_PEXT` shapes) are the export machinery's
+  product, never input locals — they ride either way. The relocatable output's symtab is the
+  input's, verbatim — the drop face refuses there (the driver surface's `LocalSymbolsConflict`
+  refusal backed by the layout's re-check and `link_reloc`, the M102/M39 pattern) while the
+  keep face never refuses. The verifier's symtab contract stays unchanged — local symbols are
+  a dyld-consumed surface, never a format defect: both faces verify strict (the `-no_adhoc`
+  carve-out pattern). The daemon wire v55 carries the decision (one byte in the config tail
+  after the bind-at-load byte, round-trip gated, the session parity byte-identical); the
+  `keep_local_symbols` bench pins the shape gate, and the `keep_local_symbols_link` example
+  walks the default, the drop, the named keep and the refusal.
+
+### Added (M105)
+
+- **M105** — the debug-section suppression: `-S`, ld64's debug-symbol strip ("Strip debug
+  symbols") naming the Pass-1 classification's debug shapes. The `__LLVM*`/`__LD`/`__DWARF`
+  segments the M1 sweep already kept out are debug metadata always; the `__debug_*` section
+  names and the `S_ATTR_DEBUG` attribute widen the class to the shapes the segment-name rule
+  misses, under the named decision (`is_debug_section`, one classification the sweep and the
+  symtab builder consult). The default keeps every pre-knob link byte-identical: the
+  name/attribute sections bucket as normal load-time bytes, their symtab entries ride. Under
+  `-S` the debug pieces drop (no bucket, no placed bytes), the symtab's entries into them drop
+  with them (a row whose section never ships must not dangle absolute), and the
+  `LC_FUNCTION_STARTS` and `LC_DATA_IN_CODE` commands drop — the M31/M30 suppression pattern
+  composed under one decision (`-S` beside `-no_function_starts` plans the same bytes as `-S`
+  alone — the composed arithmetic never double-counts). The synthetic `__unwind_info` still
+  synthesizes (the runtime's walk table is load-time metadata, not debug). The relocatable
+  output's sections are the input's, verbatim — the decision refuses there (the driver
+  surface's `StripDebugConflict` refusal backed by the layout's re-check and `link_reloc`, the
+  M102/M39 pattern). The verifier's structural contract stays unchanged — debug metadata is a
+  dyld-consumed surface, never a format defect: both faces verify strict (the `-no_adhoc`
+  carve-out pattern). The daemon wire v56 carries the decision (one byte in the config tail
+  after the symtab-shaping byte, round-trip gated, the session parity byte-identical); the
+  `strip_debug` bench pins the shape gate, and the `strip_debug_link` example walks the
+  carried default, the stripped face and the refusal.
+
 ### Added (M102)
 
 - **M102** — the bind-at-load decision: `-bind_at_load` / `-no_bind_at_load`, ld64's `MH_BINDATLOAD`
