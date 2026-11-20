@@ -2765,3 +2765,68 @@ two-machine-face and baseline refusals stay (the delta has no SARIF shape). The
 `sarif_universal` bench group pins the render's price beside the single-image face (2
 slices 6.8 µs, 4 slices 13.0 µs against one 8-issue slice's 3.6 µs — linear in the slices);
 the `universal_sarif` consumer example walks the two-slice container beside its document.
+
+## The baseline-gate records (M96/M97)
+
+**M96 — the container's baseline gate (`pgr_verify::parse_container_baseline`, `UniversalDelta::between_slices`).**
+The M74 CLI refusal ("`--baseline` gates one image's offsets; a container's slices ride their own
+windows — verify the container without `--baseline`, or one invocation per extracted slice") had
+its premise backwards, the M95 way: the slices ride *inside* the audited file and every slice's
+verdict is its own M13 report, so the container's own `--json` output — one whole-output report
+line per declared slice, the label naming the window it rode — *is* the baseline document. The
+reader ([`parse_container_baseline`]) walks the document line by line (blank lines skip, every
+other line parses through the labeled reader `parse_labeled_report` — the plain reader's
+unknown-key skip loses the `file` key, so the labeled form requires it), and each line's label
+must name a slice window: the M74 label grammar (`{file}[slice {i} cputype {ct:#x} at {o:#x},
+{s} bytes]`) is promoted into the library (`universal::slice_label` writes it, `parse_slice_label`
+reads it — one grammar, one writer, one reader; the face's bytes do not move), because a
+hand-authored line cannot vouch for a row it does not name. The pairing
+([`UniversalDelta::between_slices`]) is positional and window-checked: line *i* pairs with table
+row *i* (the M71 walk's order — the order the recording face writes), and every paired line's
+suffix must name the row's exact window (`SliceWindow`, the cputype/offset/size triple) — a
+baseline recorded from a container whose slice table changed (slices added, dropped, or windows
+that moved) refuses rather than pairing stale findings with fresh windows (`SliceCount` names
+both counts, `WindowMismatch` names both windows, the fix is the re-record in both). Within an
+agreed window the user's `IssueIdentity` policy runs exactly as the single-image gate's does —
+one `BaselineDelta::between` per slice, the same multiset match, the same determinism — and the
+container's gate is every slice's (`is_clean`, the `UniversalReport::is_ok` rule). The CLI's
+json and text faces ride the delta per slice (the json face emits one
+`to_json_with_baseline` line per slice — the same shape the recording face emits, so a gate's
+output re-records verbatim), the exit gate rides `--fail-on` exactly as the single-image gate's
+does, and the M74 refusal retires. Tests: `m96_container_baseline.rs` (the record face, the
+untouched gate, the slice-scoped corruption, the corrupted-baseline passes + `--fail-on any`
+restores, the count refusal, the moved-window refusal, the garbage-line and unlabeled-label
+refusals), the lib unit matrix (the pairing, the window gate, the multiset, the line refusals),
+the `container_baseline` bench group (the document read and the pairing beside one slice's
+delta, for scale), and the `universal_baseline` consumer example (record → untouched ships →
+corrupted refused by its own slice → the moved windows refuse).
+
+**M97 — the SARIF `baselineState` face (`pgr_verify::sarif::render_with_baseline`,
+`render_universal_with_baseline`).** The M75 refusal ("`--sarif` renders the whole verdict; the
+baseline delta has no SARIF shape") had its premise backwards too — SARIF 2.1.0 gives a result
+its own `baselineState` (`new` / `unchanged` / `absent`), which is exactly the M13 delta's
+three-way classification, so the whole-verdict document the gate audited states the gate's own
+story and a triage tool reads the baseline diff natively. The M69 conventions hold unchanged
+(one line, fixed key order — the `baselineState` slot fixed after the message, the M13 escape
+rules, an unanchored issue riding no location, the two severities' levels): every current
+finding rides `unchanged` or `new` under the policy the delta ran under (the classification is
+a multiset consumption — a key the baseline carried twice and the fresh report thrice rides one
+`unchanged` and two `new`), and the delta's `resolved` findings ride `absent` after them,
+anchored at the **baseline image's** own offsets (the gate audits the same artifact; a layout
+shift that moved a cleared site rides under `CodeIdentity`, which is what the policy is for).
+The rule table is the union of both sides' codes — a resolved-only code still names itself, so
+the rule the absent finding rode is visible. The container composes through the M96 pairing
+(`render_universal_with_baseline`): one run per declared slice, each run's results stated
+against that slice's own delta, the absent findings anchored container-absolute (the M95
+convention — the window agreement holds for the baseline's offsets too, because the paired line
+vouches for the same window). The CLI's `--sarif --baseline` rides the renders for both image
+shapes (the refusal retires; the two-machine-face refusal keeps), the exit gate unchanged (the
+delta's, under `--fail-on`), and the plain `render`/`render_universal` documents stay
+byte-identical (the states ride the shared `write_result` as an optional slot — no baseline, no
+state, the same bytes). Tests: `m97_sarif_baseline.rs` (the new/unchanged/absent states on the
+CLI, the determinism, the container's per-slice runs, the two-machine-face refusal keeps), the
+m75 matrix's served pin (the refusal retired with its premise), the lib unit matrix (the
+multiset consumption, the union rule table, the fixed key order), the `sarif_baseline` bench
+group (the stated face beside the plain render, the container's stated face), and the
+`sarif_baseline` consumer example (record → unchanged ships → absent passes → the fresh
+corruption's `new` refuses).
