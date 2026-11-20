@@ -951,6 +951,35 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-bind_at_load` surface conflict (M102): `MH_BINDATLOAD` is an
+    /// executable-only bit — dyld binds the exec'd main executable's
+    /// undefineds before `main` runs, a dylib's and a bundle's binds
+    /// ride their own loads, and the relocatable output carries no
+    /// loader semantics at all (the M27 PIE and M51 stack-execution
+    /// shape, one flag word over). The verdict names the shape
+    /// conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    BindAtLoadConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// An `-undefined warning|suppress` surface conflict (M103): the
+    /// non-escalating policies are a load-time-bind decision — a
+    /// relocatable object's undefineds stay open in its symbol table by
+    /// design (`-r` resolves nothing and carries no load-time bind to
+    /// warn or suppress). The verdict names the shape conflict; the
+    /// help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    UndefinedPolicyConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -1577,10 +1606,18 @@ fn apply_flag(
             opts.config.undefined_policy = match v.as_str() {
                 "error" => pgr_core::resolve::UndefinedPolicy::Error,
                 "dynamic_lookup" => pgr_core::resolve::UndefinedPolicy::DynamicLookup,
+                // M103: the two non-escalating faces — the references
+                // ride the flat-lookup slot exactly like
+                // `dynamic_lookup`; the exit policy differs (warning
+                // prints the unresolved list and exits 0, suppress
+                // prints nothing and exits 0). The relocatable
+                // conflict is `finish`'s (it sees the whole surface).
+                "warning" => pgr_core::resolve::UndefinedPolicy::Warning,
+                "suppress" => pgr_core::resolve::UndefinedPolicy::Suppress,
                 other => {
                     return Err(OptsError::InvalidValue {
                         flag: arg.into(),
-                        value: format!("{other} (error | dynamic_lookup)"),
+                        value: format!("{other} (error | dynamic_lookup | warning | suppress)"),
                     });
                 }
             };
@@ -2230,6 +2267,19 @@ fn apply_flag(
         // `finish`'s (it sees the whole surface).
         "-allow_stack_execute" => {
             opts.config.allow_stack_execute = true;
+        }
+        // M102: the bind-at-load decision. ld64's flag pair —
+        // `-bind_at_load` ("Bind all undefined symbols at load time,
+        // before main runs") sets the executable's `MH_BINDATLOAD`
+        // flag word, `-no_bind_at_load` drops it (ld64's own default —
+        // the last flag wins, the bool carries whichever came last);
+        // the output-kind conflict is `finish`'s (it sees the whole
+        // surface).
+        "-bind_at_load" => {
+            opts.config.bind_at_load = true;
+        }
+        "-no_bind_at_load" => {
+            opts.config.bind_at_load = false;
         }
         // M30: the data-in-code suppression. The flag rode the surface
         // as an accepted no-op since M1; the carriage reads the
@@ -2988,6 +3038,50 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             }
             Ot::Execute => {}
         }
+    }
+    // M102: the bind-at-load decision is an executable decision —
+    // `MH_BINDATLOAD` is the executable-only bit (dyld binds the exec'd
+    // main executable's undefineds before `main` runs), the same refusal
+    // shape as the M27 PIE and M51 stack-execution decisions above: an
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one.
+    if opts.config.bind_at_load {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Dylib | Ot::Bundle | Ot::Relocatable => {
+                return Err(OptsError::BindAtLoadConflict {
+                    verdict: "-bind_at_load sets the executable's MH_BINDATLOAD flag, \
+                              but this output is not an executable"
+                        .into(),
+                    fix: "MH_BINDATLOAD is an executable-only bit — dyld binds the \
+                          exec'd main executable's undefineds before main runs: link an \
+                          executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Execute => {}
+        }
+    }
+    // M103: the non-escalating undefined policies are a load-time-bind
+    // decision — the relocatable output's undefineds stay open in its
+    // symbol table by design (an object carries no load-time bind to
+    // warn or suppress), the same refusal shape as the M39 make-undefined
+    // marks above: an explicitly named knob that cannot apply is a
+    // refusal, never a silently dropped one.
+    if matches!(
+        opts.config.undefined_policy,
+        pgr_core::resolve::UndefinedPolicy::Warning | pgr_core::resolve::UndefinedPolicy::Suppress
+    ) && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::UndefinedPolicyConflict {
+            verdict: "-undefined warning|suppress names the load-time bind's exit \
+                      policy, but the relocatable output's undefineds stay open by \
+                      design"
+                .into(),
+            fix: "an object has no load-time bind to warn or suppress: drop -undefined \
+                  or link an image (an executable, dylib or bundle)"
+                .into(),
+        });
     }
     // M40: the export-trie suppression is an executable decision — a
     // main executable's trie is the dlsym/debugger surface (its dylib
