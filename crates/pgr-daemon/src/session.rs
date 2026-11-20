@@ -159,6 +159,31 @@ pub struct ServedLink {
     /// link's). The document crosses verbatim; the client writes the
     /// cold lane's file.
     pub map_text: Option<String>,
+    /// The exit policy's unresolved-open entries (v54, M103): the
+    /// session's own Pass-2 product rendered when the request's config
+    /// carries `-undefined warning` — the list the cold lane prints as
+    /// warnings and still exits 0 (the suppress face carries the empty
+    /// list: the walk records it, the exit decides what surfaces). The
+    /// entries cross verbatim; the client prints the cold lane's face
+    /// (the M62 convention).
+    pub policy_warnings: Vec<String>,
+}
+
+/// M103 (v54): the exit policy's warning face — the session's own
+/// Pass-2 product renders the unresolved-open list the cold lane prints
+/// (the client prints it; the daemon never writes the client's stderr).
+/// The warning face fills the list; every other policy carries the
+/// empty one (`suppress` recorded it, the exit prints none of it).
+fn serve_policy_warnings(
+    config: &pgr_core::layout::LinkConfig,
+    resolution: &pgr_core::resolve::Resolution,
+) -> Vec<String> {
+    match config.undefined_policy {
+        pgr_core::resolve::UndefinedPolicy::Warning => {
+            resolution.unresolved_open().map(str::to_owned).collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// The verdict's effective shape (M72): the strict pass's report with
@@ -573,6 +598,7 @@ impl ResidentSession {
             verify_report,
             provenance,
             map_text,
+            policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
         })
     }
 
@@ -775,6 +801,11 @@ impl ResidentSession {
             verify_report: None,
             provenance,
             map_text: None,
+            // The relocatable walk refuses the non-escalating policies at
+            // the core (an object has no load-time bind to warn or
+            // suppress — the M103 `-r` refusal), so the list is
+            // structurally empty here; it rides for shape fidelity.
+            policy_warnings: serve_policy_warnings(&req.config, &linked.resolution),
         })
     }
 
@@ -1019,6 +1050,10 @@ impl ResidentSession {
                 map_text: req.map.then(|| {
                     pgr_core::map::build_link_map(&result.layout, &result.interner).render()
                 }),
+                // M103: the ladder's replay rode the policy (config, not
+                // a product), so its own walk serves the exit face — the
+                // same list the cold lane prints.
+                policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
             });
         }
         let patch_started = std::time::Instant::now();
@@ -1167,6 +1202,10 @@ impl ResidentSession {
             map_text: req
                 .map
                 .then(|| pgr_core::map::build_link_map(&result.layout, &result.interner).render()),
+            // M103: the patched replay rode the policy (config, not a
+            // product), so its own walk serves the exit face — the same
+            // list the cold lane prints.
+            policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
         })
     }
 
