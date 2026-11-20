@@ -1125,6 +1125,17 @@ fn link_to_image_recorded(
                         print!("{}", live.render);
                     }
                 }
+                // M103: the exit policy's warning face — the session's
+                // own unresolved-open entries print as the cold lane's
+                // `pgr: warning:` face (the v54 tail carried them
+                // verbatim; the suppress face rides empty by policy).
+                for entry in &img.policy_warnings {
+                    tracing::warn!(
+                        undefined = %entry,
+                        "the link exits 0 with an unresolved reference"
+                    );
+                    eprintln!("pgr: warning: undefined symbol {entry}");
+                }
                 // M80: the served map writes beside the resident link
                 // (the document rides the reply verbatim — the same
                 // `-map` contract the trace rides, the sidecar writes
@@ -1290,6 +1301,10 @@ fn link_to_image_recorded(
             }
         }
     }
+    // M103: the exit policy's warning face — the unresolved list prints
+    // beside the other advisory faces and the link still exits 0 (the
+    // suppress face prints nothing; the walk recorded both).
+    print_undefined_warnings(opts, &result);
     // M68: the emit half rides the seam — the fused tile emit (Pass 4)
     // reports its completion to the same subscription the pipeline's
     // phases used (the parity gate is the seam's own contract); the
@@ -1440,6 +1455,24 @@ fn check_force_load(result: &pgr_core::LinkResult, names: &[Vec<u8>]) -> Result<
         },
         other => other.into(),
     })
+}
+
+/// M103: the exit policy's warning face — under `-undefined warning`,
+/// every unresolved-open reference the Pass-2 walk recorded prints as a
+/// warning (the M11/M91 advisory-face convention: a span, not a bare
+/// eprintln — the debug envs install the subscriber) and the link still
+/// exits 0. ld64's advisory face: the build sees the holes, the product
+/// ships. The suppress face prints nothing — the same walk product, the
+/// exit decision differentiates; `error` never reaches a `LinkResult`
+/// and `dynamic_lookup` intends the lookup, so neither records.
+fn print_undefined_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) {
+    if opts.config.undefined_policy != pgr_core::resolve::UndefinedPolicy::Warning {
+        return;
+    }
+    for entry in result.resolution.unresolved_open() {
+        tracing::warn!(undefined = %entry, "the link exits 0 with an unresolved reference");
+        eprintln!("pgr: warning: undefined symbol {entry}");
+    }
 }
 
 /// Pass 0 (M8 shape): maps the option inputs into a [`PreparedLink`] plus
@@ -2792,6 +2825,16 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
             print!("{}", live.render);
         }
     }
+    // M103: the exit policy's warning face rides the fusion relink —
+    // the replay rode the policy (config, not a product), its own walk
+    // product prints as the cold lane's face.
+    for entry in &served.policy_warnings {
+        tracing::warn!(
+            undefined = %entry,
+            "the link exits 0 with an unresolved reference"
+        );
+        eprintln!("pgr: warning: undefined symbol {entry}");
+    }
     // M66 (v42 in service): the served faces print/write beside the
     // fusion relink — the report is the session's observed ladder run (no
     // Parse row: the POIs are resident), the timeline the same document
@@ -3188,6 +3231,11 @@ fn serve_relink_faces(
         &opts.why_export,
     )
     .map_err(RelinkAttempt::Error)?;
+    // M103: the exit policy's warning face rides the ladder too — the
+    // relink re-ran the full Passes 1–3 (the replay rode the policy the
+    // way the cold ladder always has), so its own walk product serves
+    // the same face the one-shot prints.
+    print_undefined_warnings(opts, result);
     if opts.why_load {
         print!("{}", result.loads.render());
     }
@@ -3309,7 +3357,12 @@ pub fn usage() -> String {
     s.push_str("  -L <dir>                     library search directory\n");
     s.push_str("  -rpath <path>                LC_RPATH runtime search path\n");
     s.push_str("  -flat_namespace              flat-lookup binds (drop MH_TWOLEVEL)\n");
-    s.push_str("  -undefined error|dynamic_lookup   unresolved-reference policy\n");
+    s.push_str("  -undefined error|dynamic_lookup|warning|suppress\n");
+    s.push_str("                               unresolved-reference policy: error\n");
+    s.push_str("                               refuses (the default), dynamic_lookup\n");
+    s.push_str("                               binds flat at runtime, warning lists\n");
+    s.push_str("                               the unresolved names and exits 0,\n");
+    s.push_str("                               suppress stays silent (M103)\n");
     s.push_str("  -u <symbol>                  force the symbol to be defined\n");
     s.push_str("  -U <symbol>                  mark the symbol undefined while linking (M39):\n");
     s.push_str("                               the definition drops, the reference binds\n");
@@ -3324,6 +3377,12 @@ pub fn usage() -> String {
     s.push_str("                               executable (M51): MH_ALLOW_STACK_EXECUTION\n");
     s.push_str("                               rides the header word (refused with\n");
     s.push_str("                               -dylib, -bundle and -r)\n");
+    s.push_str("  -bind_at_load                 bind all undefined symbols at load\n");
+    s.push_str("                               time, before main runs (M102): the\n");
+    s.push_str("                               dlopen(RTLD_NOW) contract —\n");
+    s.push_str("                               MH_BINDATLOAD rides the header word\n");
+    s.push_str("                               (refused with -dylib, -bundle and -r;\n");
+    s.push_str("                               -no_bind_at_load drops the bit)\n");
     s.push_str("  -rename_section <fromSeg> <fromSect> <toSeg> <toSect>   rename the\n");
     s.push_str("                               input section before grouping (M53): the\n");
     s.push_str("                               renamed section groups with its new name\n");
