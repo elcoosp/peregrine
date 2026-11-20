@@ -278,8 +278,19 @@ use sha2::{Digest, Sha256};
 /// (count-prefixed, the same validation the flag parse pays, a
 /// rebuild-refusing table still a malformed request) — so a resident
 /// relink ships the composed aliases the client named; no shape moves,
-/// the version gate names the round.
-pub const PROTO_VERSION: u32 = 52;
+/// the version gate names the round. **v53** names the M102 round: the
+/// bind-at-load decision (`-bind_at_load`/`-no_bind_at_load`) rides the
+/// tail after the cstring rank table — one byte; a resident relink
+/// carries the flag word the client asked for, never the pre-M102
+/// bitless default. **v54** names the M103 round: the config body's
+/// `-undefined` policy byte widens to the four-value alphabet
+/// (`error`, `dynamic_lookup`, `warning`, `suppress`) — a value the
+/// reader refuses is a malformed frame, so an old server reading a new
+/// client's request refuses it (the M82 admits pattern, reversed), and
+/// the reply gains the warning-policy tail (a present byte, then the
+/// session's own unresolved-open render — the exit-policy face the
+/// client prints, the M62 convention).
+pub const PROTO_VERSION: u32 = 54;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1400,6 +1411,32 @@ pub fn decode_map_bytes(body: &[u8]) -> Result<Option<String>, DecodeError> {
     Ok(document)
 }
 
+// ---- the v54 policy-warning tail ------------------------------------------------
+
+/// Encodes the reply's policy-warning tail (v54, M103): a count-prefixed
+/// list of the session's unresolved-open entries — the exit policy's
+/// warning face, rendered from the session's own Pass-2 product. The
+/// suppress face carries the empty list (the walk recorded it, the exit
+/// prints none of it); a non-warning policy never fills the list. The
+/// client prints each entry as the cold lane's `pgr: warning:` face —
+/// the wire never re-shapes the face the client prints (the M62
+/// convention).
+pub fn encode_policy_warnings(out: &mut Vec<u8>, entries: &[String]) {
+    put_u32(out, entries.len() as u32);
+    for entry in entries {
+        put_str(out, entry);
+    }
+}
+
+/// Decodes the reply's policy-warning tail (v54; see
+/// [`encode_policy_warnings`] for the shape).
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation.
+pub(crate) fn decode_policy_warnings(r: &mut Reader<'_>) -> Result<Vec<String>, DecodeError> {
+    (0..r.u32()?).map(|_| r.str()).collect()
+}
+
 /// Encodes one export-filter pattern (M14, wire v7): a kind byte (the
 /// `SymbolPattern` variant) ahead of the line as written, so the daemon
 /// relinks with the surface the client named — globs stay globs.
@@ -1451,6 +1488,8 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         match cfg.undefined_policy {
             UndefinedPolicy::Error => 0,
             UndefinedPolicy::DynamicLookup => 1,
+            UndefinedPolicy::Warning => 2,
+            UndefinedPolicy::Suppress => 3,
         },
     );
     put_u32(out, cfg.rpaths.len() as u32);
@@ -1832,6 +1871,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         }
         None => put_u8(out, 0),
     }
+    // M102 (v53 wire): the bind-at-load decision rides the tail after
+    // the cstring rank table — one byte; a resident relink carries the
+    // flag word the client asked for, never the pre-M102 bitless
+    // default.
+    put_u8(out, u8::from(cfg.bind_at_load));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1861,6 +1905,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     let undefined_policy = match r.u8()? {
         0 => UndefinedPolicy::Error,
         1 => UndefinedPolicy::DynamicLookup,
+        2 => UndefinedPolicy::Warning,
+        3 => UndefinedPolicy::Suppress,
         _ => return Err(malformed()),
     };
     let rpaths = (0..r.u32()?)
@@ -2238,6 +2284,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
             })?,
         )
     };
+    // M102 (v53 wire): the bind-at-load decision — one byte, no
+    // validation beyond the bool (the flag-word assembly reads the
+    // decision; the output-kind conflicts the core re-checks refuse at
+    // link time).
+    let bind_at_load = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -2313,6 +2364,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         named_uuid,
         no_weak_imports,
         allow_stack_execute,
+        bind_at_load,
         no_dead_strip_inits_and_terms,
         renames,
         cstring_order,
@@ -2326,9 +2378,10 @@ mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, ServedExport,
         ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_map_bytes,
-        decode_provenance_bytes, decode_time_report, decode_trace_bytes,
-        decode_verify_report_bytes, encode_map, encode_provenance, encode_time_report,
-        encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64, read_pattern,
+        decode_policy_warnings, decode_provenance_bytes, decode_time_report, decode_trace_bytes,
+        decode_verify_report_bytes, encode_map, encode_policy_warnings, encode_provenance,
+        encode_time_report, encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64,
+        read_pattern,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
@@ -2545,6 +2598,11 @@ mod tests {
             // round trip verbatim (a resident relink carries the flag
             // word the client asked for, never the PIE-always default).
             no_pie: true,
+            // The v53 tail: a non-default bind-at-load decision must
+            // survive the round trip verbatim (a resident relink carries
+            // the flag word the client asked for, never the pre-M102
+            // bitless default).
+            bind_at_load: true,
             // The v19 tail: non-default section-alignment floors must
             // survive the round trip verbatim, in flag order (a
             // resident relink aligns the sections the client named,
@@ -4723,6 +4781,173 @@ mod tests {
         );
     }
 
+    /// Hand-builds the config body's head up to and including the
+    /// `-undefined` policy byte (the mirror of `encode_config`'s first
+    /// eleven fields), with `policy` spliced as the value — the
+    /// malformed-value gate's subject.
+    fn encode_config_head_up_to_policy(out: &mut Vec<u8>, policy: u8) {
+        put_str(out, "app");
+        put_u8(out, 0); // OutputType::Execute
+        put_str(out, "_main");
+        put_u32(out, 0x1); // platform
+        put_u32(out, 0x000c_0000); // minos
+        put_u32(out, 0x000e_0400); // sdk
+        put_u8(out, 0); // dynamic_linker
+        put_u8(out, 0); // fixup_chains
+        put_u8(out, 0); // adhoc
+        put_u8(out, 0); // flat_namespace
+        put_u8(out, policy);
+    }
+
+    #[test]
+    fn the_bind_at_load_decision_round_trips() {
+        // v53: a non-default bind-at-load decision must survive the
+        // round trip verbatim (a resident relink carries the flag word
+        // the client asked for, never the pre-M102 bitless default).
+        let cfg = rich_config();
+        assert!(cfg.bind_at_load, "rich_config carries the named face");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.bind_at_load,
+            "the flag word crosses byte-for-byte"
+        );
+        // The dropped face rides too (the pair's `-no_bind_at_load`).
+        let mut cfg = rich_config();
+        cfg.bind_at_load = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.bind_at_load,
+            "the dropped face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_widened_undefined_policies_round_trip() {
+        // v54: the `-undefined` policy byte widens to the four-value
+        // alphabet — warning and suppress cross byte-for-byte (a
+        // resident relink exits under the policy the client named,
+        // never the pre-M103 escalation).
+        for (policy, name) in [
+            (pgr_core::resolve::UndefinedPolicy::Warning, "warning"),
+            (pgr_core::resolve::UndefinedPolicy::Suppress, "suppress"),
+        ] {
+            let mut cfg = rich_config();
+            cfg.undefined_policy = policy;
+            let back = LinkRequest::decode(
+                &LinkRequest {
+                    config: cfg,
+                    force_load: Vec::new(),
+                    inputs: Vec::new(),
+                    archives: Vec::new(),
+                    record: None,
+                    record_resolution: false,
+                    prev_output: None,
+                    audit: false,
+                    tiles: false,
+                    time: false,
+                    trace: false,
+                    verify: false,
+                    verify_checks: None,
+                    why_export: Vec::new(),
+                    why_load: false,
+                    map: false,
+                    why_live: Vec::new(),
+                }
+                .encode(),
+            )
+            .expect("the frame decodes");
+            assert_eq!(
+                back.config.undefined_policy, policy,
+                "the {name} policy crosses byte-for-byte"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_undefined_policy_value_is_malformed() {
+        // v54: a policy value the reader refuses is a malformed frame —
+        // the wire never silently widens (an old server reading a newer
+        // client's alphabet refuses it, the M82 admits pattern
+        // reversed). The config head is hand-built up to and including
+        // the policy byte; the decode fails there, before the rest of
+        // the body could matter.
+        let mut body = Vec::new();
+        put_u32(&mut body, PROTO_VERSION);
+        encode_config_head_up_to_policy(&mut body, 9);
+        let err = LinkRequest::decode(&body).unwrap_err();
+        assert!(
+            matches!(err, DecodeError::Malformed(_)),
+            "an unknown policy value is a malformed frame: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_policy_warning_tail_round_trips() {
+        // v54: the exit policy's unresolved-open entries cross verbatim
+        // — the client prints the cold lane's face (the M62
+        // convention); the suppress face's empty list rides as the
+        // empty list.
+        let entries = vec![
+            "\"_hole\" (referenced from main.o)".to_string(),
+            "\"_gap\" (referenced from util.o)".to_string(),
+        ];
+        let mut body = Vec::new();
+        encode_policy_warnings(&mut body, &entries);
+        let back = decode_policy_warnings(&mut Reader::new(&body)).expect("the tail decodes");
+        assert_eq!(back, entries, "the entries cross verbatim, in order");
+        let mut empty = Vec::new();
+        encode_policy_warnings(&mut empty, &[]);
+        let back = decode_policy_warnings(&mut Reader::new(&empty)).expect("the tail decodes");
+        assert!(
+            back.is_empty(),
+            "the suppress face's empty list rides as the empty list"
+        );
+    }
+
     #[test]
     fn the_dead_strip_inits_and_terms_decision_round_trips() {
         // v38: a non-default dead-strip init/term roots decision must
@@ -5786,12 +6011,12 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        // `rich_config` carries no tables: drop the two absent bytes the
+        // `rich_config` carries no tables: drop the three absent bytes the
         // encoder just wrote (the M91 tail's slots at the config's end —
-        // the rank table, then the cstring table), the hand-spliced
-        // rank table takes the first place and the cstring absence
-        // follows.
-        body.truncate(body.len() - 2);
+        // the rank table, then the cstring table, then the M102
+        // bind-at-load byte), the hand-spliced rank table takes the
+        // first place and the cstring absence follows.
+        body.truncate(body.len() - 3);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -5804,6 +6029,7 @@ mod tests {
         put_str(&mut body, "_main");
         put_u32(&mut body, 9);
         put_u8(&mut body, 0); // the M91 cstring rank table's absence
+        put_u8(&mut body, 0); // the M102 bind-at-load absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
@@ -5880,7 +6106,7 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        body.truncate(body.len() - 2);
+        body.truncate(body.len() - 3);
         put_u8(&mut body, 0); // the rank table's absence
         // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
@@ -5890,6 +6116,7 @@ mod tests {
             put_u32(&mut body, 5);
             body.extend_from_slice(b"gamma");
         }
+        put_u8(&mut body, 0); // the M102 bind-at-load absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
