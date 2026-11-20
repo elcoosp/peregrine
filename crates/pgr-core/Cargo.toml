@@ -21,6 +21,11 @@ tracing = { workspace = true }
 [dev-dependencies]
 pgr-fixtures = { workspace = true }
 criterion = { workspace = true }
+# The M102 header-flag gates verify the produced image in-process — the
+# verifier's read-side engine rides as a dev-dependency the way the
+# driver's surface tests ride it (the strict contract reads the
+# decision, not a constant).
+pgr-verify = { workspace = true }
 # The consumer example installs a subscriber under PGR_TRACING=1 so the
 # resolve-reuse seams (`resolve_reuse_plan`/`resolve_reuse_install`) are
 # watchable — the same inert-until-subscriber convention the binaries use.
@@ -487,4 +492,24 @@ harness = false
 # table rides the same AliasTable seam the flag form pushed.
 [[bench]]
 name = "alias_list"
+harness = false
+
+# The M102 bind-at-load bench: the link across the `-bind_at_load`
+# decisions (the bitless default, the named flag word) over the same
+# 64-object corpus — a shape-parity gate, the decision is one bit in
+# one header word (the M51 stack-execution bench's shape, one flag
+# word over).
+[[bench]]
+name = "bind_at_load"
+harness = false
+
+# The M103 undefined-policies bench: the link across the `-undefined`
+# policies (error, dynamic_lookup, warning, suppress) over a corpus
+# whose every object carries one unresolved external — the escalation
+# lane's refusal is the error face, the other three plan the flat
+# lookup binds (a shape-parity gate: warning and suppress ride the
+# same bind words dynamic_lookup always encoded, the policy is the
+# exit's, never the image's).
+[[bench]]
+name = "undefined_policies"
 harness = false
