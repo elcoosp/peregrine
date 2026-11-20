@@ -2983,3 +2983,61 @@ bench (the composed 8- and 64-pair tables beside the default over the alias corp
 shape-parity gate the smoke gates pin), and the `alias_list_link` consumer example (the file form →
 the flag+file compose → the three refusals: the misspelled definition, the duplicate, the malformed
 line).
+
+**M102 — the bind-at-load decision (`LinkConfig::bind_at_load`, the `-bind_at_load` /
+`-no_bind_at_load` pair).** ld64's `MH_BINDATLOAD` flag word — dyld binds every undefined symbol
+at load time, before `main` runs (the `dlopen(RTLD_NOW)` contract the executable promises its
+host) — stops being unnamed and becomes a named decision on the config the flag-word assembly
+reads: the named face ORs `MH_BINDATLOAD` into the executable's header flags, the negative face
+drops it (ld64's own default — the word stays bitless unless named, so every pre-M102 link is
+byte-identical). The bit is header-level, not fixup-level: the classic opcode path plans the same
+word (the gate pins it end-to-end). The knob is an executable decision — the load-time bind
+contract belongs to the image dyld execs; a dylib, a bundle and the relocatable output refuse it
+with the fix, the driver surface's refusal backed by the layout's re-check and by `link_reloc`
+(the M27/M51 pattern — and the two earlier knobs' missing `link_reloc` re-checks ride along healed,
+the trio complete). The verifier's structural contract never refuses on the flag: a dyld-consumed
+flag is never a format defect — the non-executable shapes carrying it draw the warning face (the
+`-no_adhoc` carve-out pattern), and the bitless default verifies strict beside the named one. The
+daemon wire v53 carries the decision — one byte in the config tail after the cstring rank table,
+round-trip gated (a resident relink carries the flag word the client asked for, never the
+bitless default). Tests: `m102_bind_at_load.rs` (core — the decision, the exactly-one-bit gate,
+the pair, the classic path, the refusal matrix, the relocatable re-check, the verifier faces, the
+determinism lock; driver — the parse pair with last-flag-wins, the miette-refused conflicts, the
+end-to-end strict gate), the daemon wire gate (v53: the round trip, the version wiring), the
+`bind_at_load` bench (the bitless default beside the named word over the 64-object corpus — the
+shape-parity gate the M51 bench rides, one flag word over), and the `bind_at_load_link` consumer
+example (the default → the named face → the miette-rendered refusal).
+
+**M103 — the non-escalating undefined policies (`UndefinedPolicy::{Warning, Suppress}`, the
+`-undefined warning` / `-undefined suppress` faces).** ld64's two remaining faces of the
+`-undefined` surface, the other halves of M2's `error` and `dynamic_lookup`: the unresolved
+references ride the SAME flat-lookup slot `dynamic_lookup` always encoded
+(`BIND_SPECIAL_DYLIB_FLAT_LOOKUP`) — what changes is the escalation. The Pass-2 walk's decision
+stays a typed alphabet, now four values wide: `Warning` and `Suppress` insert the unresolved name
+into the dynamic-lookup set AND record it (the deterministic `"name" (referenced from file)`
+entries `Resolution::unresolved_open` carries — one per unresolved name, the first reference site
+named, the `-U` relocation sites included), while `Error` keeps refusing and `DynamicLookup`
+keeps recording nothing (the lookup is intended). The driver's exit policy reads the record: the
+warning face prints every entry as `pgr: warning: undefined symbol …` (the M11/M91 advisory-face
+convention — a span beside each) and still exits 0; the suppress face prints nothing and exits 0.
+The image is the exit's, never the policy's: warning, suppress and `dynamic_lookup` plan
+byte-identical outputs over the same corpus (the bench's parity gate). The relocatable output
+refuses the policies — an object has no load-time bind to warn or suppress (the driver surface's
+`UndefinedPolicyConflict` refusal backed by the `link_reloc` re-check, the knob-refusal shape
+mirrored exactly). The flat namespace hosts both faces — the escalation was the conflict, never
+the namespace. The resolve-reuse replay rides the policy the way the cold ladder always has (the
+policy is config, not a product — the M81 pattern); the served lanes print the session's own walk
+product from the reply's v54 warning tail (a count-prefixed list, the entries crossing verbatim —
+the M62 convention). The wire v54 widens the config body's `-undefined` byte to the four-value
+alphabet; an unknown value is a malformed frame — an old server refuses the new alphabet (the M82
+admits pattern reversed). Tests: `m103_undefined_policies.rs` (core — the bind parity, the
+escalation refusal, the record product, the flat-lookup slot, the manual replay walk, the `-r`
+refusals, the determinism lock; driver — the parse matrix, the widened alphabet's typo refusal,
+the `-r` surface, the flat-namespace composition, and the exit faces over the real binary —
+error refuses, warning prints and exits 0, suppress prints nothing, the three non-escalating
+images byte-identical), the daemon wire gates (the widened alphabet round-trips, the unknown
+value is malformed, the warning tail crosses verbatim), the `undefined_policies` bench (the four
+faces over the hole-bearing corpus — `error` is the escalation face, the other three plan the
+flat-lookup binds), and the `undefined_warning_link` / `undefined_suppress_link` consumer
+examples (the refusal → the warned image → the silent image beside the M2 defaults, the `-r`
+refusal rendered).
