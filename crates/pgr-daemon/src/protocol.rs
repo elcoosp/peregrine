@@ -266,8 +266,20 @@ use sha2::{Digest, Sha256};
 /// never the pre-M98 absence). **v50** appends the named output UUID
 /// (M99 — the config tail carries the 16 bytes beside the names; a
 /// resident relink carries the identity the client named, never the
-/// content-derived default).
-pub const PROTO_VERSION: u32 = 50;
+/// content-derived default). **v51** names the M100 round: the singular
+/// export filters (`-exported_symbol`/`-unexported_symbol`) compose into
+/// the ONE filter table the config already carries — the v7 pattern
+/// carriage (a present byte + count-prefixed entries for the only-list,
+/// the count-prefixed hide-list), a rebuild-refusing pattern still a
+/// malformed request — so a resident relink plans the composed surface
+/// the client named; no shape moves, the version gate names the round.
+/// **v52** names the M101 round: `-alias_list <file>` composes into the
+/// ONE alias table the config already carries — the v16 pair carriage
+/// (count-prefixed, the same validation the flag parse pays, a
+/// rebuild-refusing table still a malformed request) — so a resident
+/// relink ships the composed aliases the client named; no shape moves,
+/// the version gate names the round.
+pub const PROTO_VERSION: u32 = 52;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -2316,7 +2328,7 @@ mod tests {
         ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_map_bytes,
         decode_provenance_bytes, decode_time_report, decode_trace_bytes,
         decode_verify_report_bytes, encode_map, encode_provenance, encode_time_report,
-        encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64,
+        encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64, read_pattern,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
@@ -3229,6 +3241,80 @@ mod tests {
         };
         let back = LinkRequest::decode(&req.encode()).unwrap();
         assert_eq!(back, req);
+    }
+
+    #[test]
+    fn the_composed_filter_table_round_trips_in_composition_order() {
+        // M100 (v51): the singular export filters compose into the ONE
+        // table the config carries — flag entries and list-file entries
+        // interleave in command-line order, and the composed table
+        // crosses the v7 pattern carriage verbatim (a resident relink
+        // plans the composed surface the client named, never a
+        // reordered or re-interpreted one).
+        let cfg = LinkConfig {
+            exported_only: Some(vec![
+                SymbolPattern::parse(b"_sdk_init").unwrap(),
+                SymbolPattern::parse(b"_sdk_*").unwrap(),
+                SymbolPattern::parse(b"_sdk_write").unwrap(),
+            ]),
+            unexported: vec![
+                SymbolPattern::parse(b"_internal_seed").unwrap(),
+                SymbolPattern::parse(b"_internal_*").unwrap(),
+            ],
+            ..LinkConfig::default()
+        };
+        let req = LinkRequest {
+            config: cfg,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: Vec::new(),
+        };
+        let back = LinkRequest::decode(&req.encode()).unwrap();
+        let only = back
+            .config
+            .exported_only
+            .expect("the composed only-list rides");
+        let sources: Vec<&[u8]> = only.iter().map(SymbolPattern::source).collect();
+        assert_eq!(
+            sources,
+            [b"_sdk_init".as_slice(), b"_sdk_*", b"_sdk_write"],
+            "the composition order survives the wire"
+        );
+        let hidden: Vec<&[u8]> = back
+            .config
+            .unexported
+            .iter()
+            .map(SymbolPattern::source)
+            .collect();
+        assert_eq!(hidden, [b"_internal_seed".as_slice(), b"_internal_*"]);
+    }
+
+    #[test]
+    fn a_rebuild_refusing_pattern_is_a_malformed_request() {
+        // The wire never carries a filter the pipeline would silently
+        // misread: a pattern the seam's parse refuses (interior
+        // whitespace is not a Mach-O symbol name) is malformed at the
+        // decode, like every shape the config carries — the composed
+        // table's entries all pay the same re-parse the v7 carriage
+        // pinned.
+        let mut body = Vec::new();
+        put_u8(&mut body, 0); // the exact kind byte (advisory)
+        put_str(&mut body, "_foo bar");
+        let err = read_pattern(&mut Reader::new(&body)).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
     }
 
     #[test]
