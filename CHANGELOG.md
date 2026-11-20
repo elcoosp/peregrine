@@ -6,6 +6,51 @@ adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
 
+### Added (M102)
+
+- **M102** — the bind-at-load decision: `-bind_at_load` / `-no_bind_at_load`, ld64's `MH_BINDATLOAD`
+  flag word — dyld binds every undefined symbol at load time, before `main` runs (the
+  `dlopen(RTLD_NOW)` contract the executable promises its host). The named face ORs the bit into the
+  executable's header flags; the negative face drops it (ld64's own default — the word stays bitless
+  unless named, so every pre-knob link is byte-identical), and the last flag wins at the parse. The
+  bit is header-level, not fixup-level: the classic opcode path plans the same word. The knob is an
+  executable decision — a dylib, a bundle and `-r` refuse it with the fix (the layout's re-check and
+  `link_reloc` back the driver refusal, the M27/M51 pattern), and the trio's own missing `-r`
+  re-checks ride along healed (the M27 `no_pie` and M51 `allow_stack_execute` knobs never re-checked
+  on the relocatable path — a library caller could plan them silently inert; the M102 decision
+  completes the three). The verifier's structural contract never refuses on the flag — a
+  dyld-consumed flag is never a format defect: the non-executable shapes carrying it draw the
+  warning face (the `-no_adhoc` carve-out pattern). The daemon wire v53 carries the decision (one
+  byte in the config tail, round-trip gated); the `bind_at_load` bench pins the shape-parity gate,
+  and the `bind_at_load_link` example walks the default, the named face and the refusal.
+
+### Added (M103)
+
+- **M103** — the non-escalating undefined policies: `-undefined warning` / `-undefined suppress`,
+  ld64's two remaining faces of the `-undefined` surface, the other halves of M2's `error` and
+  `dynamic_lookup`. The unresolved references ride the SAME flat-lookup slot `dynamic_lookup` always
+  encoded (`BIND_SPECIAL_DYLIB_FLAT_LOOKUP`) — what changes is the escalation: the Pass-2 walk's
+  typed `UndefinedPolicy` alphabet widens to four, `Warning`/`Suppress` record the unresolved names
+  instead of refusing (one deterministic `"name" (referenced from file)` entry per unresolved name,
+  the `-U` relocation sites included), and the driver's exit policy reads the record — the warning
+  face prints the list to stderr and exits 0 (the M11/M91 advisory-face convention), the suppress
+  face prints nothing and exits 0. The image is the exit's, never the policy's: the three
+  non-escalating faces plan byte-identical outputs. The relocatable output refuses the policies (an
+  object has no load-time bind to warn or suppress — the knob refusal mirrored exactly); the flat
+  namespace hosts both faces; the ladder's replay rides the policy the way the cold ladder always
+  has (the policy is config, not a product — the M81 pattern); the served lanes print the session's
+  own walk product from the reply's v54 warning tail (the M62 convention). The wire v54 widens the
+  config body's `-undefined` byte to the four-value alphabet (an unknown value is a malformed frame
+  — an old server refuses the new alphabet, the M82 admits pattern reversed). The
+  `undefined_policies` bench pins the four-face parity, and the `undefined_warning_link` /
+  `undefined_suppress_link` examples walk the two faces beside the M2 defaults.
+
+### Fixed
+
+- **Docs drift heal** — the README's `pgr-daemon` crate-table row named the wire protocol "(v48)"
+  while the constant rode v52 (the M100/M101 rounds' gate tests named the rounds; the prose row
+  never followed). The row now names the live v54.
+
 ### Added (M101)
 
 - **M101** — the alias list file: the file form of M24's `-alias` — `-alias_list <file>` reads one
