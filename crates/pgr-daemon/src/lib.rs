@@ -177,8 +177,13 @@ mod tests {
         // session's own mark record renders the chains, the provenance
         // tail carries them verbatim beside the M79 answers (a liveness
         // ask beside a relocatable config is a malformed request — `-r`
-        // carries no strip).
-        assert_eq!(crate::PROTO_VERSION, 48);
+        // carries no strip) — and v49 carries the dylib terminator (M98,
+        // the config tail): a resident relink carries the `-term` name
+        // the client named, never the pre-M98 absence — and v50 carries
+        // the named output UUID (M99, the config tail): a resident
+        // relink carries the 16 bytes the client named, never the
+        // content-derived default.
+        assert_eq!(crate::PROTO_VERSION, 50);
     }
 
     #[test]
