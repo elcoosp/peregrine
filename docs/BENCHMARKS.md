@@ -948,3 +948,21 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
   (the smoke gate pins the two layouts' header blocks byte-identical). The
   `named_uuid_link` example walks the derived default, the content-independent name, the
   uppercase form and the three refusals.
+
+## The composition round (M100/M101)
+
+- `exported_symbol` (`cargo bench -p pgr-core --bench exported_symbol`, M100): the link across the
+  composed filter table over the 64-object rebase corpus — `no_filter_default` **959.7 µs** beside
+  `only_64_exact` **976.5 µs** (p = 0.72) and `hide_64_exact` **1.010 ms** (p = 0.62) (dev-sandbox
+  medians, `--measurement-time 1`; inside the run-to-run span) — the shape-parity gate, the composed
+  table feeding the unchanged M14 visibility closure (one matcher walk per planned export name; the
+  smoke gates pin the gated surfaces: the only-list halves the trie's terminal count, the hide-list
+  keeps the symtab rows and shrinks the trie). The `exported_symbol_link` example walks the default,
+  the singular face, the flag+list compose, the glob form and the parse refusals.
+- `alias_list` (`cargo bench -p pgr-core --bench alias_list`, M101): the link across the alias table
+  the file form composes over the alias bench's corpus — `no_aliases_default` **924.8 µs** beside
+  `composed_8` **983.4 µs** and `composed_64` **1.058 ms** (dev-sandbox medians,
+  `--measurement-time 1`; the growth is the composed rows' own symtab/trie/strtab cost, the same
+  per-pair price the M24 flag form's bench pinned) — the shape-parity gate, the composed table
+  riding the same `AliasTable` seam the flags pushed. The `alias_list_link` example walks the file
+  form, the flag+file compose and the three refusals.
