@@ -182,8 +182,16 @@ mod tests {
         // the client named, never the pre-M98 absence — and v50 carries
         // the named output UUID (M99, the config tail): a resident
         // relink carries the 16 bytes the client named, never the
-        // content-derived default.
-        assert_eq!(crate::PROTO_VERSION, 50);
+        // content-derived default — and v51 names the M100 round: the
+        // singular export filters compose into the ONE filter table the
+        // v7 pattern carriage carries (a resident relink plans the
+        // composed surface the client named; a rebuild-refusing pattern
+        // is a malformed request, never a silently misread filter) —
+        // and v52 names the M101 round: `-alias_list <file>` composes
+        // into the ONE alias table the v16 pair carriage carries (the
+        // same validation the flag parse pays; a resident relink ships
+        // the composed aliases the client named).
+        assert_eq!(crate::PROTO_VERSION, 52);
     }
 
     #[test]
