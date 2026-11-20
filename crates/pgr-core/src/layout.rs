@@ -441,6 +441,25 @@ pub struct LinkConfig {
     /// every `__LINKEDIT` offset field shares) instead of carrying a
     /// second copy of the decision.
     pub uuid: bool,
+    /// M99 — the named output UUID: `-uuid <uuid>` — the other half of
+    /// M32's `-no_uuid` is the emit decision the two-pass UUID patch
+    /// reads: the named 16 bytes ride the `LC_UUID` field the header
+    /// already plans, replacing the content-derived derivation (the
+    /// page hashes still hash the zeroed field — the signature's
+    /// content contract is unchanged; only the identity bytes are the
+    /// config's own choice). The parse validates the 8-4-4-4-12 hex
+    /// form; the library carries the parsed bytes. The default (`None`)
+    /// keeps every pre-M99 link byte-identical — the derivation stays
+    /// content-derived. Two conflicts: `-no_uuid` × `-uuid` refuse each
+    /// other (a suppression and a named value are two answers to one
+    /// question — the layout's re-check backs the driver surface's
+    /// refusal), and the relocatable output refuses (its header carries
+    /// no `LC_UUID` command at all — the M32 shape, a named value has
+    /// no field to land on; `link_reloc` backs it). Every segmented
+    /// output kind carries the knob: the verifier's UUID contract is
+    /// structural, so a named value is the config's own choice, never a
+    /// defect (the `-no_adhoc` carve-out pattern).
+    pub named_uuid: Option<[u8; 16]>,
     /// M33 — the private-extern decision: `-keep_private_externs`
     /// holds an input private-extern definition (`N_PEXT`, the
     /// compilers' `.private_extern`) external (`N_EXT | N_SECT |
@@ -598,6 +617,28 @@ pub struct LinkConfig {
     /// [`crate::link::link_reloc`] back the driver surface's earlier
     /// refusal).
     pub init_symbol: Option<String>,
+    /// M98 — the dylib terminator: `-term <symbol>` — the sibling
+    /// decision M48's `-init` left empty is the Pass-3 identity decision
+    /// the header assembly reads: the resolved terminator's image-space
+    /// vaddr rides `term_address` in the SAME `LC_ROUTINES_64` the
+    /// initializer composes into (one command, two fields — `-init` +
+    /// `-term` never plan a duplicate; dyld reads one routines command,
+    /// calling the initializer when the image loads and the terminator
+    /// when it unloads). The legacy `init_module` slot (byte 16) carries
+    /// the terminator: a fixed-point layout has no module table to index
+    /// — M48 writes the slot zero — so the two addresses stay adjacent,
+    /// the command the 72-byte shape dyld already walks. The name
+    /// resolves like the entry seam's (an unresolved one refuses with
+    /// the `Symbol` error). The default (`None`) keeps every pre-M98
+    /// link byte-identical — the command rides exactly when either half
+    /// names a symbol. The knob is a dylib decision like `-init`: an
+    /// executable terminates through its runtime (no load command names
+    /// the routine), a bundle dlopens without a dylib terminator, and
+    /// the relocatable output carries no load commands at all — all
+    /// three refuse the knob with the fix (the layout's re-check and
+    /// [`crate::link::link_reloc`] back the driver surface's earlier
+    /// refusal).
+    pub term_symbol: Option<String>,
     /// M50 — the weak-import refusal: `-no_weak_imports` — ld64's flag
     /// ("Don't allow weak imports"; the dylibs pass refuses every bind
     /// whose target is a runtime lookup) is the Pass-2 decision the
@@ -735,6 +776,7 @@ impl Default for LinkConfig {
             data_in_code: true,
             function_starts: true,
             uuid: true,
+            named_uuid: None,
             keep_private_externs: false,
             compact_unwind: true,
             header_pad_max_install_names: false,
@@ -745,6 +787,7 @@ impl Default for LinkConfig {
             export_dynamic: false,
             branch_islands: true,
             init_symbol: None,
+            term_symbol: None,
             no_weak_imports: false,
         }
     }
@@ -975,6 +1018,11 @@ pub struct OutputSymbol {
 pub struct Layout {
     /// Echo of the config identifier (the signature's identity string).
     pub ident: String,
+    /// M99: echo of the config's named-UUID decision (the 16 bytes the
+    /// emit two-pass patch writes instead of the content-derived
+    /// derivation; `None` keeps the derivation). The incremental patch
+    /// paths and the record read the echo — one source, no re-derivation.
+    pub named_uuid: Option<[u8; 16]>,
     /// The Mach-O file type (`MH_EXECUTE`/`MH_DYLIB`/`MH_BUNDLE`).
     pub filetype: u32,
     /// M11 rung 1: the order-file entries that matched **no** placed
@@ -1805,20 +1853,81 @@ pub fn layout(
     if cfg.init_symbol.is_some() && cfg.filetype != OutputType::Dylib {
         let (verdict, fix) = match cfg.filetype {
             OutputType::Execute => (
-                "-init names a load-time initializer dyld calls when the image                  loads, but this output is an executable",
-                "the executable's initializer surface is LC_MAIN (its entry): link a                  dylib (-dylib) or drop the flag",
+                "-init names a load-time initializer dyld calls when the image loads, but \
+                 this output is an executable",
+                "the executable's initializer surface is LC_MAIN (its entry): link a dylib \
+                 (-dylib) or drop the flag",
             ),
             OutputType::Bundle => (
-                "-init names a load-time initializer dyld calls when the image                  loads, but this output is a bundle",
-                "bundles dlopen without a dylib initializer: link a dylib (-dylib)                  or drop the flag",
+                "-init names a load-time initializer dyld calls when the image loads, but \
+                 this output is a bundle",
+                "bundles dlopen without a dylib initializer: link a dylib (-dylib) or drop \
+                 the flag",
             ),
             _ => (
-                "-init names a load-time initializer dyld calls when the image                  loads, but the relocatable output carries no load commands",
+                "-init names a load-time initializer dyld calls when the image loads, but \
+                 the relocatable output carries no load commands",
                 "drop the flag or link a dylib",
             ),
         };
         return Err(LinkError::Layout {
             message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M98: the dylib terminator is a dylib decision — the sibling of the
+    // M48 initializer, riding the SAME `LC_ROUTINES_64` (an executable
+    // terminates through its runtime, a bundle dlopens without a dylib
+    // terminator, the relocatable output carries no load commands at
+    // all). The refusal rides here (not only on the driver surface and
+    // `link_reloc`) so every caller pays it: a silently dropped knob
+    // would claim an unload-time terminator the output never carries.
+    if cfg.term_symbol.is_some() && cfg.filetype != OutputType::Dylib {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Execute => (
+                "-term names a load-time terminator dyld calls when the image unloads, but \
+                 this output is an executable",
+                "an executable terminates through its runtime (no load command names the \
+                 routine): link a dylib (-dylib) or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-term names a load-time terminator dyld calls when the image unloads, but \
+                 this output is a bundle",
+                "bundles dlopen without a dylib terminator: link a dylib (-dylib) or drop \
+                 the flag",
+            ),
+            _ => (
+                "-term names a load-time terminator dyld calls when the image unloads, but \
+                 the relocatable output carries no load commands",
+                "drop the flag or link a dylib",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M99: the named output UUID's conflicts. A named value and the
+    // M32 suppression are two answers to one question — a link asking
+    // both refuses (order-independent: the pair is the shape, not the
+    // argv order). The relocatable output carries no `LC_UUID` command
+    // at all (the M32 shape), so a named value has no field to land on.
+    // Both refusals ride here (not only on the driver surface and
+    // `link_reloc`) so every caller pays them: a silently dropped knob
+    // would claim an identity the output never carries.
+    if cfg.named_uuid.is_some() && !cfg.uuid {
+        return Err(LinkError::Layout {
+            message: "-no_uuid suppresses the output's LC_UUID command, but -uuid names \
+                     one — a suppression and a named value are two answers to one \
+                     question: keep the name and drop -no_uuid, or keep the suppression \
+                     and drop -uuid"
+                .into(),
+        });
+    }
+    if cfg.named_uuid.is_some() && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-uuid names the output's LC_UUID identity, but the relocatable \
+                     output carries no LC_UUID command at all — drop -uuid or link an \
+                     executable/dylib/bundle"
+                .into(),
         });
     }
     // M26: the loader path is an executable decision —
@@ -2594,29 +2703,37 @@ pub fn layout(
         0
     };
 
-    // ---- M48: the dylib initializer (dylibs only; the re-check above
-    // refused every other kind) — the name resolves like the entry
-    // seam's, and the address rides `LC_ROUTINES_64`'s `init_address`
-    // (dyld's "address of initialization routine": the image-space
-    // vaddr, not a `__TEXT` offset like `LC_MAIN`'s `entryoff`).
-    let init_addr = match (cfg.init_symbol.as_deref(), cfg.filetype) {
-        (Some(name), OutputType::Dylib) => {
-            let init_id = interner.lookup(name.as_bytes()).ok_or(LinkError::Symbol {
-                name: name.to_string(),
-                message: format!("init symbol \"{name}\" is not defined by any input"),
-            })?;
-            let init_vaddr = state
-                .def_addr
-                .get(&init_id.0)
-                .copied()
-                .ok_or(LinkError::Symbol {
+    // ---- M48/M98: the dylib initializer and terminator (dylibs only;
+    // the re-checks above refused every other kind) — each name resolves
+    // like the entry seam's, and the addresses ride the SAME
+    // `LC_ROUTINES_64` (M48's `init_address` at byte 8, M98's
+    // `term_address` at byte 16 — the legacy `init_module` slot, a
+    // fixed-point layout having no module table; dyld's "address of
+    // initialization routine" and the unload-time terminator beside it,
+    // the image-space vaddrs, not `__TEXT` offsets like `LC_MAIN`'s
+    // `entryoff`).
+    let resolve_dylib_addr = |name: Option<&str>, role: &str| -> Result<Option<u64>, LinkError> {
+        match name {
+            Some(name) => {
+                let id = interner.lookup(name.as_bytes()).ok_or(LinkError::Symbol {
                     name: name.to_string(),
-                    message: format!("init symbol \"{name}\" is not defined by any input"),
+                    message: format!("{role} symbol \"{name}\" is not defined by any input"),
                 })?;
-            Some(init_vaddr)
+                let vaddr = state
+                    .def_addr
+                    .get(&id.0)
+                    .copied()
+                    .ok_or(LinkError::Symbol {
+                        name: name.to_string(),
+                        message: format!("{role} symbol \"{name}\" is not defined by any input"),
+                    })?;
+                Ok(Some(vaddr))
+            }
+            None => Ok(None),
         }
-        _ => None,
     };
+    let init_addr = resolve_dylib_addr(cfg.init_symbol.as_deref(), "init")?;
+    let term_addr = resolve_dylib_addr(cfg.term_symbol.as_deref(), "term")?;
 
     // ---- __LINKEDIT chunks + signature sizing --------------------------------------
     let fixup_payload_size = if fixups.slot_count > 0 && chains_enabled {
@@ -2762,6 +2879,7 @@ pub fn layout(
         has_reexports,
         dead_strippable: cfg.dead_strippable,
         init_addr,
+        term_addr,
     };
     let (header_bytes, uuid_at, entryoff_at) =
         build_header(cfg, &state.segments, &state.sections, &header_inputs)?;
@@ -2805,6 +2923,7 @@ pub fn layout(
 
     Ok(Layout {
         ident: cfg.ident.clone(),
+        named_uuid: cfg.named_uuid,
         filetype: cfg.filetype.filetype(),
         image_base,
         order_unmatched,
@@ -5249,6 +5368,11 @@ struct HeaderInputs {
     /// M48 `-init <symbol>`: the resolved initializer's image-space
     /// vaddr (dylibs only; `None` keeps the pre-M48 command set).
     init_addr: Option<u64>,
+    /// M98 `-term <symbol>`: the resolved terminator's image-space
+    /// vaddr — the sibling field riding the SAME `LC_ROUTINES_64`
+    /// (byte 16, the legacy `init_module` slot); the command rides
+    /// when either half names a symbol.
+    term_addr: Option<u64>,
 }
 
 /// The exact `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB`/`LC_REEXPORT_DYLIB`
@@ -5315,7 +5439,7 @@ fn build_header(
         + u32::from(emit_dylinker)
         + u32::from(is_exec) // LC_MAIN
         + u32::from(hi.filetype == OutputType::Dylib) // LC_ID_DYLIB
-        + u32::from(hi.filetype == OutputType::Dylib && hi.init_addr.is_some()) // LC_ROUTINES_64 (M48)
+        + u32::from(hi.filetype == OutputType::Dylib && (hi.init_addr.is_some() || hi.term_addr.is_some())) // LC_ROUTINES_64 (M48/M98)
         + 1 // LC_SYMTAB
         + 1 // LC_DYSYMTAB
         + u32::from(!matches!(fixup_lc, FixupLc::None))
@@ -5354,8 +5478,9 @@ fn build_header(
             } else {
                 0
             }
-            + if hi.filetype == OutputType::Dylib && hi.init_addr.is_some() {
-                72 // LC_ROUTINES_64 (M48)
+            + if hi.filetype == OutputType::Dylib && (hi.init_addr.is_some() || hi.term_addr.is_some())
+            {
+                72 // LC_ROUTINES_64 (M48/M98)
             } else {
                 0
             }
@@ -5609,15 +5734,18 @@ fn build_header(
         buf[lc + 12..lc + 12 + n.len()].copy_from_slice(n.as_bytes());
         lc += cmdsize;
     }
-    // LC_ROUTINES_64 (M48): the dylib initializer rides the identity
-    // block's tail, right before the symbol tables — the resolved
-    // initializer's image-space vaddr in `init_address` (dyld's
-    // `hasInitializer` walk reads the command first, before the
-    // `__mod_init_func` sections). The 72-byte `routines_command_64`:
-    // the legacy module-table index and the six reserved words ride
-    // zero (a fixed-point layout has no module table — the zeros are
-    // written for the same reason the M6 streams write theirs).
-    if let Some(init_addr) = hi.init_addr {
+    // LC_ROUTINES_64 (M48/M98): the dylib initializer and terminator
+    // ride the identity block's tail, right before the symbol tables —
+    // one command, two fields (`-init` + `-term` compose into it, never
+    // a duplicate; the command rides when either half names a symbol).
+    // The 72-byte `routines_command_64`: `init_address` at byte 8 (dyld
+    // `hasInitializer`'s read — the image-space vaddr), `term_address`
+    // at byte 16 — the legacy `init_module` slot, which a fixed-point
+    // layout has no module table to fill (M48 wrote the slot zero; M98
+    // gives it the unload-time terminator) — and the six reserved words
+    // ride zero (written for the same reason the M6 streams write
+    // theirs).
+    if hi.init_addr.is_some() || hi.term_addr.is_some() {
         debug_assert_eq!(
             hi.filetype,
             OutputType::Dylib,
@@ -5625,8 +5753,8 @@ fn build_header(
         );
         w32(&mut buf, lc, pgr_format::consts::LC_ROUTINES_64);
         w32(&mut buf, lc + 4, 72);
-        w64(&mut buf, lc + 8, init_addr);
-        w64(&mut buf, lc + 16, 0); // init_module
+        w64(&mut buf, lc + 8, hi.init_addr.unwrap_or(0));
+        w64(&mut buf, lc + 16, hi.term_addr.unwrap_or(0)); // term_address (M98)
         w64(&mut buf, lc + 24, 0); // reserved1
         w64(&mut buf, lc + 32, 0); // reserved2
         w64(&mut buf, lc + 40, 0); // reserved3
@@ -5767,7 +5895,10 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice
         + cfg.rpaths.iter().map(|p| rpath_cmd_size(p)).sum::<usize>()
         + usize::from(cfg.source_version.is_some()) * 16 // LC_SOURCE_VERSION
         + usize::from(is_exec) * 24 // LC_MAIN
-        + usize::from(cfg.filetype == OutputType::Dylib && cfg.init_symbol.is_some()) * 72 // LC_ROUTINES_64 (M48)
+        + usize::from(
+            cfg.filetype == OutputType::Dylib
+                && (cfg.init_symbol.is_some() || cfg.term_symbol.is_some()),
+        ) * 72 // LC_ROUTINES_64 (M48/M98)
         + 24 // LC_SYMTAB
         + 80 // LC_DYSYMTAB
         + usize::from(fixup_lc == FixupLc::Chained) * 16 // LC_DYLD_CHAINED_FIXUPS
