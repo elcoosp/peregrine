@@ -190,6 +190,7 @@ pub fn parse_report_json(s: &str) -> Result<Report, ReportJsonError> {
         b: s.as_bytes(),
         at: 0,
         depth: 0,
+        file: None,
     };
     p.skip_ws();
     let report = p.parse_report()?;
@@ -198,6 +199,42 @@ pub fn parse_report_json(s: &str) -> Result<Report, ReportJsonError> {
         return Err(p.syntax("trailing content after the top-level object"));
     }
     Ok(report)
+}
+
+/// Parses one whole-output report line (`"file"` first) and captures the
+/// label the writer rode beside the report (M96): the container
+/// baseline's reader pairs the label's slice identity
+/// ([`crate::universal::parse_slice_label`]) with the table row its
+/// findings vouch for, so the label is part of the document's meaning —
+/// the plain reader's unknown-key skip loses it. The same body shapes as
+/// [`parse_report_json`] (unknown keys still ignored), plus the `file`
+/// key required: a line without one is a field error naming the fix.
+///
+/// # Errors
+/// [`ReportJsonError::Syntax`] for structural damage; [`ReportJsonError::Field`]
+/// when the `file` key is missing or not a string (the labeled form's
+/// own contract), a code token is malformed, or a counter is out of
+/// range. Total — never panics.
+pub fn parse_labeled_report(s: &str) -> Result<(String, Report), ReportJsonError> {
+    let mut p = Parser {
+        b: s.as_bytes(),
+        at: 0,
+        depth: 0,
+        file: None,
+    };
+    p.skip_ws();
+    let report = p.parse_report()?;
+    p.skip_ws();
+    if p.at != p.b.len() {
+        return Err(p.syntax("trailing content after the top-level object"));
+    }
+    let file = p.file.ok_or(ReportJsonError::Field {
+        name: "file",
+        detail: "required for the labeled form (the whole-output shape the writer renders: \
+                 the container's own --json output, one line per slice)"
+            .into(),
+    })?;
+    Ok((file, report))
 }
 
 /// Restores a consumer-side check's code token (M67): a token outside
@@ -251,6 +288,10 @@ struct Parser<'a> {
     b: &'a [u8],
     at: usize,
     depth: usize,
+    /// The `file` key's value when the line carries one (M96: the
+    /// labeled form's identity — [`parse_labeled_report`] requires it,
+    /// [`parse_report_json`] ignores it).
+    file: Option<String>,
 }
 
 impl Parser<'_> {
@@ -323,6 +364,7 @@ impl Parser<'_> {
                     seen_issues = true;
                 }
                 "stats" => report.stats = self.parse_stats()?,
+                "file" => self.file = Some(self.parse_string()?),
                 _ => self.skip_value()?,
             }
             self.skip_ws();
