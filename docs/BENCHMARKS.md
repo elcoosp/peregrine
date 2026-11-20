@@ -966,3 +966,21 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
   per-pair price the M24 flag form's bench pinned) — the shape-parity gate, the composed table
   riding the same `AliasTable` seam the flags pushed. The `alias_list_link` example walks the file
   form, the flag+file compose and the three refusals.
+
+## The flag-word and policy round (M102/M103)
+
+- `bind_at_load` (`cargo bench -p pgr-core --bench bind_at_load`, M102): the link across the
+  `-bind_at_load` decisions over the 64-object rebase corpus — `bitless_default` **930.2 µs**
+  beside `bind_at_load` **876.2 µs** (p = 0.15; dev-sandbox medians, `--measurement-time 2`;
+  inside the run-to-run span) — the shape-parity gate, the decision one bit in one header word
+  (the M51 stack-execution bench's shape, one flag word over). The `bind_at_load_link` example
+  walks the default, the named face and the refusal.
+- `undefined_policies` (`cargo bench -p pgr-core --bench undefined_policies`, M103): the link
+  across the `-undefined` policies over the 64-object corpus whose every object carries one
+  unresolved external bound through a GOT-form pointer pair — `error` **252.6 µs** (the
+  escalation face: the walk refuses, the price is the walk's own), `dynamic_lookup` **863.9 µs**
+  beside `warning` **954.0 µs** (p = 0.15) and `suppress` **970.6 µs** (p = 0.51) (dev-sandbox
+  medians, `--measurement-time 2`; inside the run-to-run span) — the three non-escalating faces
+  plan byte-identical outputs (the flat-lookup binds ride whatever the exit prints; the policy is
+  the exit's, never the image's). The `undefined_warning_link` and `undefined_suppress_link`
+  examples walk the two faces beside the M2 defaults.
