@@ -198,10 +198,14 @@ fn emit_fused(buf: &mut [u8], layout: &Layout, objects: &[InputObject]) -> Resul
         // header page re-hashes. Only page 0 can change. M32: the
         // suppression leaves the image uuid-free — the per-tile tables
         // hashed it as it is, so there is nothing to derive, write or
-        // re-hash.
+        // re-hash. M99: the config's named value replaces the derivation
+        // — the identity bytes are the config's own choice, the hashes
+        // still hash the zeroed field (the content contract is unchanged).
         let uuid_at = layout.linkedit.uuid_at as usize;
         if uuid_at != 0 {
-            let uuid = signature::derive_uuid(&hashes);
+            let uuid = layout
+                .named_uuid
+                .unwrap_or_else(|| signature::derive_uuid(&hashes));
             let dst = buf
                 .get_mut(uuid_at..uuid_at + 16)
                 .ok_or(EmitError::Internal {
