@@ -355,6 +355,25 @@ pub enum DriverError {
         /// What went wrong.
         message: String,
     },
+    /// An `-alias_list` file could not be read or parsed (M101): the
+    /// house list-file grammar — one `alias definition` pair per line,
+    /// blank lines and `#` comments skip — a malformed line names
+    /// itself (the fix is local).
+    #[error("-alias_list {path}: {message}")]
+    AliasList {
+        /// The file path.
+        path: String,
+        /// What went wrong.
+        message: String,
+    },
+    /// An alias pair the composed table refused at the assembly (M101):
+    /// the M24 duplicate contract over the sources the link read — a
+    /// repeat name composes into the same table the flags pushed.
+    #[error("alias: {message}")]
+    AliasDuplicate {
+        /// The seam's refusal (the name and the fix).
+        message: String,
+    },
     /// The `-order_file` could not be read or parsed (M11): the parse
     /// refusals name their line — the file is small, the fix is local.
     #[error("-order_file {path}: {message}")]
@@ -425,6 +444,45 @@ fn read_symbol_patterns(
             }
         })?;
         out.push(pattern);
+    }
+    Ok(out)
+}
+
+/// Reads an alias-list file (M101, the file form of M24's `-alias`):
+/// one `alias definition` pair per line, whitespace-separated — blank
+/// lines and `#` comments skip (the M11/M14 list-file convention). A
+/// malformed line refuses with the line named (the file is small, the
+/// fix is local); the pairs re-pay the M24 seam's validation at the
+/// push, so a duplicate alias name or a malformed half refuses with the
+/// same contract the flags pay.
+fn read_alias_pairs(path: &str) -> Result<Vec<pgr_core::Alias>, DriverError> {
+    let text = std::fs::read_to_string(path).map_err(|e| DriverError::AliasList {
+        path: path.to_string(),
+        message: e.to_string(),
+    })?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let (Some(alias), Some(definition), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(DriverError::AliasList {
+                path: path.to_string(),
+                message: format!(
+                    "the grammar is one `alias definition` pair per line — \
+                     two whitespace-separated names, got {line:?}"
+                ),
+            });
+        };
+        let pair =
+            pgr_core::Alias::from_parts(alias, definition).map_err(|e| DriverError::AliasList {
+                path: path.to_string(),
+                message: e.to_string(),
+            })?;
+        out.push(pair);
     }
     Ok(out)
 }
@@ -1650,17 +1708,92 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     if config.filetype != pgr_core::layout::OutputType::Execute {
         config.dynamic_linker = false;
     }
-    // M3 export filters, M14 glob-widened (the patterns ride the config;
-    // the wire mirrors them — protocol v7).
-    if let Some(path) = &opts.exported_list_path {
-        // M60: the symbol lists ride the record (ld64's `depMisc` rows —
-        // the files the link read to shape the export surface).
-        deps.record_input(&dep_path(path))?;
-        config.exported_only = Some(read_symbol_patterns("-exported_symbols_list", path)?);
+    // M3 export filters, M14 glob-widened, M100 the singular compose:
+    // the ordered sources — each `-exported_symbol`/`-unexported_symbol`
+    // occurrence carries one validated entry, each list file's lines
+    // join the same table — compose into the ONE filter table in
+    // command-line order (the M90 compose pattern), and the composed
+    // table feeds the unchanged `pgr_core::export_filter` seam (the
+    // wire mirrors it — the v7 pattern carriage, v51 naming the round).
+    // The only-list stays `Some` exactly when an exported-kind source
+    // appeared: an empty list file still gates the surface to nothing
+    // (the M3 semantics), the singular forms never compose an empty
+    // table.
+    let mut exported_only: Vec<pgr_core::SymbolPattern> = Vec::new();
+    let mut unexported: Vec<pgr_core::SymbolPattern> = Vec::new();
+    let mut exported_source = false;
+    for spec in &opts.export_filter_specs {
+        match spec {
+            opts::ExportFilterSpec::Exported { pattern } => {
+                exported_only.push(pattern.clone());
+                exported_source = true;
+            }
+            opts::ExportFilterSpec::Unexported { pattern } => {
+                unexported.push(pattern.clone());
+            }
+            opts::ExportFilterSpec::ExportedList { path } => {
+                // M60: the symbol lists ride the record (ld64's
+                // `depMisc` rows — the files the link read to shape the
+                // export surface).
+                deps.record_input(&dep_path(path))?;
+                exported_only.extend(read_symbol_patterns("-exported_symbols_list", path)?);
+                exported_source = true;
+            }
+            opts::ExportFilterSpec::UnexportedList { path } => {
+                deps.record_input(&dep_path(path))?;
+                unexported.extend(read_symbol_patterns("-unexported_symbols_list", path)?);
+            }
+        }
     }
-    if let Some(path) = &opts.unexported_list_path {
-        deps.record_input(&dep_path(path))?;
-        config.unexported = read_symbol_patterns("-unexported_symbols_list", path)?;
+    // The composed tables land only when the surface named sources —
+    // a config the caller pre-shaped (the library-consumer path the
+    // m3 e2e ride) composes from its own values exactly as it did
+    // before the singular forms existed.
+    if !opts.export_filter_specs.is_empty() {
+        if exported_source {
+            config.exported_only = Some(exported_only);
+        }
+        if !unexported.is_empty() {
+            config.unexported = unexported;
+        }
+    }
+    // M24 symbol aliases, M101 the file form: the ordered sources
+    // compose into the ONE alias table in command-line order (the M90
+    // pattern — the flag pairs and the file pairs interleave as the
+    // flags parse), and the composed table feeds the unchanged M24 seam
+    // (the symtab rows, the trie nodes, the dead-strip root and the
+    // wire's v16 carriage ride it exactly as the flags' pairs always
+    // did). A duplicate alias name across the composed table refuses
+    // here (the M24 duplicate contract — the file content is not
+    // parse-known); the config the caller pre-shaped composes beside
+    // its own values (the empty source list leaves it alone).
+    if !opts.alias_sources.is_empty() {
+        for source in &opts.alias_sources {
+            match source {
+                opts::AliasSource::Pair { alias } => {
+                    config.aliases.push(alias.clone()).map_err(|e| {
+                        DriverError::AliasDuplicate {
+                            message: e.to_string(),
+                        }
+                    })?;
+                }
+                opts::AliasSource::ListFile { path } => {
+                    // M60: the file rides the record (a file the link
+                    // read — the alias table is as much a build input
+                    // as the order files).
+                    deps.record_input(&dep_path(path))?;
+                    for pair in read_alias_pairs(path)? {
+                        config
+                            .aliases
+                            .push(pair)
+                            .map_err(|e| DriverError::AliasList {
+                                path: path.clone(),
+                                message: e.to_string(),
+                            })?;
+                    }
+                }
+            }
+        }
     }
     // M11/M90: the order sources — read, parse (typed, line-tagged
     // refusals), and compose into the ONE rank table before Pass 3, in
@@ -3165,6 +3298,12 @@ pub fn usage() -> String {
     s.push_str("  -reexport_library <path>     LC_REEXPORT_DYLIB + trie re-exports\n");
     s.push_str("  -exported_symbols_list <f>   export only the listed symbols\n");
     s.push_str("  -unexported_symbols_list <f> hide the listed symbols (N_PEXT)\n");
+    s.push_str("  -exported_symbol <name>      export only this symbol (repeatable,\n");
+    s.push_str("                               composes with the list files in flag order)\n");
+    s.push_str("  -unexported_symbol <name>    hide this symbol (repeatable, N_PEXT)\n");
+    s.push_str("  -alias <alias> <definition>  an additional exported name (repeatable)\n");
+    s.push_str("  -alias_list <f>              alias pairs from a file (one\n");
+    s.push_str("                               `alias definition` pair per line)\n");
     s.push_str("  -mark_dead_strippable_dylib  set MH_DEAD_STRIPPABLE_DYLIB\n");
     s.push_str("  -l <name> | -l<name>         link a library (searched via -L)\n");
     s.push_str("  -L <dir>                     library search directory\n");
