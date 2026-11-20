@@ -117,6 +117,13 @@ pub struct ResidentImage {
     /// absent) or on the fallback path (the one-shot link writes the
     /// cold lane's map itself).
     pub map_text: Option<String>,
+    /// The exit policy's unresolved-open entries (v54, M103): the
+    /// session's own Pass-2 product when the request's config carries
+    /// `-undefined warning` — each entry prints as the cold lane's
+    /// `pgr: warning:` face (the M62 convention; the daemon never
+    /// writes the client's stderr). Empty for every other policy (the
+    /// suppress face records the walk, prints none of it).
+    pub policy_warnings: Vec<String>,
     /// How the image tail crossed (v5): [`Transport::Full`] or the tile
     /// summary (what the benches and the driver's outcome line record).
     pub transport: Transport,
@@ -445,6 +452,10 @@ impl DaemonClient {
                     // verbatim — the client writes the `-map` file's
                     // bytes exactly as the reply carried them).
                     let map_text = crate::protocol::decode_map(&mut r)?;
+                    // The v54 tail: the exit policy's unresolved-open
+                    // entries (M103, `-undefined warning`) — the client
+                    // prints each as the cold lane's `pgr: warning:` face.
+                    let policy_warnings = crate::protocol::decode_policy_warnings(&mut r)?;
                     r.done()?;
                     return Ok(ResidentImage {
                         image,
@@ -461,6 +472,7 @@ impl DaemonClient {
                         verify_report,
                         provenance,
                         map_text,
+                        policy_warnings,
                         transport,
                     });
                 }
