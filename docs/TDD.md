@@ -2830,3 +2830,78 @@ multiset consumption, the union rule table, the fixed key order), the `sarif_bas
 group (the stated face beside the plain render, the container's stated face), and the
 `sarif_baseline` consumer example (record → unchanged ships → absent passes → the fresh
 corruption's `new` refuses).
+
+**M98 — the dylib terminator (`LinkConfig::term_symbol`, the `-term <symbol>` surface).**
+The sibling decision M48's `-init` left empty: ld64's dylib termination routine is the
+Pass-3 identity decision the header assembly reads — the resolved terminator's
+image-space vaddr rides `term_address` in the SAME `LC_ROUTINES_64` the initializer
+composes into. One command, two fields: `-init` + `-term` never plan a duplicate (dyld
+reads one routines command, calling the initializer when the image loads and the
+terminator when it unloads), and the command rides exactly when either half names a
+symbol — every pre-M98 link stays byte-identical. The field slot: byte 16, the legacy
+`init_module` — a fixed-point layout has no module table to index (M48 wrote the slot
+zero), so the slot carries the unload-time terminator and the two addresses stay
+adjacent (init at 8, term at 16), the command the 72-byte shape dyld already walks and
+the verifier already gates. The name resolves like the entry seam's (an unresolved one
+refuses with the `Symbol` error), the knob is a dylib decision like `-init` (an
+executable terminates through its runtime — no load command names the routine; a bundle
+dlopens without a dylib terminator; the relocatable output carries no load commands at
+all) — the driver surface refuses with the fix, the layout's re-check and `link_reloc`
+backing it so no library caller can plan the shape either. The verifier's routines
+contract extends to the terminator: the shared `gate_exec_mapping` gates both fields
+(the mapping shape the `-init` gate already rode — a vaddr outside every
+`VM_PROT_EXECUTE` segment is the hostile shape, dyld calling the address when the image
+unloads), so the duplicate, undersized, 32-bit-opcode and off-dylib gates cover the
+composed command whole. The daemon wire v49 carries the name beside the initializer's
+(the v35 present-byte shape, one field over — a resident relink carries the terminator
+the client named, never the pre-M98 absence). The header's sizing formula rides the
+either-half condition in all three places (the ncmds count, the `sizeofcmds`
+debug-assert and `command_size` — the single sizing source of truth), the drift heal
+riding along: the M48 re-check's three refusal strings carried runs of internal spaces
+(the driver's mirrored text was clean — the layout's copies had broken), healed to the
+driver's exact wording. Tests: `m98_term.rs` (core + driver — the default's no-command
+shape, the named terminator's address beside a zero initializer slot, the compose gate
+(one command carrying both resolved addresses), the three output-kind refusals with the
+fix, the unresolved-symbol refusal, the driver's missing-argument refusal, and the
+verifier's hostile `term_address` gate over the tampered image), the daemon wire
+round-trip gate (the name crosses byte-for-byte), the `dylib_term` bench (the
+shape-parity gate + the fixed 72-byte header delta the smoke gate pins), and the
+`dylib_term_link` consumer example (default → named → composed → the three refusals).
+
+**M99 — the named output UUID (`LinkConfig::named_uuid`, the `-uuid <uuid>` surface).**
+The other half of M32's `-no_uuid`: ld64's named-identity face is the emit decision the
+two-pass UUID patch reads — the named 16 bytes ride the `LC_UUID` field the header
+already plans, replacing the content-derived derivation. The page hashes still hash the
+zeroed field (the signature's content contract is unchanged — the derivation's shape is
+exactly the named write's), so the only observable difference is the identity itself:
+two different corpora linked under the same name ride the same `LC_UUID` bytes, and the
+content-derived default differs from the named one. The parse validates the 8-4-4-4-12
+hex form (36 chars, hyphens at 8/13/18/23, case-insensitive hex; malformed refuses with
+the grammar named — the `-alias` shape); the library carries the parsed bytes. Two
+conflicts: `-no_uuid` × `-uuid` refuse each other (a suppression and a named value are
+two answers to one question — order-independent, the pair is the shape) and `-r`
+refuses (the relocatable output carries no `LC_UUID` command at all — the M32 shape, a
+named value has no field to land on); the layout's re-checks and `link_reloc` back the
+driver surface so no library caller can plan the shape either. Every fused emit path
+writes the named value — the classic `write_signature`, the fused `tile` emit and the
+incremental ladder's page-0 rebuild all read `Layout::named_uuid` first
+(`unwrap_or_else` over the derivation — one source, no second decision copy) — and the
+byte-identity contract carries the named value across the ladder for free (the patched
+output must equal the full fused emit of the same plan, whose `LC_UUID` is the name).
+The record carries the decision (v8): `LinkRecord::named_uuid` rides the plan's echo,
+`admits` refuses a flip (named ↔ derived, or one name ↔ another) with
+`FallbackReason::NamedUuid` — the full link writes the decision the request named and
+re-records, on either lane (the session's §7.3 ladder and the driver's in-process
+relink read the same gate; the M82 pattern). The verifier's UUID contract stays
+structural — a named value is the config's own choice, never a defect (the `-no_adhoc`
+carve-out pattern), and the named image verifies strict. The daemon wire v50 carries
+the 16 bytes beside the names (a present byte, then the raw bytes — the parse's output
+needs no further grammar on the wire). Tests: `m99_named_uuid.rs` (core + driver — the
+echo, the two conflicts, the named bytes riding the output, the content-independence
+gate, the grammar matrix with the uppercase form, the strict-verify gate), the
+`incremental` suite's three gates (the record's v8 carriage and codec losslessness,
+the admit/refuse flip matrix, the in-place patch writing the named value over an
+edited body), the daemon wire round-trip gate, the `named_uuid` bench (the plan never
+moves — the smoke gate pins the header blocks byte-identical), and the
+`named_uuid_link` consumer example (derived default → the content-independent name →
+the uppercase form → the three refusals).
