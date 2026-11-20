@@ -591,6 +591,14 @@ The delta is the cheap half (O(prev×next) is deliberate at these counts); JSON 
 message's bytes; the gate's total is dominated by the verify it gates — the point. Reading a
 record costs ~a tenth of making one.
 
+The M96 container group rides the same bench (`container_baseline`, 8-issue slice reports):
+`parse/2` **9.5 µs** / `parse/4` **18.5 µs** (the document read — one labeled report line per
+declared slice, linear in the slices, each line a full M13 report parse), `between_slices/2`
+**275 ns** / `between_slices/4` **510 ns** (the window agreement plus one per-slice delta —
+linear in the slices, ~34 ns a slice beside the `one_slice_delta_for_scale` **476 ns** single
+8→18-issue pair the same slice shape costs unbundled). The gate is a document read and a
+linear walk — never a second verify pass.
+
 **Export-filter matcher (M14)** — 10 240 names, four-entry lists, same scan length per family:
 
 | Bench                      | Median   | Per name       |
@@ -909,3 +917,15 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
   `render/4` (four-slice verdict) **13.0 µs**, beside one slice's single-image render of
   the same 8-issue report **3.6 µs** — linear in the slices, the union rule table paid once
   per run's document (dev-sandbox medians).
+- `container_baseline` (the `baseline` bench's M96 group, `cargo bench -p pgr-verify --bench
+  baseline`): the container baseline's read and pairing price — `parse/2` **9.5 µs**,
+  `parse/4` **18.5 µs** (the document read, linear in the slices), `between_slices/2`
+  **275 ns**, `between_slices/4` **510 ns** (the window agreement plus one per-slice delta),
+  beside `one_slice_delta_for_scale` **476 ns** (the same slice's delta unbundled) — the
+  container gate is a linear walk over slice deltas, never a second pass (dev-sandbox medians).
+- `sarif_baseline` (the `sarif` bench's M97 group, `cargo bench -p pgr-verify --bench sarif`):
+  the stated face's price — `render_with_baseline_8` **4.29 µs** beside the plain render
+  **3.63 µs** (the state consumption pass plus the `absent` tail, ~18 % over the whole-verdict
+  document, both O(issues)) and `render_universal_with_baseline/2` **7.63 µs** beside the
+  M95 plain container render's 6.8 µs — the M96 pairing rides inside, the window agreement
+  plus per-slice states (dev-sandbox medians).
