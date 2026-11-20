@@ -672,6 +672,25 @@ pub struct LinkConfig {
     /// surface's earlier refusal; the same shape the M27 PIE decision
     /// rides, one flag word over).
     pub allow_stack_execute: bool,
+    /// M102 — the bind-at-load decision: `-bind_at_load` — ld64's flag
+    /// ("Bind all undefined symbols at load time, before main runs") is
+    /// the header decision the flag-word assembly reads: the named
+    /// decision ORs `MH_BINDATLOAD` into the executable's header flags
+    /// (dyld binds every undefined symbol when the image loads, before
+    /// `main` runs — the `dlopen(RTLD_NOW)` contract the executable
+    /// promises its host). The pair's negative face
+    /// (`-no_bind_at_load`) drops the bit, which is ld64's own default:
+    /// the flag word stays bitless unless named, so the default keeps
+    /// every pre-M102 link byte-identical. The bit is header-level, not
+    /// fixup-level — the classic opcode path plans the same word. The
+    /// knob is an executable decision — the load-time bind contract
+    /// belongs to the image dyld execs, a dylib's and a bundle's binds
+    /// ride their own loads and the relocatable output carries no
+    /// loader semantics at all, so the non-executable outputs refuse it
+    /// with the fix (the layout's re-check backs the driver surface's
+    /// earlier refusal; the same shape the M27 PIE and M51
+    /// stack-execution decisions ride, one flag word over).
+    pub bind_at_load: bool,
     /// M52 — the dead-strip init/term roots: `-no_dead_strip_inits_and_terms`
     /// — ld64's flag ("The linker never dead strips initialization and
     /// termination routines") is the Pass-2 decision the dead-strip root
@@ -768,6 +787,7 @@ impl Default for LinkConfig {
             dylinker: None,
             no_pie: false,
             allow_stack_execute: false,
+            bind_at_load: false,
             no_dead_strip_inits_and_terms: false,
             renames: crate::rename::SectionRenames::default(),
             cstring_order: None,
@@ -2050,6 +2070,42 @@ pub fn layout(
             _ => (
                 "-allow_stack_execute sets the executable's MH_ALLOW_STACK_EXECUTION \
                  flag, but the relocatable output carries no loader semantics",
+                "drop the flag or link an executable",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M102: the bind-at-load decision is an executable decision —
+    // `MH_BINDATLOAD` is the executable-only bit (dyld binds the exec'd
+    // main executable's undefineds before `main` runs; a dylib's and a
+    // bundle's binds ride their own loads and the relocatable output
+    // carries no loader semantics), so a named `-bind_at_load` has no
+    // load-time contract to promise elsewhere. The refusal rides here
+    // (not only on the driver surface) so every caller pays it: a
+    // silently dropped knob would claim a load-time bind the caller did
+    // not ask for (the same shape the M27 PIE and M51 stack-execution
+    // decisions ride, one flag word over).
+    if cfg.bind_at_load && cfg.filetype != OutputType::Execute {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Dylib => (
+                "-bind_at_load sets the executable's MH_BINDATLOAD flag, but this \
+                 output is a dylib",
+                "dyld binds a dylib's undefineds against its own load contract — \
+                 MH_BINDATLOAD is an executable-only bit: link an executable or drop \
+                 the flag",
+            ),
+            OutputType::Bundle => (
+                "-bind_at_load sets the executable's MH_BINDATLOAD flag, but this \
+                 output is a bundle",
+                "dyld binds a bundle's undefineds against its own load contract — \
+                 MH_BINDATLOAD is an executable-only bit: link an executable or drop \
+                 the flag",
+            ),
+            _ => (
+                "-bind_at_load sets the executable's MH_BINDATLOAD flag, but the \
+                 relocatable output carries no loader semantics",
                 "drop the flag or link an executable",
             ),
         };
@@ -5527,6 +5583,16 @@ fn build_header(
     // so the bit rides an executable or no image.
     if is_exec && cfg.allow_stack_execute {
         flags |= pgr_format::consts::MH_ALLOW_STACK_EXECUTION;
+    }
+    // M102: the bind-at-load decision — the named flag ORs
+    // `MH_BINDATLOAD` into the executable's header word (dyld binds
+    // every undefined symbol at load time, before `main` runs — the
+    // `dlopen(RTLD_NOW)` contract); the non-executable outputs refused
+    // the knob above, so the bit rides an executable or no image. The
+    // bit is header-level, not fixup-level: the classic opcode path
+    // plans the same word.
+    if is_exec && cfg.bind_at_load {
+        flags |= pgr_format::consts::MH_BINDATLOAD;
     }
     if hi.filetype == OutputType::Dylib && !hi.has_reexports {
         flags |= pgr_format::consts::MH_NO_REEXPORTED_DYLIBS;
