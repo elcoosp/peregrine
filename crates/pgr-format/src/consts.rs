@@ -66,6 +66,9 @@ pub const MH_NOUNDEFS: u32 = 0x1;
 pub const MH_NLIST_OUTOFSYNC_WITH_DYLDINFO: u32 = 0x0400_0000;
 /// Set when the object was linked with `-dyld`.
 pub const MH_DYLDLINK: u32 = 0x4;
+/// Dyld binds all undefined symbols at load time, before `main` runs
+/// (the `dlopen(RTLD_NOW)` contract the executable promises its host).
+pub const MH_BINDATLOAD: u32 = 0x8;
 /// Two-level namespace image.
 pub const MH_TWOLEVEL: u32 = 0x80;
 /// Image is position independent (mandatory for arm64 executables).
