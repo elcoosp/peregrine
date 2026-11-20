@@ -127,8 +127,13 @@ pub(crate) const MAGIC: &[u8; 8] = b"PGRINC1\0";
 /// family ([`LinkRecord::chain_word_format`], M82): the relink ladders
 /// admit through it — a config naming a different family is the full
 /// link's job, never a patch across word shapes; v1–v6 records decode
-/// to `None` and re-record.
-pub const FORMAT_VERSION: u32 = 7;
+/// to `None` and re-record. **v8** adds the named-UUID decision
+/// ([`LinkRecord::named_uuid`], M99): the relink ladders admit through
+/// it the same way — a config whose identity decision flipped (named ↔
+/// derived, or one named value ↔ another) is the full link's job, never
+/// an in-place identity swap; v1–v7 records decode to `None` and
+/// re-record.
+pub const FORMAT_VERSION: u32 = 8;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -289,6 +294,12 @@ pub struct LinkRecord {
     /// ([`LinkRecord::admits`]): a config naming a different family is
     /// the full link's job, never a patch across word shapes.
     pub chain_word_format: pgr_core::fixups::FixupPointerFormat,
+    /// The image's named-UUID decision (v8, M99): the plan's own echo
+    /// rides the record — one source, no re-derivation — so the relink
+    /// ladders admit through it ([`LinkRecord::admits`]): a config whose
+    /// identity decision flipped (named ↔ derived, or one named value ↔
+    /// another) is the full link's job, never an in-place identity swap.
+    pub named_uuid: Option<[u8; 16]>,
 }
 
 /// Why the incremental planner fell back to the full link. The fallback is
@@ -341,6 +352,15 @@ pub enum FallbackReason {
         /// What moved.
         detail: String,
     },
+    /// The relink's config flips the image's named-UUID decision the
+    /// record carries (M99): named ↔ derived, or one named value ↔
+    /// another. The patch cannot renegotiate the image's identity in
+    /// place, so the full link writes the decision the request named and
+    /// re-records.
+    NamedUuid {
+        /// What moved.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for FallbackReason {
@@ -361,6 +381,9 @@ impl std::fmt::Display for FallbackReason {
             }
             Self::Disabled => write!(f, "in-place tier disabled"),
             Self::ChainFamily { detail } => write!(f, "the chain word family moved: {detail}"),
+            Self::NamedUuid { detail } => {
+                write!(f, "the image's named-UUID decision moved: {detail}")
+            }
         }
     }
 }
@@ -861,6 +884,10 @@ impl LinkRecord {
             // The chain word family the plan encoded (M82): the plan's
             // own field, one source for the ladders' admission.
             chain_word_format: layout.fixups.chain_word_format,
+            // The named-UUID decision the plan echoed (M99): the
+            // record rides the plan's echo — one source, no
+            // re-derivation.
+            named_uuid: layout.named_uuid,
         })
     }
 
@@ -875,14 +902,27 @@ impl LinkRecord {
     /// chain word family is one — a config naming a different family
     /// refuses with [`FallbackReason::ChainFamily`], and the caller's
     /// full link re-plans the family the request named and re-records.
-    /// Both ladders read this one decision (the session's §7.3 ladder and
-    /// the driver's in-process relink), so neither can patch across word
-    /// shapes.
+    /// The image's named-UUID decision is the other (M99): a config
+    /// whose identity decision flipped (named ↔ derived, or one named
+    /// value ↔ another) refuses with [`FallbackReason::NamedUuid`], the
+    /// full link writing the decision the request named and
+    /// re-recording. Both ladders read this one decision (the session's
+    /// §7.3 ladder and the driver's in-process relink), so neither can
+    /// patch across word shapes or identity decisions.
     ///
     /// # Errors
-    /// [`FallbackReason::ChainFamily`] when the config's chain word
-    /// family differs from the record's.
+    /// [`FallbackReason::NamedUuid`] when the config's named-UUID
+    /// decision differs from the record's; [`FallbackReason::ChainFamily`]
+    /// when the config's chain word family differs from the record's.
     pub fn admits(&self, config: &pgr_core::layout::LinkConfig) -> Result<(), FallbackReason> {
+        if config.named_uuid != self.named_uuid {
+            return Err(FallbackReason::NamedUuid {
+                detail: format!(
+                    "the record encodes {:?}, the link asks {:?}",
+                    self.named_uuid, config.named_uuid
+                ),
+            });
+        }
         if config.chain_word_format == self.chain_word_format {
             return Ok(());
         }
@@ -1015,6 +1055,16 @@ impl LinkRecord {
             pgr_core::fixups::FixupPointerFormat::Offset64 => 0,
             pgr_core::fixups::FixupPointerFormat::Arm64e => 1,
         });
+        // v8: the named-UUID decision (M99) — a present byte, then the
+        // 16 bytes (the v35 wire shape); the plan's own echo. The
+        // relink ladders admit through it the same way.
+        match self.named_uuid {
+            Some(bytes) => {
+                p.push(1);
+                p.extend_from_slice(&bytes);
+            }
+            None => p.push(0),
+        }
 
         let mut out = Vec::with_capacity(HEADER_LEN + p.len());
         out.extend_from_slice(MAGIC);
@@ -1192,6 +1242,18 @@ impl LinkRecord {
             1 => pgr_core::fixups::FixupPointerFormat::Arm64e,
             _ => return None,
         };
+        // v8: the named-UUID decision (M99, see encode). 0 = derived
+        // default, 1 = the 16 named bytes follow; anything else is
+        // corruption.
+        let named_uuid = match d.u8()? {
+            0 => None,
+            1 => {
+                let mut bytes = [0u8; 16];
+                d.bytes(&mut bytes)?;
+                Some(bytes)
+            }
+            _ => return None,
+        };
         if d.at != d.b.len() || content_digests.len() != sections.len() {
             return None;
         }
@@ -1215,6 +1277,7 @@ impl LinkRecord {
             content_digests,
             resolution,
             chain_word_format,
+            named_uuid,
         })
     }
 }
@@ -1232,6 +1295,10 @@ impl Decoder<'_> {
         let out = self.b.get(self.at..end)?;
         self.at = end;
         Some(out)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
     }
 
     fn u64(&mut self) -> Option<u64> {
@@ -2482,7 +2549,13 @@ fn patch_file<S: PatchSink>(
     // wrote it too (the plan offset names the absent sentinel), so the
     // patch consults the sentinel, never a second decision copy.
     if code_limit > 0 && layout.linkedit.uuid_at != 0 {
-        let uuid = signature::derive_uuid(&merged.concat());
+        // M99: the named value replaces the derivation — the page
+        // hashes still hash the zeroed field (the content contract is
+        // unchanged), only the identity bytes are the config's own
+        // choice.
+        let uuid = layout
+            .named_uuid
+            .unwrap_or_else(|| signature::derive_uuid(&merged.concat()));
         for (t, tile) in &mut scratches {
             if *t == 0 {
                 let uuid_at = layout.linkedit.uuid_at as usize;
@@ -2738,6 +2811,7 @@ mod tests {
             ident: "x".into(),
             code_limit: 0x3000,
             chain_word_format: pgr_core::fixups::FixupPointerFormat::Offset64,
+            named_uuid: None,
             linkedit: pgr_core::layout::LinkeditPlan {
                 sig_off: 0x3000,
                 sig_size: 0x100,
