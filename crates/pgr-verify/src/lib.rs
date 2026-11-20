@@ -42,11 +42,17 @@
 //!   same form the library renders),
 //! * [`sarif`] — the M69 SARIF 2.1.0 interchange (the one-way writer
 //!   the ecosystem's triage reads; the M13 escape rules and the
-//!   determinism gate ride),
+//!   determinism gate ride), the M95 container face (one run per
+//!   declared slice, container-absolute anchors) and the M97 baseline
+//!   face (SARIF 2.1.0's own `baselineState` carrying the M13 delta).
 //! * [`baseline`] — the M13 baseline gate: [`BaselineDelta::between`]
 //!   classifies a fresh report against the last accepted image's
 //!   (introduced / resolved / surviving) under an [`IssueIdentity`]
-//!   matching policy — the relink loop's "no *new* findings" gate.
+//!   matching policy — the relink loop's "no *new* findings" gate. The
+//!   container rides it since M96: [`ContainerBaseline`] reads the
+//!   container's own `--json` output (one report line per declared
+//!   slice) and [`UniversalDelta::between_slices`] pairs the lines with
+//!   the table rows (positional, window-checked), one delta per slice.
 
 pub mod baseline;
 pub mod branch_range;
@@ -66,15 +72,20 @@ pub mod tlv;
 pub mod universal;
 pub mod unwind;
 
-pub use baseline::{BaselineDelta, CodeIdentity, IssueIdentity, IssueKey, OffsetIdentity};
+pub use baseline::{
+    BaselineDelta, CodeIdentity, ContainerBaseline, ContainerBaselineEntry, ContainerBaselineError,
+    IssueIdentity, IssueKey, OffsetIdentity, SliceDelta, UniversalDelta, parse_container_baseline,
+};
 pub use checks::{
     Check, CheckContext, CheckSet, CheckSetError, CustomCheck, ImageCheck, image_checks,
 };
 pub use report_json::{
-    ReportJsonError, parse_report_json, to_json, to_json_with_baseline, to_json_with_file,
+    ReportJsonError, parse_labeled_report, parse_report_json, to_json, to_json_with_baseline,
+    to_json_with_file,
 };
 pub use universal::{
-    SliceVerdict, UniversalReport, verify_universal, verify_universal_with_checks,
+    SliceLabel, SliceVerdict, SliceWindow, UniversalReport, slice_label, verify_universal,
+    verify_universal_with_checks,
 };
 
 use pgr_format::FormatError;
