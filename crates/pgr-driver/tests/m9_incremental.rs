@@ -770,11 +770,12 @@ fn record_v5_carries_the_resolution_and_the_relink_renews_it() {
         .expect("the sidecar decodes");
     // M30: the data-in-code chunk joins the recorded `__LINKEDIT`
     // plan — the resolve wiring's v5 gate rides, bumped to v6; M82: the
-    // chain word family joins the record, bumped to v7 (the sidecar the
+    // chain word family joins the record, bumped to v7; M99: the named
+    // output UUID joins the plan's echo, bumped to v8 (the sidecar the
     // relink renews rides the fresh byte either way).
     assert_eq!(
-        first.format_version, 7,
-        "the M30 carriage and the M82 family bump the record format to v7"
+        first.format_version, 8,
+        "the M30 carriage, the M82 family and the M99 name bump the record format to v8"
     );
     let snap = first
         .resolution
