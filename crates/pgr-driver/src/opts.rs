@@ -980,6 +980,34 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-x` surface conflict (M104): the symtab-shaping decision's
+    /// drop face is a final-image decision — the relocatable output's
+    /// symtab is the input's, verbatim (an object carries its inputs'
+    /// tables untouched; there is no locals subrange to shape). The
+    /// verdict names the shape conflict; the help is the fix — the
+    /// house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    LocalSymbolsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-S` surface conflict (M105): the debug-section suppression is
+    /// a final-image decision — the relocatable output's sections are
+    /// the input's, verbatim (an object carries its inputs' sections
+    /// untouched; there is no debug classification to apply). The
+    /// verdict names the shape conflict; the help is the fix — the
+    /// house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    StripDebugConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -2281,6 +2309,34 @@ fn apply_flag(
         "-no_bind_at_load" => {
             opts.config.bind_at_load = false;
         }
+        // M104: the symtab-shaping decision. ld64's pair —
+        // `-keep_local_symbols` ("Keep local symbols in the symbol
+        // table") names the keep face, `-x` ("Do not emit symbols for
+        // internal symbols") the drop: the output symtab's plain
+        // local-symbol subrange drops or rides on the decision (the
+        // last flag wins, the bool carries whichever came last). The
+        // default keeps the subrange (ld64's own default,
+        // kLocalSymbolsAll — every pre-knob link byte-identical); the
+        // relocatable-output conflict is `finish`'s (it sees the whole
+        // surface).
+        "-keep_local_symbols" => {
+            opts.config.keep_local_symbols = true;
+        }
+        "-x" => {
+            opts.config.keep_local_symbols = false;
+        }
+        // M105: the debug-section suppression. ld64's `-S` ("Strip
+        // debug symbols") names the debug shapes — the `__DWARF`
+        // segments the sweep always kept out, plus the `__debug_*` and
+        // `S_ATTR_DEBUG` sections the segment-name rule misses — the
+        // Pass-1 classification drops their bytes, the symtab's entries
+        // into them drop with them, and the `LC_FUNCTION_STARTS` /
+        // `LC_DATA_IN_CODE` commands drop (the M31/M30 suppression
+        // pattern composed). The relocatable-output conflict is
+        // `finish`'s (it sees the whole surface).
+        "-S" => {
+            opts.config.strip_debug = true;
+        }
         // M30: the data-in-code suppression. The flag rode the surface
         // as an accepted no-op since M1; the carriage reads the
         // decision — the output's `LC_DATA_IN_CODE` command drops (no
@@ -3080,6 +3136,44 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 .into(),
             fix: "an object has no load-time bind to warn or suppress: drop -undefined \
                   or link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M104: the symtab-shaping decision's drop face (`-x`) is a final
+    // image decision — the relocatable output's symtab is the input's,
+    // verbatim (an object carries its inputs' tables untouched), the
+    // same refusal shape as the M103 policy faces above: an explicitly
+    // named knob that cannot apply is a refusal, never a silently
+    // dropped one. The keep face is the default's mirror and never
+    // refuses.
+    if !opts.config.keep_local_symbols
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::LocalSymbolsConflict {
+            verdict: "-x drops the output's plain local symbols, but the relocatable \
+                      output's symtab is the input's, verbatim"
+                .into(),
+            fix: "an object carries its inputs' symbol tables untouched — there is no \
+                  locals subrange to shape: drop -x or link an image (an executable, \
+                  dylib or bundle)"
+                .into(),
+        });
+    }
+    // M105: the debug-section suppression's `-S` face is a final image
+    // decision — the relocatable output's sections are the input's,
+    // verbatim (an object carries its inputs' sections untouched), the
+    // same refusal shape as the M104 drop face above: an explicitly
+    // named knob that cannot apply is a refusal, never a silently
+    // dropped one.
+    if opts.config.strip_debug && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::StripDebugConflict {
+            verdict: "-S drops the output's debug sections, but the relocatable \
+                      output's sections are the input's, verbatim"
+                .into(),
+            fix: "an object carries its inputs' sections untouched — there is no debug \
+                  classification to apply: drop -S or link an image (an executable, \
+                  dylib or bundle)"
                 .into(),
         });
     }
