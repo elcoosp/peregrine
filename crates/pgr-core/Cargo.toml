@@ -513,3 +513,25 @@ harness = false
 [[bench]]
 name = "undefined_policies"
 harness = false
+
+# The M104 symtab-shaping bench: the link across the
+# `-keep_local_symbols`/`-x` decisions (the kept default, the dropped
+# face) over the same 64-object corpus whose every object carries two
+# section-defined statics and two name-only locals — the plain
+# local-symbol subrange the decision shapes (a shape gate: the drop
+# moves the symtab builder's subrange and the strtab's tail, never the
+# function-starts stream).
+[[bench]]
+name = "keep_local_symbols"
+harness = false
+
+# The M105 debug-suppression bench: the link across the `-S` decisions
+# (the debug-carrying default, the stripped face) over the same
+# 64-object corpus whose every object carries a __TEXT,__debug_info
+# S_ATTR_DEBUG section with a local in it and a __DWARF segment section
+# (a shape gate: the strip moves the classification's Debug class, the
+# symtab's debug entries and the two LC_FUNCTION_STARTS /
+# LC_DATA_IN_CODE commands, never the __unwind_info synthesis).
+[[bench]]
+name = "strip_debug"
+harness = false
