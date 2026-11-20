@@ -101,6 +101,20 @@ pub enum UndefinedPolicy {
     /// `-undefined dynamic_lookup`: the reference becomes a dynamic lookup
     /// bind (dyld resolves it at launch or kills the image).
     DynamicLookup,
+    /// M103 `-undefined warning`: the link succeeds — the unresolved
+    /// references ride the flat-lookup slot exactly like
+    /// [`UndefinedPolicy::DynamicLookup`] (dyld resolves them at launch
+    /// or kills the image), but the resolver does not escalate: the
+    /// unresolved names are *recorded* and the driver's exit policy
+    /// prints them as warnings while still exiting 0. ld64's advisory
+    /// face: the build sees the holes, the product ships.
+    Warning,
+    /// M103 `-undefined suppress`: the other dangerous face — the
+    /// unresolved references ride the same flat-lookup slot and the
+    /// resolver records them, but the exit policy prints nothing and
+    /// exits 0. ld64's silent face: the holes ride to load time
+    /// unannounced at link time.
+    Suppress,
 }
 
 /// The winning definition of a resolved symbol.
@@ -152,6 +166,16 @@ pub struct Resolution {
     /// liveness root. References to a marked name follow the
     /// `-undefined` policy like any unresolved name.
     make_undefined: BTreeSet<u32>,
+    /// M103: the unresolved-open entries the non-escalating policies
+    /// (`Warning`, `Suppress`) recorded — one deterministic
+    /// `"name" (referenced from file)` entry per unresolved reference,
+    /// sorted. The exit policy reads it: the warning face prints every
+    /// entry to stderr and exits 0, the suppress face prints nothing
+    /// and exits 0. An escalating policy (`Error`) never records here —
+    /// its product is the refusal itself — and neither does
+    /// `DynamicLookup` (the lookup is the intended shape, nothing to
+    /// report).
+    unresolved_open: std::collections::BTreeSet<String>,
 }
 
 impl Resolution {
@@ -444,6 +468,7 @@ impl Resolution {
         no_weak_imports: bool,
     ) -> Result<(), LinkError> {
         self.dynamic_lookups.clear();
+        self.unresolved_open.clear();
         let mut missing: Vec<String> = Vec::new();
         // M50: the weak-import refusals, one entry per runtime-lookup
         // weak reference (kept beside `missing` so the aggregate error
@@ -475,6 +500,21 @@ impl Resolution {
                     match policy {
                         UndefinedPolicy::DynamicLookup => {
                             self.dynamic_lookups.insert(id.0);
+                        }
+                        // M103: the non-escalating policies ride the same
+                        // flat-lookup slot — the *product* differs, not the
+                        // bind. The warning face records the entry the
+                        // driver's exit policy prints; the suppress face
+                        // records it too (the resolver's own walk product,
+                        // the exit policy decides what surfaces).
+                        UndefinedPolicy::Warning | UndefinedPolicy::Suppress => {
+                            self.dynamic_lookups.insert(id.0);
+                            self.unresolved_open.insert(format!(
+                                "\"{}\" (referenced from {} through a relocation) — -U marks \
+                                 it undefined",
+                                interner.name(id),
+                                obj.name
+                            ));
                         }
                         UndefinedPolicy::Error => {
                             missing.push(format!(
@@ -525,6 +565,30 @@ impl Resolution {
             match policy {
                 UndefinedPolicy::DynamicLookup => {
                     self.dynamic_lookups.insert(*key);
+                }
+                // M103: the non-escalating policies ride the same
+                // flat-lookup slot; the warning face records the entry
+                // the driver's exit policy prints, the suppress face
+                // records it for the resolver's own walk product (the
+                // exit policy decides what surfaces). A weak reference
+                // under the warning face is the same record — the M50
+                // knob reads the escalation lane, not the advisory ones.
+                UndefinedPolicy::Warning | UndefinedPolicy::Suppress => {
+                    self.dynamic_lookups.insert(*key);
+                    let file_name = objects
+                        .get(file.0 as usize)
+                        .map_or_else(|| format!("input {}", file.0), |o| o.name.clone());
+                    if self.make_undefined.contains(key) {
+                        self.unresolved_open.insert(format!(
+                            "\"{}\" (referenced from {file_name}) — -U marks it undefined",
+                            interner.name(crate::ids::StringId(*key))
+                        ));
+                    } else {
+                        self.unresolved_open.insert(format!(
+                            "\"{}\" (referenced from {file_name})",
+                            interner.name(crate::ids::StringId(*key))
+                        ));
+                    }
                 }
                 UndefinedPolicy::Error => {
                     if is_weak_ref {
@@ -589,6 +653,15 @@ impl Resolution {
     #[must_use]
     pub fn is_dynamic_lookup(&self, id: StringId) -> bool {
         self.dynamic_lookups.contains(&id.0)
+    }
+
+    /// The unresolved-open entries the non-escalating policies recorded
+    /// (M103): one deterministic `"name" (referenced from file)` entry
+    /// per unresolved reference, sorted. The exit policy reads it — the
+    /// warning face prints every entry to stderr and exits 0, the
+    /// suppress face prints nothing and exits 0.
+    pub fn unresolved_open(&self) -> impl Iterator<Item = &str> {
+        self.unresolved_open.iter().map(String::as_str)
     }
 
     /// True when at least one *bind* in the image is weak (dyld semantics
