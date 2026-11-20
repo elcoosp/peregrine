@@ -312,7 +312,7 @@ pub fn render_with_baseline(
 /// of every slice's two sides, named once per run.
 ///
 /// # Errors
-/// [`ContainerBaselineError::SliceCount`] / [`ContainerBaselineError::WindowMismatch`]
+/// [`crate::ContainerBaselineError::SliceCount`] / [`crate::ContainerBaselineError::WindowMismatch`]
 /// when the document and the container disagree (the M96 pairing's own
 /// contract — the render never states findings against a window the
 /// baseline does not vouch for).
