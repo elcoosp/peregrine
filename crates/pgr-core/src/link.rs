@@ -748,6 +748,57 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M27/M51/M102: the header flag words (`MH_PIE`,
+    // `MH_ALLOW_STACK_EXECUTION`, `MH_BINDATLOAD`) are executable-only
+    // decisions — the relocatable output carries no loader semantics and
+    // plans no header word, so a named knob has no bit to land on. The
+    // re-checks back the driver surface's earlier refusals (the M27 and
+    // M51 knobs never re-checked here — the relocatable path left them
+    // silently inert for a library caller; the M102 decision completes
+    // the trio and heals the two holes with it): no library caller can
+    // plan the shape either.
+    if cfg.no_pie {
+        return Err(LinkError::Layout {
+            message: "-no_pie clears the executable's MH_PIE flag, but the relocatable \
+                      output carries no loader semantics and plans no header word — drop \
+                      -no_pie or link an executable"
+                .into(),
+        });
+    }
+    if cfg.allow_stack_execute {
+        return Err(LinkError::Layout {
+            message: "-allow_stack_execute sets the executable's MH_ALLOW_STACK_EXECUTION \
+                      flag, but the relocatable output carries no loader semantics and \
+                      plans no header word — drop -allow_stack_execute or link an \
+                      executable"
+                .into(),
+        });
+    }
+    if cfg.bind_at_load {
+        return Err(LinkError::Layout {
+            message: "-bind_at_load sets the executable's MH_BINDATLOAD flag, but the \
+                      relocatable output carries no loader semantics and plans no header \
+                      word — drop -bind_at_load or link an executable"
+                .into(),
+        });
+    }
+    // M103: the non-escalating undefined policies are a load-time-bind
+    // exit decision — the relocatable output's undefineds stay open in
+    // its symbol table by design (an object carries no load-time bind to
+    // warn or suppress). The re-check backs the driver surface's earlier
+    // refusal: no library caller can plan the shape either.
+    if matches!(
+        cfg.undefined_policy,
+        crate::resolve::UndefinedPolicy::Warning | crate::resolve::UndefinedPolicy::Suppress
+    ) {
+        return Err(LinkError::Layout {
+            message: "-undefined warning|suppress names the load-time bind's exit policy, \
+                      but the relocatable output's undefineds stay open by design — an \
+                      object has no load-time bind to warn or suppress: drop -undefined \
+                      or link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
     // M39: the make-undefined marks are a Pass-2 decision — the
     // relocatable output opens its undefineds by design and carries its
     // input symbol table verbatim, so a mark has nothing to strip. The
