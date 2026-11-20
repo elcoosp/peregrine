@@ -23,8 +23,9 @@
 
 use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
-    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_map, encode_provenance, encode_time_report,
-    encode_trace, encode_verify_report, put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
+    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_map, encode_policy_warnings, encode_provenance,
+    encode_time_report, encode_trace, encode_verify_report, put_bytes, put_hash, put_str, put_u8,
+    put_u32, put_u64,
 };
 use crate::session::ResidentSession;
 use std::io::{Read, Write};
@@ -337,6 +338,10 @@ fn serve_link(
             // (the session's own walk renders the placed image's
             // report), absent otherwise.
             encode_map(&mut b, served.map_text.as_deref());
+            // The v54 tail: the exit policy's unresolved-open entries
+            // (M103, `-undefined warning`) — the session's own Pass-2
+            // product renders, the client prints the cold lane's face.
+            encode_policy_warnings(&mut b, &served.policy_warnings);
             write_frame(stream, TAG_IMAGE, &b)
         }
         Err(e) => {
