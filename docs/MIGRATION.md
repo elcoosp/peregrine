@@ -69,7 +69,7 @@ is exactly why `-install_name @rpath/libfoo.dylib` keeps working.
 | `-fixup_chains` / `-no_fixup_chains` | same (chained `LC_DYLD_CHAINED_FIXUPS` by default; below the deployment floor — or with `-no_fixup_chains` — the classic `LC_DYLD_INFO_ONLY` streams encode the same fixups) |
 | `-fixup_chains_format offset64\|arm64e` | same family vocabulary (M10 rung 4; an explicitly named family refuses a target below the platform's chained-fixups floor — raise the target or drop the flag) |
 | `-platform_version <platform> <min> <sdk>` | same (`<platform>` ∈ `macos`, `ios`, `tvos`, `watchos`, `visionos`; the SDK must be at least the deployment target) |
-| `-flat_namespace` / `-twolevel_namespace`, `-undefined error\|dynamic_lookup` | same |
+| `-flat_namespace` / `-twolevel_namespace`, `-undefined error\|dynamic_lookup\|warning\|suppress` | same (warning lists the unresolved names to stderr and exits 0; suppress stays silent — both ride the flat-lookup bind `dynamic_lookup` always encoded; M103) |
 | `-rpath <path>` | same (`LC_RPATH`) |
 | `-source_version <n>` | same (`LC_SOURCE_VERSION`) |
 | `-adhoc` / `-no_adhoc` | same (the ad-hoc signature is on by default) |
