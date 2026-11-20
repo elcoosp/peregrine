@@ -3041,3 +3041,69 @@ faces over the hole-bearing corpus — `error` is the escalation face, the other
 flat-lookup binds), and the `undefined_warning_link` / `undefined_suppress_link` consumer
 examples (the refusal → the warned image → the silent image beside the M2 defaults, the `-r`
 refusal rendered).
+**M104 — the symtab-shaping decision (`LinkConfig::keep_local_symbols`, the
+`-keep_local_symbols` / `-x` pair).** ld64's symtab knob, the other half of the local-symbol
+contract (M33 named the filter-hidden shape): the output symtab's plain local-symbol subrange —
+the rows without `N_EXT` set (`N_SECT & ~N_EXT`: the section-defined statics plus the name-only
+locals that ride absolute) — rides by default (ld64's own default, `kLocalSymbolsAll`; the man
+page's "usually they are stripped when the final linked output is produced" is the final-output
+face the `-x` flag names), so every pre-knob link is byte-identical. `-x` names the drop: the
+`build_symtab` locals loop's product drops from the table (the `SymtabContext` carries the
+decision beside `keep_private_externs`), the string table shrinks with the names (the strtab is
+built from the shaped rows), and the subrange math follows — `iextdefsym` starts where the
+(possibly empty) locals subrange ended. The drop touches the symtab only: the function-starts
+stream still covers the local functions — ld64 strips the symtab rows, never the start
+addresses — so `build_func_starts`' source chains the dropped rows (the M104 stream-stability
+gate). The filter-hidden rows (the M3 export filter's and M33's `N_SECT | N_PEXT` shapes) are
+the export machinery's product, never input locals: they ride either way (the M33 default
+conversion survives `-x` beside it). The relocatable output's symtab is the input's, verbatim —
+the drop face refuses there (the driver surface's `LocalSymbolsConflict` refusal backed by the
+layout's re-check and `link_reloc`, the M102/M39 pattern) while the keep face never refuses.
+The verifier's symtab contract stays unchanged — local symbols are a dyld-consumed surface,
+never a format defect: both faces verify strict (the `-no_adhoc` carve-out pattern). The wire
+v55 carries the decision — one byte in the config tail after the bind-at-load byte, round-trip
+gated, and the session's warm pipeline plans the same locals-free shape (the parity gate is
+byte-identical; the shape is config, not a product — the M81 pattern). Tests:
+`m104_keep_local_symbols.rs` (core — the default keep, the byte-identical keep mirror, the drop
+and its subrange math, the hidden rows riding the drop, the function-starts stream stability,
+the relocatable refusals (the image path and `link_reloc`), the determinism lock; driver — the
+parse pair with last-flag-wins, the relocatable refusal and the never-refusing keep face, and
+the end-to-end strict gate over both faces — the locals range read back from the real images),
+the daemon wire gates (v55: the drop face and the kept face round-trip byte-for-byte, the
+session parity over the shaped config), the `keep_local_symbols` bench (the kept default
+beside the dropped face over the 64-object locals-bearing corpus), and the
+`keep_local_symbols_link` consumer example (the default → the drop → the named keep → the
+miette-rendered refusal).
+
+**M105 — the debug-section suppression (`LinkConfig::strip_debug`, the `-S` flag).** ld64's
+debug-symbol strip ("Strip debug symbols") names the Pass-1 classification's debug shapes: the
+`__LLVM*`/`__LD`/`__DWARF` segments the M1 sweep already kept out are debug metadata always,
+and the `__debug_*` section names and the `S_ATTR_DEBUG` attribute widen the class to the
+shapes the segment-name rule misses, under the named decision — `is_debug_section`, one
+classification the sweep and the symtab builder consult (the M1 sweep's silent sentinel-drop
+gets its name). The default keeps every pre-knob link byte-identical: the name/attribute
+sections bucket as normal load-time bytes, their symtab entries ride. Under `-S` the debug
+pieces drop (no bucket, no placed bytes), the symtab's entries into them drop with them (a row
+whose section never ships must not dangle absolute — the M1 swept shapes' locals included),
+and the `LC_FUNCTION_STARTS` and `LC_DATA_IN_CODE` commands drop — the M31/M30 suppression
+pattern composed under one decision (`emit_func_starts` reads the composed predicate; the
+stream, the command gate, the `ncmds` count and `command_size` all read it, so the two-pass
+`sizeofcmds` contract holds by construction; `-S` beside `-no_function_starts` plans the same
+bytes as `-S` alone — the composed arithmetic never double-counts). The synthetic
+`__unwind_info` still synthesizes (the runtime's walk table is load-time metadata, not debug —
+the M34 carriage survives the strip). The relocatable output's sections are the input's,
+verbatim — the decision refuses there (the driver surface's `StripDebugConflict` refusal
+backed by the layout's re-check and `link_reloc`, the M102/M39 pattern). The verifier's
+structural contract stays unchanged — debug metadata is a dyld-consumed surface, never a
+format defect: both faces verify strict (the `-no_adhoc` carve-out pattern). The wire v56
+carries the decision — one byte in the config tail after the symtab-shaping byte, round-trip
+gated, and the session's warm pipeline plans the same debug-free shape (the parity gate is
+byte-identical — the M81 pattern). Tests: `m105_strip_debug.rs` (core — the default ride, the
+strip and its symtab drops, the command suppression and the compose arithmetic, the
+`__unwind_info` synthesis, the relocatable refusals (the image path and `link_reloc`), the
+determinism lock; driver — the parse face, the relocatable refusal, and the end-to-end strict
+gate over the real images with both commands read back), the daemon wire gates (v56: the strip
+face and the carried face round-trip byte-for-byte, the session parity over the shaped
+config), the `strip_debug` bench (the carried default beside the stripped face over the
+64-object debug-bearing corpus), and the `strip_debug_link` consumer example (the carried
+default → the stripped face → the miette-rendered refusal).
