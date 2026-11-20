@@ -896,6 +896,45 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-term` surface conflict (M98): the dylib terminator is the
+    /// sibling of the `-init` decision — dylib-only, riding the same
+    /// `LC_ROUTINES_64`. An executable terminates through its runtime
+    /// (no load command names the routine), a bundle dlopens without a
+    /// dylib terminator, and the relocatable output carries no load
+    /// commands at all. The verdict names the shape conflict; the help
+    /// is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    TermConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-uuid` value the surface refuses (M99): the 8-4-4-4-12 hex
+    /// form is the grammar the flag accepts — 36 characters, hyphens at
+    /// 8/13/18/23, case-insensitive hex. The refusal rides the help
+    /// (the grammar, not just the verdict — the house convention).
+    #[error("invalid value for -uuid: {raw}")]
+    #[diagnostic(help("{message}"))]
+    UuidValue {
+        /// The refused value as written.
+        raw: String,
+        /// The grammar the flag accepts (the fix).
+        message: String,
+    },
+    /// A `-no_uuid` × `-uuid` conflict (M99): a suppression and a named
+    /// value are two answers to one question — order-independent, the
+    /// pair is the shape. The verdict names both flags; the help is the
+    /// fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    UuidConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-alias` pair the core seam refuses (M24): the
     /// `-alias <alias_name> <definition_name>` grammar (two non-empty,
     /// NUL-free, distinct names), named once. The seam's refusal rides
@@ -1117,6 +1156,59 @@ fn next_value(args: &[std::ffi::OsString], i: &mut usize, flag: &str) -> Result<
         .ok_or_else(|| OptsError::MissingValue {
             flag: flag.to_string(),
         })
+}
+
+/// Validates the `-uuid` value's 8-4-4-4-12 hex form (36 chars, hyphens
+/// at 8/13/18/23, case-insensitive hex) and parses it into the 16 bytes
+/// the `LC_UUID` command carries. The refusal names the grammar (the
+/// fix, not just the verdict — the house convention), so a typo reads
+/// what the flag accepts.
+fn parse_named_uuid(raw: &str) -> Result<[u8; 16], String> {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let is_hex =
+        |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || (b'A'..=b'F').contains(&b);
+    let malformed = |why: &str| {
+        format!(
+            "-uuid accepts the 8-4-4-4-12 hex form (36 characters, hyphens at \
+             positions 8/13/18/23, case-insensitive hex digits) — {why}"
+        )
+    };
+    let bytes = raw.as_bytes();
+    if bytes.len() != 36 {
+        return Err(malformed(&format!(
+            "the value is {} characters long",
+            bytes.len()
+        )));
+    }
+    let mut out = [0u8; 16];
+    let mut at = 0usize;
+    let mut oi = 0usize;
+    for (gi, group) in GROUPS.iter().enumerate() {
+        if gi > 0 {
+            if bytes[at] != b'-' {
+                return Err(malformed(&format!("position {} must be a hyphen", at + 1)));
+            }
+            at += 1;
+        }
+        for k in 0..*group {
+            let b = bytes[at + k];
+            if !is_hex(b) {
+                return Err(malformed(&format!(
+                    "character {b:?} at position {} is not a hex digit",
+                    at + k + 1
+                )));
+            }
+        }
+        let hex = &raw[at..at + *group];
+        let value = u64::from_str_radix(hex, 16)
+            .map_err(|_| malformed("the group does not parse as hex"))?;
+        let group_bytes = group.div_ceil(2);
+        let encoded = value.to_be_bytes();
+        out[oi..oi + group_bytes].copy_from_slice(&encoded[8 - group_bytes..]);
+        oi += group_bytes;
+        at += *group;
+    }
+    Ok(out)
 }
 
 /// Maximum `@response-file` nesting depth (cycle protection).
@@ -2041,6 +2133,22 @@ fn apply_flag(
         "-no_uuid" => {
             opts.config.uuid = false;
         }
+        // M99: the named output UUID — the other half of the M32
+        // suppression. ld64's `-uuid <uuid>` names the image's identity:
+        // the 8-4-4-4-12 hex form validates here (36 chars, hyphens at
+        // 8/13/18/23, case-insensitive hex — malformed refuses with the
+        // fix), the parsed 16 bytes ride the config, and the emit
+        // two-pass patch writes them instead of deriving. The surface
+        // conflicts (`-no_uuid` × `-uuid`, the relocatable output) are
+        // `finish`'s — it sees the whole surface.
+        "-uuid" => {
+            let v = next_value(args, i, arg)?;
+            let bytes = parse_named_uuid(&v).map_err(|message| OptsError::UuidValue {
+                raw: v.clone(),
+                message,
+            })?;
+            opts.config.named_uuid = Some(bytes);
+        }
         // M33: the private-extern decision. The flag rode the surface
         // as an accepted no-op since M1; the symtab build reads it —
         // an input `N_PEXT` definition stays external (`N_EXT | N_SECT
@@ -2120,6 +2228,16 @@ fn apply_flag(
         "-init" => {
             let v = next_value(args, i, arg)?;
             opts.config.init_symbol = Some(v);
+        }
+        // M98: the dylib terminator — the sibling of the M48
+        // initializer (`-term <symbol>` names the load-time terminator
+        // dyld calls when the image unloads; the resolved address rides
+        // the SAME LC_ROUTINES_64, one command two fields). The
+        // output-kind conflicts (executable, bundle, the relocatable
+        // output) are `finish`'s — it sees the whole surface.
+        "-term" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.term_symbol = Some(v);
         }
         // M50: the weak-import refusal — ld64's `-no_weak_imports`
         // turns the weak reference's runtime-lookup fallthrough into a
@@ -2893,6 +3011,74 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 });
             }
         }
+    }
+    // M98: the dylib terminator's surface conflicts. The knob is a
+    // dylib decision like the M48 initializer — an executable
+    // terminates through its runtime (no load command names the
+    // routine), a bundle dlopens without a dylib terminator, and the
+    // relocatable output carries no load commands at all. An explicitly
+    // named knob that cannot apply is a refusal, never a silently
+    // dropped one (the library's re-checks — the layout and
+    // `link_reloc` — back this so no caller can plan the shape either).
+    if opts.config.term_symbol.is_some() {
+        match opts.config.filetype {
+            pgr_core::layout::OutputType::Dylib => {}
+            pgr_core::layout::OutputType::Execute => {
+                return Err(OptsError::TermConflict {
+                    verdict: "-term names a load-time terminator dyld calls when the \
+                              image unloads, but this output is an executable"
+                        .into(),
+                    fix: "an executable terminates through its runtime (no load command \
+                          names the routine): link a dylib (-dylib) or drop the flag"
+                        .into(),
+                });
+            }
+            pgr_core::layout::OutputType::Bundle => {
+                return Err(OptsError::TermConflict {
+                    verdict: "-term names a load-time terminator dyld calls when the \
+                              image unloads, but this output is a bundle"
+                        .into(),
+                    fix: "bundles dlopen without a dylib terminator: link a dylib \
+                          (-dylib) or drop the flag"
+                        .into(),
+                });
+            }
+            pgr_core::layout::OutputType::Relocatable => {
+                return Err(OptsError::TermConflict {
+                    verdict: "-term names a load-time terminator dyld calls when the \
+                              image unloads, but the relocatable output carries no load \
+                              commands"
+                        .into(),
+                    fix: "drop the flag or link a dylib".into(),
+                });
+            }
+        }
+    }
+    // M99: the named output UUID's surface conflicts. A named value and
+    // the M32 suppression are two answers to one question (the pair is
+    // the shape, not the argv order), and the relocatable output
+    // carries no LC_UUID command at all (the M32 shape) — a named value
+    // has no field to land on. The library's re-checks (the layout and
+    // `link_reloc`) back these so no caller can plan the shape either.
+    if opts.config.named_uuid.is_some() && !opts.config.uuid {
+        return Err(OptsError::UuidConflict {
+            verdict: "-no_uuid suppresses the output's LC_UUID command, but -uuid names \
+                     one"
+            .into(),
+            fix: "a suppression and a named value are two answers to one question: keep \
+                 the name and drop -no_uuid, or keep the suppression and drop -uuid"
+                .into(),
+        });
+    }
+    if opts.config.named_uuid.is_some()
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::UuidConflict {
+            verdict: "-uuid names the output's LC_UUID identity, but the relocatable \
+                     output carries no LC_UUID command at all"
+                .into(),
+            fix: "drop -uuid or link an executable/dylib/bundle".into(),
+        });
     }
     match opts.config.filetype {
         pgr_core::layout::OutputType::Execute => {
