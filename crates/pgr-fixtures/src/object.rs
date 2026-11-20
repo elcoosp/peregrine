@@ -407,6 +407,18 @@ pub enum ObjectSymbol {
         /// Symbol name as written in source.
         String,
     ),
+    /// Section-defined local symbol (`N_SECT` without `N_EXT` — the
+    /// compilers' static-function shape): the plain local row the
+    /// M104 symtab-shaping decision (`-x` / `-keep_local_symbols`)
+    /// drops or keeps.
+    LocalDefined {
+        /// Symbol name.
+        name: String,
+        /// 0-based index into the builder's section list.
+        section_index: usize,
+        /// Section-relative address.
+        value: u64,
+    },
     /// External definition (`N_SECT | N_EXT`).
     Defined {
         /// Symbol name.
@@ -625,10 +637,34 @@ impl ObjectBuilder {
             entries.push((strx, n_type, n_sect, n_desc, value));
         };
         for (decl_i, sym) in self.symbols.iter().enumerate() {
-            if let ObjectSymbol::Local(name) = sym {
-                let n_desc =
-                    u16::from(self.alt_entries.contains(&decl_i)) * pgr_format::consts::N_ALT_ENTRY;
-                push_sym(&mut strtab, &mut entries, name, 0, 0, n_desc, 0);
+            match sym {
+                ObjectSymbol::Local(name) => {
+                    let n_desc = u16::from(self.alt_entries.contains(&decl_i))
+                        * pgr_format::consts::N_ALT_ENTRY;
+                    push_sym(&mut strtab, &mut entries, name, 0, 0, n_desc, 0);
+                }
+                // M104: the section-defined local (`N_SECT` without
+                // `N_EXT`) — the static-function shape the symtab-shaping
+                // decision reads. Blob-relative like every section symbol.
+                ObjectSymbol::LocalDefined {
+                    name,
+                    section_index,
+                    value,
+                } => {
+                    let n_desc = u16::from(self.alt_entries.contains(&decl_i))
+                        * pgr_format::consts::N_ALT_ENTRY;
+                    let blob_addr = placed.get(*section_index).map_or(0, |(addr, _)| *addr);
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        name,
+                        N_SECT,
+                        (*section_index + 1) as u8,
+                        n_desc,
+                        blob_addr + *value,
+                    );
+                }
+                _ => {}
             }
         }
         for (decl_i, sym) in self.symbols.iter().enumerate() {
