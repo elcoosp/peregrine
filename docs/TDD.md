@@ -2905,3 +2905,81 @@ edited body), the daemon wire round-trip gate, the `named_uuid` bench (the plan 
 moves — the smoke gate pins the header blocks byte-identical), and the
 `named_uuid_link` consumer example (derived default → the content-independent name →
 the uppercase form → the three refusals).
+
+**M100 — the singular export filters (`ExportFilterSpec`, the `-exported_symbol <name>` /
+`-unexported_symbol <name>` surface).** ld64's command-line siblings of the M14 list files: each
+occurrence appends ONE validated entry to the ONE composed filter table in command-line order — the
+M90 compose pattern (the ordered `ExportFilterSpec` list carries the singular entries and the
+list-file paths in flag order; the singular flags and the list files interleave, `_a`-list-file-`_b`
+composing `[_a, …file rows…, _b]`, never last-wins). The same pattern grammar the lists widened to
+validates at the parse (`SymbolPattern::parse` — an exact name, or a `*` glob; an empty value
+matches nothing, interior whitespace is not a Mach-O symbol name — the refusal names the flag and
+the fix, the `-alias` shape), so a typo refuses before the pipeline runs. The list files keep their
+once-per-kind contract (the M3 surface pinned it — the singular flags are the repeatable face), and
+the composed table feeds the unchanged `pgr_core::export_filter` seam: the glob matcher, the
+`N_PEXT` symtab marking and the trie exclusion exactly as the lists shaped them, the
+exported/unexported interaction the seam's existing rule (`is_export_visible` — the only-list gates,
+the hide-list removes; a filter-hidden alias does not land, the layout's existing convention). The
+empty default keeps every pre-knob link byte-identical, and a config the caller pre-shaped
+(`opts.config.exported_only`/`unexported` set between the parse and the assembly — the library-
+consumer path the m3 e2e ride) composes beside its own values exactly as it did before the singular
+forms existed (the source list's presence gates the assignment). The composed table is config and
+crosses the wire on the v7 pattern carriage (a present byte + count-prefixed entries for the
+only-list, the count-prefixed hide-list; a rebuild-refusing pattern is a malformed request, the
+decode re-parsing every entry — the wire never carries a filter the pipeline would silently
+misread). The resident lane does not refuse the filter today — the v7 carriage and the session's
+warm pipeline already serve it, the M14 round's parity gate pinning the byte-identical cycle — so
+the rung's conditional flip (refusal → service) finds nothing to flip, and the surface tests pin
+the service the round rides: the composed-table resident cycle plans the same bytes either lane,
+the ladder's replay walks the same table (the relink's anchored config carries it verbatim), and a
+filter flip lands the correct image on either lane — the relink's own Passes 1–3 re-plan the
+surface the request named, a content-only flip patching in place and a size-moving flip falling
+back through the skeleton gate (the admission names the reason, the M82 pattern). The daemon wire
+v51 names the round (no shape moves — the version gate records the carriage the composed table
+rides). Tests: `m100_exported_symbol.rs` (the parse order — specs ride in flag order with the
+singular entries' source bytes verbatim; the compose gate — flag + list file + flag exports exactly
+the union, the header symbol gated unless a source names it; the glob form; the singular
+unexported's `N_PEXT` face; the empty default's deterministic pre-knob bytes; the parse refusals
+naming flag and fix; the once-only list-file contract; the resident parity cycle), the daemon wire
+gates (the composed table round-trips in composition order; a whitespace pattern is malformed at
+the decode), the `exported_symbol` bench (the composed only-list and hide-list beside the default
+over the 64-object rebase corpus — the shape-parity gate the smoke gates pin), and the
+`exported_symbol_link` consumer example (default → the singular face → the flag+list compose → the
+glob form → the parse refusals).
+
+**M101 — the alias list file (`AliasSource`, the `-alias_list <file>` surface).** The file form of
+M24's `-alias`: one `alias definition` pair per line, whitespace-separated — the house list-file
+grammar (blank lines and `#` comments skip, the M11/M14 convention; a malformed line refuses naming
+itself, the file small and the fix local). The pairs append to the ONE alias table in command-line
+order beside the `-alias` flags — the M90 compose pattern again (the ordered `AliasSource` list
+carries the validated pairs and the file paths; the composition walks it once at link time, the
+flag pairs and the file pairs interleaving as the flags parsed). The flag pairs keep their
+parse-time contracts unchanged (the grammar, the NUL check, the flag-vs-flag duplicate — the parse
+scans the pair sources it has seen), the file-borne refusals are the link-time composition's (the
+file content is not parse-known): a duplicate alias name — file against flag, file against file —
+refuses through the same `AliasTable::push` contract (one decision per name; a repeat name is a
+typo, never a silently shadowed row), and every file pair re-pays the M24 seam's validation at the
+push. The M24 refusal contracts ride unchanged: an alias of a name no input defines refuses with
+the misspelling named (the layout's re-check), an alias name already defined or referenced refuses,
+the alias keeps its definition alive under `-dead_strip` (the root rides the composed table — the
+gate's control runs on an executable, a dylib's export surface being its own root set), and the
+relocatable output refuses the knob (the source list is the knob's presence — the file form refuses
+exactly where the flag form refuses). The composed table rides the v16 alias wire carriage and the
+ladder exactly as the single flags' pairs always did — the resident cycle plans the byte-identical
+composed table (the symtab rows landing in composed order, the emit order the seam pins), the
+ladder's replay walks the same table — and a config the caller pre-shaped composes beside its own
+values (the empty source list leaves it alone). The daemon wire v52 names the round (no shape
+moves — the version gate records the carriage the composed table rides). Drift heal riding along:
+the M99 round bumped the link record to v8 (`FORMAT_VERSION`), its own gates followed, but the
+`m9_incremental` renewal gate still pinned v7 — healed to v8 (the M30/M82/M99 carriage chain named
+in the assertion; the pristine-main failure reproduced before the heal). Tests:
+`m101_alias_list.rs` (the parse order — pairs and files ride the source list in flag order; the
+end-to-end compose — flag, file, flag with the symtab rows in composed order and each alias at its
+definition's address; the grammar gate — blanks and comments skip; the malformed line refusing with
+the line named; the misspelled definition refusing with the misspelling named; the file-vs-flag
+duplicate refusing; the relocatable refusal; the dead-strip root riding the composed table beside
+its stripping control; the resident parity cycle), the daemon wire gate (v52), the `alias_list`
+bench (the composed 8- and 64-pair tables beside the default over the alias corpus — the
+shape-parity gate the smoke gates pin), and the `alias_list_link` consumer example (the file form →
+the flag+file compose → the three refusals: the misspelled definition, the duplicate, the malformed
+line).
