@@ -3,11 +3,13 @@
 //! CLI — one deterministic SARIF 2.1.0 document per verified image, the
 //! shape GitHub Code Scanning, IDE problem panels and CI triage read
 //! natively. The face refuses where it cannot apply honestly: beside the
-//! other machine face (`--json`) and beside the baseline gate (the delta
-//! has no SARIF shape). (The M75 container refusal — "a slice's anchors
-//! ride their own windows" — retired with its premise at M95: the slices
-//! ride *inside* the audited file, so `render_universal` re-anchors
-//! honestly; the container's gates live in `m95_sarif_universal.rs`.)
+//! other machine face (`--json`). (The M75 container refusal — "a slice's
+//! anchors ride their own windows" — retired with its premise at M95: the
+//! slices ride *inside* the audited file, so `render_universal` re-anchors
+//! honestly; the container's gates live in `m95_sarif_universal.rs`. The
+//! baseline refusal retired the same way at M97 — SARIF 2.1.0's own
+//! `baselineState` carries the delta; the stated face's gates live in
+//! `m97_sarif_baseline.rs`.)
 //!
 //! Gate matrix:
 //! * the clean image's document rides an empty `results` array, one
@@ -16,7 +18,7 @@
 //!   stable code token, `level` the severity, the anchor offset) and
 //!   fails the exit gate;
 //! * the two machine faces refuse each other;
-//! * the baseline gate refuses the face.
+//! * the baseline gate composes into the document (M97 — the pin).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -151,21 +153,36 @@ fn the_two_machine_faces_refuse_each_other() {
 }
 
 #[test]
-fn the_sarif_face_refuses_the_baseline_gate() {
+fn the_sarif_face_serves_the_baseline_gate_since_m97() {
+    // The M75 refusal ("the delta has no SARIF shape") retired with its
+    // premise — SARIF 2.1.0's own `baselineState` carries the delta, and
+    // the served face's gates live in `m97_sarif_baseline.rs`. This rung
+    // keeps one honest pin: the baseline composes into the document
+    // instead of the refusal (the surviving finding rides `unchanged`).
     let dir = scratch("baseline");
-    let path = write_image(&dir, "one.dylib", &dylib_image(0x75));
+    let mut bytes = dylib_image(0x75);
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    let path = write_image(&dir, "one.dylib", &bytes);
     let path_str = path.display().to_string();
-    // The previous report comes from the CLI's own flow (the --json face).
+    // The corrupted run records the baseline (the tolerated history).
     let prev_report = run(&["--json", &path_str]);
+    assert_eq!(prev_report.status.code(), Some(1));
     let prev = dir.join("prev.json");
     std::fs::write(&prev, stdout(&prev_report)).expect("the baseline writes");
     let prev_str = prev.display().to_string();
     let out = run(&["--sarif", "--baseline", &prev_str, &path_str]);
-    assert_eq!(out.status.code(), Some(2), "usage refusal");
-    let text = stderr(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the tolerated history passes the gate: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
     assert!(
-        text.contains("baseline"),
-        "the fix names the baseline conflict: {text}"
+        stdout(&out).contains("\"baselineState\":\"unchanged\""),
+        "the document states the gate: {}",
+        stdout(&out)
     );
 }
 
