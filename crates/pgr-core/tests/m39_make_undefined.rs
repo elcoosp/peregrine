@@ -106,6 +106,7 @@ fn f_dylib() -> Dylib {
         upward: false,
         reexport: false,
         needed: false,
+        hidden: false,
     }
 }
 
