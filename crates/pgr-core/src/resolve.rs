@@ -101,6 +101,34 @@ pub struct Dylib {
     /// `LC_LOAD_DYLIB` unless another kind's obligation names its
     /// command.
     pub needed: bool,
+    /// M110 `-hidden_library`/`-hidden_framework`/`-hidden-l`: the
+    /// hidden-dylib mark — ld64's "hidden" loads, the other half of the
+    /// load-command contract. The dylib is parsed and its exports enter
+    /// the resolve arena (the same scan path as
+    /// [`Dylib::weak`](Self::weak)/[`Dylib::lazy`](Self::lazy)), but the
+    /// header assembly **drops the load command** for it: no
+    /// `LC_LOAD_DYLIB`, no `LC_LOAD_WEAK_DYLIB` — the two-level ordinal
+    /// space does not name it (the dylib gets no ordinal; its exports
+    /// never enter the two-level map) and the chained-fixups import
+    /// table does not name it.
+    ///
+    /// A weak reference resolved against a hidden export rides the
+    /// flat-lookup slot (`BIND_SPECIAL_DYLIB_FLAT_LOOKUP`, the M103
+    /// dynamic-lookup shape — dyld looks the name up at runtime against
+    /// whatever images the process loaded); a strong reference refuses
+    /// the link with the fix (dyld cannot bind it at runtime without
+    /// the load command — the resolver's refusal names the hidden
+    /// dylib, the `-undefined dynamic_lookup` face intends the ride and
+    /// never refuses).
+    ///
+    /// The mark composes with `weak`/`lazy` (their command would drop
+    /// either way); the `reexport` obligation outranks the mark and the
+    /// composition refuses (a re-export's trie node names a provider
+    /// dyld must load — dropping its command leaves the obligation
+    /// unbacked). Under `-dead_strip_dylibs` a hidden dylib always
+    /// drops: it carries no command, and dyld's flat lookup cannot
+    /// reach an image the process never loaded.
+    pub hidden: bool,
 }
 
 /// What to do with references no input and no dylib resolves.
@@ -292,6 +320,78 @@ pub struct Def {
     pub common_size: u64,
 }
 
+/// M111 — the read-only-relocations policy (`-read_only_relocs <policy>`):
+/// ld64's policy for relocations in read-only segments ("Enables or
+/// disables the use of relocations in read-only sections", the `ld` man
+/// page) — the W^X contract's other half. A chained fixup or classic
+/// opcode whose target segment's initial mapping lacks `VM_PROT_WRITE`
+/// (the target's `initprot`, from `-segprot` or the house defaults) is
+/// the write dyld cannot perform at load time:
+/// * `error` (the peregrine default) refuses the link — the M17 segprot
+///   gate's W^X contract, the fix names the segment;
+/// * `warning` prints the advisory face (the reloc rides — dyld will
+///   fail the bind at load time) and still exits 0;
+/// * `suppress` rides silently.
+///
+/// The decision touches Pass 3's fixup planning (the target segment's
+///
+/// protections are checked after the plan converges) and Pass 4's emit
+///
+/// (the reloc applies when the policy allows it). The policy is the
+///
+/// exit's and the refusal's — `warning` and `suppress` plan the
+///
+/// identical image (byte-for-byte), so a policy flip between the two
+///
+/// never rewrites bytes; the `error` face refuses before any image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadOnlyRelocsPolicy {
+    /// `-read_only_relocs error` (the default): the write dyld cannot
+    /// perform refuses the link.
+    #[default]
+    Error,
+    /// `-read_only_relocs warning`: the advisory face prints, the
+    /// reloc rides, the link exits 0.
+    Warning,
+    /// `-read_only_relocs suppress`: the reloc rides silently.
+    Suppress,
+}
+
+impl ReadOnlyRelocsPolicy {
+    /// The wire byte (the v62 alphabet; an unknown byte is a malformed
+    /// frame — the M103 reversed-admits shape).
+    #[must_use]
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::Error => 0,
+            Self::Warning => 1,
+            Self::Suppress => 2,
+        }
+    }
+
+    /// The wire byte's face (`None` off the alphabet — the decoder
+    /// refuses, never silently defaults).
+    #[must_use]
+    pub const fn from_wire(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Error),
+            1 => Some(Self::Warning),
+            2 => Some(Self::Suppress),
+            _ => None,
+        }
+    }
+
+    /// The `ld`-man-page spelling the surface errors name.
+    #[must_use]
+    pub const fn flag_word(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Suppress => "suppress",
+        }
+    }
+}
+
 /// The global resolution state (Pass 2 output).
 #[derive(Debug, Default)]
 pub struct Resolution {
@@ -345,6 +445,17 @@ pub struct Resolution {
     /// product is the refusal at the install site) and `DynamicLookup`
     /// intends the ride (nothing to report).
     multiply_defined_open: std::collections::BTreeSet<String>,
+    /// M110: the exports the **hidden** dylibs carry (`-hidden_library`
+    /// family) — interned name → the hidden dylib's index in
+    /// [`Self::dylibs`], for the diagnostics that name the provider.
+    /// The two-level map deliberately excludes them: a hidden dylib has
+    /// no load command, so no ordinal exists to bind with — a reference
+    /// resolved against one of these names rides the flat-lookup slot
+    /// when it is weak and refuses when it is strong (the
+    /// [`Self::require_all_resolved`] walk decides; the M103 shape).
+    /// Cleared by [`Self::dead_strip_dylibs`] (a hidden dylib carries
+    /// no command — the drop leaves nothing for the map to name).
+    hidden_exports: BTreeMap<u32, u16>,
 }
 
 impl Resolution {
@@ -601,11 +712,39 @@ impl Resolution {
     /// `export_ids` are the interned ids of the flattened export names, in
     /// `(dylib index, export index)` order — [`crate::link()`] appends them to
     /// the interner batch after the object symbol names.
+    ///
+    /// M110: a **hidden** dylib (the `-hidden_library` family) installs
+    /// its exports into `hidden_exports` instead — the
+    /// two-level ordinal space does not name it (no load command, no
+    /// ordinal; the import table cannot name it either). Its exports
+    /// still enter the arena so [`Self::require_all_resolved`] can tell
+    /// a hidden-provider ride (weak → the flat-lookup slot, the M103
+    /// shape) from an unresolvable name, and refuse the strong bind
+    /// with the provider named. The visible ordinals stay contiguous
+    /// onto the header's emitted load-command list (a hidden dylib
+    /// occupies a list slot but no command slot — the ordinals count
+    /// non-hidden dylibs only, the compaction in
+    /// [`Self::dead_strip_dylibs`] keeps the same rule).
     pub fn install_dylibs(&mut self, dylibs: &[Dylib], export_ids: &[StringId]) {
         self.dylibs = dylibs.to_vec();
+        self.hidden_exports.clear();
         let mut cursor = 0usize;
-        for (ord, dylib) in dylibs.iter().enumerate() {
-            let ordinal = (ord + 1) as u16;
+        let mut visible = 0u16;
+        for (idx, dylib) in dylibs.iter().enumerate() {
+            if dylib.hidden {
+                // M110: the two-level map never names a hidden dylib —
+                // its exports ride the hidden map (the diagnostics'
+                // provider lookup), the ordinals skip the slot.
+                for _ in &dylib.exports {
+                    if let Some(id) = export_ids.get(cursor) {
+                        self.hidden_exports.insert(id.0, idx as u16);
+                    }
+                    cursor += 1;
+                }
+                continue;
+            }
+            visible += 1;
+            let ordinal = visible;
             for _ in &dylib.exports {
                 if let Some(id) = export_ids.get(cursor) {
                     // First dylib in command order wins (two-level lookup
@@ -654,12 +793,27 @@ impl Resolution {
         // The kept list rides in command order; re-exports are identity
         // obligations (the trie contract cannot survive their drop) and
         // the needed marks are the per-dylib survival opt-out (M106).
+        // M110: the ordinals count **non-hidden** kept dylibs only — a
+        // hidden dylib occupies no command slot (the header assembly
+        // drops its command), so the compacted two-level map must name
+        // the emitted `LC_LOAD_DYLIB` list, not the list's slot indices
+        // (a hidden survivor between two visible ones would otherwise
+        // shift every later ordinal onto a command that does not
+        // exist).
         let mut kept: Vec<Dylib> = Vec::new();
         let mut remap: Vec<Option<u16>> = Vec::with_capacity(self.dylibs.len());
+        let mut visible_kept = 0u16;
         for (i, dylib) in self.dylibs.iter().enumerate() {
             if dylib.reexport || dylib.needed || used[i] {
                 kept.push(dylib.clone());
-                remap.push(Some(kept.len() as u16));
+                if dylib.hidden {
+                    // The two-level map never names a hidden dylib (no
+                    // ordinal was assigned); the slot stays unnamed.
+                    remap.push(None);
+                } else {
+                    visible_kept += 1;
+                    remap.push(Some(visible_kept));
+                }
             } else {
                 remap.push(None);
             }
@@ -679,6 +833,12 @@ impl Resolution {
         }
         self.dylib_exports = compacted;
         self.dylibs.clone_from(&kept);
+        // M110: the hidden providers are gone with the drop (a hidden
+        // dylib carries no command, and dyld's flat lookup cannot reach
+        // an image the process never loaded) — the map names nothing
+        // anymore. Every reference it served rode `dynamic_lookups`
+        // above; that set is the surviving shape.
+        self.hidden_exports.clear();
         kept
     }
 
@@ -904,6 +1064,11 @@ impl Resolution {
         // weak reference (kept beside `missing` so the aggregate error
         // names the lane, not just the symbols).
         let mut weak_imports: Vec<String> = Vec::new();
+        // M110: the hidden-dylib refusals — the strong references whose
+        // only provider is a hidden dylib (no load command exists for
+        // dyld to bind through). Kept beside `missing`/`weak_imports`
+        // so the aggregate error names its own lane.
+        let mut hidden_strong: Vec<String> = Vec::new();
         // M39: the marked names' *relocation* references. A well-formed
         // object references an external name through an undefined symtab
         // row — the symtab walk below. A marked name's reference is
@@ -925,6 +1090,48 @@ impl Resolution {
                         || self.dylib_exports.contains_key(&id.0)
                         || self.loader_exports.contains(&id.0)
                     {
+                        continue;
+                    }
+                    // M110: the relocation's only provider is a hidden
+                    // dylib (the `-U` wording below never applies — the
+                    // name resolves against a provider, just one no
+                    // load command names). A relocation site is a
+                    // strong reference (the relocations carry no weak
+                    // bit): the default policy refuses with the fix,
+                    // the non-escalating faces intend the flat ride
+                    // (the M103 record shapes — the ride is the same
+                    // slot the policy always encodes).
+                    if self.hidden_exports.contains_key(&id.0) {
+                        match policy {
+                            UndefinedPolicy::DynamicLookup => {
+                                self.dynamic_lookups.insert(id.0);
+                            }
+                            UndefinedPolicy::Warning | UndefinedPolicy::Suppress => {
+                                self.dynamic_lookups.insert(id.0);
+                                self.unresolved_open.insert(format!(
+                                    "\"{}\" (referenced from {} through a relocation) — \
+                                     -U marks it undefined",
+                                    interner.name(id),
+                                    obj.name
+                                ));
+                            }
+                            UndefinedPolicy::Error => {
+                                let provider = self
+                                    .hidden_exports
+                                    .get(&id.0)
+                                    .and_then(|&idx| self.dylibs.get(idx as usize))
+                                    .map_or("unknown", |d| d.install_name.as_str());
+                                missing.push(format!(
+                                    "\"{}\" (referenced from {} through a relocation) — the \
+                                     only provider is the hidden dylib {provider}; dyld cannot \
+                                     bind a strong reference without the load command \
+                                     -hidden_library drops — load it with -l (or \
+                                     -weak_library) or drop the -hidden_library decision",
+                                    interner.name(id),
+                                    obj.name
+                                ));
+                            }
+                        }
                         continue;
                     }
                     match policy {
@@ -1000,6 +1207,57 @@ impl Resolution {
                 ));
                 continue;
             }
+            // M110: the hidden-dylib seam — the name's only provider is
+            // a hidden dylib (`-hidden_library` family): no load
+            // command, no two-level ordinal, no import-table name. A
+            // weak reference rides the flat-lookup slot (the M103
+            // shape — dyld looks the name up at runtime against
+            // whatever images the process loaded; the `-no_weak_imports`
+            // refusal above already priced the same ride). A strong
+            // reference refuses under the default policy (dyld cannot
+            // bind it without the load command — the fix names the
+            // surface), while the non-escalating `-undefined` faces
+            // intend the ride (the M103 record shapes carry the entry).
+            if self.hidden_exports.contains_key(key) {
+                if is_weak_ref {
+                    self.dynamic_lookups.insert(*key);
+                    continue;
+                }
+                match policy {
+                    UndefinedPolicy::DynamicLookup => {
+                        self.dynamic_lookups.insert(*key);
+                    }
+                    UndefinedPolicy::Warning | UndefinedPolicy::Suppress => {
+                        self.dynamic_lookups.insert(*key);
+                        let file_name = objects
+                            .get(file.0 as usize)
+                            .map_or_else(|| format!("input {}", file.0), |o| o.name.clone());
+                        self.unresolved_open.insert(format!(
+                            "\"{}\" (referenced from {file_name})",
+                            interner.name(crate::ids::StringId(*key))
+                        ));
+                    }
+                    UndefinedPolicy::Error => {
+                        let file_name = objects
+                            .get(file.0 as usize)
+                            .map_or_else(|| format!("input {}", file.0), |o| o.name.clone());
+                        let provider = self
+                            .hidden_exports
+                            .get(key)
+                            .and_then(|&idx| self.dylibs.get(idx as usize))
+                            .map_or("unknown", |d| d.install_name.as_str());
+                        hidden_strong.push(format!(
+                            "\"{}\" (referenced from {file_name}) — the only provider is \
+                             the hidden dylib {provider}; dyld cannot bind a strong \
+                             reference without the load command -hidden_library drops — \
+                             load it with -l (or -weak_library) or drop the \
+                             -hidden_library decision",
+                            interner.name(crate::ids::StringId(*key))
+                        ));
+                    }
+                }
+                continue;
+            }
             match policy {
                 UndefinedPolicy::DynamicLookup => {
                     self.dynamic_lookups.insert(*key);
@@ -1061,6 +1319,15 @@ impl Resolution {
                 message: format!(
                     "weak import(s) not supported under -no_weak_imports: {}",
                     weak_imports.join(", ")
+                ),
+            });
+        }
+        if !hidden_strong.is_empty() {
+            return Err(LinkError::Symbol {
+                name: String::new(),
+                message: format!(
+                    "hidden dylib reference(s) dyld cannot bind: {}",
+                    hidden_strong.join(", ")
                 ),
             });
         }
