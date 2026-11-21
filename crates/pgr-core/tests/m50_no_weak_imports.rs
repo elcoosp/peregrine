@@ -165,6 +165,7 @@ fn the_weak_dylib_export_never_refuses() {
         exports: vec![b"_maybe".to_vec()],
         weak: true,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     }];
