@@ -66,6 +66,7 @@ fn dylibs(kind: &str) -> Vec<Dylib> {
             weak: kind == "weak",
             reexport: false,
             needed: false,
+            hidden: false,
             lazy: kind == "lazy",
             upward: false,
         })
