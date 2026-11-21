@@ -86,6 +86,59 @@ fn copy_and_patch(
             }
         }
     }
+    // M118: under `-dtrace`, every `__dtrace_dof` (`S_DTRACE_DOF`)
+    // section's assembled `DOF` header is validated before the section
+    // links into the output (the producer-side gate the verifier
+    // backstops read-side; the fused tile path pays the same gate so the
+    // driver and daemon serve it regardless of which path ran — the M4
+    // byte-identity contract).
+    validate_dtrace_dof_sections(buf, layout)?;
+    Ok(())
+}
+
+/// M118: under `-dtrace`, validates every `__dtrace_dof` (`S_DTRACE_DOF`)
+/// section's assembled `DOF` header in the output buffer — the
+/// identification magic and the bounds the `DTrace` consumer's first walk
+/// gates on (the producer-side gate the verifier backstops read-side,
+/// the M115 shape one section type over). The off face carries the
+/// bytes verbatim (the read-side backstop still gates either way).
+/// Shared by [`copy_and_patch`] (the reference path) and the fused tile
+/// emit (`pgr_emit::tile::emit_fused`) so the gate fires regardless of
+/// which path the driver or daemon serves.
+pub(crate) fn validate_dtrace_dof_sections(buf: &[u8], layout: &Layout) -> Result<(), EmitError> {
+    if !layout.dtrace {
+        return Ok(());
+    }
+    for sect in &layout.sections {
+        if sect.zerofill || sect.size == 0 {
+            continue;
+        }
+        if !pgr_format::is_dtrace_dof_section(sect.flags) {
+            continue;
+        }
+        let start = sect.file_off as usize;
+        let end = start
+            .checked_add(sect.size as usize)
+            .ok_or(EmitError::Internal {
+                message: format!("section {} size overflows the output", sect.name),
+            })?;
+        let sect_bytes = buf.get(start..end).ok_or(EmitError::Contract {
+            message: format!(
+                "section {} at {start:#x} (size {}) leaves the output buffer",
+                sect.name, sect.size
+            ),
+        })?;
+        if let Err(what) = pgr_format::validate_dof_header(sect_bytes) {
+            return Err(EmitError::Contract {
+                message: format!(
+                    "section {} carries a malformed DOF header — {what} (drop -dtrace \
+                     or supply a __dtrace_dof section whose head carries the DOF \
+                     identification magic and whose size covers the identification region)",
+                    sect.name
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
