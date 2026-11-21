@@ -10,7 +10,7 @@
 //! carries no `LC_UUID` at all). The default (`None`) keeps every
 //! pre-M99 link byte-identical — the derivation stays content-derived.
 
-use pgr_core::layout::{LinkConfig, OutputType};
+use pgr_core::layout::{LinkConfig, OutputType, UuidSource};
 use pgr_core::link::{LinkInput, Parallelism, link, link_reloc};
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
@@ -50,12 +50,12 @@ fn lib_inputs(tag: u8) -> Vec<LinkInput> {
     }]
 }
 
-fn dylib_cfg(uuid: bool, named: Option<[u8; 16]>) -> LinkConfig {
+fn dylib_cfg(uuid_source: UuidSource, named: Option<[u8; 16]>) -> LinkConfig {
     LinkConfig {
         ident: "lib".into(),
         filetype: OutputType::Dylib,
         install_name: Some("@rpath/lib.dylib".into()),
-        uuid,
+        uuid_source,
         named_uuid: named,
         ..LinkConfig::default()
     }
@@ -65,9 +65,13 @@ fn dylib_cfg(uuid: bool, named: Option<[u8; 16]>) -> LinkConfig {
 fn the_default_echoes_no_named_uuid() {
     // Pre-M99 shape: without the knob the decision is the config's own
     // absence — the derivation stays content-derived.
-    let layout = link(&lib_inputs(0xA0), &[], &dylib_cfg(true, None))
-        .expect("the default dylib plans")
-        .layout;
+    let layout = link(
+        &lib_inputs(0xA0),
+        &[],
+        &dylib_cfg(UuidSource::Content, None),
+    )
+    .expect("the default dylib plans")
+    .layout;
     assert!(
         layout.named_uuid.is_none(),
         "the default echoes no named value"
@@ -79,9 +83,13 @@ fn a_named_uuid_rides_the_layout() {
     // The named decision echoes onto the plan the emit two-pass patch
     // reads: the patch writes the named 16 bytes instead of deriving
     // them.
-    let layout = link(&lib_inputs(0xA0), &[], &dylib_cfg(true, Some(NAMED)))
-        .expect("the named dylib plans")
-        .layout;
+    let layout = link(
+        &lib_inputs(0xA0),
+        &[],
+        &dylib_cfg(UuidSource::Content, Some(NAMED)),
+    )
+    .expect("the named dylib plans")
+    .layout;
     assert_eq!(
         layout.named_uuid,
         Some(NAMED),
@@ -94,7 +102,7 @@ fn a_named_uuid_refuses_beside_the_uuid_suppression() {
     // M32's suppression and M99's name are two answers to one question
     // — a link asking both refuses naming both flags (the layout's
     // re-check backs the driver surface's refusal).
-    let cfg = dylib_cfg(false, Some(NAMED));
+    let cfg = dylib_cfg(UuidSource::None, Some(NAMED));
     let err =
         link(&lib_inputs(0xA0), &[], &cfg).expect_err("the suppressed-plus-named config refuses");
     let message = err.to_string();
