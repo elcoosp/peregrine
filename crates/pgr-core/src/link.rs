@@ -311,7 +311,11 @@ pub fn link_from_objects_observed(
             &loader_export_names,
         ) {
             Ok(plan) => {
-                match crate::resolve_reuse::install_reused(
+                // M113: the reference-trace face rides the replay too —
+                // the replay's reference re-walk reports the same visits
+                // the full path does (the trace is the run's own Pass-2
+                // record, the M107/M108 config pattern).
+                let replay = crate::resolve_reuse::install_reused(
                     &plan,
                     &seed.snapshot,
                     &interner,
@@ -322,7 +326,9 @@ pub fn link_from_objects_observed(
                     cfg.undefined_policy,
                     cfg.no_weak_imports,
                     cfg.multiply_defined,
-                ) {
+                    &mut observer,
+                );
+                match replay {
                     Ok(res) => Some(res),
                     // The shape guard passed but the replay refused an
                     // invariant — a distinct cause from a shape move, and
@@ -367,7 +373,7 @@ pub fn link_from_objects_observed(
     } else {
         let mut full = Resolution::default();
         full.install_make_undefined(&make_undefined_ids, &objects, &interner)?;
-        full.install(&objects, &interner, cfg.multiply_defined)?;
+        full.install(&objects, &interner, cfg.multiply_defined, &mut observer)?;
         full.install_dylibs(&cfg.dylibs, &export_ids);
         full.install_loader_exports(&loader_ids);
         full.require_all_resolved(
@@ -824,6 +830,36 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M112: the link-statistics report is a final-image decision — the
+    // relocatable output has no full-emit layout or fixup planning to
+    // report in the same way (its sections are the input's, verbatim;
+    // the object walk plans no segments, no fixup slots and emits no
+    // image the report's counts name). The re-check backs the driver
+    // surface's earlier refusal: no library caller can plan the shape
+    // either (the M104/M105 pattern).
+    if cfg.print_statistics {
+        return Err(LinkError::Layout {
+            message: "-print_statistics reports the link's statistics, but the relocatable \
+                      output has no full-emit layout or fixup planning to report in the \
+                      same way — drop -print_statistics or link an image (an executable, \
+                      dylib or bundle)"
+                .into(),
+        });
+    }
+    // M113: the reference trace is a resolve-shaping decision — the
+    // relocatable output's symtab is the input's, verbatim (its symbol
+    // table rides the inputs untouched; there is no Pass-2 trace to
+    // report). The re-check backs the driver surface's earlier refusal:
+    // no library caller can plan the shape either (the
+    // M104/M105/M112 pattern).
+    if cfg.trace_refs {
+        return Err(LinkError::Layout {
+            message: "-t traces the symbols Pass 2's resolve references, but the \
+                      relocatable output's symtab is the input's, verbatim — nothing to \
+                      trace: drop -t or link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
     // M28: the section-alignment floors are a packing-engine decision —
     // the relocatable output plans no segments and carries its input
     // sections verbatim, so a named floor has nothing to land on. The
@@ -1040,7 +1076,10 @@ fn link_reloc_inner(
         pull_and_intern(objects, archives, cfg, parallel, None, false, &mut observer)?;
     let resolve_started = Instant::now();
     let mut res = Resolution::default();
-    res.install(&objects, &interner, cfg.multiply_defined)?;
+    // M113: the relocatable walk never carries the trace face — the knob
+    // is refused above (the object's symtab is the input's, verbatim);
+    // the slot rides `None` by construction here.
+    res.install(&objects, &interner, cfg.multiply_defined, &mut None)?;
     // M108: the default policy's walk product (the non-default faces the
     // re-check above refused) — the record faces derive nothing under
     // `error`; the call keeps the relocatable path's contract symmetric
