@@ -69,6 +69,24 @@ pub fn derive_uuid(zeroed_hashes: &[u8]) -> [u8; 16] {
     out
 }
 
+/// Draws the random UUID (M114, the `-random_uuid` face): 16 bytes from
+/// the system CSPRNG with the RFC 4122 version (4) and variant
+/// (`10xx`) bits set — a whole `UUIDv4` identity, fresh per emit. The
+/// identity is never deterministic (that is the decision's own
+/// contract; the reproducible face is the content derivation above).
+///
+/// # Errors
+/// [`getrandom::Error`] when the system entropy source fails (the
+/// caller maps it onto its own typed error — the emit's
+/// [`EmitError::Internal`], the patch's `PatchError::Contract`).
+pub fn random_uuid() -> Result<[u8; 16], getrandom::Error> {
+    let mut out = [0u8; 16];
+    getrandom::fill(&mut out)?;
+    out[6] = (out[6] & 0x0f) | 0x40;
+    out[8] = (out[8] & 0x3f) | 0x80;
+    Ok(out)
+}
+
 /// Builds the ad-hoc `SuperBlob` covering `code_limit` bytes with `hashes`
 /// (concatenated 32-byte page hashes).
 ///
