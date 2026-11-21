@@ -551,3 +551,11 @@ harness = false
 [[bench]]
 name = "strip_debug"
 harness = false
+
+# The M108 multiply-defined bench: the link across the -multiply_defined
+# faces (the refusing default beside the three named faces) over the same
+# 64-object corpus with every name defined twice — a shape-parity gate,
+# the decision is one tie-check plus one derive walk over the winners.
+[[bench]]
+name = "multiply_defined"
+harness = false
