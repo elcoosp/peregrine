@@ -1012,3 +1012,11 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
 ### M107 — the commons resolution policy
 
 - `commons_policy` (`cargo bench -p pgr-core --bench commons_policy`): the link across the four `-commons` faces over the 64-object corpus (a tentative each, a dylib exporting every colliding name). Shape-parity gate: the decision is one Pass-2 walk over the common winners. Recorded on the dev sandbox (bounded `--measurement-time 1`): the four faces land within noise of each other (the default face the reference).
+
+### M108 — the multiply-defined resolution policy
+
+- `multiply_defined` (`cargo bench -p pgr-core --bench multiply_defined`): the link across the four `-multiply_defined` faces over the 64-object corpus (every name defined by exactly two objects). Shape-parity gate: the decision is one tie-check at the install site plus one derive walk over the winners. Recorded on the dev sandbox (bounded `--measurement-time 1`): the four faces land within noise of each other (the default face the reference — it prices the walk to the refusal).
+
+### M109 — the warnings-as-errors exit policy
+
+- `fatal_warnings` (`cargo bench -p pgr-driver --bench fatal_warnings`): the driver run across the exit faces (the advisory default beside the `-fatal_warnings` escalation) over the same warning-producing 32-object corpus. Shape-parity gate: the tally is a counter the faces increment as they print; the escalation never regresses the link. Recorded on the dev sandbox (bounded `--measurement-time 1`): the two faces land within noise of each other (the advisory face the reference).
