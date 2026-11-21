@@ -1048,17 +1048,38 @@ fn link_reloc_inner(
                 .into(),
         });
     }
-    // M99: the named output UUID's relocatable refusal — the object
-    // carries no `LC_UUID` command at all (the M32 shape), so a named
-    // value has no field to land on. The re-check backs the driver
-    // surface's earlier refusal: no library caller can plan the shape
-    // either. (The `-no_uuid` pair refusal is the layout's — the
-    // relocatable output never reaches a uuid field to patch.)
+    // M99/M114: the named output UUID's and the random source's
+    // relocatable refusals — the object carries no `LC_UUID` command at
+    // all (the M32 shape), so a named value and a random draw have no
+    // field to land on. The re-check backs the driver surface's earlier
+    // refusals: no library caller can plan the shape either. (The
+    // `-no_uuid` pair refusal is the layout's — the relocatable output
+    // never reaches a uuid field to patch.)
     if cfg.named_uuid.is_some() {
         return Err(LinkError::Layout {
             message: "-uuid names the output's LC_UUID identity, but the relocatable \
                       output carries no LC_UUID command at all — drop -uuid or link an \
                       executable/dylib/bundle"
+                .into(),
+        });
+    }
+    if cfg.uuid_source == crate::layout::UuidSource::Random {
+        return Err(LinkError::Layout {
+            message: "-random_uuid generates the output's LC_UUID identity, but the \
+                      relocatable output carries no LC_UUID command at all — drop \
+                      -random_uuid or link an executable/dylib/bundle"
+                .into(),
+        });
+    }
+    // M115: the category-merge disable's relocatable refusal — the
+    // object's sections are the input's, verbatim (the re-check backs
+    // the driver surface so no library caller plans the shape either).
+    if !cfg.objc_category_merging {
+        return Err(LinkError::Layout {
+            message: "-no_objc_category_merging keeps every category's registration \
+                      verbatim, but the relocatable output's sections are the input's, \
+                      verbatim already — drop -no_objc_category_merging or link an \
+                      image (an executable, dylib or bundle)"
                 .into(),
         });
     }
