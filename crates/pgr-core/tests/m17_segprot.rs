@@ -300,6 +300,13 @@ fn non_executable_kinds_take_the_knob() {
             install_name: Some("@rpath/libgreet.dylib".into()),
             ..LinkConfig::default()
         };
+        // M111's default `error` face prices the converged fixup plan's
+        // own slots: this shape's rebase sites land in __DATA under a
+        // non-writable initprot — the refusal the W^X contract plans.
+        // The segprot pair is this test's subject, so the advisory face
+        // names itself off (the pair still rides; the policy is the
+        // exit's, never the bytes').
+        cfg.read_only_relocs = pgr_core::resolve::ReadOnlyRelocsPolicy::Suppress;
         cfg.seg_prots
             .insert(
                 SegName::Data,
