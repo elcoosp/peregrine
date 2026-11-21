@@ -300,6 +300,22 @@ harness = false
 name = "dead_strip_dylibs"
 harness = false
 
+# The M106 needed-dylib bench: the link across the needed mark under
+# -dead_strip_dylibs (the unmarked drop, the needed survival) over the
+# same 64-object corpus with one bind each — a shape-parity gate, the
+# mark is one bool in the survival check.
+[[bench]]
+name = "needed_dylibs"
+harness = false
+
+# The M107 commons-policy bench: the link across the -commons faces
+# (the default beside the three named faces) over the same 64-object
+# corpus with a tentative and a colliding dylib each — a shape-parity
+# gate, the decision is one Pass-2 walk over the common winners.
+[[bench]]
+name = "commons_policy"
+harness = false
+
 # The M43 ObjC-pull bench: the link across the -ObjC decision
 # (reference-driven default, the metadata pull, -all_load) over the
 # same 64-object corpus with a half-ObjC archive — a shape gate, the
