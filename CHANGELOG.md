@@ -5,6 +5,12 @@ All notable changes to Peregrine are documented here. The format is based on
 adopts [Conventional Commits](https://www.conventionalcommits.org/) for
 release automation.
 ## [Unreleased]
+### Added
+
+- **M106** — the needed-dylib mark: `-needed_library <path>`, `-needed_framework <name>` and `-needed-l <name>` (ld64's "needed" loads — the dylib really rides even when no symbol binds against it); the `-dead_strip_dylibs` survival opt-out scoped to the load command, the mark composing with every command kind, the relocatable-output refusal, the resident lane's byte-identical parity, the wire v57 mark byte (round-trip gated), the `needed_dylibs` bench and the `needed_library_link` consumer example.
+- **M107** — the commons resolution policy: `-commons use_dylibs|search_dylibs|use_extern|error` (ld64's common-symbol treatment — the tentative's fate is the policy's decision); the typed `CommonsPolicy` alphabet, the Pass-2 walk riding both resolve paths, the relocatable-output refusal for the non-default policies, the unchanged verifier symtab contract, the wire v58 policy byte (a byte off the alphabet is a malformed frame), the `commons_policy` bench and the four `commons_<policy>_link` consumer examples.
+- The `-weak_library`/`-weak_framework` consumer example (`weak_library_link`) — the flag family's first runnable walkthrough (the weak-load command, `MH_BINDS_TO_WEAK`, the strict verifier).
+
 
 ### Added (M104)
 
