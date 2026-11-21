@@ -27,7 +27,7 @@
 //!   `-no_function_starts` (the whole always-carried family names
 //!   itself off in one link).
 
-use pgr_core::layout::{LinkConfig, OutputType};
+use pgr_core::layout::{LinkConfig, OutputType, UuidSource};
 use pgr_core::link::{LinkInput, LinkResult, Parallelism, link, link_reloc};
 use pgr_core::resolve::Dylib;
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
@@ -173,7 +173,7 @@ fn the_classic_path_suppresses_too() {
 #[test]
 fn the_suppression_composes_with_the_suppression_family() {
     let bare = link_cfg(&suppressed(|cfg| {
-        cfg.uuid = false;
+        cfg.uuid_source = UuidSource::None;
         cfg.function_starts = false;
     }));
     assert!(
