@@ -793,6 +793,7 @@ mod tests {
         };
         Layout {
             ident: "tiny".into(),
+            uuid_source: crate::layout::UuidSource::Content,
             named_uuid: None,
             filetype: 2,
             order_unmatched: Vec::new(),
