@@ -258,6 +258,23 @@ pub const S_INTERPOSING: u32 = 0xd;
 pub const S_16BYTE_LITERALS: u32 = 0xe;
 /// `DTrace` `DOF` section.
 pub const S_DTRACE_DOF: u32 = 0xf;
+/// M118: the `DTrace` `DOF` identification magic — the four leading bytes
+/// of every `__dtrace_dof` section's DOF header (`dofh_id[0..4]`), the
+/// `DTrace` consumer's first validity gate. The bytes spell `DoFD`
+/// (`0x44_6f_46_44`), illumos `<sys/dof.h>`'s `DOF_ID_MAGIC` (the value
+/// the macOS `dtrace` consumer's `dof_hdr` identification region carries);
+/// the byte-array form keeps the check endianness-agnostic (the magic
+/// rides the file as ASCII bytes at the head of the section, never as a
+/// sized integer the host would re-interpret).
+pub const DOF_MAGIC: [u8; 4] = *b"DoFD";
+/// M118: the `DTrace` `DOF` identification region's byte width — illumos
+/// `<sys/dof.h>`'s `DOF_ID_SIZE`: the `dofh_id[16]` array the magic
+/// heads (the trailing 12 bytes carry the version and flags the consumer
+/// reads after the magic). The bounds gate prices against this floor: a
+/// `__dtrace_dof` section smaller than the identification region cannot
+/// carry the magic the consumer gates on (the producer refuses at emit
+/// under `-dtrace`, the verifier reports the truncated section read-side).
+pub const DOF_ID_SIZE: usize = 16;
 /// Lazy dylib symbol pointers.
 pub const S_LAZY_DYLIB_SYMBOL_POINTERS: u32 = 0x10;
 /// Thread-local regular data.
