@@ -750,6 +750,40 @@ pub struct LinkConfig {
     /// contract stays unchanged (common symbols are a dyld-consumed
     /// surface, never a format defect).
     pub commons: crate::resolve::CommonsPolicy,
+    /// M108 — the multiply-defined symbol resolution policy:
+    /// `-multiply_defined <policy>` — ld64's duplicate-symbol treatment
+    /// ("How to handle multiply defined symbols", the `ld` man page) is
+    /// the Pass-2 decision the resolver's install walk reads at the
+    /// collision site (`Resolution::install_sect_def`, private to the pass):
+    /// the default
+    /// ([`MultiplyDefinedPolicy::Error`](crate::resolve::MultiplyDefinedPolicy::Error))
+    /// escalates exactly as it always has (the refusal, the symbol named
+    /// — every pre-knob link byte-identical), `warning` and `suppress`
+    /// keep the first definition (command-line order) and derive the
+    /// collision entries the driver's exit policy surfaces, and
+    /// `dynamic_lookup` leaves the duplicated name unresolved (the
+    /// references ride the flat-lookup slot — the M103 undefined face
+    /// pattern). The non-default policies are final-image decisions —
+    /// the relocatable output's symtab is the input's, verbatim — and
+    /// refuse there (the layout's re-check and `link_reloc` back the
+    /// driver refusal, the M104/M105/M107 pattern); the default never
+    /// refuses.
+    pub multiply_defined: crate::resolve::MultiplyDefinedPolicy,
+    /// M109 — the warnings-as-errors exit policy: `-fatal_warnings` /
+    /// `-no_fatal_warnings` — ld64's flag ("Make warnings into errors",
+    /// the `ld` man page) is the driver's exit decision the config
+    /// carries so every lane (the cold link, the resident session, the
+    /// ladder's replay) plans the same exit shape. The bytes never
+    /// move — the policy is the exit's, not the image's: the default
+    /// (`false`) keeps every pre-knob link byte-identical (warnings
+    /// print, the link exits 0), the escalation turns any advisory
+    /// face's product into a hard failure. The relocatable output
+    /// refuses the knob (the object's shape is the input's, verbatim —
+    /// every advisory face that would warn beside `-r` is already
+    /// refused there, the M104/M105/M107/M108 pattern — so there is
+    /// nothing left to elevate; the layout's re-check and `link_reloc`
+    /// back the driver refusal).
+    pub fatal_warnings: bool,
     /// M52 — the dead-strip init/term roots: `-no_dead_strip_inits_and_terms`
     /// — ld64's flag ("The linker never dead strips initialization and
     /// termination routines") is the Pass-2 decision the dead-strip root
@@ -850,6 +884,8 @@ impl Default for LinkConfig {
             keep_local_symbols: true,
             strip_debug: false,
             commons: crate::resolve::CommonsPolicy::default(),
+            multiply_defined: crate::resolve::MultiplyDefinedPolicy::default(),
+            fatal_warnings: false,
             no_dead_strip_inits_and_terms: false,
             renames: crate::rename::SectionRenames::default(),
             cstring_order: None,
@@ -2259,6 +2295,45 @@ pub fn layout(
                  or bundle)",
                 cfg.commons.flag_word()
             ),
+        });
+    }
+    // M108: the non-default multiply-defined policies are final-image
+    // decisions — the relocatable output's symtab is the input's,
+    // verbatim (an object carries its inputs' symbol tables untouched;
+    // there is no winner to decide about). The default never refuses
+    // (the install site's escalation is the pre-M108 shape). The
+    // refusal rides here (not only on the driver surface) so every
+    // caller pays it: a silently inert policy would claim a decided
+    // shape the object cannot carry (the M104/M105/M107 pattern).
+    if cfg.multiply_defined != crate::resolve::MultiplyDefinedPolicy::Error
+        && cfg.filetype == OutputType::Relocatable
+    {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-multiply_defined {} decides which definition wins a duplicated name, but \
+                 the relocatable output's symtab is the input's, verbatim — nothing to \
+                 decide: drop -multiply_defined or link an image (an executable, dylib or \
+                 bundle)",
+                cfg.multiply_defined.flag_word()
+            ),
+        });
+    }
+    // M109: the warnings-as-errors exit decision is a final-image
+    // decision — the relocatable output's shape is the input's,
+    // verbatim, and every advisory face that would warn beside `-r` is
+    // already refused there (the M103/M108 `-r` refusals), so there is
+    // nothing left to elevate. The default never refuses (the
+    // pre-M109 shape). The refusal rides here (not only on the driver
+    // surface) so every caller pays it (the M104/M105/M107/M108
+    // pattern).
+    if cfg.fatal_warnings && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-fatal_warnings elevates the advisory faces' warnings to a failed \
+                      link, but the relocatable output's shape is the input's, verbatim \
+                      and every advisory face is already refused beside -r — nothing to \
+                      elevate: drop -fatal_warnings or link an image (an executable, \
+                      dylib or bundle)"
+                .into(),
         });
     }
     // M40: the export-trie suppression is an executable decision — a
