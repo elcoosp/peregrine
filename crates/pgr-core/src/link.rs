@@ -321,6 +321,7 @@ pub fn link_from_objects_observed(
                     &make_undefined_ids,
                     cfg.undefined_policy,
                     cfg.no_weak_imports,
+                    cfg.multiply_defined,
                 ) {
                     Ok(res) => Some(res),
                     // The shape guard passed but the replay refused an
@@ -366,7 +367,7 @@ pub fn link_from_objects_observed(
     } else {
         let mut full = Resolution::default();
         full.install_make_undefined(&make_undefined_ids, &objects, &interner)?;
-        full.install(&objects)?;
+        full.install(&objects, &interner, cfg.multiply_defined)?;
         full.install_dylibs(&cfg.dylibs, &export_ids);
         full.install_loader_exports(&loader_ids);
         full.require_all_resolved(
@@ -383,6 +384,14 @@ pub fn link_from_objects_observed(
         PhaseDetail::Winners { reused: replayed },
         resolve_started.elapsed(),
     );
+    // M108: the multiply-defined resolution policy (`-multiply_defined
+    // <policy>`) — the collision's advisory product rides both resolve
+    // paths (the full install and the reuse replay — the policy is
+    // config, not a lane product, the M107 pattern): the decision
+    // landed at the install site, this walk derives the record faces'
+    // entries from the resolved state (the replay's copied winners and
+    // the fresh parse reach the same entries the cold walk derives).
+    res.apply_multiply_defined_policy(cfg.multiply_defined, &interner, &objects)?;
     // M107: the commons resolution policy (`-commons <policy>`) — the
     // tentative's fate is the policy's decision. The walk rides both
     // resolve paths (the full install and the reuse replay — the policy
@@ -733,6 +742,41 @@ fn link_reloc_inner(
             ),
         });
     }
+    // M108: the non-default multiply-defined policies are a
+    // segmented-output decision — the relocatable output's symtab is the
+    // input's, verbatim (an object carries its inputs' symbol tables
+    // untouched; there is no winner to decide about). The re-check backs
+    // the driver surface's earlier refusal: no library caller can plan
+    // the shape either (the M104/M105/M107 pattern).
+    if cfg.multiply_defined != crate::resolve::MultiplyDefinedPolicy::Error {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-multiply_defined {} decides which definition wins a duplicated name, \
+                 but the relocatable output's symtab is the input's, verbatim — nothing \
+                 to decide: drop -multiply_defined or link an image (an executable, dylib \
+                 or bundle)",
+                cfg.multiply_defined.flag_word()
+            ),
+        });
+    }
+    // M109: the warnings-as-errors exit decision is a segmented-output
+    // decision — the relocatable output's shape is the input's, verbatim,
+    // and every advisory face that would warn beside `-r` is already
+    // refused there (the M103/M108 `-r` refusals: an object has no
+    // load-time bind to warn about, no winner to decide about), so there
+    // is nothing left to elevate. The re-check backs the driver
+    // surface's earlier refusal: no library caller can plan the shape
+    // either.
+    if cfg.fatal_warnings {
+        return Err(LinkError::Layout {
+            message: "-fatal_warnings elevates the advisory faces' warnings to a failed \
+                      link, but the relocatable output's shape is the input's, verbatim \
+                      and every advisory face is already refused beside -r — nothing to \
+                      elevate: drop -fatal_warnings or link an image (an executable, \
+                      dylib or bundle)"
+                .into(),
+        });
+    }
     // M106: the needed-dylib mark is a segmented-output decision — the
     // mark keeps a dylib's load command alive under the drop, and the
     // relocatable output carries no load commands (its symtab is the
@@ -964,7 +1008,13 @@ fn link_reloc_inner(
         pull_and_intern(objects, archives, cfg, parallel, None, false, &mut observer)?;
     let resolve_started = Instant::now();
     let mut res = Resolution::default();
-    res.install(&objects)?;
+    res.install(&objects, &interner, cfg.multiply_defined)?;
+    // M108: the default policy's walk product (the non-default faces the
+    // re-check above refused) — the record faces derive nothing under
+    // `error`; the call keeps the relocatable path's contract symmetric
+    // with the image path's (the install site's escalation is the
+    // product, the walk is the record faces' advisory).
+    res.apply_multiply_defined_policy(cfg.multiply_defined, &interner, &objects)?;
     emit_phase(
         &mut observer,
         Phase::Resolve,
