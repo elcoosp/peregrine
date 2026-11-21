@@ -346,8 +346,25 @@ use std::time::Duration;
 /// tail carries the [`pgr_core::observe::ReferenceEvent`]s verbatim (the
 /// facts the client renders through the cold lane's face — the M62
 /// convention; the trace rides the ladder's replay too, the run's own
-/// Pass-2 record).
-pub const PROTO_VERSION: u32 = 64;
+/// Pass-2 record). **v65** names the M114 round: the UUID source
+/// (`-random_uuid` — the typed `UuidSource` alphabet) widens the v23
+/// suppression slot to one byte off the three-value alphabet
+/// (`content`/`random`/`none`); a byte the reader refuses is a
+/// malformed frame (the M107 reversed-admits shape, the M82 `admits`
+/// pattern's wire face) — the session's warm pipeline plans the same
+/// identity shape the cold link plans (the parity gate is
+/// byte-identical; the `random` face's identity is the emit's own
+/// per-emit draw), and the ladder's replay rides the decision (the
+/// record's v9 source byte, the M81 pattern — the decision is config,
+/// not a product).
+/// the record's v9 source byte, the M81 pattern — the decision is
+/// config, not a product). **v66** names the M115 round: the `ObjC`
+/// category-merging disable (`-no_objc_category_merging`) rides the
+/// tail after the UUID-source byte — one byte; the session's warm
+/// pipeline plans the same registration shape the cold link plans (the
+/// parity gate is byte-identical; the merge is Pass 3's own decision,
+/// the replay re-plans the shape the config names).
+pub const PROTO_VERSION: u32 = 66;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1898,11 +1915,20 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // carries the linkedit-metadata decision the client asked for,
     // never the pre-M31 always-carried default.
     put_u8(out, u8::from(!cfg.function_starts));
-    // M32 (v23 wire): the UUID suppression rides the tail after the
-    // function-starts suppression — one byte; a resident relink
-    // carries the derived-UUID decision the client asked for, never
-    // the pre-M32 always-carried default.
-    put_u8(out, u8::from(!cfg.uuid));
+    // M32/M114 (v23→v65 wire): the UUID source rides the tail after the
+    // function-starts suppression — the v23 slot carried the suppression
+    // bool; v65 widens it to one byte off the three-value alphabet
+    // (`content`/`random`/`none`), an unknown byte is a malformed frame
+    // (an old server reading a new client's alphabet refuses the
+    // request, the M107 reversed-admits shape). A resident relink
+    // carries the identity decision the client asked for, never the
+    // pre-M32 always-carried default.
+    put_u8(out, cfg.uuid_source.wire());
+    // M115 (v66 wire): the ObjC category-merging disable rides the tail
+    // after the UUID source byte — one byte (the negation, the v25
+    // suppression shape); a resident relink plans the same registration
+    // shape the client asked for, never the pre-M115 merging default.
+    put_u8(out, u8::from(!cfg.objc_category_merging));
     // M33 (v24 wire): the private-extern keep rides the tail after the
     // UUID suppression — one byte; a resident relink carries the
     // private-extern decision the client asked for, never the pre-M33
@@ -2351,10 +2377,16 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // validation beyond the bool (the verifier validates the payload
     // only when the command is present).
     let no_function_starts = r.u8()? != 0;
-    // M32 (v23 wire): the UUID suppression — one byte, no validation
-    // beyond the bool (the absence is the decision; the carried
+    // M32/M114 (v23→v65 wire): the UUID source — one byte off the
+    // three-value alphabet (the v23 slot carried the suppression bool);
+    // an unknown byte is a malformed frame (the M107 reversed-admits
+    // shape; the absence is the `none` face's decision, the carried
     // payload is opaque).
-    let no_uuid = r.u8()? != 0;
+    let uuid_source = pgr_core::layout::UuidSource::from_wire(r.u8()?).ok_or_else(malformed)?;
+    // M115 (v66 wire): the category-merging disable — one byte, no
+    // validation beyond the bool (the default merges; the disable keeps
+    // the registration verbatim).
+    let no_objc_category_merging = r.u8()? != 0;
     // M33 (v24 wire): the private-extern keep — one byte, no
     // validation beyond the bool (the conversion is the default; the
     // input `N_PEXT` bit names where the decision fires).
@@ -2617,7 +2649,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         header_pad,
         data_in_code: !no_data_in_code,
         function_starts: !no_function_starts,
-        uuid: !no_uuid,
+        uuid_source,
+        objc_category_merging: !no_objc_category_merging,
         keep_private_externs,
         compact_unwind: !no_compact_unwind,
         header_pad_max_install_names: header_pad_max,
@@ -2960,11 +2993,12 @@ mod tests {
             // carries the linkedit-metadata decision the client asked
             // for, never the pre-M31 always-carried default).
             function_starts: false,
-            // The v23 tail: a non-default UUID suppression must survive
-            // the round trip verbatim (a resident relink carries the
-            // derived-UUID decision the client asked for, never the
-            // pre-M32 always-carried default).
-            uuid: false,
+            // The v23 tail (the v65 alphabet): a non-default UUID
+            // source must survive the round trip verbatim (a resident
+            // relink carries the identity decision the client asked
+            // for, never the pre-M32 always-carried content default).
+            uuid_source: pgr_core::layout::UuidSource::None,
+            objc_category_merging: false,
             // The v24 tail: a non-default private-extern keep must
             // survive the round trip verbatim (a resident relink
             // carries the private-extern decision the client asked
@@ -4029,7 +4063,7 @@ mod tests {
         // request tail).
         cfg.data_in_code = true;
         cfg.function_starts = true;
-        cfg.uuid = true;
+        cfg.uuid_source = pgr_core::layout::UuidSource::Content;
         cfg.keep_private_externs = false;
         let body = LinkRequest {
             config: cfg,
@@ -4699,12 +4733,17 @@ mod tests {
 
     #[test]
     fn the_uuid_decision_round_trips() {
-        // v23: a non-default UUID suppression must survive the round
-        // trip verbatim (a resident relink carries the derived-UUID
+        // v23→v65: a non-default UUID source must survive the round
+        // trip verbatim (a resident relink carries the identity
         // decision the client asked for, never the pre-M32
-        // always-carried default).
+        // always-carried content default). The v65 alphabet widened the
+        // v23 suppression slot: rich_config carries the `none` face.
         let cfg = rich_config();
-        assert!(!cfg.uuid, "rich_config carries the v23 knob");
+        assert_eq!(
+            cfg.uuid_source,
+            pgr_core::layout::UuidSource::None,
+            "rich_config carries the v23 knob (the v65 alphabet's none face)"
+        );
         let back = LinkRequest::decode(
             &LinkRequest {
                 config: cfg,
@@ -4728,7 +4767,105 @@ mod tests {
             .encode(),
         )
         .unwrap();
-        assert!(!back.config.uuid, "the suppression crosses byte-for-byte");
+        assert_eq!(
+            back.config.uuid_source,
+            pgr_core::layout::UuidSource::None,
+            "the suppression crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_uuid_source_alphabet_round_trips() {
+        // v65: the whole typed alphabet crosses byte-for-byte — the
+        // `random` face (the M114 draw) and the `content` default (the
+        // pre-M114 shape) decode to the same source the request named.
+        for source in [
+            pgr_core::layout::UuidSource::Content,
+            pgr_core::layout::UuidSource::Random,
+            pgr_core::layout::UuidSource::None,
+        ] {
+            let mut cfg = rich_config();
+            cfg.uuid_source = source;
+            let back = LinkRequest::decode(
+                &LinkRequest {
+                    config: cfg,
+                    force_load: Vec::new(),
+                    inputs: Vec::new(),
+                    archives: Vec::new(),
+                    record: None,
+                    record_resolution: false,
+                    prev_output: None,
+                    audit: false,
+                    tiles: false,
+                    time: false,
+                    trace: false,
+                    verify: false,
+                    verify_checks: None,
+                    why_export: Vec::new(),
+                    why_load: false,
+                    map: false,
+                    why_live: Vec::new(),
+                }
+                .encode(),
+            )
+            .unwrap_or_else(|_| panic!("{source:?} crosses the round trip"));
+            assert_eq!(
+                back.config.uuid_source, source,
+                "the source crosses byte-for-byte ({source:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_uuid_source_byte_is_malformed() {
+        // v65: the alphabet widened the v23 suppression slot — a byte
+        // off the three-value alphabet is a malformed frame (the M107
+        // reversed-admits shape: an old server reading a new client's
+        // alphabet refuses the request). Exactly one byte position
+        // differs between the two encodes (the alphabet byte), the
+        // corruption names it, and the refusal is the malformed shape.
+        let mut rich = rich_config();
+        rich.uuid_source = pgr_core::layout::UuidSource::Random;
+        let mut bare = rich.clone();
+        bare.uuid_source = pgr_core::layout::UuidSource::Content;
+        let encode = |cfg: &LinkConfig| {
+            LinkRequest {
+                config: cfg.clone(),
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode()
+        };
+        let a = encode(&rich);
+        let b = encode(&bare);
+        let diffs: Vec<usize> = a
+            .iter()
+            .zip(b.iter())
+            .enumerate()
+            .filter_map(|(i, (x, y))| (x != y).then_some(i))
+            .collect();
+        assert_eq!(diffs.len(), 1, "exactly the source byte differs: {diffs:?}");
+        let mut corrupt = a.clone();
+        corrupt[diffs[0]] = 0xFF;
+        let err = LinkRequest::decode(&corrupt).expect_err("the unknown byte is malformed");
+        assert!(
+            matches!(err, DecodeError::Malformed(_)),
+            "the refusal is the malformed frame: {err}"
+        );
     }
 
     #[test]
