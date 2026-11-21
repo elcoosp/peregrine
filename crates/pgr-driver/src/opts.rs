@@ -1038,6 +1038,29 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-multiply_defined` policy surface conflict (M108): the
+    /// non-default duplicated-symbol treatment cannot apply where it was
+    /// requested. The verdict names the shape conflict; the help is the
+    /// fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    MultiplyDefinedPolicyConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-fatal_warnings` surface conflict (M109): the exit escalation
+    /// cannot apply where it was requested. The verdict names the shape
+    /// conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    FatalWarningsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -1711,6 +1734,36 @@ fn apply_flag(
                     });
                 }
             };
+        }
+        // M108: the multiply-defined resolution policy — ld64's
+        // `-multiply_defined <policy>` ("How to handle multiply defined
+        // symbols"). The typed alphabet rides the config; the relocatable
+        // conflict is `finish`'s (it sees the whole surface).
+        "-multiply_defined" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.multiply_defined = match v.as_str() {
+                "error" => pgr_core::resolve::MultiplyDefinedPolicy::Error,
+                "warning" => pgr_core::resolve::MultiplyDefinedPolicy::Warning,
+                "suppress" => pgr_core::resolve::MultiplyDefinedPolicy::Suppress,
+                "dynamic_lookup" => pgr_core::resolve::MultiplyDefinedPolicy::DynamicLookup,
+                other => {
+                    return Err(OptsError::InvalidValue {
+                        flag: arg.into(),
+                        value: format!("{other} (error | warning | suppress | dynamic_lookup)"),
+                    });
+                }
+            };
+        }
+        // M109: the warnings-as-errors exit policy — ld64's
+        // `-fatal_warnings` ("Make warnings into errors") and its explicit
+        // mirror. The bool rides the config (the bytes never move — the
+        // policy is the exit's, not the image's); the relocatable conflict
+        // is `finish`'s.
+        "-fatal_warnings" => {
+            opts.config.fatal_warnings = true;
+        }
+        "-no_fatal_warnings" => {
+            opts.config.fatal_warnings = false;
         }
         "-rpath" => {
             let v = next_value(args, i, arg)?;
@@ -3297,6 +3350,50 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             fix: "an object carries its inputs' symbol tables untouched — there is no \
                   tentative to decide about: drop -commons or link an image (an \
                   executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M108: the non-default multiply-defined policies are a final-image
+    // decision — the relocatable output's symtab is the input's, verbatim
+    // (an object carries its inputs' tables untouched — there is no
+    // winner to decide about). The default never refuses (the pre-M108
+    // shape). An explicitly named policy that cannot apply is a refusal,
+    // never a silently dropped one (the library's re-checks back this so
+    // no caller can plan the shape either).
+    if opts.config.multiply_defined != pgr_core::resolve::MultiplyDefinedPolicy::Error
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::MultiplyDefinedPolicyConflict {
+            verdict: format!(
+                "-multiply_defined {} decides which definition wins a duplicated name, \
+                 but the relocatable output's symtab is the input's, verbatim",
+                opts.config.multiply_defined.flag_word()
+            ),
+            fix: "an object carries its inputs' symbol tables untouched — there is no \
+                  winner to decide about: drop -multiply_defined or link an image (an \
+                  executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M109: the warnings-as-errors exit decision is a final-image decision
+    // — the relocatable output's shape is the input's, verbatim, and
+    // every advisory face that would warn beside `-r` is already refused
+    // there (the M103/M108 refusals: an object has no load-time bind to
+    // warn about, no winner to decide about), so there is nothing left to
+    // elevate. The default and its explicit mirror never refuse. An
+    // explicitly named escalation that cannot apply is a refusal, never a
+    // silently dropped one (the library's re-checks back this so no
+    // caller can plan the shape either).
+    if opts.config.fatal_warnings
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::FatalWarningsConflict {
+            verdict: "-fatal_warnings elevates the advisory faces' warnings to a failed \
+                      link, but the relocatable output's shape is the input's, verbatim"
+                .into(),
+            fix: "every advisory face is already refused beside -r — there is nothing \
+                  left to elevate: drop -fatal_warnings or link an image (an executable, \
+                  dylib or bundle)"
                 .into(),
         });
     }
