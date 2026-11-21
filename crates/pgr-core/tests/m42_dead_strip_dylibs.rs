@@ -74,6 +74,7 @@ fn dylib(install_name: &str, exports: &[&str]) -> Dylib {
         upward: false,
         reexport: false,
         needed: false,
+        hidden: false,
     }
 }
 
@@ -81,6 +82,7 @@ fn reexport(install_name: &str, exports: &[&str]) -> Dylib {
     Dylib {
         reexport: true,
         needed: false,
+        hidden: false,
         ..dylib(install_name, exports)
     }
 }
