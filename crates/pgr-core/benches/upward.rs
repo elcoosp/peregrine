@@ -65,6 +65,7 @@ fn dylibs(kind: &str) -> Vec<Dylib> {
                 .collect(),
             weak: false,
             reexport: false,
+            needed: false,
             lazy: false,
             upward: kind == "upward",
         })
