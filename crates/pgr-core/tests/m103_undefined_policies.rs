@@ -197,7 +197,13 @@ fn the_resolve_reuse_replay_rides_the_policy() {
         obj.compute_atoms(true);
     }
     let mut resolution = pgr_core::resolve::Resolution::default();
-    resolution.install(&objects).expect("the names install");
+    resolution
+        .install(
+            &objects,
+            &interner,
+            pgr_core::resolve::MultiplyDefinedPolicy::Error,
+        )
+        .expect("the names install");
     resolution
         .require_all_resolved(&interner, &objects, UndefinedPolicy::Warning, false)
         .expect("the warning face resolves");
