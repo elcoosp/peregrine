@@ -148,6 +148,11 @@ pub struct Options {
     /// needed-dylib mark — the dylib really rides even when no symbol
     /// binds against it (the `-dead_strip_dylibs` survival opt-out).
     pub needed_libs: Vec<String>,
+    /// M110 `-hidden-l <name>` (repeatable, ld64's `-hidden-l<name>`
+    /// attached form accepted too): the `-l` basenames that carry the
+    /// hidden-dylib mark — the dylib's exports resolve but its load
+    /// command drops (the dyld-flat-ride seam).
+    pub hidden_libs: Vec<String>,
     /// `-u <symbol>`: force the symbol to be treated as defined (must
     /// resolve; a plain liveness marker at M2).
     pub force_load: Vec<String>,
@@ -164,6 +169,11 @@ pub struct Options {
     /// binds against it (the `-dead_strip_dylibs` survival opt-out —
     /// ld64's "needed" loads).
     pub needed_library_inputs: Vec<usize>,
+    /// M110 indices into `inputs` loaded hidden (`-hidden_library`):
+    /// the dylib's exports enter the resolve arena but its load
+    /// command drops — a weak reference rides dyld's flat lookup, a
+    /// strong one refuses the link (ld64's "hidden" loads).
+    pub hidden_library_inputs: Vec<usize>,
     /// Indices into `inputs` loaded as `LC_REEXPORT_DYLIB`
     /// (`-reexport_library`, M3).
     pub reexport_library_inputs: Vec<usize>,
@@ -214,6 +224,11 @@ pub struct Options {
     /// binds against it (the `-dead_strip_dylibs` survival opt-out),
     /// resolved through the `-F` search (the M23 pattern).
     pub needed_frameworks: Vec<String>,
+    /// M110 `-hidden_framework <name>` (repeatable): the framework dylib
+    /// carries the hidden mark — its exports resolve but its load
+    /// command drops, resolved through the `-F` search (the M23/M106
+    /// pattern; ld64's "hidden" loads).
+    pub hidden_frameworks: Vec<String>,
     /// M5 `-F <dir>`: framework search directories.
     pub framework_dirs: Vec<String>,
     /// M5 `-sectcreate <seg> <sect> <file>`: section contents from a file.
@@ -459,11 +474,13 @@ impl Default for Options {
             lib_dirs: Vec::new(),
             libs: Vec::new(),
             needed_libs: Vec::new(),
+            hidden_libs: Vec::new(),
             force_load: Vec::new(),
             weak_library_inputs: Vec::new(),
             lazy_library_inputs: Vec::new(),
             upward_library_inputs: Vec::new(),
             needed_library_inputs: Vec::new(),
+            hidden_library_inputs: Vec::new(),
             reexport_library_inputs: Vec::new(),
             export_filter_specs: Vec::new(),
             alias_sources: Vec::new(),
@@ -476,6 +493,7 @@ impl Default for Options {
             upward_frameworks: Vec::new(),
             reexport_frameworks: Vec::new(),
             needed_frameworks: Vec::new(),
+            hidden_frameworks: Vec::new(),
             framework_dirs: Vec::new(),
             sectcreate: Vec::new(),
             cache_dir: None,
@@ -1222,6 +1240,32 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-hidden_library`/`-hidden_framework`/`-hidden-l` surface
+    /// conflict (M110): the hidden-dylib mark cannot apply where it was
+    /// requested (the relocatable output carries no load commands to
+    /// drop). The verdict names the shape conflict; the help is the fix
+    /// — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    HiddenLibraryConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-read_only_relocs <policy>` surface conflict (M111): the
+    /// read-only-relocations policy cannot apply where it was requested
+    /// (the relocatable output carries no segment mapping to price).
+    /// The verdict names the shape conflict; the help is the fix — the
+    /// house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ReadOnlyRelocsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// A `-final_output` surface conflict (M44): the dylib-identity
     /// default cannot apply where it was requested. The verdict names
     /// the shape conflict; the help is the fix — the house convention.
@@ -1735,6 +1779,25 @@ fn apply_flag(
                 }
             };
         }
+        "-read_only_relocs" => {
+            // M111: the read-only-relocations policy — ld64's policy
+            // for relocations in read-only segments (the W^X
+            // contract's other half): `error` refuses the write dyld
+            // cannot perform, `warning` prints the advisory face (the
+            // reloc rides, exit 0), `suppress` rides silently.
+            let v = next_value(args, i, arg)?;
+            opts.config.read_only_relocs = match v.as_str() {
+                "error" => pgr_core::resolve::ReadOnlyRelocsPolicy::Error,
+                "warning" => pgr_core::resolve::ReadOnlyRelocsPolicy::Warning,
+                "suppress" => pgr_core::resolve::ReadOnlyRelocsPolicy::Suppress,
+                other => {
+                    return Err(OptsError::InvalidValue {
+                        flag: arg.into(),
+                        value: format!("{other} (error | warning | suppress)"),
+                    });
+                }
+            };
+        }
         // M108: the multiply-defined resolution policy — ld64's
         // `-multiply_defined <policy>` ("How to handle multiply defined
         // symbols"). The typed alphabet rides the config; the relocatable
@@ -1819,6 +1882,18 @@ fn apply_flag(
             opts.inputs.push(v);
             opts.needed_library_inputs.push(opts.inputs.len() - 1);
         }
+        "-hidden_library" => {
+            // M110: the hidden-dylib mark — the dylib's exports enter
+            // the resolve arena (the same scan path as
+            // `-weak_library`/`-lazy_library`) but its load command
+            // drops: a weak reference rides dyld's flat lookup, a
+            // strong one refuses the link (ld64's "hidden" loads —
+            // dyld cannot bind a strong reference without the load
+            // command).
+            let v = next_value(args, i, arg)?;
+            opts.inputs.push(v);
+            opts.hidden_library_inputs.push(opts.inputs.len() - 1);
+        }
         "-weak_framework" => {
             // M14: the framework dylib loads weakly (the -framework
             // search with the weak-load kind).
@@ -1853,6 +1928,14 @@ fn apply_flag(
             let v = next_value(args, i, arg)?;
             opts.needed_frameworks.push(v);
         }
+        "-hidden_framework" => {
+            // M110: the hidden-framework mark — the framework dylib's
+            // exports resolve but its load command drops, resolved
+            // through the `-F` search (the M23/M106 pattern; ld64's
+            // "hidden" loads).
+            let v = next_value(args, i, arg)?;
+            opts.hidden_frameworks.push(v);
+        }
         "-needed-l" => {
             // M106: the `-l` form of the needed mark — the basename
             // rides the `-L` search carrying the survival opt-out
@@ -1864,6 +1947,18 @@ fn apply_flag(
             let v = next_value(args, i, arg)?;
             opts.libs.push(v.clone());
             opts.needed_libs.push(v);
+        }
+        "-hidden-l" => {
+            // M110: the `-l` form of the hidden mark — the basename
+            // rides the `-L` search carrying the command drop (ld64's
+            // `-hidden-l<name>`; the detached form is the flag's own
+            // spelling, the attached `-hidden-l<name>` form is matched
+            // below with the attached libraries). The name is a library
+            // request like `-l`'s (the search is shared, the mark rides
+            // the resolved dylib).
+            let v = next_value(args, i, arg)?;
+            opts.libs.push(v.clone());
+            opts.hidden_libs.push(v);
         }
         "-dylib" => match opts.config.filetype {
             // A repeated kind is idempotent; only a kind *switch* is a
@@ -2700,6 +2795,15 @@ fn apply_flag(
             opts.libs.push(name.clone());
             opts.needed_libs.push(name);
         }
+        _ if arg.starts_with("-hidden-l") && arg.len() > 9 => {
+            // M110: the attached form of `-hidden-l` (ld64's
+            // `-hidden-l<name>`) — the basename rides the `-L` search
+            // carrying the hidden-dylib mark (a library request like
+            // `-l`'s, the mark rides the resolved dylib).
+            let name = arg[9..].to_string();
+            opts.libs.push(name.clone());
+            opts.hidden_libs.push(name);
+        }
         _ if NOOP_FLAGS.contains(&arg) => {
             // Accepted no-ops at M1 (the features they toggle do not exist
             // yet; emitting nothing matches the requested state).
@@ -3505,6 +3609,52 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 .into(),
             fix: "drop -needed_library/-needed_framework/-needed-l or link a segmented \
                   output (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M110: the hidden-dylib mark's surface conflict. The mark drops a
+    // load command from the output's header (a weak reference rides
+    // dyld's flat lookup, a strong one refuses), and the relocatable
+    // output carries no load commands (its symtab is the input's,
+    // verbatim — nothing for the mark to drop). An explicitly named
+    // knob that cannot apply is a refusal, never a silently dropped
+    // one (the library's re-check backs this so no caller can plan the
+    // shape either).
+    if opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+        && (!opts.hidden_library_inputs.is_empty()
+            || !opts.hidden_frameworks.is_empty()
+            || !opts.hidden_libs.is_empty())
+    {
+        return Err(OptsError::HiddenLibraryConflict {
+            verdict: "-hidden marks a dylib to ride without its load command, but the \
+                      relocatable output opens its undefineds by design and carries no \
+                      load commands to drop"
+                .into(),
+            fix: "drop -hidden_library/-hidden_framework/-hidden-l or link a segmented \
+                  output (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M111: the read-only-relocations policy's surface conflict. The
+    // non-default faces decide what a write into a read-only segment
+    // becomes (the W^X contract's other half), and the relocatable
+    // output's sections are the input's, verbatim — its relocation
+    // sites ride untouched and no segment mapping exists for the
+    // policy to price. An explicitly named knob that cannot apply is a
+    // refusal, never a silently dropped one (the library's re-checks
+    // back this so no caller can plan the shape either).
+    if opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+        && opts.config.read_only_relocs != pgr_core::resolve::ReadOnlyRelocsPolicy::Error
+    {
+        return Err(OptsError::ReadOnlyRelocsConflict {
+            verdict: format!(
+                "-read_only_relocs {} decides what a write into a read-only segment \
+                 becomes, but the relocatable output's sections are the input's, \
+                 verbatim",
+                opts.config.read_only_relocs.flag_word()
+            ),
+            fix: "drop -read_only_relocs or link a segmented output (an executable, \
+                  dylib or bundle)"
                 .into(),
         });
     }
