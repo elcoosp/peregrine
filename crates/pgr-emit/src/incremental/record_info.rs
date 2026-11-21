@@ -419,6 +419,7 @@ mod tests {
             code_limit: 0,
             chain_word_format: pgr_core::fixups::FixupPointerFormat::Offset64,
             named_uuid: None,
+            uuid_source: pgr_core::layout::UuidSource::Content,
             linkedit: pgr_core::layout::LinkeditPlan::default(),
             header_sha: [0; 32],
             segments: vec![crate::incremental::RecordedSegment {
