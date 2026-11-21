@@ -175,6 +175,13 @@ pub struct ServedLink {
     /// entries cross verbatim; the client prints the cold lane's face
     /// (the M62 convention).
     pub multiply_warnings: Vec<String>,
+    /// The common-symbol advisory entries (v67, M116): the session's own
+    /// resolved state rendered when the request's config carries
+    /// `-warn_commons` — the list the cold lane prints as warnings and
+    /// still exits 0 (the off decision carries the empty list: the walk
+    /// recorded nothing). The entries cross verbatim; the client prints
+    /// the cold lane's face (the M62 convention).
+    pub commons_warnings: Vec<String>,
     /// The served link-statistics report (v63, M112): `Some` when the
     /// request's config carries `-print_statistics` — the counts the
     /// session's own run reported (the warm pipeline's product: the
@@ -229,6 +236,23 @@ fn serve_multiply_warnings(
             .map(str::to_owned)
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// M116 (v67): the exit policy's common-symbol advisory face — the
+/// session's own resolved state renders the common-symbol landing list
+/// the cold lane prints (the client prints it; the daemon never writes
+/// the client's stderr). The `-warn_commons` decision fills the list;
+/// the off decision carries the empty one (the walk recorded nothing —
+/// the face is a measurement, never a layout product).
+fn serve_commons_warnings(
+    config: &pgr_core::layout::LinkConfig,
+    resolution: &pgr_core::resolve::Resolution,
+) -> Vec<String> {
+    if config.warn_commons {
+        resolution.warn_commons_open().map(str::to_owned).collect()
+    } else {
+        Vec::new()
     }
 }
 
@@ -728,6 +752,7 @@ impl ResidentSession {
             map_text,
             policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
             multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
+            commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
             statistics,
             references,
         })
@@ -942,6 +967,7 @@ impl ResidentSession {
             // layout or fixup planning to report).
             policy_warnings: serve_policy_warnings(&req.config, &linked.resolution),
             multiply_warnings: serve_multiply_warnings(&req.config, &linked.resolution),
+            commons_warnings: serve_commons_warnings(&req.config, &linked.resolution),
             statistics: None,
             references: Vec::new(),
         })
@@ -1250,6 +1276,7 @@ impl ResidentSession {
                 // same list the cold lane prints.
                 policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
                 multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
+                commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
                 statistics: serve_statistics(req, &result, prev.len() as u64, started.elapsed()),
                 references,
             });
@@ -1409,6 +1436,7 @@ impl ResidentSession {
             // list the cold lane prints.
             policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
             multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
+            commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
             statistics,
             references,
         })
