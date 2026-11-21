@@ -30,6 +30,7 @@ fn dylibs() -> Vec<Dylib> {
         exports: vec![format!("_{export}").into_bytes()],
         weak: false,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     };
