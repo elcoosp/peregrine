@@ -627,3 +627,14 @@ harness = false
 [[bench]]
 name = "no_inits"
 harness = false
+
+# M118 — the dtrace DOF section processing (`-dtrace`): the shape-parity
+# gate — the carrying corpus keeps its `__dtrace_dof` section under the
+# default and under the decision (the classification recognizes the
+# payload, never drops it; the emit validates the DOF header at emit),
+# the payload rides under `-S` too (distinct from the debug class), and
+# a corpus without a `__dtrace_dof` section links byte-identical under
+# either face, over the same 32-object dtrace-bearing corpus.
+[[bench]]
+name = "dtrace"
+harness = false
