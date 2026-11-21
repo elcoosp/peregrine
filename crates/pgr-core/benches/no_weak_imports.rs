@@ -65,6 +65,7 @@ fn weak_dylib() -> Dylib {
         exports: vec![b"_maybe".to_vec()],
         weak: true,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     }
