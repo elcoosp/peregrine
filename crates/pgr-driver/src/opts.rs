@@ -13,7 +13,7 @@
 //! the sources compose in command-line order).
 
 use pgr_core::fixups::FixupPointerFormat;
-use pgr_core::layout::LinkConfig;
+use pgr_core::layout::{LinkConfig, UuidSource};
 use pgr_format::consts::{
     PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_VISIONOS, PLATFORM_WATCHOS,
 };
@@ -460,6 +460,13 @@ pub struct Options {
     /// absence of the knob, an unaligned value breaks the load-command
     /// alignment); the output-kind conflict is `finish`'s too.
     pub headerpad_explicit: bool,
+    /// M114: which UUID-identity flags the argv named (`-random_uuid`,
+    /// `-no_uuid`) — both write the ONE typed source field, so the pair
+    /// is not detectable from the config alone; `finish` refuses the
+    /// pair order-independently from the two seen bits (the M99 pair
+    /// shape, whose sides ride two fields). Parse bookkeeping, never a
+    /// surface knob — the `chain_word_format_explicit` pattern.
+    pub uuid_flags_seen: [bool; 2],
 }
 
 impl Default for Options {
@@ -524,6 +531,7 @@ impl Default for Options {
             image_base_explicit: false,
             sect_align_stage: Vec::new(),
             headerpad_explicit: false,
+            uuid_flags_seen: [false; 2],
         }
     }
 }
@@ -1102,6 +1110,20 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     TraceRefsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-no_objc_category_merging` surface conflict (M115): the
+    /// category-merge disable is a final-image decision — the
+    /// relocatable output's sections are the input's, verbatim (its
+    /// sections ride the inputs untouched; there is no registration to
+    /// fold). The verdict names the shape conflict; the help is the fix
+    /// — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ObjcCategoryMergingConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -2641,13 +2663,38 @@ fn apply_flag(
         "-no_function_starts" => {
             opts.config.function_starts = false;
         }
-        // M32: the UUID suppression. The flag rode the surface as an
-        // accepted no-op since M1; the header assembly reads the
-        // decision — the output's `LC_UUID` command drops (no uuid
-        // field for the emit two-pass derivation to patch). A boolean
-        // knob with no output-kind conflict.
+        // M32/M114: the UUID suppression — the typed source alphabet's
+        // `none` face. The flag rode the surface as an accepted no-op
+        // since M1; the header assembly reads the decision — the
+        // output's `LC_UUID` command drops (no uuid field for the emit
+        // two-pass derivation to patch). The pair conflicts
+        // (`-no_uuid` × `-uuid`, `-no_uuid` × `-random_uuid`) are
+        // `finish`'s — it sees the whole surface; both flags writing
+        // the ONE source field rides the seen bits.
         "-no_uuid" => {
-            opts.config.uuid = false;
+            opts.config.uuid_source = pgr_core::layout::UuidSource::None;
+            opts.uuid_flags_seen[1] = true;
+        }
+        // M114: ld64's `-random_uuid` — the typed source alphabet's
+        // `random` face: the emit draws the output's identity from the
+        // system CSPRNG at emit time (a whole UUIDv4, fresh per emit —
+        // the reproducible face stays `content`, the default). The
+        // conflicts (`-random_uuid` × `-uuid`, `×` `-no_uuid`, the
+        // relocatable output) are `finish`'s — it sees the whole
+        // surface.
+        "-random_uuid" => {
+            opts.config.uuid_source = pgr_core::layout::UuidSource::Random;
+            opts.uuid_flags_seen[0] = true;
+        }
+        // M115: ld64's `-no_objc_category_merging` — the ObjC
+        // category-merging optimization's disable. The default merges
+        // every category whose base class rides the link (the
+        // registration section the metadata family names folds away);
+        // the flag keeps every category's registration verbatim. The
+        // relocatable conflict is `finish`'s — it sees the whole
+        // surface.
+        "-no_objc_category_merging" => {
+            opts.config.objc_category_merging = false;
         }
         // M99: the named output UUID — the other half of the M32
         // suppression. ld64's `-uuid <uuid>` names the image's identity:
@@ -3583,6 +3630,25 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             fix: "drop -t or link an image (an executable, dylib or bundle)".into(),
         });
     }
+    // M115: the category-merge disable's surface conflict — the
+    // relocatable output's sections are the input's, verbatim (an
+    // object carries its inputs' sections untouched; there is no
+    // registration to fold). An explicitly named knob that cannot
+    // apply is a refusal, never a silently dropped one (the library's
+    // re-checks back this so no caller can plan the shape either).
+    if !opts.config.objc_category_merging
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::ObjcCategoryMergingConflict {
+            verdict: "-no_objc_category_merging keeps every category's registration \
+                      verbatim, but the relocatable output's sections are the input's, \
+                      verbatim already"
+                .into(),
+            fix: "drop -no_objc_category_merging or link an image (an executable, dylib \
+                  or bundle)"
+                .into(),
+        });
+    }
     // M40: the export-trie suppression is an executable decision — a
     // main executable's trie is the dlsym/debugger surface (its dylib
     // partners bind into their own tries), while a dylib's trie IS the
@@ -3874,7 +3940,7 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
     // carries no LC_UUID command at all (the M32 shape) — a named value
     // has no field to land on. The library's re-checks (the layout and
     // `link_reloc`) back these so no caller can plan the shape either.
-    if opts.config.named_uuid.is_some() && !opts.config.uuid {
+    if opts.config.named_uuid.is_some() && opts.config.uuid_source == UuidSource::None {
         return Err(OptsError::UuidConflict {
             verdict: "-no_uuid suppresses the output's LC_UUID command, but -uuid names \
                      one"
@@ -3892,6 +3958,45 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                      output carries no LC_UUID command at all"
                 .into(),
             fix: "drop -uuid or link an executable/dylib/bundle".into(),
+        });
+    }
+    // M114: the random source's surface conflicts. `-random_uuid` and
+    // `-no_uuid` both write the ONE typed source field — the pair rides
+    // the seen bits (order-independent, the M99 pair shape; neither
+    // flag outlives the other in the config). `-random_uuid` × `-uuid`
+    // are two answers to the identity question, and the relocatable
+    // output carries no LC_UUID command at all — a draw has no field to
+    // land on (the M99 relocatable refusal mirrored exactly). The
+    // library's re-checks (the layout and `link_reloc`) back the
+    // output-kind refusal so no caller can plan the shape either.
+    if opts.uuid_flags_seen[0] && opts.uuid_flags_seen[1] {
+        return Err(OptsError::UuidConflict {
+            verdict: "-random_uuid draws the output's LC_UUID identity at emit time, but \
+                     -no_uuid suppresses the command"
+                .into(),
+            fix: "a draw and a suppression are two answers to one question: keep the draw \
+                 and drop -no_uuid, or keep the suppression and drop -random_uuid"
+                .into(),
+        });
+    }
+    if opts.config.uuid_source == UuidSource::Random && opts.config.named_uuid.is_some() {
+        return Err(OptsError::UuidConflict {
+            verdict: "-random_uuid draws the output's LC_UUID identity at emit time, but \
+                     -uuid names one"
+                .into(),
+            fix: "a draw and a named value are two answers to one question: keep the name \
+                 and drop -random_uuid, or keep the draw and drop -uuid"
+                .into(),
+        });
+    }
+    if opts.config.uuid_source == UuidSource::Random
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::UuidConflict {
+            verdict: "-random_uuid generates the output's LC_UUID identity, but the \
+                     relocatable output carries no LC_UUID command at all"
+                .into(),
+            fix: "drop -random_uuid or link an executable/dylib/bundle".into(),
         });
     }
     match opts.config.filetype {
