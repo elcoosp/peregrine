@@ -377,8 +377,17 @@ use std::time::Duration;
 /// parity gate is byte-identical — the suppression is Pass 3's own
 /// decision, the replay re-plans the shape the config names), and the
 /// `LC_ROUTINES_64` command drops from the served header exactly as
-/// the cold header drops it.
-pub const PROTO_VERSION: u32 = 68;
+/// the cold header drops it. **v69** names the M118 round: the dtrace
+/// `DOF` section processing (`-dtrace`) rides the tail after the
+/// init/term byte — one byte; the session's warm pipeline plans the
+/// same DOF-validated shape the cold link plans (the parity gate is
+/// byte-identical — the classification is Pass 1's own decision, the
+/// emit validation Pass 4's, the replay re-plans the shape the config
+/// names), and the verifier's read-side backstop gates the served
+/// `__dtrace_dof` section exactly as the cold emit gates it; the
+/// ladder's replay rides the decision (the M81 pattern — the decision
+/// is config, not a product).
+pub const PROTO_VERSION: u32 = 69;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1977,6 +1986,12 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // Pass 3's own decision, the M81 replay rides the config), never
     // the pre-M117 carrying default.
     put_u8(out, u8::from(cfg.no_inits));
+    // M118 (v69 wire): the dtrace DOF section processing rides the tail
+    // after the init/term byte — one byte; a resident relink plans the
+    // same DOF-validated shape the client asked for (the classification
+    // is Pass 1's own decision, the emit validation Pass 4's, the M81
+    // replay rides the config), never the pre-M118 carrying default.
+    put_u8(out, u8::from(cfg.dtrace));
     // M33 (v24 wire): the private-extern keep rides the tail after the
     // UUID suppression — one byte; a resident relink carries the
     // private-extern decision the client asked for, never the pre-M33
@@ -2445,6 +2460,12 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // decision; the output-kind conflict the core re-checks refuse at
     // link time).
     let no_inits = r.u8()? != 0;
+    // M118 (v69 wire): the dtrace DOF section processing — one byte, no
+    // validation beyond the bool (the classification is Pass 1's own
+    // decision; the DOF header validation is Pass 4's, the verifier's
+    // read-side backstop the output-kind conflict the core re-checks
+    // refuse cannot reach).
+    let dtrace = r.u8()? != 0;
     // M33 (v24 wire): the private-extern keep — one byte, no
     // validation beyond the bool (the conversion is the default; the
     // input `N_PEXT` bit names where the decision fires).
@@ -2711,6 +2732,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         objc_category_merging: !no_objc_category_merging,
         warn_commons,
         no_inits,
+        dtrace,
         keep_private_externs,
         compact_unwind: !no_compact_unwind,
         header_pad_max_install_names: header_pad_max,
@@ -3065,6 +3087,12 @@ mod tests {
             // The v68 tail: the init/term suppression rides the default
             // here — the knob the round-trip test flips.
             no_inits: false,
+            // The v69 tail: the dtrace DOF processing rides non-default
+            // here — the decision the round-trip test flips (the on face
+            // validates the section's DOF header at emit; the off face
+            // carries the bytes verbatim, the read-side backstop gating
+            // either way).
+            dtrace: true,
             // The v24 tail: a non-default private-extern keep must
             // survive the round trip verbatim (a resident relink
             // carries the private-extern decision the client asked
@@ -6081,6 +6109,76 @@ mod tests {
         assert!(
             back.config.no_inits,
             "the suppression crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_dtrace_decision_round_trips() {
+        // v69: the dtrace DOF processing's decision must survive the
+        // round trip verbatim (a resident relink plans the same
+        // DOF-validated shape the client asked for — the classification
+        // is Pass 1's own decision, the emit validation Pass 4's, the
+        // M81 replay rides the config).
+        let cfg = rich_config();
+        assert!(cfg.dtrace, "rich_config carries the v69 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.dtrace,
+            "the dtrace decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M118 carrying shape — the
+        // section rides its regular bucket verbatim, the read-side
+        // backstop gating either way).
+        let mut cfg = rich_config();
+        cfg.dtrace = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.dtrace,
+            "the off decision crosses byte-for-byte"
         );
     }
 
