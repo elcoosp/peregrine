@@ -21,3 +21,7 @@ docs/launch.md
 # ship ceremony (generated locally, never committed)
 ship.toml
 .github/pr-body.md
+
+# ship deliverables (validated dirty-tree, not committed)
+ship.toml
+.github/pr-body.md
