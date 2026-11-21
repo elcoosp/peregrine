@@ -1079,6 +1079,34 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-print_statistics` surface conflict (M112): the
+    /// link-statistics report is a final-image decision — the relocatable
+    /// output has no full-emit layout or fixup planning to report in the
+    /// same way (its sections are the input's, verbatim; the object walk
+    /// plans no segments, no fixup slots and emits no image the report's
+    /// counts name). The verdict names the shape conflict; the help is
+    /// the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    PrintStatisticsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-t` surface conflict (M113): the reference trace is a
+    /// resolve-shaping decision — the relocatable output's symtab is the
+    /// input's, verbatim (its symbol table rides the inputs untouched;
+    /// there is no Pass-2 trace to report). The verdict names the shape
+    /// conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    TraceRefsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -1827,6 +1855,24 @@ fn apply_flag(
         }
         "-no_fatal_warnings" => {
             opts.config.fatal_warnings = false;
+        }
+        // M112: the link-statistics report — ld64's "Print statistics
+        // about the linker's performance". The counts ride the run's own
+        // passes (the M54 observation seam) and the product, rendered to
+        // stderr at the end of the link. The relocatable conflict is
+        // `finish`'s (the object path has no full-emit layout or fixup
+        // planning to report in the same way — the M104/M105 pattern).
+        "-print_statistics" => {
+            opts.config.print_statistics = true;
+        }
+        // M113: the reference trace — ld64's `-t` ("Print a trace of all
+        // symbol references"). Each symbol Pass 2's resolve visits prints
+        // to stderr, the events riding the M54 observation seam's
+        // `on_reference` face. The relocatable conflict is `finish`'s
+        // (the object's symtab is the input's, verbatim — the
+        // M104/M105/M112 pattern).
+        "-t" => {
+            opts.config.trace_refs = true;
         }
         "-rpath" => {
             let v = next_value(args, i, arg)?;
@@ -3499,6 +3545,42 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                   left to elevate: drop -fatal_warnings or link an image (an executable, \
                   dylib or bundle)"
                 .into(),
+        });
+    }
+    // M112: the link-statistics report is a final-image decision — the
+    // relocatable output has no full-emit layout or fixup planning to
+    // report in the same way (the object walk plans no segments, no
+    // fixup slots and emits no image the report's counts name). The
+    // default never refuses (the pre-M112 shape). An explicitly named
+    // knob that cannot apply is a refusal, never a silently dropped one
+    // (the library's re-checks back this so no caller can plan the shape
+    // either).
+    if opts.config.print_statistics
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::PrintStatisticsConflict {
+            verdict: "-print_statistics reports the link's statistics, but the relocatable \
+                      output has no full-emit layout or fixup planning to report in the \
+                      same way"
+                .into(),
+            fix: "drop -print_statistics or link an image (an executable, dylib or \
+                  bundle)"
+                .into(),
+        });
+    }
+    // M113: the reference trace's surface conflict. The knob is a
+    // resolve-shaping decision — the relocatable output's symtab is the
+    // input's, verbatim (its symbol table rides the inputs untouched;
+    // there is no Pass-2 trace to report). An explicitly named knob that
+    // cannot apply is a refusal, never a silently dropped one (the
+    // library's re-checks back this so no caller can plan the shape
+    // either).
+    if opts.config.trace_refs && opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+        return Err(OptsError::TraceRefsConflict {
+            verdict: "-t traces the symbols Pass 2's resolve references, but the \
+                      relocatable output's symtab is the input's, verbatim"
+                .into(),
+            fix: "drop -t or link an image (an executable, dylib or bundle)".into(),
         });
     }
     // M40: the export-trie suppression is an executable decision — a
