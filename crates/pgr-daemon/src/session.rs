@@ -1705,6 +1705,132 @@ mod tests {
         );
     }
 
+    /// The image's `LC_UUID` slot when the command rides: the uuid
+    /// field's file offset and the 16 bytes it carries (the M114 read).
+    fn uuid_slot(image: &[u8]) -> Option<(usize, [u8; 16])> {
+        let hdr = pgr_format::MachHeader64::parse(image).expect("the image parses");
+        let mut it = pgr_format::LoadCommandIter::new(
+            image,
+            pgr_format::MachHeader64::SIZE,
+            hdr.ncmds,
+            hdr.sizeofcmds,
+        )
+        .expect("the load commands parse");
+        while let Some(cmd) = it.next_command().expect("the command chain walks") {
+            if let pgr_format::LoadCommandKind::Uuid = cmd.kind {
+                let st = pgr_format::UuidCommand::parse(cmd.bytes).expect("the lc parses");
+                return Some((cmd.offset + 8, st.uuid));
+            }
+        }
+        None
+    }
+
+    /// The image's pre-signature prefix with the identity field zeroed
+    /// (the shape comparison the random face's parity rides — the
+    /// signature blob's hashes cover the identity, the §9 content
+    /// contract, so the prefix is where the shape lives).
+    fn identity_zeroed_prefix(image: &[u8], sig_off: u64) -> Vec<u8> {
+        let mut copy = image[..sig_off as usize].to_vec();
+        if let Some((off, _)) = uuid_slot(&copy) {
+            copy[off..off + 16].fill(0);
+        }
+        copy
+    }
+
+    #[test]
+    fn the_uuid_source_faces_serve_byte_identical() {
+        // M114: the UUID source rides the config tail — the warm
+        // pipeline plans the same identity shape the cold lane plans
+        // (the parity gate is byte-identical; the shape is config, not
+        // a lane product — the M81 pattern). The content face is
+        // deterministic (the derivation both lanes run), the none face
+        // is uuid-free, and the random face draws per emit — the images
+        // differ ONLY in the 16 identity bytes (the draw is the emit's
+        // own, the shape the decision carries).
+        let hello = hello_main();
+        let greet_bytes = greet();
+        let (mut req, hashes) = request(&hello, &greet_bytes);
+        let mut session = ResidentSession::default();
+        for h in &hashes {
+            let bytes = if *h == content_hash(&hello) {
+                hello.clone()
+            } else {
+                greet_bytes.clone()
+            };
+            session.store_blob(h, bytes).unwrap();
+        }
+
+        // The content face: full byte-identical parity (the M32/M99
+        // deterministic shape).
+        req.config.uuid_source = pgr_core::layout::UuidSource::Content;
+        let cold = session.link(&req).unwrap().image;
+        let warm = session.link(&req).unwrap().image;
+        assert_eq!(cold, warm, "the content face is the session's own plan");
+        let inputs: Vec<pgr_core::LinkInput> = vec![
+            pgr_core::LinkInput {
+                name: "hello.o".into(),
+                bytes: hello.clone(),
+            },
+            pgr_core::LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.clone(),
+            },
+        ];
+        let one_shot =
+            pgr_core::link_cached(&inputs, &[], &req.config, pgr_core::Parallelism::Auto, None)
+                .unwrap();
+        let image = pgr_emit::build_image_fused(&one_shot.layout, &one_shot.objects).unwrap();
+        assert_eq!(image, cold, "session link == one-shot link, byte for byte");
+
+        // The none face: uuid-free on both lanes (the M32 shape).
+        req.config.uuid_source = pgr_core::layout::UuidSource::None;
+        let cold = session.link(&req).unwrap().image;
+        let warm = session.link(&req).unwrap().image;
+        assert_eq!(cold, warm, "the suppressed shape is the session's own plan");
+        assert!(
+            uuid_slot(&cold).is_none(),
+            "the served image carries no LC_UUID command (the suppression rides)"
+        );
+
+        // The random face: fresh draws per emit, the same shape — the
+        // identity-zeroed images are byte-identical across lanes, the
+        // draws themselves differ and are whole UUIDv4 values.
+        req.config.uuid_source = pgr_core::layout::UuidSource::Random;
+        let cold = session.link(&req).unwrap().image;
+        let warm = session.link(&req).unwrap().image;
+        let one_shot =
+            pgr_core::link_cached(&inputs, &[], &req.config, pgr_core::Parallelism::Auto, None)
+                .unwrap();
+        let image = pgr_emit::build_image_fused(&one_shot.layout, &one_shot.objects).unwrap();
+        let (_, cold_uuid) = uuid_slot(&cold).expect("the cold image carries the command");
+        let (_, warm_uuid) = uuid_slot(&warm).expect("the warm image carries the command");
+        let (_, one_shot_uuid) = uuid_slot(&image).expect("the one-shot image carries the command");
+        assert_ne!(cold_uuid, warm_uuid, "the draws are fresh per emit");
+        assert_ne!(cold_uuid, one_shot_uuid, "the one-shot draw is its own");
+        assert_ne!(
+            cold_uuid, [0u8; 16],
+            "the draw never lands on the zero identity"
+        );
+        assert_eq!(cold_uuid[6] >> 4, 4, "the version nibble names UUIDv4");
+        assert_eq!(
+            cold_uuid[8] >> 6,
+            0b10,
+            "the variant bits name the RFC 4122 form"
+        );
+        let sig_off = one_shot.layout.linkedit.sig_off;
+        assert_eq!(
+            identity_zeroed_prefix(&cold, sig_off),
+            identity_zeroed_prefix(&warm, sig_off),
+            "the two lanes' shapes are byte-identical (the identity bytes are the emit's own)"
+        );
+        assert_eq!(
+            identity_zeroed_prefix(&cold, sig_off),
+            identity_zeroed_prefix(&image, sig_off),
+            "session link == one-shot link modulo the identity bytes"
+        );
+        assert_eq!(cold.len(), warm.len(), "the file size never moves");
+    }
+
     #[test]
     fn the_needed_dylib_shape_serves_byte_identical() {
         // M106: the needed-dylib mark rides the dylib list — the warm
