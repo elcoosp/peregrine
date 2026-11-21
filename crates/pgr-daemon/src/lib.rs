@@ -259,7 +259,17 @@ mod tests {
         // own decision, the replay re-plans the shape the config
         // names), and the LC_ROUTINES_64 command drops from the served
         // header exactly as the cold header drops it.
-        assert_eq!(crate::PROTO_VERSION, 68);
+        // and v69 carries the dtrace DOF section processing (M118, the
+        // tail after the init/term byte): the session's warm pipeline
+        // plans the same DOF-validated shape the cold link plans (the
+        // parity gate is byte-identical — the classification is Pass 1's
+        // own decision, the emit validation Pass 4's, the replay
+        // re-plans the shape the config names), and the verifier's
+        // read-side backstop gates the served __dtrace_dof section
+        // exactly as the cold emit gates it; the ladder's replay rides
+        // the decision (the M81 pattern — the decision is config, not a
+        // product).
+        assert_eq!(crate::PROTO_VERSION, 69);
     }
 
     #[test]
