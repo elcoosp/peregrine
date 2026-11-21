@@ -51,6 +51,11 @@ enum DylibKind {
     /// `-upward_framework` (`LC_LOAD_UPWARD_DYLIB`, the M45
     /// umbrella-relationship mark).
     Upward,
+    /// `-needed_framework` (M106: the needed-dylib mark through the
+    /// framework search — the dylib rides even when nothing binds
+    /// against it; the command kind stays a plain load, the mark is a
+    /// survival opt-out, not a command kind).
+    Needed,
 }
 
 /// The driver outcome: bytes written, plus the plan for diagnostics.
@@ -609,6 +614,7 @@ pub fn scan_dylib(path: &str, bytes: &[u8]) -> Result<Dylib, DriverError> {
         exports,
         weak: false,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     })
@@ -709,6 +715,7 @@ pub fn tbd_to_dylib_cached(
             .collect(),
         weak,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     };
@@ -1596,11 +1603,17 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             None => bytes,
         };
         if looks_like_tbd(&bytes) {
-            dylibs.push(tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?);
+            // M106: a `-needed-l` basename carries the needed mark (the
+            // `-l` search is shared, the mark is per name).
+            let mut dylib = tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?;
+            dylib.needed = opts.needed_libs.iter().any(|n| n == name);
+            dylibs.push(dylib);
         } else if pgr_format::MachHeader64::parse(&bytes)
             .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
         {
-            dylibs.push(scan_dylib(&path, &bytes)?);
+            let mut scanned = scan_dylib(&path, &bytes)?;
+            scanned.needed = opts.needed_libs.iter().any(|n| n == name);
+            dylibs.push(scanned);
         } else if pgr_format::is_archive(&bytes) {
             push_archive(&mut archives, &path, bytes, opts)?;
         } else if is_llvm_bitcode(&bytes) {
@@ -1624,6 +1637,10 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     // list leaves every pre-M23 link byte-identical). M45: the upward
     // frameworks resolve after the lazy ones (the order is plain,
     // re-export, weak, lazy, then upward — the umbrella mark rides last).
+    // M106: the needed frameworks resolve after the upward ones (the
+    // order is plain, re-export, weak, lazy, upward, then needed — the
+    // survival mark rides last; an empty list leaves every pre-M106
+    // link byte-identical).
     let framework_dirs = opts::effective_framework_dirs(&opts.framework_dirs, &opts.syslibroots);
     for (name, kind) in opts
         .frameworks
@@ -1640,6 +1657,11 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             opts.upward_frameworks
                 .iter()
                 .map(|n| (n, DylibKind::Upward)),
+        )
+        .chain(
+            opts.needed_frameworks
+                .iter()
+                .map(|n| (n, DylibKind::Needed)),
         )
     {
         // M60: the framework search rides the record like the `-l`
@@ -1686,6 +1708,10 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         dylib.lazy = kind == DylibKind::Lazy;
         dylib.reexport = kind == DylibKind::Reexport;
         dylib.upward = kind == DylibKind::Upward;
+        // M106: the needed mark is a survival opt-out, never a command
+        // kind — a needed framework loads as `LC_LOAD_DYLIB` (the mark
+        // composes with every kind's obligation).
+        dylib.needed = kind == DylibKind::Needed;
         dylibs.push(dylib);
     }
     // M5 `-sectcreate`: section contents from a file, carried as a synthetic
@@ -2029,6 +2055,9 @@ fn map_input(
         dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
         dylib.lazy = opts_index.is_some_and(|i| opts.lazy_library_inputs.contains(&i));
         dylib.upward = opts_index.is_some_and(|i| opts.upward_library_inputs.contains(&i));
+        // M106: the needed-dylib mark — the survival opt-out under
+        // `-dead_strip_dylibs` (the command kind stays a plain load).
+        dylib.needed = opts_index.is_some_and(|i| opts.needed_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
     }
@@ -2041,6 +2070,7 @@ fn map_input(
         dylib.reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
         dylib.lazy = opts_index.is_some_and(|i| opts.lazy_library_inputs.contains(&i));
         dylib.upward = opts_index.is_some_and(|i| opts.upward_library_inputs.contains(&i));
+        dylib.needed = opts_index.is_some_and(|i| opts.needed_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
     }
@@ -2050,12 +2080,17 @@ fn map_input(
         push_archive(archives, path, bytes, opts)?;
         return Ok(());
     }
-    if opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i)) {
+    let marked_reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
+    let marked_needed = opts_index.is_some_and(|i| opts.needed_library_inputs.contains(&i));
+    if marked_reexport || marked_needed {
+        let what = if marked_reexport {
+            "-reexport_library input is not a dylib (.tbd or Mach-O)"
+        } else {
+            "-needed_library input is not a dylib (.tbd or Mach-O)"
+        };
         return Err(DriverError::Tbd {
             path: path.to_string(),
-            source: pgr_format::FormatError::Malformed {
-                what: "-reexport_library input is not a dylib (.tbd or Mach-O)".into(),
-            },
+            source: pgr_format::FormatError::Malformed { what: what.into() },
         });
     }
     // M6 LTO pass-through scope: bitcode objects are detected up front and
@@ -3344,6 +3379,12 @@ pub fn usage() -> String {
     s.push_str("  -current_version <X.Y.Z>     LC_ID_DYLIB current version\n");
     s.push_str("  -compatibility_version <X.Y.Z>   LC_ID_DYLIB compatibility version\n");
     s.push_str("  -reexport_library <path>     LC_REEXPORT_DYLIB + trie re-exports\n");
+    s.push_str("  -needed_library <path>       the dylib really rides even when nothing\n");
+    s.push_str("                               binds against it (M106): the\n");
+    s.push_str("                               -dead_strip_dylibs survival opt-out\n");
+    s.push_str("  -needed_framework <name>     the needed mark through the -F search (M106)\n");
+    s.push_str("  -needed-l <name> | -needed-l<name>   the needed mark through the -L\n");
+    s.push_str("                               search (M106)\n");
     s.push_str("  -exported_symbols_list <f>   export only the listed symbols\n");
     s.push_str("  -unexported_symbols_list <f> hide the listed symbols (N_PEXT)\n");
     s.push_str("  -exported_symbol <name>      export only this symbol (repeatable,\n");
