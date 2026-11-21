@@ -295,6 +295,63 @@ pub enum LinkNote {
     },
 }
 
+/// One symbol reference Pass 2 visited (M113): the resolver's trace face.
+/// The event names the referenced symbol as the resolver saw it (the
+/// interner's bytes, verbatim) and the input that carries the reference —
+/// the two facts ld64's `-t` trace prints. The event rides the same
+/// read-only contract as [`PhaseEvent`] — reporting never moves a byte —
+/// and fires once per visit (a name referenced from two inputs rides
+/// twice, in the walk's own order: the trace is the walk's record, not a
+/// deduped set). Both resolve paths report it: the full install's walk
+/// and the resolve-reuse replay's reference re-walk (the trace is the
+/// run's own Pass-2 record — the M107/M108 config pattern).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceEvent {
+    /// The referenced symbol's name (the interner's bytes, verbatim).
+    pub name: String,
+    /// The input that carries the reference (the command-line name).
+    pub from: String,
+}
+
+impl ReferenceEvent {
+    /// The face both lanes print: the reference and the input that
+    /// carried it — the cold lane's stderr line and the served tail's
+    /// client-printed line are this render (the wire carries the facts,
+    /// the M62 convention; the face never re-shapes between lanes).
+    #[must_use]
+    pub fn render(&self) -> String {
+        format!("{} (from {})", self.name, self.from)
+    }
+}
+
+/// The reference trace's collector (M113): subscribes to the observation
+/// seam's `on_reference` face and keeps every visit in walk order (the
+/// trace face's `Vec` — the driver prints each; a library consumer reads
+/// the events as data). Feed it to [`crate::link_observed`] /
+/// [`crate::link_from_objects_observed`] /
+/// [`crate::link_reloc_observed`], then [`RefsCollector::finish`] into
+/// the ordered event list.
+#[derive(Debug, Default)]
+pub struct RefsCollector {
+    events: Vec<ReferenceEvent>,
+}
+
+impl LinkObserver for RefsCollector {
+    fn on_reference(&mut self, event: ReferenceEvent) {
+        self.events.push(event);
+    }
+}
+
+impl RefsCollector {
+    /// Consumes the collection into the ordered event list (the walk's
+    /// own order: file order, then symbol order — the replay's re-walk
+    /// pushes the same order).
+    #[must_use]
+    pub fn finish(self) -> Vec<ReferenceEvent> {
+        self.events
+    }
+}
+
 /// The link-pipeline observer: subscribes to the passes a link runs. Both
 /// methods default to subscribing to nothing — an observer opts into the
 /// phases and notes it wants, and the pipeline pays nothing for the
@@ -308,6 +365,11 @@ pub trait LinkObserver {
     fn on_task(&mut self, _task: TaskEvent) {}
     /// A pipeline note (a fallback the ladder answered itself).
     fn on_note(&mut self, _note: LinkNote) {}
+    /// One symbol reference Pass 2 visited (M113 — `event.name` the
+    /// referenced symbol, `event.from` the input that carries it): the
+    /// trace face ld64's `-t` prints, reported once per visit in the
+    /// walk's own order.
+    fn on_reference(&mut self, _event: ReferenceEvent) {}
 }
 
 /// The tracing bridge: every event rides the house tracing seam (debug
@@ -350,6 +412,14 @@ impl LinkObserver for TracingObserver {
             ),
         }
     }
+
+    fn on_reference(&mut self, event: ReferenceEvent) {
+        tracing::debug!(
+            symbol = %event.name,
+            from = %event.from,
+            "the resolve visited a symbol reference"
+        );
+    }
 }
 
 /// Two observers behind one subscription (M61): the one-shot `--time` +
@@ -385,5 +455,10 @@ impl LinkObserver for ObserverPair<'_, '_> {
     fn on_note(&mut self, note: LinkNote) {
         self.first.on_note(note.clone());
         self.second.on_note(note);
+    }
+
+    fn on_reference(&mut self, event: ReferenceEvent) {
+        self.first.on_reference(event.clone());
+        self.second.on_reference(event);
     }
 }
