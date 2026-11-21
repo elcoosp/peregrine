@@ -73,6 +73,7 @@ pub mod segprot;
 pub mod slack;
 pub mod stable_imports;
 pub mod stack_size;
+pub mod statistics;
 pub mod sub_client;
 pub mod thunks;
 pub mod time_report;
@@ -116,8 +117,8 @@ pub use objc::{
 };
 pub use object::{DecodedReloc, InputObject, RelocKind, RelocTarget};
 pub use observe::{
-    LinkNote, LinkObserver, ObserverPair, Phase, PhaseDetail, PhaseEvent, TaskEvent,
-    TracingObserver,
+    LinkNote, LinkObserver, ObserverPair, Phase, PhaseDetail, PhaseEvent, ReferenceEvent,
+    RefsCollector, TaskEvent, TracingObserver,
 };
 pub use pagezero::PageZero;
 pub use platform::FixupEncoding;
@@ -135,6 +136,7 @@ pub use segprot::{SegName, SegProt, SegProtError, SegProts};
 pub use slack::{LayoutFallback, SlackPolicy};
 pub use stable_imports::{StableImport, StableImports};
 pub use stack_size::StackSize;
+pub use statistics::{LinkStatistics, StatsCollector};
 pub use sub_client::{SubClient, SubClientEntry, SubClientError};
 pub use time_report::{TimeCollector, TimeReport};
 pub use trace::{TraceCollector, TraceJsonError, TraceLane, TraceReport, TraceTask};
