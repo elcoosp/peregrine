@@ -506,6 +506,11 @@ impl Resolution {
     /// (`Error`) escalates exactly as it always has, the record faces keep
     /// the first definition, the lookup face drops the duplicated slot —
     /// the interner names the symbol the refusal or the record carries.
+    /// `observer` carries the M113 reference-trace seam (the
+    /// [`crate::observe`] slot convention — `None` = silence, the
+    /// historical shape): every undefined reference the walk visits
+    /// reports one [`crate::observe::ReferenceEvent`] — the event builds
+    /// only when a subscriber rides, the seam's own zero-cost silence.
     ///
     /// # Errors
     /// [`LinkError::Symbol`] on duplicate strong definitions under the
@@ -515,6 +520,7 @@ impl Resolution {
         objects: &[InputObject],
         interner: &Interner,
         policy: MultiplyDefinedPolicy,
+        observer: &mut Option<&mut dyn crate::observe::LinkObserver>,
     ) -> Result<(), LinkError> {
         for obj in objects {
             for (sym_i, sym) in obj.symbols.iter().enumerate() {
@@ -559,6 +565,16 @@ impl Resolution {
                         .entry(key)
                         .or_default()
                         .push((obj.file, sym_i));
+                    // M113: the reference-trace face — one event per visit
+                    // (the name as the resolver saw it, the input that
+                    // carries it), built only when a subscriber rides (the
+                    // seam's own zero-cost silence).
+                    if let Some(obs) = observer.as_deref_mut() {
+                        obs.on_reference(crate::observe::ReferenceEvent {
+                            name: interner.name(sym.name),
+                            from: obj.name.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -1740,7 +1756,7 @@ mod tests {
             cursor += take;
         }
         let mut res = Resolution::default();
-        res.install(&objects, &interner, MultiplyDefinedPolicy::Error)
+        res.install(&objects, &interner, MultiplyDefinedPolicy::Error, &mut None)
             .unwrap();
         (interner, objects, res)
     }
@@ -1909,7 +1925,7 @@ mod tests {
         }
         let mut res = Resolution::default();
         let err = res
-            .install(&objects, &interner, MultiplyDefinedPolicy::Error)
+            .install(&objects, &interner, MultiplyDefinedPolicy::Error, &mut None)
             .unwrap_err();
         assert!(err.to_string().contains("duplicate strong"), "{err}");
     }
