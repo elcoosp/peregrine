@@ -469,6 +469,7 @@ name = "pgr-emit"
 version = "0.22.0"
 dependencies = [
  "criterion",
+ "getrandom 0.3.4",
  "miette",
  "pgr-core",
  "pgr-fixtures",
