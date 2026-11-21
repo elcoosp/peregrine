@@ -1052,3 +1052,7 @@ The `warn_commons` bench: a shape-parity gate over a 32-object commons-bearing c
 ### M117 — the init/term section suppression decision
 
 The `no_inits` bench: a shape-parity gate over a 32-object init-bearing corpus (each object carrying one initializer and one terminator pointer section) — the carrying corpus keeps its sections by default and drops them under the suppression, and a corpus without init/term sections links byte-identical under either face; recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M118 — the dtrace DOF section processing decision
+
+The `dtrace` bench: a shape-parity gate over a 32-object dtrace-bearing corpus (each object carrying one `__dtrace_dof` (`S_DTRACE_DOF`) section whose head carries the `DOF` identification magic) — the carrying corpus keeps its section under the default and under the decision (the classification recognizes the payload, never drops it; the emit validates the `DOF` header at emit), the payload rides under `-S` too (distinct from the debug class), and a corpus without a `__dtrace_dof` section links byte-identical under either face; recorded on the dev sandbox (bounded `--measurement-time 1`).
