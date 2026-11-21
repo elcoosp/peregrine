@@ -90,6 +90,7 @@ fn dylib(install_name: &str) -> Dylib {
         lazy: false,
         upward: false,
         reexport: false,
+        needed: false,
     }
 }
 
