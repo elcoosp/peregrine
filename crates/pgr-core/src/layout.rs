@@ -79,6 +79,66 @@ impl OutputType {
     }
 }
 
+/// M114 — the typed UUID-source alphabet: the answer to "what identity
+/// does the output carry" — the pair of faces the M32/M99 bool pair
+/// carried (`uuid: bool`, the suppression; `named_uuid`, the named
+/// value) typed as one decision with three values. The default
+/// ([`UuidSource::Content`]) keeps every pre-M114 link byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UuidSource {
+    /// The content-derived derivation (the M32 pattern's default): the
+    /// first 16 bytes of SHA-256 over the zeroed-UUID page-hash table —
+    /// the reproducible-builds face (the same corpus derives the same
+    /// identity). `-uuid <uuid>` replaces the derived bytes under this
+    /// face (the M99 override rides it).
+    #[default]
+    Content,
+    /// The random identity (ld64's `-random_uuid`): 16 bytes the emit
+    /// draws at emit time (`UUIDv4` — the RFC 4122 version and variant
+    /// bits set over the system CSPRNG). The identity is per-emit, never
+    /// deterministic — that is the decision's own contract; the
+    /// reproducible face is [`UuidSource::Content`].
+    Random,
+    /// The `-no_uuid` suppression (the M32 decision): no `LC_UUID`
+    /// command at all — the plan offset names the absent sentinel (`0`,
+    /// the convention every `__LINKEDIT` offset field shares).
+    None,
+}
+
+impl UuidSource {
+    /// The wire byte (v65) and the surface alphabet's order.
+    #[must_use]
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::Content => 0,
+            Self::Random => 1,
+            Self::None => 2,
+        }
+    }
+
+    /// The source from the wire byte (`None` off the alphabet — an old
+    /// server reading a new client's alphabet refuses the request as a
+    /// malformed frame, the M107 reversed-admits shape).
+    #[must_use]
+    pub const fn from_wire(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Content),
+            1 => Some(Self::Random),
+            2 => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    /// The output carries an `LC_UUID` command exactly when the source
+    /// plans one — the [`UuidSource::None`] face is the M32 suppression
+    /// (the sizing, the header assembly and the emit patch paths all
+    /// consult this one predicate, never a second decision copy).
+    #[must_use]
+    pub const fn carries_command(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 /// Link configuration the layout pass consumes (driver-derived).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkConfig {
@@ -427,38 +487,37 @@ pub struct LinkConfig {
     /// segmented output can suppress, and the relocatable object's
     /// header carries no function-starts command at all.
     pub function_starts: bool,
-    /// M32 — the UUID suppression: `-no_uuid` drops the output's
-    /// `LC_UUID` command (no uuid field for the emit two-pass
-    /// derivation to patch, `sizeofcmds` 24 bytes narrower). The flag
-    /// rode the driver surface as an accepted no-op since M1; the
-    /// default (`true`) keeps every pre-M32 link byte-identical — the
-    /// derived-UUID command rides every segmented image, its field
-    /// zeroed in the header bytes until the emit patches it after
-    /// hashing. There is no output-kind conflict: every segmented
-    /// output can suppress, and the relocatable object's header
-    /// carries no `LC_UUID` command at all — the emit patch paths
-    /// consult the plan offset's absent sentinel (`0`, the convention
-    /// every `__LINKEDIT` offset field shares) instead of carrying a
-    /// second copy of the decision.
-    pub uuid: bool,
-    /// M99 — the named output UUID: `-uuid <uuid>` — the other half of
-    /// M32's `-no_uuid` is the emit decision the two-pass UUID patch
-    /// reads: the named 16 bytes ride the `LC_UUID` field the header
+    /// M32/M114 — the UUID source: the typed alphabet the two faces the
+    /// bool pair carried (the M32 suppression, the M99 named value) hid.
+    /// Three values: [`UuidSource::Content`] (the default — the
+    /// content-derived derivation from the page hashes, the M32
+    /// pattern's reproducible face), [`UuidSource::Random`]
+    /// (`-random_uuid` — a fresh identity the emit draws at emit time,
+    /// ld64's random-UUID face), and [`UuidSource::None`] (`-no_uuid` —
+    /// the M32 suppression, no `LC_UUID` command at all, the absent
+    /// sentinel). The default keeps every pre-M114 link byte-identical —
+    /// the derivation stays content-derived. The conflicts (the layout's
+    /// re-check backs the driver surface's refusals so every caller pays
+    /// them): a named value refuses beside both the `None` face (two
+    /// answers to one question — the M99 conflict) and the `Random` face
+    /// (a draw and a name are two answers to the same question), and the
+    /// relocatable output refuses both the named value and the `Random`
+    /// face (its header carries no `LC_UUID` command at all — the M32
+    /// shape, no field to land on; `link_reloc` backs it).
+    pub uuid_source: UuidSource,
+    /// M99 — the named output UUID: `-uuid <uuid>` — the emit decision
+    /// the two-pass UUID patch reads under the [`UuidSource::Content`]
+    /// face: the named 16 bytes ride the `LC_UUID` field the header
     /// already plans, replacing the content-derived derivation (the
     /// page hashes still hash the zeroed field — the signature's
     /// content contract is unchanged; only the identity bytes are the
     /// config's own choice). The parse validates the 8-4-4-4-12 hex
     /// form; the library carries the parsed bytes. The default (`None`)
     /// keeps every pre-M99 link byte-identical — the derivation stays
-    /// content-derived. Two conflicts: `-no_uuid` × `-uuid` refuse each
-    /// other (a suppression and a named value are two answers to one
-    /// question — the layout's re-check backs the driver surface's
-    /// refusal), and the relocatable output refuses (its header carries
-    /// no `LC_UUID` command at all — the M32 shape, a named value has
-    /// no field to land on; `link_reloc` backs it). Every segmented
-    /// output kind carries the knob: the verifier's UUID contract is
-    /// structural, so a named value is the config's own choice, never a
-    /// defect (the `-no_adhoc` carve-out pattern).
+    /// content-derived. Every segmented output kind carries the knob:
+    /// the verifier's UUID contract is structural, so a named value is
+    /// the config's own choice, never a defect (the `-no_adhoc`
+    /// carve-out pattern).
     pub named_uuid: Option<[u8; 16]>,
     /// M33 — the private-extern decision: `-keep_private_externs`
     /// holds an input private-extern definition (`N_PEXT`, the
@@ -567,6 +626,25 @@ pub struct LinkConfig {
     /// like a segmented one (its object carries the member's sections
     /// verbatim), so `-r` rides the same pull.
     pub objc: bool,
+    /// M115 — the `ObjC` category-merging optimization: ld64's default-on
+    /// transform (the M43 `-ObjC` pattern's optimization). A category
+    /// whose base class rides the image registers through its base
+    /// class's registration — the `__objc_catlist`/`__objc_nlcatlist`
+    /// registration section the metadata family names folds away (the
+    /// classification consults the resolution's own winners and the
+    /// entries' relocation-bound names; a section the classifier cannot
+    /// parse, or one carrying any entry whose base class arrives at
+    /// load time, rides verbatim). `-no_objc_category_merging` disables
+    /// the merge — categories stay as separate sections, every
+    /// load-time byte the input carried. Corpora without mergeable
+    /// categories link byte-identical under either face (every
+    /// pre-knob link included). The relocatable output refuses the
+    /// disabling knob (the object's sections are the input's, verbatim
+    /// — the M104/M105 pattern; `link_reloc` re-checks). The decision
+    /// rides the daemon wire v66 (one byte, round-trip gated) and the
+    /// ladder's replay re-plans the shape the config names (a flip
+    /// falls back on the skeleton move — the M81 pattern).
+    pub objc_category_merging: bool,
     /// M46 — the export-dynamic roots: `-export_dynamic` — ld64's
     /// liveness rule, *"Preserves all global symbols in main
     /// executables during dead stripping"* (the `ld` man page) — is the
@@ -945,7 +1023,7 @@ impl Default for LinkConfig {
             header_pad: None,
             data_in_code: true,
             function_starts: true,
-            uuid: true,
+            uuid_source: UuidSource::Content,
             named_uuid: None,
             keep_private_externs: false,
             compact_unwind: true,
@@ -954,6 +1032,7 @@ impl Default for LinkConfig {
             deduplicate: true,
             dead_strip_dylibs: false,
             objc: false,
+            objc_category_merging: true,
             export_dynamic: false,
             branch_islands: true,
             init_symbol: None,
@@ -1188,6 +1267,12 @@ pub struct OutputSymbol {
 pub struct Layout {
     /// Echo of the config identifier (the signature's identity string).
     pub ident: String,
+    /// M114: echo of the config's UUID source (the face the emit
+    /// two-pass patch serves — the `Random` face draws at emit time,
+    /// the `Content` face derives or writes the named bytes, the `None`
+    /// face never reaches the emit). The incremental patch paths and
+    /// the record read the echo — one source, no re-derivation.
+    pub uuid_source: UuidSource,
     /// M99: echo of the config's named-UUID decision (the 16 bytes the
     /// emit two-pass patch writes instead of the content-derived
     /// derivation; `None` keeps the derivation). The incremental patch
@@ -1545,9 +1630,12 @@ fn count_live_fixup_slots(
 fn bucket_inputs(
     objects: &[InputObject],
     res: &Resolution,
+    interner: &Interner,
     init_skip: &std::collections::HashSet<(u32, usize)>,
     renames: &crate::rename::SectionRenames,
     strip_debug: bool,
+    objc_category_merging: bool,
+    defined_class_bases: &std::collections::HashSet<Vec<u8>>,
 ) -> Result<(BucketTable, Vec<Vec<usize>>, usize), LinkError> {
     let mut buckets: Vec<(String, String, u32, bool)> = Vec::new(); // (seg, name, flags, zerofill)
     let mut bucket_of: Vec<Vec<usize>> = Vec::with_capacity(objects.len());
@@ -1569,6 +1657,9 @@ fn bucket_inputs(
                 &mut fixup_slot_count,
                 renames,
                 strip_debug,
+                objc_category_merging,
+                defined_class_bases,
+                interner,
             )?;
             per_sect.push(bucket);
         }
@@ -1608,6 +1699,9 @@ fn bucket_for(
     fixup_slot_count: &mut usize,
     renames: &crate::rename::SectionRenames,
     strip_debug: bool,
+    objc_category_merging: bool,
+    defined_class_bases: &std::collections::HashSet<Vec<u8>>,
+    interner: &Interner,
 ) -> Result<usize, LinkError> {
     if in_sect.size == 0 {
         return Ok(usize::MAX);
@@ -1649,6 +1743,17 @@ fn bucket_for(
                 "input section {name} in segment {seg} (M1 buckets __TEXT/__DATA_CONST/__DATA only)"
             ),
         });
+    }
+    // M115: the category-merge decision — a registration section whose
+    // every entry names a base class riding this image folds away (the
+    // merged category registers through its base class's registration,
+    // ld64's optimization's linker-side shape); anything unparseable or
+    // unmergeable rides verbatim. The drop precedes the fixup count —
+    // the folded entries plan no slots (the M105 sentinel shape).
+    if objc_category_merging
+        && crate::objc::registration_merges(in_sect, interner, defined_class_bases)
+    {
+        return Ok(usize::MAX); // the MergedRegistration class: no load-time bytes
     }
     *fixup_slot_count += in_sect
         .relocs
@@ -2113,15 +2218,15 @@ pub fn layout(
             message: format!("{verdict} — {fix}"),
         });
     }
-    // M99: the named output UUID's conflicts. A named value and the
-    // M32 suppression are two answers to one question — a link asking
-    // both refuses (order-independent: the pair is the shape, not the
-    // argv order). The relocatable output carries no `LC_UUID` command
-    // at all (the M32 shape), so a named value has no field to land on.
-    // Both refusals ride here (not only on the driver surface and
-    // `link_reloc`) so every caller pays them: a silently dropped knob
-    // would claim an identity the output never carries.
-    if cfg.named_uuid.is_some() && !cfg.uuid {
+    // M99/M114: the named output UUID's conflicts. A named value and
+    // the M32 suppression are two answers to one question — a link
+    // asking both refuses (order-independent: the pair is the shape,
+    // not the argv order). The relocatable output carries no `LC_UUID`
+    // command at all (the M32 shape), so a named value has no field to
+    // land on. Both refusals ride here (not only on the driver surface
+    // and `link_reloc`) so every caller pays them: a silently dropped
+    // knob would claim an identity the output never carries.
+    if cfg.named_uuid.is_some() && cfg.uuid_source == UuidSource::None {
         return Err(LinkError::Layout {
             message: "-no_uuid suppresses the output's LC_UUID command, but -uuid names \
                      one — a suppression and a named value are two answers to one \
@@ -2135,6 +2240,29 @@ pub fn layout(
             message: "-uuid names the output's LC_UUID identity, but the relocatable \
                      output carries no LC_UUID command at all — drop -uuid or link an \
                      executable/dylib/bundle"
+                .into(),
+        });
+    }
+    // M114: the random source's conflicts. A random draw and a named
+    // value are two answers to the identity question (the M99 pair
+    // shape one face over), and the relocatable output carries no
+    // `LC_UUID` command at all — a draw has no field to land on. The
+    // refusals ride here (not only on the driver surface and
+    // `link_reloc`) so every caller pays them.
+    if cfg.uuid_source == UuidSource::Random && cfg.named_uuid.is_some() {
+        return Err(LinkError::Layout {
+            message: "-random_uuid draws the output's LC_UUID identity at emit time, but \
+                     -uuid names one — a draw and a named value are two answers to one \
+                     question: keep the name and drop -random_uuid, or keep the draw \
+                     and drop -uuid"
+                .into(),
+        });
+    }
+    if cfg.uuid_source == UuidSource::Random && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-random_uuid generates the output's LC_UUID identity, but the \
+                     relocatable output carries no LC_UUID command at all — drop \
+                     -random_uuid or link an executable/dylib/bundle"
                 .into(),
         });
     }
@@ -2378,6 +2506,23 @@ pub fn layout(
                 .into(),
         });
     }
+    // M115: the category-merging disable is a final-image decision —
+    // the relocatable output's sections are the input's, verbatim (an
+    // object carries its inputs' sections untouched; there is no
+    // registration to fold). The refusal rides here (not only on the
+    // driver surface and `link_reloc`) so every caller pays it: a
+    // silently inert knob would claim a shape the object cannot carry
+    // (the M104/M105 refusal shape).
+    if !cfg.objc_category_merging && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-no_objc_category_merging keeps every category's registration \
+                      verbatim, but the relocatable output's sections are the input's, \
+                      verbatim already — nothing to disable: drop \
+                      -no_objc_category_merging or link an image (an executable, dylib \
+                      or bundle)"
+                .into(),
+        });
+    }
     // M107: the non-default commons policies are final-image decisions —
     // the relocatable output's symtab is the input's, verbatim (an
     // object carries its inputs' tables untouched; there is no tentative
@@ -2528,9 +2673,27 @@ pub fn layout(
         .iter()
         .map(|s| (objects[s.file as usize].sections[s.in_sect].size / 8) as usize)
         .sum();
+    // M115: the merge's class set — the base names the image's own
+    // winners ride (the `_OBJC_CLASS_$_`/`_OBJC_METACLASS_$_` families
+    // among the resolution's definitions). One collection, consumed by
+    // the bucketing classification and the live-slot counter.
+    let defined_class_bases: std::collections::HashSet<Vec<u8>> = res
+        .definitions()
+        .filter_map(|(id, _)| {
+            crate::objc::class_family_base(interner.name(id).as_bytes()).map(<[u8]>::to_vec)
+        })
+        .collect();
     // ---- bucketing ---------------------------------------------------------
-    let (mut buckets, mut bucket_of, _pre_strip_slots) =
-        bucket_inputs(objects, res, &init_skip, &cfg.renames, cfg.strip_debug)?;
+    let (mut buckets, mut bucket_of, _pre_strip_slots) = bucket_inputs(
+        objects,
+        res,
+        interner,
+        &init_skip,
+        &cfg.renames,
+        cfg.strip_debug,
+        cfg.objc_category_merging,
+        &defined_class_bases,
+    )?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
     let needs = scan_needs(objects, res, interner, live)?;
     // The fixups payload exists when *any* slot is planned: input pointer
@@ -3344,6 +3507,7 @@ pub fn layout(
 
     Ok(Layout {
         ident: cfg.ident.clone(),
+        uuid_source: cfg.uuid_source,
         named_uuid: cfg.named_uuid,
         filetype: cfg.filetype.filetype(),
         image_base,
@@ -5981,7 +6145,7 @@ fn build_header(
         + u32::from(cfg.exported_symbols) // LC_DYLD_EXPORTS_TRIE (M40)
         + u32::from(emit_func_starts(cfg)) // LC_FUNCTION_STARTS (M31; M105 composes -S)
         + u32::from(hi.emit_dice) // LC_DATA_IN_CODE (M30; M105 composes -S)
-        + u32::from(cfg.uuid) // LC_UUID (M32)
+        + u32::from(cfg.uuid_source.carries_command()) // LC_UUID (M32/M114)
         + u32::from(cfg.adhoc)
         // M110: the hidden dylibs ride no load command (the mark's own
         // contract) — the command count names the non-hidden dylibs
@@ -6029,7 +6193,7 @@ fn build_header(
             + usize::from(cfg.exported_symbols) * 16 // LC_DYLD_EXPORTS_TRIE (M40)
             + usize::from(emit_func_starts(cfg)) * 16 // LC_FUNCTION_STARTS (M31; M105 composes -S)
             + if hi.emit_dice { 16 } else { 0 } // LC_DATA_IN_CODE (M30)
-            + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
+            + usize::from(cfg.uuid_source.carries_command()) * 24 // LC_UUID (M32/M114)
             + if cfg.adhoc { 16 } else { 0 } // LC_CODE_SIGNATURE
             // M110: the hidden dylibs ride no load command — the sizing
             // formula names the emitted commands (the non-hidden list).
@@ -6403,7 +6567,7 @@ fn build_header(
     // convention every `__LINKEDIT` offset field shares). The emit
     // patch paths consult the sentinel, never a second decision copy.
     let uuid_at;
-    if cfg.uuid {
+    if cfg.uuid_source.carries_command() {
         w32(&mut buf, lc, pgr_format::consts::LC_UUID);
         w32(&mut buf, lc + 4, 24);
         uuid_at = lc + 8;
@@ -6475,7 +6639,7 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice
         + usize::from(cfg.exported_symbols) * 16 // LC_DYLD_EXPORTS_TRIE (M40)
         + usize::from(emit_func_starts(cfg)) * 16 // LC_FUNCTION_STARTS (M31; M105 composes -S)
         + usize::from(emit_dice) * 16 // LC_DATA_IN_CODE (M30)
-        + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
+        + usize::from(cfg.uuid_source.carries_command()) * 24 // LC_UUID (M32/M114)
         + usize::from(cfg.adhoc) * 16 // LC_CODE_SIGNATURE
 }
 
