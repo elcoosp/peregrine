@@ -1,5 +1,5 @@
 //! M111 — the read-only-relocations policy face `error`:
-//! `-read_only_relocs error` — the peregrine default — the link refuses: a fixup whose target segment's initial mapping lacks VM_PROT_WRITE is the write dyld cannot perform at load time (the M17 W^X contract); the fix names the segment.
+//! `-read_only_relocs error` — the peregrine default — the link refuses: a fixup whose target segment's initial mapping lacks `VM_PROT_WRITE` is the write dyld cannot perform at load time (the M17 W^X contract); the fix names the segment.
 //! The target rides the `-segprot` decision the example makes: `__DATA`
 //! mapped `rx`/`rx` drops `VM_PROT_WRITE` from the initial mapping.
 //!
@@ -8,7 +8,6 @@
 use pgr_driver::opts;
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use std::ffi::OsString;
-use std::path::Path;
 
 fn pointer_object() -> Vec<u8> {
     let mut b = ObjectBuilder::new("hello.o");
@@ -62,7 +61,7 @@ fn main() {
         Err(e) => Err(e.to_string()),
     };
     match outcome {
-        Ok(_) => panic!("the read-only target must refuse under error"),
+        Ok(()) => panic!("the read-only target must refuse under error"),
         Err(err) => println!("face (error): refused — {err}"),
     }
 
