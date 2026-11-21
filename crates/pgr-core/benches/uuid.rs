@@ -14,7 +14,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
-use pgr_core::layout::{LinkConfig, OutputType};
+use pgr_core::layout::{LinkConfig, OutputType, UuidSource};
 use pgr_core::link::{LinkInput, link};
 
 const OBJECTS: usize = 64;
@@ -74,15 +74,18 @@ fn bench_uuid(c: &mut Criterion) {
     let mut group = c.benchmark_group("uuid");
     let inputs = corpus();
     group.throughput(Throughput::Elements(OBJECTS as u64));
-    for (name, keep) in [("default", true), ("suppressed", false)] {
+    for (name, source) in [
+        ("default", UuidSource::Content),
+        ("suppressed", UuidSource::None),
+    ] {
         group.bench_with_input(
             BenchmarkId::new("link_64_objects", name),
-            &keep,
-            |b, &keep| {
+            &source,
+            |b, &source| {
                 b.iter(|| {
                     let cfg = LinkConfig {
                         filetype: OutputType::Execute,
-                        uuid: keep,
+                        uuid_source: source,
                         ..LinkConfig::default()
                     };
                     let result = link(black_box(&inputs), &[], &cfg).expect("the corpus links");
