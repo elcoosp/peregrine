@@ -327,6 +327,7 @@ impl From<FrozenDylib> for Dylib {
             exports: f.exports,
             weak: false,
             reexport: false,
+            needed: false,
             lazy: false,
             upward: false,
         }
@@ -891,6 +892,7 @@ mod tests {
             exports: vec![b"_printf".to_vec(), b"_strlen".to_vec()],
             weak: false,
             reexport: false,
+            needed: false,
             lazy: false,
             upward: false,
         };
@@ -952,6 +954,7 @@ mod m7_versioned {
             exports: vec![b"_f".to_vec()],
             weak: false,
             reexport: false,
+            needed: false,
             lazy: false,
             upward: false,
         })
