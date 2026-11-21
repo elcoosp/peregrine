@@ -51,7 +51,7 @@ fn the_default_refuses_with_the_symbol_named() {
     let a = definer("a.o", "_dup", true);
     let b = definer("b.o", "_dup", false);
     let cfg = LinkConfig::default();
-    let err = link(&corpus(a, b), &[], &cfg).expect_err("the collision refuses");
+    let err = link(&corpus(&a, &b), &[], &cfg).expect_err("the collision refuses");
     let msg = err.to_string();
     assert!(
         msg.contains("duplicate strong"),
@@ -75,7 +75,7 @@ fn warning_and_suppress_keep_the_first_definition_and_record() {
             multiply_defined: policy,
             ..LinkConfig::default()
         };
-        let result = link(&corpus(a, b), &[], &cfg).expect("the first definition wins");
+        let result = link(&corpus(&a, &b), &[], &cfg).expect("the first definition wins");
         let id = result.interner.lookup(b"_dup").expect("the name interned");
         let def = result
             .resolution
@@ -116,7 +116,7 @@ fn dynamic_lookup_leaves_the_name_flat() {
         multiply_defined: MultiplyDefinedPolicy::DynamicLookup,
         ..LinkConfig::default()
     };
-    let result = link(&corpus(a, b), &[], &cfg).expect("the flat ride links");
+    let result = link(&corpus(&a, &b), &[], &cfg).expect("the flat ride links");
     let id = result.interner.lookup(b"_dup").expect("the name interned");
     assert!(
         result.resolution.def(id).is_none(),
@@ -150,7 +150,7 @@ fn a_strong_weak_collision_is_not_a_duplicate() {
         weak: true,
     });
     let cfg = LinkConfig::default();
-    let result = link(&corpus(strong, weak), &[], &cfg).expect("the strong side wins");
+    let result = link(&corpus(&strong, &weak), &[], &cfg).expect("the strong side wins");
     let id = result.interner.lookup(b"_dup").expect("the name interned");
     assert_eq!(
         result.resolution.def(id).expect("the winner").file,
@@ -175,7 +175,7 @@ fn the_non_default_policies_refuse_on_the_relocatable_output() {
             ..LinkConfig::default()
         };
         let err = link_reloc(
-            &corpus(definer("a.o", "_dup", true), definer("b.o", "_dup", false)),
+            &corpus(&definer("a.o", "_dup", true), &definer("b.o", "_dup", false)),
             &[],
             &cfg,
             Parallelism::default(),
@@ -195,8 +195,8 @@ fn the_non_default_policies_refuse_on_the_relocatable_output() {
     };
     link_reloc(
         &corpus(
-            definer("a.o", "_solo", true),
-            definer("b.o", "_other", false),
+            &definer("a.o", "_solo", true),
+            &definer("b.o", "_other", false),
         ),
         &[],
         &cfg,
@@ -204,7 +204,7 @@ fn the_non_default_policies_refuse_on_the_relocatable_output() {
     )
     .expect("the default rides the relocatable output");
     let err = link_reloc(
-        &corpus(definer("a.o", "_dup", true), definer("b.o", "_dup", false)),
+        &corpus(&definer("a.o", "_dup", true), &definer("b.o", "_dup", false)),
         &[],
         &cfg,
         Parallelism::default(),
@@ -216,7 +216,7 @@ fn the_non_default_policies_refuse_on_the_relocatable_output() {
     );
 }
 
-fn corpus(a: ObjectBuilder, b: ObjectBuilder) -> Vec<LinkInput> {
+fn corpus(a: &ObjectBuilder, b: &ObjectBuilder) -> Vec<LinkInput> {
     vec![
         LinkInput {
             name: a.name().to_string(),
