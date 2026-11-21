@@ -302,6 +302,17 @@ pub enum DriverError {
     /// the typed refusal, no longer misfiled under the `.tbd` variant).
     #[error("-sectcreate {0}")]
     SectionCreate(#[from] crate::synth::SynthError),
+    /// M109: the exit policy's escalation — `-fatal_warnings` turned the
+    /// advisory faces' tally into the link's failure (the warnings
+    /// printed; the image was never built, never written).
+    #[error(
+        "-fatal_warnings: {count} warning(s) elevated to errors (the advisory faces \
+             printed them; the image was never written)"
+    )]
+    FatalWarnings {
+        /// How many warnings the faces printed.
+        count: usize,
+    },
     /// A `-u` force-load symbol did not resolve to an in-image definition.
     #[error("-u {symbol}: {message}")]
     ForceLoad {
@@ -1136,6 +1147,9 @@ fn link_to_image_recorded(
                 // own unresolved-open entries print as the cold lane's
                 // `pgr: warning:` face (the v54 tail carried them
                 // verbatim; the suppress face rides empty by policy).
+                // M109: the tally rides — the served faces' products are
+                // the same tally the exit policy reads.
+                let mut warnings = img.policy_warnings.len();
                 for entry in &img.policy_warnings {
                     tracing::warn!(
                         undefined = %entry,
@@ -1143,6 +1157,23 @@ fn link_to_image_recorded(
                     );
                     eprintln!("pgr: warning: undefined symbol {entry}");
                 }
+                // M108: the exit policy's collision face — the session's
+                // own resolved state prints as the cold lane's
+                // `pgr: warning:` face (the v59 tail carried them
+                // verbatim; the suppress face rides empty by policy).
+                warnings += img.multiply_warnings.len();
+                for entry in &img.multiply_warnings {
+                    tracing::warn!(
+                        multiply_defined = %entry,
+                        "the link exits 0 with a duplicated definition (the first one wins)"
+                    );
+                    eprintln!("pgr: warning: multiply defined symbol {entry}");
+                }
+                // M109: the exit policy reads the tally — under
+                // `-fatal_warnings` the served faces' products are a hard
+                // failure (the image is never written; the one-shot
+                // fallback is not taken — the client stands down).
+                exit_shape(opts, warnings)?;
                 // M80: the served map writes beside the resident link
                 // (the document rides the reply verbatim — the same
                 // `-map` contract the trace rides, the sidecar writes
@@ -1253,6 +1284,9 @@ fn link_to_image_recorded(
         )?
     };
     check_force_load(&result, &prepared.force_load)?;
+    // M109: the advisory tally — every warning face's product counted as
+    // it prints; the exit policy reads the count under `-fatal_warnings`.
+    let mut warnings = 0usize;
     // M11: the ld64-style advisory — an order-file entry that ranked no
     // placed piece is a typo, not an error (the layout plans what the
     // inputs define). Warn once per unranked entry, in entry order.
@@ -1265,6 +1299,7 @@ fn link_to_image_recorded(
             "pgr: warning: order file symbol {} not matched by any input",
             String::from_utf8_lossy(name)
         );
+        warnings += 1;
     }
     // M91: the same advisory face for the cstring ranks — an entry whose
     // content matched no placed literal is a typo, not an error. Warn
@@ -1278,6 +1313,7 @@ fn link_to_image_recorded(
             "pgr: warning: order file literal {:?} not matched by any input",
             String::from_utf8_lossy(content)
         );
+        warnings += 1;
     }
     // M14: the filter's advisory — a list pattern that matched no
     // symbol in the plan is a typo, not an error (the link is correct,
@@ -1305,13 +1341,23 @@ fn link_to_image_recorded(
                     "pgr: warning: symbol list pattern {} matched no symbol",
                     String::from_utf8_lossy(pattern.source())
                 );
+                warnings += 1;
             }
         }
     }
     // M103: the exit policy's warning face — the unresolved list prints
     // beside the other advisory faces and the link still exits 0 (the
     // suppress face prints nothing; the walk recorded both).
-    print_undefined_warnings(opts, &result);
+    warnings += print_undefined_warnings(opts, &result);
+    // M108: the exit policy's collision face — the multiply-defined list
+    // prints beside the other advisory faces (the first definition wins;
+    // the suppress face prints nothing, the lookup face intends the
+    // ride).
+    warnings += print_multiply_defined_warnings(opts, &result);
+    // M109: the exit policy reads the tally — under `-fatal_warnings`
+    // every advisory face's product is a hard failure (the image is
+    // never built, never written); the default keeps the advisory exit.
+    exit_shape(opts, warnings)?;
     // M68: the emit half rides the seam — the fused tile emit (Pass 4)
     // reports its completion to the same subscription the pipeline's
     // phases used (the parity gate is the seam's own contract); the
@@ -1471,15 +1517,57 @@ fn check_force_load(result: &pgr_core::LinkResult, names: &[Vec<u8>]) -> Result<
 /// exits 0. ld64's advisory face: the build sees the holes, the product
 /// ships. The suppress face prints nothing — the same walk product, the
 /// exit decision differentiates; `error` never reaches a `LinkResult`
-/// and `dynamic_lookup` intends the lookup, so neither records.
-fn print_undefined_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) {
+/// and `dynamic_lookup` intends the lookup, so neither records. Returns
+/// the number of warnings printed (the M109 tally the exit policy
+/// reads).
+fn print_undefined_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) -> usize {
     if opts.config.undefined_policy != pgr_core::resolve::UndefinedPolicy::Warning {
-        return;
+        return 0;
     }
+    let mut warnings = 0usize;
     for entry in result.resolution.unresolved_open() {
         tracing::warn!(undefined = %entry, "the link exits 0 with an unresolved reference");
         eprintln!("pgr: warning: undefined symbol {entry}");
+        warnings += 1;
     }
+    warnings
+}
+
+/// M108: the exit policy's collision face — under
+/// `-multiply_defined warning`, every strong-strong collision the apply
+/// walk derived prints as a warning (the M11/M91 advisory-face
+/// convention: a span, not a bare eprintln) and the link still exits 0
+/// (the first definition wins). The suppress face prints nothing — the
+/// same walk product, the exit decision differentiates; `error` never
+/// reaches a `LinkResult` and `dynamic_lookup` intends the ride, so
+/// neither records. Returns the number of warnings printed (the M109
+/// tally the exit policy reads).
+fn print_multiply_defined_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) -> usize {
+    if opts.config.multiply_defined != pgr_core::resolve::MultiplyDefinedPolicy::Warning {
+        return 0;
+    }
+    let mut warnings = 0usize;
+    for entry in result.resolution.multiply_defined_open() {
+        tracing::warn!(
+            multiply_defined = %entry,
+            "the link exits 0 with a duplicated definition (the first one wins)"
+        );
+        eprintln!("pgr: warning: multiply defined symbol {entry}");
+        warnings += 1;
+    }
+    warnings
+}
+
+/// M109: the exit policy reads the tally — under `-fatal_warnings` every
+/// advisory face's product (the warnings the faces printed as they
+/// rendered) elevates to a hard failure (ld64: "Make warnings into
+/// errors"); the default and its explicit `-no_fatal_warnings` mirror
+/// keep the advisory exit.
+fn exit_shape(opts: &opts::Options, warnings: usize) -> Result<(), DriverError> {
+    if opts.config.fatal_warnings && warnings > 0 {
+        return Err(DriverError::FatalWarnings { count: warnings });
+    }
+    Ok(())
 }
 
 /// Pass 0 (M8 shape): maps the option inputs into a [`PreparedLink`] plus
@@ -2862,7 +2950,10 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
     }
     // M103: the exit policy's warning face rides the fusion relink —
     // the replay rode the policy (config, not a product), its own walk
-    // product prints as the cold lane's face.
+    // product prints as the cold lane's face. M109: the tally rides —
+    // the served faces' products are the same tally the exit policy
+    // reads.
+    let mut warnings = served.policy_warnings.len();
     for entry in &served.policy_warnings {
         tracing::warn!(
             undefined = %entry,
@@ -2870,6 +2961,20 @@ fn resident_relink(opts: &opts::Options) -> Result<LinkOutcome, ResidentAttempt>
         );
         eprintln!("pgr: warning: undefined symbol {entry}");
     }
+    // M108: the exit policy's collision face rides the fusion relink —
+    // the v59 tail carried the session's own resolved state verbatim
+    // (the suppress face rides empty by policy).
+    warnings += served.multiply_warnings.len();
+    for entry in &served.multiply_warnings {
+        tracing::warn!(
+            multiply_defined = %entry,
+            "the link exits 0 with a duplicated definition (the first one wins)"
+        );
+        eprintln!("pgr: warning: multiply defined symbol {entry}");
+    }
+    // M109: the exit policy reads the tally (the image is never written
+    // under the escalation — the caller's atomic write stands down).
+    exit_shape(opts, warnings)?;
     // M66 (v42 in service): the served faces print/write beside the
     // fusion relink — the report is the session's observed ladder run (no
     // Parse row: the POIs are resident), the timeline the same document
@@ -3404,6 +3509,20 @@ pub fn usage() -> String {
     s.push_str("                               binds flat at runtime, warning lists\n");
     s.push_str("                               the unresolved names and exits 0,\n");
     s.push_str("                               suppress stays silent (M103)\n");
+    s.push_str("  -multiply_defined error|warning|suppress|dynamic_lookup\n");
+    s.push_str("                               duplicated-symbol policy: error\n");
+    s.push_str("                               refuses with the symbol named (the\n");
+    s.push_str("                               default), warning prints the\n");
+    s.push_str("                               collision and exits 0 (first wins),\n");
+    s.push_str("                               suppress stays silent, dynamic_lookup\n");
+    s.push_str("                               rides the flat lookup (M108; refused\n");
+    s.push_str("                               with -r — the object's symtab is the\n");
+    s.push_str("                               input's, verbatim)\n");
+    s.push_str("  -fatal_warnings / -no_fatal_warnings\n");
+    s.push_str("                               elevate every advisory face's\n");
+    s.push_str("                               warnings to a hard exit 1 (M109);\n");
+    s.push_str("                               the default exits 0 with the\n");
+    s.push_str("                               warnings printed (refused with -r)\n");
     s.push_str("  -u <symbol>                  force the symbol to be defined\n");
     s.push_str("  -U <symbol>                  mark the symbol undefined while linking (M39):\n");
     s.push_str("                               the definition drops, the reference binds\n");
