@@ -201,11 +201,21 @@ fn emit_fused(buf: &mut [u8], layout: &Layout, objects: &[InputObject]) -> Resul
         // re-hash. M99: the config's named value replaces the derivation
         // — the identity bytes are the config's own choice, the hashes
         // still hash the zeroed field (the content contract is unchanged).
+        // M114: the `Random` face draws the identity at emit time (fresh
+        // per emit — the plan carries the source, never the bytes).
         let uuid_at = layout.linkedit.uuid_at as usize;
         if uuid_at != 0 {
-            let uuid = layout
-                .named_uuid
-                .unwrap_or_else(|| signature::derive_uuid(&hashes));
+            let uuid = match layout.uuid_source {
+                pgr_core::layout::UuidSource::Random => {
+                    signature::random_uuid().map_err(|e| EmitError::Internal {
+                        message: format!("the system entropy source failed: {e}"),
+                    })?
+                }
+                // The `Content` face: the named value (M99) or the derivation.
+                _ => layout
+                    .named_uuid
+                    .unwrap_or_else(|| signature::derive_uuid(&hashes)),
+            };
             let dst = buf
                 .get_mut(uuid_at..uuid_at + 16)
                 .ok_or(EmitError::Internal {
