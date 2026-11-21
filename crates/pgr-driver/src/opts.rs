@@ -143,6 +143,11 @@ pub struct Options {
     pub lib_dirs: Vec<String>,
     /// `-l` requested library basenames (`-lfoo` / `-l foo`), in order.
     pub libs: Vec<String>,
+    /// M106 `-needed-l <name>` (repeatable, ld64's `-needed-l<name>`
+    /// attached form accepted too): the `-l` basenames that carry the
+    /// needed-dylib mark — the dylib really rides even when no symbol
+    /// binds against it (the `-dead_strip_dylibs` survival opt-out).
+    pub needed_libs: Vec<String>,
     /// `-u <symbol>`: force the symbol to be treated as defined (must
     /// resolve; a plain liveness marker at M2).
     pub force_load: Vec<String>,
@@ -154,6 +159,11 @@ pub struct Options {
     /// Indices into `inputs` loaded upward (`-upward_library`, M45:
     /// `LC_LOAD_UPWARD_DYLIB` — ld64's umbrella-relationship mark).
     pub upward_library_inputs: Vec<usize>,
+    /// M106 indices into `inputs` carrying the needed-dylib mark
+    /// (`-needed_library`): the dylib really rides even when no symbol
+    /// binds against it (the `-dead_strip_dylibs` survival opt-out —
+    /// ld64's "needed" loads).
+    pub needed_library_inputs: Vec<usize>,
     /// Indices into `inputs` loaded as `LC_REEXPORT_DYLIB`
     /// (`-reexport_library`, M3).
     pub reexport_library_inputs: Vec<usize>,
@@ -199,6 +209,11 @@ pub struct Options {
     /// image's export trie as REEXPORT nodes (the M3 `-reexport_library`
     /// shape, resolved through the `-F` search).
     pub reexport_frameworks: Vec<String>,
+    /// M106 `-needed_framework <name>` (repeatable): the framework dylib
+    /// carries the needed mark — it really rides even when no symbol
+    /// binds against it (the `-dead_strip_dylibs` survival opt-out),
+    /// resolved through the `-F` search (the M23 pattern).
+    pub needed_frameworks: Vec<String>,
     /// M5 `-F <dir>`: framework search directories.
     pub framework_dirs: Vec<String>,
     /// M5 `-sectcreate <seg> <sect> <file>`: section contents from a file.
@@ -443,10 +458,12 @@ impl Default for Options {
             headerpad: 0,
             lib_dirs: Vec::new(),
             libs: Vec::new(),
+            needed_libs: Vec::new(),
             force_load: Vec::new(),
             weak_library_inputs: Vec::new(),
             lazy_library_inputs: Vec::new(),
             upward_library_inputs: Vec::new(),
+            needed_library_inputs: Vec::new(),
             reexport_library_inputs: Vec::new(),
             export_filter_specs: Vec::new(),
             alias_sources: Vec::new(),
@@ -458,6 +475,7 @@ impl Default for Options {
             lazy_frameworks: Vec::new(),
             upward_frameworks: Vec::new(),
             reexport_frameworks: Vec::new(),
+            needed_frameworks: Vec::new(),
             framework_dirs: Vec::new(),
             sectcreate: Vec::new(),
             cache_dir: None,
@@ -1008,6 +1026,18 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-commons` policy surface conflict (M107): the non-default
+    /// common-symbol treatment cannot apply where it was requested. The
+    /// verdict names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    CommonsPolicyConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -1152,6 +1182,18 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     DeadStripDylibsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-needed_library`/`-needed_framework`/`-needed-l` surface
+    /// conflict (M106): the needed-dylib mark cannot apply where it was
+    /// requested. The verdict names the shape conflict; the help is the
+    /// fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    NeededLibraryConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -1650,6 +1692,26 @@ fn apply_flag(
                 }
             };
         }
+        // M107: the commons resolution policy — ld64's `-commons
+        // <policy>` ("Specifies how commons (aka tentative definitions)
+        // are resolved with respect to dylibs"). The typed alphabet
+        // rides the config; the relocatable conflict is `finish`'s (it
+        // sees the whole surface).
+        "-commons" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.commons = match v.as_str() {
+                "use_dylibs" => pgr_core::resolve::CommonsPolicy::UseDylibs,
+                "search_dylibs" => pgr_core::resolve::CommonsPolicy::SearchDylibs,
+                "use_extern" => pgr_core::resolve::CommonsPolicy::UseExtern,
+                "error" => pgr_core::resolve::CommonsPolicy::Error,
+                other => {
+                    return Err(OptsError::InvalidValue {
+                        flag: arg.into(),
+                        value: format!("{other} (use_dylibs | search_dylibs | use_extern | error)"),
+                    });
+                }
+            };
+        }
         "-rpath" => {
             let v = next_value(args, i, arg)?;
             opts.config.rpaths.push(v);
@@ -1695,6 +1757,15 @@ fn apply_flag(
             opts.inputs.push(v);
             opts.upward_library_inputs.push(opts.inputs.len() - 1);
         }
+        "-needed_library" => {
+            // M106: the needed-dylib mark — the dylib really rides even
+            // when no symbol binds against it (the `-dead_strip_dylibs`
+            // survival opt-out; ld64's "needed" loads). The command kind
+            // stays a plain load: the mark composes with every kind.
+            let v = next_value(args, i, arg)?;
+            opts.inputs.push(v);
+            opts.needed_library_inputs.push(opts.inputs.len() - 1);
+        }
         "-weak_framework" => {
             // M14: the framework dylib loads weakly (the -framework
             // search with the weak-load kind).
@@ -1719,6 +1790,27 @@ fn apply_flag(
             // of `-reexport_library`).
             let v = next_value(args, i, arg)?;
             opts.reexport_frameworks.push(v);
+        }
+        "-needed_framework" => {
+            // M106: the needed-framework mark — the framework dylib
+            // really rides even when no symbol binds against it (the
+            // `-dead_strip_dylibs` survival opt-out), resolved through
+            // the `-F` search (the M23 pattern). The command kind stays
+            // a plain load: the mark composes with every kind.
+            let v = next_value(args, i, arg)?;
+            opts.needed_frameworks.push(v);
+        }
+        "-needed-l" => {
+            // M106: the `-l` form of the needed mark — the basename
+            // rides the `-L` search carrying the survival opt-out
+            // (ld64's `-needed-l<name>`; the detached form is the flag's
+            // own spelling, the attached `-needed-l<name>` form is
+            // matched below with the attached libraries). The name is a
+            // library request like `-l`'s (the search is shared, the
+            // mark rides the resolved dylib).
+            let v = next_value(args, i, arg)?;
+            opts.libs.push(v.clone());
+            opts.needed_libs.push(v);
         }
         "-dylib" => match opts.config.filetype {
             // A repeated kind is idempotent; only a kind *switch* is a
@@ -2546,6 +2638,15 @@ fn apply_flag(
             // Attached library form: -lSystem, -lfoo.
             opts.libs.push(arg[2..].to_string());
         }
+        _ if arg.starts_with("-needed-l") && arg.len() > 9 => {
+            // M106: the attached form of `-needed-l` (ld64's
+            // `-needed-l<name>`) — the basename rides the `-L` search
+            // carrying the needed-dylib mark (a library request like
+            // `-l`'s, the mark rides the resolved dylib).
+            let name = arg[9..].to_string();
+            opts.libs.push(name.clone());
+            opts.needed_libs.push(name);
+        }
         _ if NOOP_FLAGS.contains(&arg) => {
             // Accepted no-ops at M1 (the features they toggle do not exist
             // yet; emitting nothing matches the requested state).
@@ -3177,6 +3278,28 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 .into(),
         });
     }
+    // M107: the non-default commons policies are a final-image decision
+    // — the relocatable output's symtab is the input's, verbatim (an
+    // object carries its inputs' tables untouched — there is no
+    // tentative fate to decide). The default never refuses (the
+    // pre-M107 shape). An explicitly named policy that cannot apply is
+    // a refusal, never a silently dropped one (the library's re-checks
+    // back this so no caller can plan the shape either).
+    if opts.config.commons != pgr_core::resolve::CommonsPolicy::UseDylibs
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::CommonsPolicyConflict {
+            verdict: format!(
+                "-commons {} decides a tentative definition's fate against the linked \
+                 dylibs, but the relocatable output's symtab is the input's, verbatim",
+                opts.config.commons.flag_word()
+            ),
+            fix: "an object carries its inputs' symbol tables untouched — there is no \
+                  tentative to decide about: drop -commons or link an image (an \
+                  executable, dylib or bundle)"
+                .into(),
+        });
+    }
     // M40: the export-trie suppression is an executable decision — a
     // main executable's trie is the dlsym/debugger surface (its dylib
     // partners bind into their own tries), while a dylib's trie IS the
@@ -3264,6 +3387,29 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                     .into(),
             });
         }
+    }
+    // M106: the needed-dylib mark's surface conflict. The mark shapes
+    // the output's load-command list (the `-dead_strip_dylibs` survival
+    // opt-out — a needed dylib rides the kept list), and the relocatable
+    // output carries no load commands (its symtab is the input's,
+    // verbatim — nothing for the mark to keep). An explicitly named knob
+    // that cannot apply is a refusal, never a silently dropped one (the
+    // library's re-check backs this so no caller can plan the shape
+    // either).
+    if opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+        && (!opts.needed_library_inputs.is_empty()
+            || !opts.needed_frameworks.is_empty()
+            || !opts.needed_libs.is_empty())
+    {
+        return Err(OptsError::NeededLibraryConflict {
+            verdict: "-needed marks a dylib to really ride the load commands even when \
+                      nothing binds against it, but the relocatable output opens its \
+                      undefineds by design and carries no load commands"
+                .into(),
+            fix: "drop -needed_library/-needed_framework/-needed-l or link a segmented \
+                  output (an executable, dylib or bundle)"
+                .into(),
+        });
     }
     // M46: the export-dynamic roots' surface conflicts. The knob is an
     // executable decision — a dylib's and a bundle's strip already
