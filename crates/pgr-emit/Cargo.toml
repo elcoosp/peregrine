@@ -16,6 +16,9 @@ pgr-format = { workspace = true }
 pgr-core = { workspace = true }
 pgr-verify = { workspace = true }
 sha2 = { workspace = true }
+# M114: the random UUID source's entropy (the emit draws the identity
+# from the system CSPRNG at emit time).
+getrandom = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
 tracing = { workspace = true }
