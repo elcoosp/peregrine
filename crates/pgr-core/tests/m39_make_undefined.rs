@@ -364,11 +364,9 @@ fn the_mark_silences_a_duplicate_strong_definition() {
         &interner,
     )
     .expect("the mark lands on a real definition");
-    res.install(
-        &objects,
+    res.install(&objects,
         &interner,
-        pgr_core::resolve::MultiplyDefinedPolicy::Error,
-    )
+        pgr_core::resolve::MultiplyDefinedPolicy::Error, &mut None)
     .expect("the marked candidates skip");
     assert!(res.def(interner.lookup(b"_dup").unwrap()).is_none());
 }
@@ -460,11 +458,9 @@ fn harness(
     let mut full = Resolution::default();
     full.install_make_undefined(&mark_ids, &objects, &interner)
         .unwrap();
-    full.install(
-        &objects,
+    full.install(&objects,
         &interner,
-        pgr_core::resolve::MultiplyDefinedPolicy::Error,
-    )
+        pgr_core::resolve::MultiplyDefinedPolicy::Error, &mut None)
     .unwrap();
     full.require_all_resolved(&interner, &objects, UndefinedPolicy::DynamicLookup, false)
         .unwrap();
@@ -491,6 +487,7 @@ fn the_reuse_replay_honors_the_mark() {
         UndefinedPolicy::DynamicLookup,
         false,
         pgr_core::resolve::MultiplyDefinedPolicy::Error,
+        &mut None,
     )
     .expect("the replay installs");
     let f = interner.lookup(b"_f").unwrap();
