@@ -54,6 +54,7 @@ fn full_resolve(
         objects,
         interner,
         pgr_core::resolve::MultiplyDefinedPolicy::Error,
+        &mut None,
     )?;
     if !dylibs.is_empty() {
         let export_ids: Vec<pgr_core::ids::StringId> = dylibs
@@ -95,6 +96,7 @@ fn reused_resolve(
         UndefinedPolicy::Error,
         false,
         pgr_core::resolve::MultiplyDefinedPolicy::Error,
+        &mut None,
     )
 }
 
