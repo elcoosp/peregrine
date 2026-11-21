@@ -730,6 +730,26 @@ pub struct LinkConfig {
     /// refuses there (the layout's re-check and `link_reloc` back the
     /// driver refusal, the M102/M39 pattern).
     pub strip_debug: bool,
+    /// M107 — the commons resolution policy: `-commons <policy>` —
+    /// ld64's common-symbol treatment ("Specifies how commons (aka
+    /// tentative definitions) are resolved with respect to dylibs", the
+    /// `ld` man page) is the Pass-2 decision the resolver's
+    /// common-symbol walk reads
+    /// ([`crate::resolve::Resolution::apply_commons_policy`]): the
+    /// tentative's fate is the policy's decision — the default
+    /// ([`CommonsPolicy::UseDylibs`](crate::resolve::CommonsPolicy::UseDylibs))
+    /// keeps every pre-knob link byte-identical (the tentative rides as
+    /// a local definition, the house rank order), `search_dylibs` lets
+    /// a dylib's definition replace the tentative, `use_extern` rides
+    /// the common as an external reference, `error` refuses the
+    /// dylib-export conflict with the symbol named. The non-default
+    /// policies are final-image decisions — the relocatable output's
+    /// symtab is the input's, verbatim — and refuse there (the layout's
+    /// re-check and `link_reloc` back the driver refusal, the M104/M105
+    /// pattern); the default never refuses. The verifier's symtab
+    /// contract stays unchanged (common symbols are a dyld-consumed
+    /// surface, never a format defect).
+    pub commons: crate::resolve::CommonsPolicy,
     /// M52 — the dead-strip init/term roots: `-no_dead_strip_inits_and_terms`
     /// — ld64's flag ("The linker never dead strips initialization and
     /// termination routines") is the Pass-2 decision the dead-strip root
@@ -829,6 +849,7 @@ impl Default for LinkConfig {
             bind_at_load: false,
             keep_local_symbols: true,
             strip_debug: false,
+            commons: crate::resolve::CommonsPolicy::default(),
             no_dead_strip_inits_and_terms: false,
             renames: crate::rename::SectionRenames::default(),
             cstring_order: None,
@@ -2217,6 +2238,27 @@ pub fn layout(
                       sections are the input's, verbatim — nothing to strip: drop -S or \
                       link an image (an executable, dylib or bundle)"
                 .into(),
+        });
+    }
+    // M107: the non-default commons policies are final-image decisions —
+    // the relocatable output's symtab is the input's, verbatim (an
+    // object carries its inputs' tables untouched; there is no tentative
+    // fate to decide). The default never refuses. The refusal rides
+    // here (not only on the driver surface) so every caller pays it: a
+    // silently inert policy would claim a resolved shape the object
+    // cannot carry (the same shape the M104 symtab-shaping and M105
+    // debug-suppression refusals ride on the relocatable path).
+    if cfg.commons != crate::resolve::CommonsPolicy::UseDylibs
+        && cfg.filetype == OutputType::Relocatable
+    {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-commons {} decides a tentative definition's fate against the linked \
+                 dylibs, but the relocatable output's symtab is the input's, verbatim — \
+                 nothing to decide: drop -commons or link an image (an executable, dylib \
+                 or bundle)",
+                cfg.commons.flag_word()
+            ),
         });
     }
     // M40: the export-trie suppression is an executable decision — a
