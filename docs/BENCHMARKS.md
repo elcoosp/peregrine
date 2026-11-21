@@ -1020,3 +1020,11 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
 ### M109 — the warnings-as-errors exit policy
 
 - `fatal_warnings` (`cargo bench -p pgr-driver --bench fatal_warnings`): the driver run across the exit faces (the advisory default beside the `-fatal_warnings` escalation) over the same warning-producing 32-object corpus. Shape-parity gate: the tally is a counter the faces increment as they print; the escalation never regresses the link. Recorded on the dev sandbox (bounded `--measurement-time 1`): the two faces land within noise of each other (the advisory face the reference).
+
+### M110 — the hidden-dylib mark
+
+- `hidden_library` (`cargo bench -p pgr-core --bench hidden_library`): the link across the two faces over the 64-object corpus (the dylib rides visibly — `LC_LOAD_DYLIB` — or hidden, its load command dropped and its exports riding the resolve arena). Recorded on the dev sandbox (bounded `--measurement-time 1`): the two faces land within noise of each other (the mark is one bool in the arena install and the command-drop arithmetic — the shape-parity gate).
+
+### M111 — the read-only-relocations policy
+
+- `read_only_relocs` (`cargo bench -p pgr-core --bench read_only_relocs`): the link across the three `-read_only_relocs` faces over the 64-object corpus (a read-only-target slot per object: the `error` face prices the refusal walk, the `warning`/`suppress` faces price the identical image plus the advisory derivation). Recorded on the dev sandbox (bounded `--measurement-time 1`): the warning and suppress faces land within noise of each other and of the un-knobbed link (the policy is the exit's, never the bytes').
