@@ -609,3 +609,21 @@ harness = false
 [[bench]]
 name = "no_objc_category_merging"
 harness = false
+
+# M116 — the common-symbol advisory (`-warn_commons`): the shape-parity
+# gate — the advisory face is a measurement, never a layout product, so
+# the decision on/off plans identical header bytes over the same
+# commons-bearing corpus (the default commons policy and use_extern
+# alike), and the landing entries derive on the on face only.
+[[bench]]
+name = "warn_commons"
+harness = false
+
+# M117 — the init/term section suppression (`-no_inits`): the
+# shape-parity gate — the carrying corpus keeps its sections by default
+# and drops them under the suppression, and a corpus without init/term
+# sections links byte-identical under either face, over the same
+# 32-object init-bearing corpus.
+[[bench]]
+name = "no_inits"
+harness = false
