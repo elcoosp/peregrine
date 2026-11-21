@@ -1157,6 +1157,20 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-dtrace` surface conflict (M118): the `DTrace` `DOF` section
+    /// processing is a final-image decision — the relocatable output's
+    /// sections are the input's, verbatim (its sections ride the inputs
+    /// untouched; there is no `DOF` header to validate at emit, no
+    /// assembly to link). The verdict names the shape conflict; the help
+    /// is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    DtraceConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -2745,6 +2759,17 @@ fn apply_flag(
         "-no_inits" => {
             opts.config.no_inits = true;
         }
+        // M118: ld64's dtrace DOF section processing — a `__dtrace_dof`
+        // (`S_DTRACE_DOF`) section is recognized as a dtrace payload
+        // (Pass 1, distinct from the generic `S_ATTR_DEBUG` debug class)
+        // and the emit validates its DOF header (the identification magic
+        // and the bounds the DTrace consumer gates on) before the section
+        // links into the output; the verifier backstops the contract
+        // read-side on every `S_DTRACE_DOF` section. The relocatable
+        // conflict is `finish`'s — it sees the whole surface.
+        "-dtrace" => {
+            opts.config.dtrace = true;
+        }
         // M99: the named output UUID — the other half of the M32
         // suppression. ld64's `-uuid <uuid>` names the image's identity:
         // the 8-4-4-4-12 hex form validates here (36 chars, hyphens at
@@ -3726,6 +3751,21 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                       but the relocatable output's sections are the input's, verbatim"
                 .into(),
             fix: "drop -no_inits or link an image (an executable, dylib or bundle)".into(),
+        });
+    }
+    // M118: the dtrace DOF processing's surface conflict — the
+    // relocatable output's sections are the input's, verbatim (there is
+    // no DOF header to validate at emit, no assembly to link). An
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one (the library's re-checks back this so no
+    // caller can plan the shape either).
+    if opts.config.dtrace && opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+        return Err(OptsError::DtraceConflict {
+            verdict: "-dtrace validates the output's __dtrace_dof (DOF) section \
+                      headers and links them into the image, but the relocatable \
+                      output's sections are the input's, verbatim"
+                .into(),
+            fix: "drop -dtrace or link an image (an executable, dylib or bundle)".into(),
         });
     }
     // M40: the export-trie suppression is an executable decision — a
