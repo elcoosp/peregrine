@@ -140,6 +140,14 @@ fn m6_objc_and_swift_sections_pass_through_and_verify() {
         output: dir.join("out.bin").display().to_string(),
         config: pgr_core::layout::LinkConfig {
             ident: "m6-objc".into(),
+            // M111: the `__swift5_types` section carries an absolute
+            // rebase into read-only `__TEXT` — the write dyld cannot
+            // perform at load time. The default `error` face now
+            // refuses exactly that shape (the W^X contract's other
+            // half); the pass-through premise links under `warning`
+            // (the reloc rides, the advisory face prints, the image
+            // verifies strict).
+            read_only_relocs: pgr_core::resolve::ReadOnlyRelocsPolicy::Warning,
             ..pgr_core::layout::LinkConfig::default()
         },
         ..Options::default()
@@ -193,6 +201,7 @@ fn m6_objc_and_swift_sections_pass_through_and_verify() {
         output: dir2.join("out.bin").display().to_string(),
         config: pgr_core::layout::LinkConfig {
             ident: "m6-objc".into(),
+            read_only_relocs: pgr_core::resolve::ReadOnlyRelocsPolicy::Warning,
             ..pgr_core::layout::LinkConfig::default()
         },
         ..Options::default()
