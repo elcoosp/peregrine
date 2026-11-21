@@ -246,7 +246,20 @@ mod tests {
         // plans the same registration shape the cold link plans (the
         // parity gate is byte-identical; the merge is Pass 3's own
         // decision — the replay re-plans the shape the config names).
-        assert_eq!(crate::PROTO_VERSION, 66);
+        // and v67 carries the common-symbol advisory (M116, the tail
+        // after the category-merging byte): the session's warm pipeline
+        // derives the same advisory product the cold walk derives (the
+        // decision is config, the M81 pattern) and the reply tail
+        // carries the landing entries verbatim (the client prints the
+        // cold lane's face).
+        // and v68 carries the init/term section suppression (M117, the
+        // tail after the advisory byte): the session's warm pipeline
+        // plans the same init-free shape the cold link plans (the
+        // parity gate is byte-identical — the suppression is Pass 3's
+        // own decision, the replay re-plans the shape the config
+        // names), and the LC_ROUTINES_64 command drops from the served
+        // header exactly as the cold header drops it.
+        assert_eq!(crate::PROTO_VERSION, 68);
     }
 
     #[test]
