@@ -227,8 +227,8 @@ fn write_linkedit(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     Ok(())
 }
 
-/// Two-pass UUID (§9 — content-derived, or the M99 named value) + the
-/// ad-hoc `SuperBlob`, last in file.
+/// Two-pass UUID (§9 — content-derived, the M114 random draw, or the
+/// M99 named value) + the ad-hoc `SuperBlob`, last in file.
 fn write_signature(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     let le = &layout.linkedit;
     if le.sig_size == 0 {
@@ -239,12 +239,23 @@ fn write_signature(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
     // so the hashes hash the bytes as they are. M99: the config's
     // named value replaces the derivation — the page hashes still hash
     // the zeroed field (the signature's content contract is unchanged),
-    // only the identity bytes are the config's own choice.
+    // only the identity bytes are the config's own choice. M114: the
+    // `Random` face draws the identity from the system CSPRNG at emit
+    // time (fresh per emit — the plan carries the source, never the
+    // bytes), the `None` face never reaches here (the absent sentinel).
     let hashes = if le.uuid_at != 0 {
         let zeroed = signature::page_hashes(buf, le.uuid_at as usize, le.sig_off, true);
-        let uuid = layout
-            .named_uuid
-            .unwrap_or_else(|| signature::derive_uuid(&zeroed));
+        let uuid = match layout.uuid_source {
+            pgr_core::layout::UuidSource::Random => {
+                signature::random_uuid().map_err(|e| EmitError::Internal {
+                    message: format!("the system entropy source failed: {e}"),
+                })?
+            }
+            // The `Content` face: the named value (M99) or the derivation.
+            _ => layout
+                .named_uuid
+                .unwrap_or_else(|| signature::derive_uuid(&zeroed)),
+        };
         let dst = buf
             .get_mut(le.uuid_at as usize..le.uuid_at as usize + 16)
             .ok_or(EmitError::Internal {
