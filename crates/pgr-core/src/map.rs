@@ -797,6 +797,7 @@ mod tests {
             filetype: 2,
             order_unmatched: Vec::new(),
             cstring_order_unmatched: Vec::new(),
+            read_only_relocs: Vec::new(),
             image_base: 0,
             segments: vec![SegmentPlan {
                 name: "__TEXT".into(),
