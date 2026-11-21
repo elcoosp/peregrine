@@ -1501,6 +1501,108 @@ mod tests {
     }
 
     #[test]
+    fn the_needed_dylib_shape_serves_byte_identical() {
+        // M106: the needed-dylib mark rides the dylib list — the warm
+        // pipeline plans the same kept-list shape the cold lane plans
+        // (the parity gate is byte-identical; the shape is config, not a
+        // lane product — the M81 pattern). The needed dylib binds
+        // nothing and survives the drop on both lanes.
+        let hello = hello_main();
+        let greet_bytes = greet();
+        let (mut req, hashes) = request(&hello, &greet_bytes);
+        req.config.dead_strip_dylibs = true;
+        req.config.dylibs = vec![pgr_core::resolve::Dylib {
+            install_name: "@rpath/libidle.dylib".into(),
+            current_version: 0,
+            compatibility_version: 0,
+            exports: vec![b"_idle_fn".to_vec()],
+            weak: false,
+            reexport: false,
+            lazy: false,
+            upward: false,
+            needed: true,
+        }];
+        let mut session = ResidentSession::default();
+        for h in &hashes {
+            let bytes = if *h == content_hash(&hello) {
+                hello.clone()
+            } else {
+                greet_bytes.clone()
+            };
+            session.store_blob(h, bytes).unwrap();
+        }
+        let cold = session.link(&req).unwrap().image;
+        let warm = session.link(&req).unwrap().image;
+        assert_eq!(cold, warm, "the kept-list shape is the session's own plan");
+        let inputs: Vec<pgr_core::LinkInput> = vec![
+            pgr_core::LinkInput {
+                name: "hello.o".into(),
+                bytes: hello.clone(),
+            },
+            pgr_core::LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.clone(),
+            },
+        ];
+        let one_shot =
+            pgr_core::link_cached(&inputs, &[], &req.config, pgr_core::Parallelism::Auto, None)
+                .unwrap();
+        let image = pgr_emit::build_image_fused(&one_shot.layout, &one_shot.objects).unwrap();
+        assert_eq!(image, cold, "session link == one-shot link, byte for byte");
+        assert!(
+            one_shot
+                .layout
+                .header_bytes
+                .windows(b"@rpath/libidle.dylib".len())
+                .any(|w| w == b"@rpath/libidle.dylib"),
+            "the served shape keeps the needed dylib's load command (the survival mark \
+             rides the drop)"
+        );
+    }
+
+    #[test]
+    fn the_commons_policy_shape_serves_byte_identical() {
+        // M107: the commons resolution policy rides the config tail —
+        // the warm pipeline plans the same resolve shape the cold lane
+        // plans (the parity gate is byte-identical; the shape is
+        // config, not a lane product — the M81 pattern).
+        let hello = hello_main();
+        let greet_bytes = greet();
+        let (mut req, hashes) = request(&hello, &greet_bytes);
+        req.config.commons = pgr_core::resolve::CommonsPolicy::SearchDylibs;
+        let mut session = ResidentSession::default();
+        for h in &hashes {
+            let bytes = if *h == content_hash(&hello) {
+                hello.clone()
+            } else {
+                greet_bytes.clone()
+            };
+            session.store_blob(h, bytes).unwrap();
+        }
+        let cold = session.link(&req).unwrap().image;
+        let warm = session.link(&req).unwrap().image;
+        assert_eq!(
+            cold, warm,
+            "the policy's resolve shape is the session's own plan"
+        );
+        let inputs: Vec<pgr_core::LinkInput> = vec![
+            pgr_core::LinkInput {
+                name: "hello.o".into(),
+                bytes: hello.clone(),
+            },
+            pgr_core::LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.clone(),
+            },
+        ];
+        let one_shot =
+            pgr_core::link_cached(&inputs, &[], &req.config, pgr_core::Parallelism::Auto, None)
+                .unwrap();
+        let image = pgr_emit::build_image_fused(&one_shot.layout, &one_shot.objects).unwrap();
+        assert_eq!(image, cold, "session link == one-shot link, byte for byte");
+    }
+
+    #[test]
     fn changed_input_reuses_the_unchanged_poi() {
         let hello = hello_main();
         let greet_bytes = greet();
