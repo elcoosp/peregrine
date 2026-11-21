@@ -1035,4 +1035,12 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
 
 ### M113 — the reference trace
 
+### M114 — the UUID source
+
+The `random_uuid` bench: a shape-parity gate over the corpus the M32/M99 uuid benches share (64 objects, 4 rebases each) — the carried faces' plans byte-identical (the source is the emit's identity write, never the plan's), the suppressed face exactly one 24-byte command narrower; recorded on the dev sandbox (the knob-parity convention).
+
+### M115 — the ObjC category-merging decision
+
+The `no_objc_category_merging` bench: a shape-parity gate over a 32-object category-bearing corpus — the merged plan drops the registration section, the disabled plan keeps it, the unmergeable corpus links byte-identical under either face; recorded on the dev sandbox.
+
 - `trace_refs` (`cargo bench -p pgr-core --bench trace_refs`): the seam's near-parity — the refs collector rides the M54 observation seam's `on_reference` face (one event per reference the resolve visits, 64 per link over this corpus) beside the unobserved link. Recorded on the dev sandbox (bounded `--measurement-time 1`): the two faces land within noise of each other (the unobserved face the reference — the shape-parity gate).
