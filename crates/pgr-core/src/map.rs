@@ -795,6 +795,7 @@ mod tests {
             ident: "tiny".into(),
             uuid_source: crate::layout::UuidSource::Content,
             named_uuid: None,
+            dtrace: false,
             filetype: 2,
             order_unmatched: Vec::new(),
             cstring_order_unmatched: Vec::new(),
