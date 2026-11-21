@@ -784,6 +784,23 @@ pub struct LinkConfig {
     /// nothing left to elevate; the layout's re-check and `link_reloc`
     /// back the driver refusal).
     pub fatal_warnings: bool,
+    /// M111 — the read-only-relocations policy:
+    /// `-read_only_relocs <policy>` — ld64's policy for relocations in
+    /// read-only segments (the W^X contract's other half; see
+    /// [`crate::resolve::ReadOnlyRelocsPolicy`]). The decision touches
+    /// Pass 3's fixup planning: after the plan converges, every chained
+    /// fixup and classic opcode whose target segment's `initprot` (from
+    /// `-segprot` or the house defaults) lacks `VM_PROT_WRITE` fires
+    /// the policy — `error` refuses the link (the M17 segprot gate's
+    /// W^X contract, the fix names the segment), `warning` derives the
+    /// advisory entries the driver's exit policy surfaces, `suppress`
+    /// rides silently. The `warning` and `suppress` faces plan the
+    /// identical image; the relocatable output refuses the non-default
+    /// faces (its sections are the input's, verbatim — the M104/M105
+    /// refusal shape); the verifier's structural contract stays
+    /// unchanged (the read-side backstop — the image's own W^X walk —
+    /// is the producer's mirror, never a policy reader).
+    pub read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy,
     /// M52 — the dead-strip init/term roots: `-no_dead_strip_inits_and_terms`
     /// — ld64's flag ("The linker never dead strips initialization and
     /// termination routines") is the Pass-2 decision the dead-strip root
@@ -886,6 +903,7 @@ impl Default for LinkConfig {
             commons: crate::resolve::CommonsPolicy::default(),
             multiply_defined: crate::resolve::MultiplyDefinedPolicy::default(),
             fatal_warnings: false,
+            read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy::default(),
             no_dead_strip_inits_and_terms: false,
             renames: crate::rename::SectionRenames::default(),
             cstring_order: None,
@@ -1154,6 +1172,14 @@ pub struct Layout {
     /// a `-sectorder __TEXT __cstring` table and whenever every entry
     /// ranked something — the same advisory face, the literal's wording.
     pub cstring_order_unmatched: Vec<Vec<u8>>,
+    /// M111: the read-only-relocation advisory entries the `warning`
+    /// face derived — one deterministic `"bind of _name at 0x… in
+    /// segment …"` entry per fixup whose target segment's initial
+    /// mapping lacks `VM_PROT_WRITE`, sorted. Empty under the default
+    /// `error` face (its product is the refusal) and under `suppress`
+    /// (the ride is silent) — the driver's exit policy prints the
+    /// entries and still exits 0.
+    pub read_only_relocs: Vec<String>,
     /// The image base (`__PAGEZERO` vmsize for executables, `0` for
     /// dylibs/bundles): every absolute fixup/trie address is relative to it.
     pub image_base: u64,
@@ -2241,6 +2267,28 @@ pub fn layout(
             message: format!("{verdict} — {fix}"),
         });
     }
+    // M110: the hidden mark composes with the weak/lazy kinds (their
+    // command would drop either way — the hidden dylib rides no load
+    // command), but the re-export obligation outranks it: a
+    // `LC_REEXPORT_DYLIB` command is an identity obligation and its
+    // REEXPORT nodes join the image's export trie naming a provider
+    // dyld must load — a hidden re-export would publish trie nodes for
+    // an image no load command ever loads (two-level clients bind into
+    // a provider that cannot exist). The refusal rides here (not only
+    // on the driver surface) so every caller pays it (the same shape
+    // the M45 kind-obligation rule rides).
+    if let Some(d) = cfg.dylibs.iter().find(|d| d.hidden && d.reexport) {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-hidden_library marks {} hidden (no load command), but the same dylib \
+                 carries the re-export obligation: its REEXPORT nodes name a provider \
+                 dyld must load through the command the hidden mark drops — the two \
+                 marks contradict; keep the re-export (drop -hidden_library) or drop \
+                 -reexport_library",
+                d.install_name
+            ),
+        });
+    }
     // M104: the symtab-shaping decision's drop face (`-x`) is a final
     // image decision — the relocatable output's symtab is the input's,
     // verbatim (an object carries its inputs' tables untouched; there
@@ -2250,6 +2298,26 @@ pub fn layout(
     // drop would claim a shaped symtab the object cannot carry (the
     // same shape the M39 make-undefined and M40 export-trie refusals
     // ride on the relocatable path).
+    // M111: the read-only-relocations policy is a final-image decision
+    // — the relocatable output's sections are the input's, verbatim
+    // (an object carries its inputs' relocation sites untouched; there
+    // is no segment mapping for the policy to price). The non-default
+    // faces refuse here (not only on the driver surface) so every
+    // caller pays it: a silently inert policy would claim a protected
+    // shape the object cannot carry (the M104/M105 refusal shape).
+    if cfg.read_only_relocs != crate::resolve::ReadOnlyRelocsPolicy::Error
+        && cfg.filetype == OutputType::Relocatable
+    {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-read_only_relocs {} decides what a write into a read-only segment \
+                 becomes, but the relocatable output's sections are the input's, \
+                 verbatim — nothing to decide: drop -read_only_relocs or link an image \
+                 (an executable, dylib or bundle)",
+                cfg.read_only_relocs.flag_word()
+            ),
+        });
+    }
     if !cfg.keep_local_symbols && cfg.filetype == OutputType::Relocatable {
         return Err(LinkError::Layout {
             message: "-x drops the output's plain local symbols (the symtab's \
@@ -2658,6 +2726,34 @@ pub fn layout(
     // when classic streams carry bytes.
     let dyld_info = final_dyld_info;
 
+    // ---- M111: the read-only-relocations policy ------------------------------
+    // The target segment's `initprot` (from `-segprot` or the house
+    // defaults) decides: a chained fixup or classic opcode whose slot
+    // lands in a segment the initial mapping does not make writable is
+    // the write dyld cannot perform at load time — the policy's
+    // decision (the W^X contract's other half). The walk rides the
+    // converged plan's own slot list, so the chained and the classic
+    // shape price the same targets.
+    let read_only_relocs = read_only_reloc_entries(cfg, &state, interner);
+    if cfg.read_only_relocs == crate::resolve::ReadOnlyRelocsPolicy::Error {
+        if let Some(first) = read_only_relocs.first() {
+            return Err(LinkError::Layout {
+                message: format!(
+                    "-read_only_relocs error: a chained fixup or classic opcode targets a \
+                     read-only segment and dyld cannot write the bind at load time (the \
+                     M17 W^X contract) — {first}; move the slot to a writable segment, \
+                     mark the reference weak, or relax the policy with -read_only_relocs \
+                     warning|suppress"
+                ),
+            });
+        }
+    }
+    let read_only_relocs = match cfg.read_only_relocs {
+        crate::resolve::ReadOnlyRelocsPolicy::Error
+        | crate::resolve::ReadOnlyRelocsPolicy::Suppress => Vec::new(),
+        crate::resolve::ReadOnlyRelocsPolicy::Warning => read_only_relocs,
+    };
+
     // ---- export visibility (M3, M14) -------------------------------------------
     // `-exported_symbols_list` restricts the surface to the names its
     // patterns select; `-unexported_symbols_list` removes names. Hidden
@@ -2821,7 +2917,12 @@ pub fn layout(
                 ),
             });
         };
-        let desc = if imp.lib_ordinal > res.dylibs().len() as u16
+        // M110: the ordinals name the *emitted* command list — the
+        // non-hidden dylibs (a hidden dylib rides no command and was
+        // never in the ordinal space; the check's bound is the list
+        // dyld walks).
+        let visible_dylibs = res.dylibs().iter().filter(|d| !d.hidden).count();
+        let desc = if imp.lib_ordinal > visible_dylibs as u16
             && imp.lib_ordinal < BIND_SPECIAL_DYLIB_FLAT_LOOKUP
         {
             return Err(LinkError::Internal {
@@ -3214,6 +3315,7 @@ pub fn layout(
         image_base,
         order_unmatched,
         cstring_order_unmatched,
+        read_only_relocs,
         segments: state.segments,
         sections: state.sections,
         linkedit: LinkeditPlan {
@@ -5740,6 +5842,51 @@ fn rpath_cmd_size(path: &str) -> usize {
     align8(12 + path.len() + 1)
 }
 
+/// M111: the read-only-relocation targets the converged plan carries —
+/// one deterministic entry per fixup slot whose target segment's
+/// `initprot` lacks `VM_PROT_WRITE`, sorted (the chained and the
+/// classic path price the same slot list; the entry names the slot and
+/// the segment the refusal/advisory speak).
+fn read_only_reloc_entries(
+    cfg: &LinkConfig,
+    state: &PlacedState,
+    interner: &Interner,
+) -> Vec<String> {
+    if cfg.read_only_relocs == crate::resolve::ReadOnlyRelocsPolicy::Suppress {
+        return Vec::new();
+    }
+    let mut entries: Vec<String> = Vec::new();
+    for fp in &state.flat {
+        for (off, kind) in &fp.piece.fixup_slots {
+            let vaddr = fp.addr + u64::from(*off);
+            let Some(seg) = state
+                .segments
+                .iter()
+                .find(|s| vaddr >= s.vmaddr && vaddr < s.vmaddr.saturating_add(s.vmsize))
+            else {
+                continue;
+            };
+            if seg.initprot & VM_PROT_WRITE != 0 {
+                continue;
+            }
+            let what = match kind {
+                FixupKind::Bind { name, .. } => {
+                    format!("bind of {}", String::from_utf8_lossy(interner.bytes(*name)))
+                }
+                FixupKind::Rebase { .. } => "rebase".to_string(),
+            };
+            entries.push(format!(
+                "{what} at {vaddr:#x} in segment {} (initprot {:#x} — the initial mapping \
+                 is not writable)",
+                seg.name, seg.initprot
+            ));
+        }
+    }
+    entries.sort();
+    entries.dedup();
+    entries
+}
+
 fn build_header(
     cfg: &LinkConfig,
     segments: &[SegmentPlan],
@@ -5802,9 +5949,13 @@ fn build_header(
         + u32::from(hi.emit_dice) // LC_DATA_IN_CODE (M30; M105 composes -S)
         + u32::from(cfg.uuid) // LC_UUID (M32)
         + u32::from(cfg.adhoc)
-        + u32::try_from(hi.dylibs.len()).map_err(|_| LinkError::Internal {
-            message: "dylib count exceeds u32".into(),
-        })?
+        // M110: the hidden dylibs ride no load command (the mark's own
+        // contract) — the command count names the non-hidden dylibs
+        // only, the same list the two-level ordinals compact onto.
+        + u32::try_from(hi.dylibs.iter().filter(|d| !d.hidden).count())
+            .map_err(|_| LinkError::Internal {
+                message: "dylib count exceeds u32".into(),
+            })?
         + u32::try_from(cfg.umbrella.count()).map_err(|_| LinkError::Internal {
             message: "umbrella member count exceeds u32".into(),
         })?
@@ -5846,7 +5997,13 @@ fn build_header(
             + if hi.emit_dice { 16 } else { 0 } // LC_DATA_IN_CODE (M30)
             + usize::from(cfg.uuid) * 24 // LC_UUID (M32)
             + if cfg.adhoc { 16 } else { 0 } // LC_CODE_SIGNATURE
-            + hi.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
+            // M110: the hidden dylibs ride no load command — the sizing
+            // formula names the emitted commands (the non-hidden list).
+            + hi.dylibs
+                .iter()
+                .filter(|d| !d.hidden)
+                .map(|d| dylib_cmd_size(&d.install_name))
+                .sum::<usize>()
             + cfg.umbrella.region_size()
             + cfg.sub_clients.region_size()
             + cfg.dyld_envs.region_size()
@@ -6031,7 +6188,16 @@ fn build_header(
     // LC_LOAD_DYLIB / LC_LOAD_WEAK_DYLIB / LC_REEXPORT_DYLIB per input
     // dylib, in ordinal order — the two-level namespace index base
     // (TDD §3.3); re-exports join the same ordinal space (M3).
+    // M110: the hidden dylibs (`-hidden_library` family) ride no
+    // command at all — the mark's contract drops the `LC_LOAD_DYLIB`
+    // (or `LC_LOAD_WEAK_DYLIB`/`LC_LAZY_LOAD_DYLIB` for the composed
+    // kinds) the dylib would otherwise carry; the two-level ordinal
+    // space never named it and the emitted list stays contiguous onto
+    // the ordinals.
     for (d, &cmd) in hi.dylibs.iter().zip(dylib_cmds.iter()) {
+        if d.hidden {
+            continue;
+        }
         let name = d.install_name.as_bytes();
         let cmdsize = dylib_cmd_size(&d.install_name);
         w32(&mut buf, lc, cmd);
@@ -6252,7 +6418,12 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice
         } else {
             0
         }
-        + cfg.dylibs.iter().map(|d| dylib_cmd_size(&d.install_name)).sum::<usize>()
+        + cfg
+            .dylibs
+            .iter()
+            .filter(|d| !d.hidden) // M110: hidden dylibs ride no load command
+            .map(|d| dylib_cmd_size(&d.install_name))
+            .sum::<usize>()
         + cfg.umbrella.region_size()
         + cfg.sub_clients.region_size()
         + cfg.dyld_envs.region_size()
