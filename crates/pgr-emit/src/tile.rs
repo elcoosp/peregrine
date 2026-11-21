@@ -235,6 +235,12 @@ fn emit_fused(buf: &mut [u8], layout: &Layout, objects: &[InputObject]) -> Resul
         // The SuperBlob lands last (beyond the hashed range).
         write_superblob(layout, &mut *buf, &hashes)?;
     }
+    // M118: under `-dtrace`, every `__dtrace_dof` section's assembled
+    // DOF header is validated before the section links into the output
+    // (the producer-side gate the verifier backstops read-side; the same
+    // gate `copy_and_patch` pays on the reference path — the fused path
+    // must match it, the M4 byte-identity contract).
+    crate::emit::validate_dtrace_dof_sections(buf, layout)?;
     Ok(())
 }
 
