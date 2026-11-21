@@ -24,8 +24,8 @@
 use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
     TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_map, encode_multiply_warnings, encode_policy_warnings,
-    encode_provenance, encode_time_report, encode_trace, encode_verify_report, put_bytes, put_hash,
-    put_str, put_u8, put_u32, put_u64,
+    encode_provenance, encode_references, encode_statistics, encode_time_report, encode_trace,
+    encode_verify_report, put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
 };
 use crate::session::ResidentSession;
 use std::io::{Read, Write};
@@ -346,6 +346,14 @@ fn serve_link(
             // `-multiply_defined warning`) — the session's own resolved
             // state renders, the client prints the cold lane's face.
             encode_multiply_warnings(&mut b, &served.multiply_warnings);
+            // The v63 tail: the link-statistics report when the request
+            // asked (the session's own run's counts, the M62 convention
+            // — the client prints the cold lane's face), absent otherwise.
+            encode_statistics(&mut b, served.statistics.as_ref());
+            // The v64 tail: the reference trace when the request asked
+            // (the session's own Pass 2 visits, the M62 convention — the
+            // client renders the cold lane's face).
+            encode_references(&mut b, &served.references);
             write_frame(stream, TAG_IMAGE, &b)
         }
         Err(e) => {
