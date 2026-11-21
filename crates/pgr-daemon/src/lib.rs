@@ -235,7 +235,18 @@ mod tests {
         // references its own Pass 2 visited and the reply tail carries
         // the facts verbatim (the client renders the cold lane's face —
         // the trace rides the ladder's replay too).
-        assert_eq!(crate::PROTO_VERSION, 64);
+        // and v65 carries the UUID source (M114, the typed alphabet
+        // widening the v23 suppression slot): the session's warm
+        // pipeline plans the same identity shape the cold link plans
+        // (the parity gate is byte-identical; the random face's draw is
+        // the emit's own), and the ladder's replay rides the decision —
+        // the record's v9 source byte, the M81 pattern).
+        // and v66 carries the ObjC category-merging disable (M115, the
+        // tail after the UUID-source byte): the session's warm pipeline
+        // plans the same registration shape the cold link plans (the
+        // parity gate is byte-identical; the merge is Pass 3's own
+        // decision — the replay re-plans the shape the config names).
+        assert_eq!(crate::PROTO_VERSION, 66);
     }
 
     #[test]
