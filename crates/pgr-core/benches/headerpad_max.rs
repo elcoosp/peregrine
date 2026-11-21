@@ -31,6 +31,7 @@ fn dylibs() -> Vec<Dylib> {
         weak: false,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     };
