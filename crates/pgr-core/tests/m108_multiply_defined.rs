@@ -175,7 +175,10 @@ fn the_non_default_policies_refuse_on_the_relocatable_output() {
             ..LinkConfig::default()
         };
         let err = link_reloc(
-            &corpus(&definer("a.o", "_dup", true), &definer("b.o", "_dup", false)),
+            &corpus(
+                &definer("a.o", "_dup", true),
+                &definer("b.o", "_dup", false),
+            ),
             &[],
             &cfg,
             Parallelism::default(),
@@ -204,7 +207,10 @@ fn the_non_default_policies_refuse_on_the_relocatable_output() {
     )
     .expect("the default rides the relocatable output");
     let err = link_reloc(
-        &corpus(&definer("a.o", "_dup", true), &definer("b.o", "_dup", false)),
+        &corpus(
+            &definer("a.o", "_dup", true),
+            &definer("b.o", "_dup", false),
+        ),
         &[],
         &cfg,
         Parallelism::default(),
