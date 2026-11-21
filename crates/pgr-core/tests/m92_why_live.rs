@@ -354,6 +354,7 @@ fn a_dylib_bound_name_refuses_the_walk() {
         exports: vec![b"_greet".to_vec()],
         weak: false,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     });
