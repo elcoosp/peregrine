@@ -8,7 +8,6 @@
 use pgr_driver::opts;
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use std::ffi::OsString;
-use std::path::Path;
 
 fn pointer_object() -> Vec<u8> {
     let mut b = ObjectBuilder::new("hello.o");
@@ -64,7 +63,7 @@ fn main() {
         Err(e) => Err(e.to_string()),
     };
     match outcome {
-        Ok(_) => println!("face (warning): linked — the advisory face printed above"),
+        Ok(()) => println!("face (warning): linked — the advisory face printed above"),
         Err(err) => panic!("the warning face must not refuse: {err}"),
     }
 
