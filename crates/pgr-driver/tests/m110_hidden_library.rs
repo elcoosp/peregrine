@@ -161,7 +161,7 @@ fn a_strong_reference_to_a_hidden_export_refuses_with_the_fix() {
     let dir = scratch("hidden_strong");
     let obj = hello_o(&dir, true);
     let _stub = lib_tbd(&dir, "greet", "_greet");
-    let mut argv: Vec<OsString> = vec![
+    let argv: Vec<OsString> = vec![
         "-o".into(),
         dir.join("hello").to_string_lossy().into_owned().into(),
         "-hidden_library".into(),
