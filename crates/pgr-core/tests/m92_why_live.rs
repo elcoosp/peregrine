@@ -355,6 +355,7 @@ fn a_dylib_bound_name_refuses_the_walk() {
         weak: false,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     });
