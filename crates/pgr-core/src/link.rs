@@ -383,6 +383,16 @@ pub fn link_from_objects_observed(
         PhaseDetail::Winners { reused: replayed },
         resolve_started.elapsed(),
     );
+    // M107: the commons resolution policy (`-commons <policy>`) — the
+    // tentative's fate is the policy's decision. The walk rides both
+    // resolve paths (the full install and the reuse replay — the policy
+    // is config, not a lane product): the default face is a no-op (the
+    // house rank order — an in-image definition, a common included,
+    // beats the two-level export), the non-default faces replace or
+    // un-define the tentative and let the exporting dylib serve the
+    // bind, so the M42 drop's use-decision below reads the post-policy
+    // winners.
+    res.apply_commons_policy(cfg.commons, cfg.undefined_policy, &interner)?;
     // M42: the unused-dylib drop (`-dead_strip_dylibs`) — the Pass-2
     // decision the kept command list reads. The compaction rides both
     // resolve paths (the full install and the reuse replay): the
@@ -705,6 +715,36 @@ fn link_reloc_inner(
             message: "-dead_strip_dylibs drops the load commands of unused dylibs, but the \
                       relocatable output opens its undefineds by design and carries no load \
                       commands — drop -dead_strip_dylibs or link a segmented output"
+                .into(),
+        });
+    }
+    // M107: the non-default commons policies are a segmented-output
+    // decision — the relocatable output's symtab is the input's,
+    // verbatim (there is no tentative fate to decide). The re-check
+    // backs the driver surface's earlier refusal: no library caller can
+    // plan the shape either.
+    if cfg.commons != crate::resolve::CommonsPolicy::UseDylibs {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-commons {} decides a tentative definition's fate against the linked \
+                 dylibs, but the relocatable output opens its undefineds by design — \
+                 nothing to decide: drop -commons or link a segmented output",
+                cfg.commons.flag_word()
+            ),
+        });
+    }
+    // M106: the needed-dylib mark is a segmented-output decision — the
+    // mark keeps a dylib's load command alive under the drop, and the
+    // relocatable output carries no load commands (its symtab is the
+    // input's, verbatim), so there is nothing for the mark to keep. The
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either.
+    if cfg.dylibs.iter().any(|d| d.needed) {
+        return Err(LinkError::Layout {
+            message: "-needed_library/-needed_framework/-needed-l marks a dylib to really \
+                      ride the load commands even when nothing binds against it, but the \
+                      relocatable output opens its undefineds by design and carries no \
+                      load commands — drop the needed marks or link a segmented output"
                 .into(),
         });
     }
