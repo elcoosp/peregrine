@@ -73,12 +73,14 @@ fn dylib(install_name: &str, exports: &[&str]) -> Dylib {
         lazy: false,
         upward: false,
         reexport: false,
+        needed: false,
     }
 }
 
 fn reexport(install_name: &str, exports: &[&str]) -> Dylib {
     Dylib {
         reexport: true,
+        needed: false,
         ..dylib(install_name, exports)
     }
 }
