@@ -195,6 +195,7 @@ fn lib_system(exports: &[&[u8]]) -> Dylib {
         weak: false,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     }
