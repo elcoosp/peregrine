@@ -792,6 +792,38 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M110: the hidden-dylib mark is a segmented-output decision — the
+    // mark drops a load command the object cannot carry (its load
+    // command list is the input's, verbatim: there is no header to
+    // drop the command from, and no two-level ordinal space to keep
+    // the dylib out of). The re-check backs the driver surface's
+    // earlier refusal: no library caller can plan the shape either.
+    // M111: the read-only-relocations policy is a final-image decision —
+    // the relocatable output's sections are the input's, verbatim, and
+    // its relocation sites ride untouched (there is no segment mapping
+    // for the policy to price). The re-check backs the driver surface's
+    // earlier refusal: no library caller can plan the shape either.
+    if cfg.read_only_relocs != crate::resolve::ReadOnlyRelocsPolicy::Error {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-read_only_relocs {} decides what a write into a read-only segment \
+                 becomes, but the relocatable output's sections are the input's, \
+                 verbatim — nothing to decide: drop -read_only_relocs or link an image \
+                 (an executable, dylib or bundle)",
+                cfg.read_only_relocs.flag_word()
+            ),
+        });
+    }
+    if cfg.dylibs.iter().any(|d| d.hidden) {
+        return Err(LinkError::Layout {
+            message: "-hidden_library/-hidden_framework/-hidden-l marks a dylib to ride \
+                      without its load command, but the relocatable output opens its \
+                      undefineds by design and carries no load commands to drop — link \
+                      a segmented output (an executable, dylib or bundle) or drop the \
+                      hidden marks"
+                .into(),
+        });
+    }
     // M28: the section-alignment floors are a packing-engine decision —
     // the relocatable output plans no segments and carries its input
     // sections verbatim, so a named floor has nothing to land on. The
