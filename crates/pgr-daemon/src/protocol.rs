@@ -84,6 +84,7 @@ use pgr_core::icf::IcfMode;
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::resolve::{Dylib, UndefinedPolicy};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 /// Wire-protocol revision. A mismatch is a hard [`DecodeError::Proto`]
 /// (the client falls back to one-shot rather than guessing). v3 carried
@@ -327,8 +328,26 @@ use sha2::{Digest, Sha256};
 /// load-command carriage widens one mark over (the wire never silently
 /// flattens a hidden load into a visible one: the session's warm
 /// pipeline drops the same load command the cold link drops, and the
-/// parity gate is byte-identical).
-pub const PROTO_VERSION: u32 = 62;
+/// parity gate is byte-identical). **v62** names the M111 round: the
+/// read-only-relocations policy (`-read_only_relocs <policy>`) rides the
+/// tail after the fatal-warnings byte — one byte off the three-value
+/// alphabet; a byte the reader refuses is a malformed frame (the M107
+/// shape one round over). **v63** names the M112 round: the
+/// link-statistics report (`-print_statistics`) rides the tail after the
+/// read-only-relocs byte — one byte; the session's warm pipeline computes
+/// the counts its own run reported and the reply tail carries the
+/// [`pgr_core::statistics::LinkStatistics`] payload (the M62 convention —
+/// the client prints the cold lane's face, the count fields
+/// byte-identical parity-gated, the wall the clock's). **v64** names the
+/// M113 round: the reference trace (`-t`) rides the tail after the
+/// statistics byte — one byte; the session's warm pipeline records the
+/// references its own Pass 2 visited (the M54 seam's `on_reference`
+/// face, [`pgr_core::observe::RefsCollector`] subscribed) and the reply
+/// tail carries the [`pgr_core::observe::ReferenceEvent`]s verbatim (the
+/// facts the client renders through the cold lane's face — the M62
+/// convention; the trace rides the ladder's replay too, the run's own
+/// Pass-2 record).
+pub const PROTO_VERSION: u32 = 64;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1499,6 +1518,91 @@ pub(crate) fn decode_multiply_warnings(r: &mut Reader<'_>) -> Result<Vec<String>
     (0..r.u32()?).map(|_| r.str()).collect()
 }
 
+// ---- the v64 references tail ---------------------------------------------------
+
+/// Encodes the reply's reference-trace tail (v64, M113): a present byte,
+/// then the session's own Pass 2 visits — each
+/// [`pgr_core::observe::ReferenceEvent`] as the `(name, from)` fact pair,
+/// in the walk's own order. The facts cross verbatim; the client renders
+/// the cold lane's face (the M62 convention). A config that never asked
+/// carries the empty list (the decode side's absent shape).
+pub fn encode_references(out: &mut Vec<u8>, events: &[pgr_core::observe::ReferenceEvent]) {
+    put_u8(out, 1);
+    put_u32(out, events.len() as u32);
+    for event in events {
+        put_str(out, &event.name);
+        put_str(out, &event.from);
+    }
+}
+
+/// Decodes the reply's reference-trace tail (v64; see [`encode_references`]
+/// for the shape).
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation.
+pub(crate) fn decode_references(
+    r: &mut Reader<'_>,
+) -> Result<Vec<pgr_core::observe::ReferenceEvent>, DecodeError> {
+    if r.u8()? == 0 {
+        return Ok(Vec::new());
+    }
+    let n = r.u32()? as usize;
+    let mut events = Vec::with_capacity(n);
+    for _ in 0..n {
+        let name = r.str()?;
+        let from = r.str()?;
+        events.push(pgr_core::observe::ReferenceEvent { name, from });
+    }
+    Ok(events)
+}
+
+// ---- the v63 statistics tail ---------------------------------------------------
+
+/// Encodes the reply's link-statistics tail (v63, M112): a present byte,
+/// then the session's own run's counts — the warm pipeline's product, the
+/// fields the cold lane's [`pgr_core::statistics::LinkStatistics`]
+/// carries (the count fields byte-identical parity-gated, the wall the
+/// clock's). An unasked report never crosses the wire (the M58
+/// convention).
+pub fn encode_statistics(out: &mut Vec<u8>, stats: Option<&pgr_core::statistics::LinkStatistics>) {
+    match stats {
+        Some(s) => {
+            put_u8(out, 1);
+            put_u64(out, s.objects as u64);
+            put_u64(out, s.interned as u64);
+            put_u64(out, s.fixup_slots as u64);
+            put_u64(out, s.bytes);
+            put_u64(out, s.wall.as_nanos() as u64);
+        }
+        None => put_u8(out, 0),
+    }
+}
+
+/// Decodes the reply's link-statistics tail (v63; see [`encode_statistics`]
+/// for the shape).
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation.
+pub(crate) fn decode_statistics(
+    r: &mut Reader<'_>,
+) -> Result<Option<pgr_core::statistics::LinkStatistics>, DecodeError> {
+    if r.u8()? == 0 {
+        return Ok(None);
+    }
+    let objects = r.u64()?;
+    let interned = r.u64()?;
+    let fixup_slots = r.u64()?;
+    let bytes = r.u64()?;
+    let wall_nanos = r.u64()?;
+    Ok(Some(pgr_core::statistics::LinkStatistics {
+        objects: usize::try_from(objects).unwrap_or(usize::MAX),
+        interned: usize::try_from(interned).unwrap_or(usize::MAX),
+        fixup_slots: usize::try_from(fixup_slots).unwrap_or(usize::MAX),
+        bytes,
+        wall: Duration::from_nanos(wall_nanos),
+    }))
+}
+
 /// Encodes one export-filter pattern (M14, wire v7): a kind byte (the
 /// `SymbolPattern` variant) ahead of the line as written, so the daemon
 /// relinks with the surface the client named — globs stay globs.
@@ -1978,6 +2082,17 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // alphabet; a resident relink prices the same read-only targets the
     // cold link prices, never the pre-M111 default refusal.
     put_u8(out, cfg.read_only_relocs.wire());
+    // M112 (v63 wire): the link-statistics report rides the tail after
+    // the read-only-relocs byte — one byte; the session's warm pipeline
+    // computes the counts its own run reported and the reply tail
+    // carries the payload (the M62 convention), never a silently
+    // unreported one.
+    put_u8(out, u8::from(cfg.print_statistics));
+    // M113 (v64 wire): the reference trace rides the tail after the
+    // statistics byte — one byte; the session's warm pipeline records
+    // the references its own Pass 2 visited and the reply tail carries
+    // them verbatim (the M62 convention), never a silently dropped one.
+    put_u8(out, u8::from(cfg.trace_refs));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -2433,6 +2548,16 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // the request, the M103 reversed-admits shape).
     let read_only_relocs =
         pgr_core::resolve::ReadOnlyRelocsPolicy::from_wire(r.u8()?).ok_or_else(malformed)?;
+    // M112 (v63 wire): the link-statistics report — one byte, no
+    // validation beyond the bool (the report is a measurement, never a
+    // layout product; the session's served run computes the counts when
+    // the decision rides).
+    let print_statistics = r.u8()? != 0;
+    // M113 (v64 wire): the reference trace — one byte, no validation
+    // beyond the bool (the trace is a measurement, never a layout
+    // product; the session's served walk records the references when
+    // the decision rides).
+    let trace_refs = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -2515,6 +2640,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         multiply_defined,
         fatal_warnings,
         read_only_relocs,
+        print_statistics,
+        trace_refs,
         no_dead_strip_inits_and_terms,
         renames,
         cstring_order,
@@ -2528,8 +2655,9 @@ mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, ServedExport,
         ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_map_bytes,
-        decode_policy_warnings, decode_provenance_bytes, decode_time_report, decode_trace_bytes,
-        decode_verify_report_bytes, encode_map, encode_policy_warnings, encode_provenance,
+        decode_policy_warnings, decode_provenance_bytes, decode_references, decode_statistics,
+        decode_time_report, decode_trace_bytes, decode_verify_report_bytes, encode_map,
+        encode_policy_warnings, encode_provenance, encode_references, encode_statistics,
         encode_time_report, encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64,
         read_pattern,
     };
@@ -2538,6 +2666,7 @@ mod tests {
     use pgr_core::layout::{LinkConfig, OutputType};
     use pgr_core::observe::LinkObserver;
     use pgr_core::resolve::Dylib;
+    use std::time::Duration;
 
     /// The M99 example value's raw bytes (the round-trip gate's named
     /// identity).
@@ -2783,6 +2912,16 @@ mod tests {
             // survive the round trip verbatim (the bytes never move —
             // the decision is the exit's).
             fatal_warnings: false,
+            // The v63 tail: the link-statistics decision must survive
+            // the round trip verbatim (the report the client asked for
+            // is the report the session serves — never a silently
+            // unreported one).
+            print_statistics: true,
+            // The v64 tail: the reference-trace decision must survive
+            // the round trip verbatim (the trace the client asked for
+            // is the trace the session records — never a silently
+            // dropped one).
+            trace_refs: true,
             // The v19 tail: non-default section-alignment floors must
             // survive the round trip verbatim, in flag order (a
             // resident relink aligns the sections the client named,
@@ -5474,6 +5613,106 @@ mod tests {
     }
 
     #[test]
+    fn the_print_statistics_decision_and_payload_round_trip() {
+        // v63: the link-statistics decision must survive the round trip
+        // verbatim (a resident relink serves the report the client asked
+        // for — never a silently unreported one), and the reply's
+        // statistics tail must restore the payload field-for-field (the
+        // count fields byte-identical parity-gated, the wall the
+        // clock's).
+        let cfg = rich_config();
+        assert!(cfg.print_statistics, "rich_config carries the named face");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.print_statistics,
+            "the decision crosses byte-for-byte"
+        );
+        assert!(
+            back.config.trace_refs,
+            "the trace decision crosses byte-for-byte"
+        );
+        // The reply tail: a present payload restores exactly, an unasked
+        // report rides absent (the M58 convention).
+        let mut body = Vec::new();
+        let report = pgr_core::statistics::LinkStatistics {
+            objects: 12,
+            interned: 340,
+            fixup_slots: 57,
+            bytes: 0x4000,
+            wall: Duration::from_millis(7),
+        };
+        encode_statistics(&mut body, Some(&report));
+        let mut r = Reader::new(&body);
+        let back = decode_statistics(&mut r).expect("the tail decodes");
+        r.done().expect("the tail carries no trailing bytes");
+        assert_eq!(back.as_ref().expect("the report rides"), &report);
+        let mut body = Vec::new();
+        encode_statistics(&mut body, None);
+        let mut r = Reader::new(&body);
+        assert!(
+            decode_statistics(&mut r)
+                .expect("the absent tail decodes")
+                .is_none(),
+            "an unasked report never crosses the wire"
+        );
+        // The v64 references tail: the facts ride verbatim, in walk
+        // order (an unasked trace rides the empty list).
+        let mut body = Vec::new();
+        encode_references(
+            &mut body,
+            &[
+                pgr_core::observe::ReferenceEvent {
+                    name: "_greet".into(),
+                    from: "main.o".into(),
+                },
+                pgr_core::observe::ReferenceEvent {
+                    name: "_shared".into(),
+                    from: "b.o".into(),
+                },
+            ],
+        );
+        let mut r = Reader::new(&body);
+        let events = decode_references(&mut r).expect("the tail decodes");
+        r.done().expect("the tail carries no trailing bytes");
+        assert_eq!(events.len(), 2, "every visit rides");
+        assert_eq!(events[0].name, "_greet");
+        assert_eq!(events[0].from, "main.o");
+        assert_eq!(events[1].name, "_shared");
+        assert_eq!(events[1].from, "b.o");
+        let mut body = Vec::new();
+        encode_references(&mut body, &[]);
+        let mut r = Reader::new(&body);
+        assert!(
+            decode_references(&mut r)
+                .expect("the empty tail decodes")
+                .is_empty(),
+            "an unasked trace crosses nothing"
+        );
+    }
+
+    #[test]
     fn the_fatal_warnings_decision_round_trips() {
         // v60: the exit policy's escalation decision must survive the
         // round trip verbatim (a resident relink exits the shape the
@@ -6797,14 +7036,14 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        // `rich_config` carries no tables: drop the six absent bytes the
+        // `rich_config` carries no tables: drop the ten absent bytes the
         // encoder just wrote (the M91 tail's slots at the config's end —
         // the rank table, then the cstring table, then the M102
         // bind-at-load byte, then the M104 keep-local-symbols byte, then
         // the M105 strip-debug byte, then the M107 commons-policy byte),
         // the hand-spliced rank table takes the first place and the
         // cstring absence follows.
-        body.truncate(body.len() - 9);
+        body.truncate(body.len() - 11);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -6824,6 +7063,8 @@ mod tests {
         put_u8(&mut body, 0); // the M108 multiply-defined-policy absence
         put_u8(&mut body, 0); // the M109 fatal-warnings absence
         put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
+        put_u8(&mut body, 0); // the M112 print-statistics absence
+        put_u8(&mut body, 0); // the M113 reference-trace absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
@@ -6900,7 +7141,7 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        body.truncate(body.len() - 9);
+        body.truncate(body.len() - 11);
         put_u8(&mut body, 0); // the rank table's absence
         // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
@@ -6917,6 +7158,8 @@ mod tests {
         put_u8(&mut body, 0); // the M108 multiply-defined-policy absence
         put_u8(&mut body, 0); // the M109 fatal-warnings absence
         put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
+        put_u8(&mut body, 0); // the M112 print-statistics absence
+        put_u8(&mut body, 0); // the M113 reference-trace absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
