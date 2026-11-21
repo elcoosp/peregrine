@@ -87,7 +87,7 @@ fn the_flag_names_the_suppression() {
     .collect();
     let o = pgr_driver::opts::parse(&argv).expect("the flag parses");
     assert!(
-        !o.config.uuid,
+        o.config.uuid_source == pgr_core::layout::UuidSource::None,
         "the flag parses onto the suppression decision"
     );
     let default_argv: Vec<std::ffi::OsString> = [
@@ -98,11 +98,12 @@ fn the_flag_names_the_suppression() {
     .iter()
     .map(std::ffi::OsString::from)
     .collect();
-    assert!(
+    assert_eq!(
         pgr_driver::opts::parse(&default_argv)
             .expect("the default surface parses")
             .config
-            .uuid,
+            .uuid_source,
+        pgr_core::layout::UuidSource::Content,
         "the default derives the UUID"
     );
 }
