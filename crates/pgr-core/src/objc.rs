@@ -88,10 +88,93 @@ pub fn classify_objc_metadata(name: &[u8]) -> Option<ObjcFamily> {
     None
 }
 
-/// True when the symbol name is `ObjC` metadata the `-ObjC` pull honors:
-/// a class, metaclass or category definition — the modern clang
-/// emitter's `$_`-prefixed family or the ObjC1/GCC-era C symbols
-/// (M49; see the [module doc](self) for the scope and the exclusions).
+/// M115 — the category family's base-class name: the base the category
+/// merges into. The modern family names it directly
+/// (`_OBJC_CATEGORY_$_Dog` → `Dog`); the pre-2.0 GCC-era form names it
+/// before the parenthesized category (`.objc_category_name_Dog(Traits)`
+/// → `Dog`) — a form without the paren names no base (the classifier
+/// stays conservative: a shape it cannot name never merges).
+#[must_use]
+pub fn category_base_class(name: &[u8]) -> Option<&[u8]> {
+    if let Some(rest) = name.strip_prefix(b"_OBJC_CATEGORY_$_") {
+        return Some(rest);
+    }
+    if let Some(rest) = name.strip_prefix(b".objc_category_name_") {
+        let end = rest.iter().position(|&b| b == b'(')?;
+        return Some(&rest[..end]);
+    }
+    None
+}
+
+/// M115 — the class family's base name: the class a category merges
+/// into (`_OBJC_CLASS_$_Dog` and `_OBJC_METACLASS_$_Dog` both name
+/// `Dog`).
+#[must_use]
+pub fn class_family_base(name: &[u8]) -> Option<&[u8]> {
+    if let Some(rest) = name.strip_prefix(b"_OBJC_CLASS_$_") {
+        return Some(rest);
+    }
+    if let Some(rest) = name.strip_prefix(b"_OBJC_METACLASS_$_") {
+        return Some(rest);
+    }
+    None
+}
+
+/// M115 — the category-merge classification for one registration
+/// section (`__objc_catlist` / `__objc_nlcatlist`): the section merges
+/// when EVERY entry names — through its 8-byte unsigned-pointer slot's
+/// relocation — a category family whose base class rides this image
+/// (the image's own `_OBJC_CLASS_$_`/`_OBJC_METACLASS_$_` winners).
+/// The classifier never mutates a shape it cannot parse: a size off
+/// the pointer stride, a slot that is not an 8-byte unsigned pointer
+/// at the entry boundary, or a bound name off the category families
+/// keeps the section verbatim (the unmergeable shape registers exactly
+/// as the input carried it). The ld64 optimization's decision point in
+/// Pass 3's layout consults this — the merged category registers
+/// through its base class's registration, so the separate section
+/// drops (`usize::MAX`, the M105 sentinel).
+pub(crate) fn registration_merges(
+    in_sect: &crate::object::InputSection,
+    interner: &crate::interner::Interner,
+    defined_class_bases: &std::collections::HashSet<Vec<u8>>,
+) -> bool {
+    if !matches!(in_sect.name.as_str(), "__objc_catlist" | "__objc_nlcatlist") {
+        return false;
+    }
+    if in_sect.size == 0 || in_sect.size % 8 != 0 {
+        return false;
+    }
+    let entries = (in_sect.size / 8) as usize;
+    // One 8-byte unsigned pointer slot per entry, at the entry boundary
+    // (the map keeps it order-independent — the reader's order is the
+    // input's, the classification must not ride it).
+    let mut slots: std::collections::HashMap<u32, &crate::object::DecodedReloc> =
+        std::collections::HashMap::new();
+    for r in &in_sect.relocs {
+        if matches!(r.kind, crate::object::RelocKind::Unsigned) && !r.pcrel && r.length_log2 == 3 {
+            slots.insert(r.offset, r);
+        }
+    }
+    for e in 0..entries as u32 {
+        let Some(r) = slots.get(&(e * 8)) else {
+            return false;
+        };
+        let crate::object::RelocTarget::Extern(id) = r.target else {
+            return false;
+        };
+        let name = interner.name(id);
+        let Some(base) = category_base_class(name.as_bytes()) else {
+            return false;
+        };
+        if !defined_class_bases.contains(base) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when the name rides one of the metadata families the archive
+/// pull reads (the M43 classifier's face).
 #[must_use]
 pub fn defines_objc_metadata(name: &[u8]) -> bool {
     classify_objc_metadata(name).is_some()
