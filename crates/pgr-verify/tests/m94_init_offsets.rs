@@ -314,15 +314,22 @@ fn the_family_joins_the_registry_in_canonical_order() {
         .iter()
         .position(|n| *n == "init_offsets")
         .expect("the family joins ALL");
+    // M115's `objc` family joined between `tlv` and `init_offsets` (the
+    // registry order rides the surface milestones).
     assert_eq!(
         names.get(pos - 1),
+        Some(&"objc"),
+        "canonical order rides the surface: M115 joins before the M94 family"
+    );
+    assert_eq!(
+        names.get(pos - 2),
         Some(&"tlv"),
         "canonical order rides the M37 surface"
     );
     assert_eq!(
         Check::ALL.len(),
-        12,
-        "one family per rung, M94 is the twelfth"
+        13,
+        "one family per rung, M115 is the thirteenth and M94 the twelfth"
     );
     let set = CheckSet::parse("init_offsets").expect("the token parses");
     assert_eq!(set.to_string(), "init_offsets");
