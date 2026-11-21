@@ -328,6 +328,7 @@ impl From<FrozenDylib> for Dylib {
             weak: false,
             reexport: false,
             needed: false,
+            hidden: false,
             lazy: false,
             upward: false,
         }
@@ -893,6 +894,7 @@ mod tests {
             weak: false,
             reexport: false,
             needed: false,
+            hidden: false,
             lazy: false,
             upward: false,
         };
@@ -955,6 +957,7 @@ mod m7_versioned {
             weak: false,
             reexport: false,
             needed: false,
+            hidden: false,
             lazy: false,
             upward: false,
         })
