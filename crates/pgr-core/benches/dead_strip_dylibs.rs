@@ -79,6 +79,7 @@ fn dylibs() -> Vec<Dylib> {
         upward: false,
         reexport: false,
         needed: false,
+        hidden: false,
     };
     let unused = Dylib {
         install_name: "@rpath/libunused.dylib".into(),
@@ -93,6 +94,7 @@ fn dylibs() -> Vec<Dylib> {
         upward: false,
         reexport: false,
         needed: false,
+        hidden: false,
     };
     vec![used, unused]
 }
