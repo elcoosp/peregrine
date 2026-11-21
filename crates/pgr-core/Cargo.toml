@@ -574,3 +574,20 @@ harness = false
 [[bench]]
 name = "read_only_relocs"
 harness = false
+
+# M112 — the link-statistics report (`-print_statistics`): the seam's
+# near-parity — the stats collector rides the M54 observation seam (two
+# count updates per phase event, seven per segmented link, regardless of
+# the corpus size) beside the unobserved link over the observer bench's
+# 64-object corpus, plus the render's O(rows) price.
+[[bench]]
+name = "print_statistics"
+harness = false
+
+# M113 — the reference trace (`-t`): the seam's near-parity — the refs
+# collector rides the M54 observation seam's on_reference face (one event
+# per reference the resolve visits, 64 per link over this corpus) beside
+# the unobserved link.
+[[bench]]
+name = "trace_refs"
+harness = false
