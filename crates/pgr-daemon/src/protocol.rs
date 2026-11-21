@@ -321,7 +321,14 @@ use sha2::{Digest, Sha256};
 /// `-no_fatal_warnings`) rides the tail after the multiply-defined byte
 /// — one byte; the bytes never move (the policy is the exit's, not the
 /// image's), a resident relink exits the shape the client asked for.
-pub const PROTO_VERSION: u32 = 60;
+/// **v61** names the M110 round: the hidden-dylib mark
+/// (`-hidden_library`/`-hidden_framework`/`-hidden-l`) rides beside the
+/// per-dylib kind bytes after the needed byte — the v13/M14
+/// load-command carriage widens one mark over (the wire never silently
+/// flattens a hidden load into a visible one: the session's warm
+/// pipeline drops the same load command the cold link drops, and the
+/// parity gate is byte-identical).
+pub const PROTO_VERSION: u32 = 62;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1632,6 +1639,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         // needed dylib rides the kept list under `-dead_strip_dylibs`;
         // the mark composes with every command kind).
         put_u8(out, u8::from(d.needed));
+        // M110 (v61 wire): the hidden-dylib mark rides beside the
+        // needed byte — the wire never silently drops a hidden mark (a
+        // hidden dylib rides no load command; the mark composes with
+        // the weak/lazy kinds, the re-export obligation refuses it).
+        put_u8(out, u8::from(d.hidden));
     }
     // M10 rung 4 slice 2 (v6 wire): the chain word family rides the tail
     // of the config body (the append-in-place upgrade convention).
@@ -1961,6 +1973,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // move (the policy is the exit's, not the image's), a resident
     // relink exits the shape the client asked for.
     put_u8(out, u8::from(cfg.fatal_warnings));
+    // M111 (v62 wire): the read-only-relocations policy rides the tail
+    // after the fatal-warnings byte — one byte off the three-value
+    // alphabet; a resident relink prices the same read-only targets the
+    // cold link prices, never the pre-M111 default refusal.
+    put_u8(out, cfg.read_only_relocs.wire());
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -2067,6 +2084,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
                 // the dylib the client marked, never a silently dropped
                 // mark).
                 needed: r.u8()? != 0,
+                // M110 (v61 wire): the hidden-dylib mark (the mirror of
+                // the encode's hidden byte — a resident relink drops the
+                // same load command the cold link drops; the wire never
+                // silently flattens a hidden load into a visible one).
+                hidden: r.u8()? != 0,
             })
         })
         .collect::<Result<Vec<Dylib>, DecodeError>>()?;
@@ -2405,6 +2427,12 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // is the exit's, not the image's; the session's served link plans
     // the same shape either way).
     let fatal_warnings = r.u8()? != 0;
+    // M111 (v62 wire): the read-only-relocations policy — an unknown
+    // byte is malformed (a refusal, never a silently defaulted
+    // policy; an old server reading a new client's alphabet refuses
+    // the request, the M103 reversed-admits shape).
+    let read_only_relocs =
+        pgr_core::resolve::ReadOnlyRelocsPolicy::from_wire(r.u8()?).ok_or_else(malformed)?;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -2486,6 +2514,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         commons,
         multiply_defined,
         fatal_warnings,
+        read_only_relocs,
         no_dead_strip_inits_and_terms,
         renames,
         cstring_order,
@@ -2520,6 +2549,7 @@ mod tests {
     /// A representative config: every field set, dylibs included.
     fn rich_config() -> LinkConfig {
         LinkConfig {
+            read_only_relocs: pgr_core::resolve::ReadOnlyRelocsPolicy::default(),
             ident: "build/app".into(),
             filetype: pgr_core::layout::OutputType::Dylib,
             entry_symbol: "_start".into(),
@@ -2542,6 +2572,10 @@ mod tests {
                 // the round trip verbatim (the wire never silently
                 // drops a needed dylib's mark).
                 needed: true,
+                // The v61 mark: a non-default hidden mark must survive
+                // the round trip verbatim (the wire never silently
+                // flattens a hidden dylib into a visible load).
+                hidden: true,
             }],
             flat_namespace: true,
             undefined_policy: pgr_core::resolve::UndefinedPolicy::DynamicLookup,
@@ -5085,6 +5119,79 @@ mod tests {
     }
 
     #[test]
+    fn the_hidden_dylib_mark_round_trips() {
+        // v61: a non-default hidden-dylib mark must survive the round
+        // trip verbatim (a resident relink drops the same load command
+        // the cold link drops, never a silently flattened hidden load
+        // — the M110 carriage widen, the v57 shape one mark over).
+        let cfg = rich_config();
+        assert!(
+            cfg.dylibs.iter().all(|d| d.hidden),
+            "rich_config carries the named mark"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.dylibs.iter().all(|d| d.hidden),
+            "the hidden mark crosses byte-for-byte"
+        );
+        // The unmarked face rides too (the default — every pre-M110
+        // dylib list crosses untouched).
+        let mut cfg = rich_config();
+        for d in &mut cfg.dylibs {
+            d.hidden = false;
+        }
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.dylibs.iter().all(|d| !d.hidden),
+            "the unmarked face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
     fn the_commons_policy_round_trips() {
         // v58: a non-default commons policy must survive the round trip
         // verbatim (a resident relink resolves the commons the client
@@ -6697,7 +6804,7 @@ mod tests {
         // the M105 strip-debug byte, then the M107 commons-policy byte),
         // the hand-spliced rank table takes the first place and the
         // cstring absence follows.
-        body.truncate(body.len() - 8);
+        body.truncate(body.len() - 9);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -6716,6 +6823,7 @@ mod tests {
         put_u8(&mut body, 0); // the M107 commons-policy absence
         put_u8(&mut body, 0); // the M108 multiply-defined-policy absence
         put_u8(&mut body, 0); // the M109 fatal-warnings absence
+        put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
@@ -6792,7 +6900,7 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        body.truncate(body.len() - 8);
+        body.truncate(body.len() - 9);
         put_u8(&mut body, 0); // the rank table's absence
         // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
@@ -6808,6 +6916,7 @@ mod tests {
         put_u8(&mut body, 0); // the M107 commons-policy absence
         put_u8(&mut body, 0); // the M108 multiply-defined-policy absence
         put_u8(&mut body, 0); // the M109 fatal-warnings absence
+        put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
