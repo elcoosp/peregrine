@@ -445,6 +445,19 @@ pub struct Resolution {
     /// product is the refusal at the install site) and `DynamicLookup`
     /// intends the ride (nothing to report).
     multiply_defined_open: std::collections::BTreeSet<String>,
+    /// M116: the common-symbol advisory entries `-warn_commons` derived —
+    /// one deterministic `'<name>' resolved to '<provider>'` entry per
+    /// input common symbol (`N_UNDF | N_EXT`, non-zero value) whose name
+    /// the finished resolution landed on a definition: a local one (the
+    /// common's own coalesced ride included — the provider is the
+    /// winner's input) or a linked dylib's export (the non-default
+    /// `-commons` faces' shape — the provider is the install name). The
+    /// driver's advisory face tallies the entries, prints them to stderr
+    /// and exits 0 (the M103/M108 warning-face pattern); the decision
+    /// never changes the resolution policy itself — the walk derives the
+    /// record from the resolved state on both resolve paths (the M107
+    /// config pattern), the M81 replay riding the same way.
+    warn_commons_open: std::collections::BTreeSet<String>,
     /// M110: the exports the **hidden** dylibs carry (`-hidden_library`
     /// family) — interned name → the hidden dylib's index in
     /// [`Self::dylibs`], for the diagnostics that name the provider.
@@ -1010,6 +1023,74 @@ impl Resolution {
                 Ok(())
             }
         }
+    }
+    /// M116 — the common-symbol advisory walk (`-warn_commons`): ld64's
+    /// face ("Print a warning whenever a tentative definition in an
+    /// object file is found [and an external symbol by the same name is
+    /// also found]", the `ld64` man page) — the advisory product the
+    /// driver's warning face tallies. The walk runs after the commons
+    /// policy (a dropped tentative lets the exporting dylib serve the
+    /// name — the post-policy winners are the landing surface) and
+    /// derives, for every input common symbol (`N_UNDF | N_EXT`, non-zero
+    /// value), where its name resolved: an in-image definition (the
+    /// common's own coalesced ride included — the provider is the
+    /// winner's input, the M108 entry convention) or a linked dylib's
+    /// export (the provider is the install name). The decision never
+    /// changes the resolution policy itself — the default (`false`)
+    /// records nothing and every pre-knob link is byte-identical (the
+    /// advisory is a measurement, never a layout product — the M109
+    /// pattern's face). Both resolve paths derive the same entries (the
+    /// M107 config pattern — the replay rides the decision, the M81
+    /// pattern).
+    pub fn apply_warn_commons(&mut self, warn: bool, interner: &Interner, objects: &[InputObject]) {
+        self.warn_commons_open.clear();
+        if !warn {
+            return;
+        }
+        for obj in objects {
+            for sym in &obj.symbols {
+                // The tentative definition shape: external,
+                // undefined-class, non-zero value — the `is_common`
+                // contract every commons reader shares (the M107 walk's
+                // own filter).
+                if sym.stab || !sym.external || !sym.is_common() {
+                    continue;
+                }
+                if let Some(winner) = self.defs.get(&sym.name.0) {
+                    // The landing is a local definition — the winner's
+                    // input names it (the common's own coalesced ride
+                    // included: the tentative became a definition, the
+                    // advisory's missing-extern hazard).
+                    self.warn_commons_open.insert(format!(
+                        "'{}' resolved to 'input {}'",
+                        interner.name(sym.name),
+                        winner.file.0
+                    ));
+                } else if let Some(&ordinal) = self.dylib_exports.get(&sym.name.0)
+                    && let Some(dylib) = self.dylibs.get(ordinal as usize - 1)
+                {
+                    // The landing is the exporting dylib (the
+                    // `-commons` faces' shape — the definition side
+                    // dropped and the bind rides the export; the M42
+                    // drop's compaction ran before this walk, so a
+                    // dropped provider is never named).
+                    self.warn_commons_open.insert(format!(
+                        "'{}' resolved to '{}'",
+                        interner.name(sym.name),
+                        dylib.install_name
+                    ));
+                }
+                // No definition anywhere (the `-U` mark stripped the
+                // common, or the flat ride owns the name): nothing to
+                // advise about.
+            }
+        }
+    }
+
+    /// The common-symbol advisory entries the M116 walk derived (see
+    /// [`Self::apply_warn_commons`]).
+    pub fn warn_commons_open(&self) -> impl Iterator<Item = &str> {
+        self.warn_commons_open.iter().map(String::as_str)
     }
     /// The unresolved-open escalation for names the commons policy
     /// un-defined (M107): the names with no in-image definition, no
