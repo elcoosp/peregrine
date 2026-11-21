@@ -1554,6 +1554,7 @@ mod tests {
             lazy: false,
             upward: false,
             needed: true,
+            hidden: false,
         }];
         let mut session = ResidentSession::default();
         for h in &hashes {
