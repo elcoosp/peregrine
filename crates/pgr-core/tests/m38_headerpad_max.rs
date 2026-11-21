@@ -91,6 +91,7 @@ fn dylib(install_name: &str) -> Dylib {
         upward: false,
         reexport: false,
         needed: false,
+        hidden: false,
     }
 }
 
