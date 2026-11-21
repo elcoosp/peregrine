@@ -443,6 +443,18 @@ pub fn link_from_objects_observed(
     } else {
         cfg
     };
+    // M116: the common-symbol advisory (`-warn_commons`) — the walk
+    // rides both resolve paths (the full install and the reuse replay —
+    // the decision is config, not a lane product, the M107/M108
+    // pattern): it derives, from the finished resolution, where every
+    // input common symbol landed (a local definition or a linked
+    // dylib's export) and records the advisory product the driver's
+    // warning face tallies. The default (`false`) records nothing — the
+    // face is a measurement, never a layout product (the M109 pattern).
+    // The M42 drop above ran first, so a dropped provider is never
+    // named; the relocatable path refuses the knob (the walk never runs
+    // there — the object's symtab is the input's, verbatim).
+    res.apply_warn_commons(cfg.warn_commons, &interner, &objects);
     // The record side: capture the finished Pass-2 state when the caller
     // asked for it (the `-incremental` record), so the v5 record section
     // carries it to the next relink.
@@ -857,6 +869,37 @@ fn link_reloc_inner(
             message: "-t traces the symbols Pass 2's resolve references, but the \
                       relocatable output's symtab is the input's, verbatim — nothing to \
                       trace: drop -t or link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M116: the common-symbol advisory is a resolve-record decision —
+    // the relocatable output's symtab is the input's, verbatim (its
+    // symbol table rides the inputs untouched; there is no resolution
+    // landing to advise about). The re-check backs the driver surface's
+    // earlier refusal: no library caller can plan the shape either (the
+    // M104/M105/M112 pattern).
+    if cfg.warn_commons {
+        return Err(LinkError::Layout {
+            message: "-warn_commons advises where every tentative definition resolved, \
+                      but the relocatable output's symtab is the input's, verbatim — \
+                      nothing to advise about: drop -warn_commons or link an image (an \
+                      executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M117: the init/term section suppression is a final-image decision
+    // — the relocatable output's sections are the input's, verbatim
+    // (its sections ride the inputs untouched; there is no init
+    // classification to apply). The re-check backs the driver surface's
+    // earlier refusal: no library caller can plan the shape either (the
+    // M104/M105/M115 pattern).
+    if cfg.no_inits {
+        return Err(LinkError::Layout {
+            message: "-no_inits drops the output's init/term sections (the \
+                      __mod_init_func, __mod_term_func and __init_offsets shapes), but \
+                      the relocatable output's sections are the input's, verbatim — \
+                      nothing to drop: drop -no_inits or link an image (an executable, \
+                      dylib or bundle)"
                 .into(),
         });
     }
