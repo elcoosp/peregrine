@@ -184,6 +184,7 @@ fn lib_system(exports: &[&[u8]]) -> Dylib {
         exports: exports.iter().map(|e| e.to_vec()).collect(),
         weak: false,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     }
