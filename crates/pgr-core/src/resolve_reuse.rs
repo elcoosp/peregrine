@@ -270,6 +270,12 @@ pub fn install_reused(
     // the collision site decides exactly as the full walk's does (the
     // policy is config, not a lane product, the M107 pattern).
     multiply_defined: MultiplyDefinedPolicy,
+    // M113: the reference-trace face rides the replay — the replay's
+    // reference re-walk (step 3, the digest-vouched site set) reports the
+    // same visits the full path does, in the same file order (`None` =
+    // silence, the historical shape; the slot convention `parse_inputs`
+    // rides).
+    observer: &mut Option<&mut dyn crate::observe::LinkObserver>,
 ) -> Result<Resolution, LinkError> {
     let span = tracing::info_span!(
         "resolve_reuse_install",
@@ -378,13 +384,21 @@ pub fn install_reused(
     tracing::debug!(replayed = replay.len(), "the precedence replay finished");
     // 3. References: the recorded site set is digest-vouched to equal the
     //    relink parse's own, so re-walk the parse in file order — the
-    //    walk order the full path pushes sites in.
+    //    walk order the full path pushes sites in. M113: the trace face
+    //    rides the re-walk (one event per visit, the same order — built
+    //    only when a subscriber rides, the seam's own zero-cost silence).
     for obj in objects {
         for (i, s) in obj.symbols.iter().enumerate() {
             if s.stab || !s.external || s.is_defined() || s.is_common() {
                 continue; // undefined references only
             }
             res.merge_reference(s.name.0, (obj.file, i));
+            if let Some(obs) = observer.as_deref_mut() {
+                obs.on_reference(crate::observe::ReferenceEvent {
+                    name: interner.name(s.name),
+                    from: obj.name.clone(),
+                });
+            }
         }
     }
     // 4. The dylib + loader surface and the undefined policy run exactly
