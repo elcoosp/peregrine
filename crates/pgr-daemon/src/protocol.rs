@@ -296,8 +296,20 @@ use sha2::{Digest, Sha256};
 /// kept default. **v56** names the M105 round: the debug-section
 /// suppression (`-S`) rides the tail after the symtab-shaping byte —
 /// one byte; a resident relink carries the debug-free shape the client
-/// asked for, never the pre-M105 debug-carrying default.
-pub const PROTO_VERSION: u32 = 56;
+/// asked for, never the pre-M105 debug-carrying default. **v57** names
+/// the M106 round: the dylib list's kind-byte tail widens to carry the
+/// needed-dylib mark (`-needed_library`/`-needed_framework`/`-needed-l`)
+/// — one byte per dylib after the upward kind byte; a resident relink
+/// keeps the survival mark the client named, never a silently dropped
+/// one (the mark composes with every command kind). **v58** names the
+/// M107 round: the commons resolution policy (`-commons <policy>`) rides
+/// the tail after the debug-suppression byte — one byte off the
+/// four-value alphabet (`use_dylibs`, `search_dylibs`, `use_extern`,
+/// `error`); a byte the reader refuses is a malformed frame, so an old
+/// server reading a new client's request refuses it (the M103
+/// reversed-admits shape), and a resident relink resolves the commons
+/// the client asked for, never the house default.
+pub const PROTO_VERSION: u32 = 58;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1579,6 +1591,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         // wire never silently flattens an `LC_LOAD_UPWARD_DYLIB` request
         // into a plain load.
         put_u8(out, u8::from(d.upward));
+        // M106 (v57 wire): the needed-dylib mark rides beside the kind
+        // bytes — the wire never silently drops a survival mark (a
+        // needed dylib rides the kept list under `-dead_strip_dylibs`;
+        // the mark composes with every command kind).
+        put_u8(out, u8::from(d.needed));
     }
     // M10 rung 4 slice 2 (v6 wire): the chain word family rides the tail
     // of the config body (the append-in-place upgrade convention).
@@ -1893,6 +1910,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // carries the debug-free shape the client asked for, never the
     // pre-M105 debug-carrying default.
     put_u8(out, u8::from(cfg.strip_debug));
+    // M107 (v58 wire): the commons resolution policy rides the tail
+    // after the debug-suppression byte — one byte off the four-value
+    // alphabet; a resident relink resolves the commons the client
+    // asked for, never the pre-M107 house default.
+    put_u8(out, cfg.commons.wire());
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -1994,6 +2016,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
                 // M45 (v32 wire): the upward-load kind (the mirror of the
                 // encode's fourth kind byte).
                 upward: r.u8()? != 0,
+                // M106 (v57 wire): the needed-dylib mark (the mirror of
+                // the encode's survival byte — a resident relink keeps
+                // the dylib the client marked, never a silently dropped
+                // mark).
+                needed: r.u8()? != 0,
             })
         })
         .collect::<Result<Vec<Dylib>, DecodeError>>()?;
@@ -2316,6 +2343,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // decision; the relocatable-shape conflict the core re-checks
     // refuse at link time).
     let strip_debug = r.u8()? != 0;
+    // M107 (v58 wire): the commons resolution policy — an unknown byte
+    // is malformed (a refusal, never a silently defaulted policy; an
+    // old server reading a new client's alphabet refuses the request,
+    // the M103 reversed-admits shape).
+    let commons = pgr_core::resolve::CommonsPolicy::from_wire(r.u8()?).ok_or_else(malformed)?;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -2394,6 +2426,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         bind_at_load,
         keep_local_symbols,
         strip_debug,
+        commons,
         no_dead_strip_inits_and_terms,
         renames,
         cstring_order,
@@ -2446,6 +2479,10 @@ mod tests {
                 reexport: true,
                 lazy: true,
                 upward: true,
+                // The v57 mark: a non-default survival mark must survive
+                // the round trip verbatim (the wire never silently
+                // drops a needed dylib's mark).
+                needed: true,
             }],
             flat_namespace: true,
             undefined_policy: pgr_core::resolve::UndefinedPolicy::DynamicLookup,
@@ -2642,6 +2679,9 @@ mod tests {
             // the debug-free shape the client asked for, never the
             // pre-M105 debug-carrying default).
             strip_debug: true,
+
+            // The v58 tail: a non-default commons policy must survive the round trip.
+            commons: pgr_core::resolve::CommonsPolicy::SearchDylibs,
             // The v19 tail: non-default section-alignment floors must
             // survive the round trip verbatim, in flag order (a
             // resident relink aligns the sections the client named,
@@ -4901,6 +4941,220 @@ mod tests {
         assert!(
             !back.config.bind_at_load,
             "the dropped face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_needed_dylib_mark_round_trips() {
+        // v57: a non-default needed-dylib mark must survive the round
+        // trip verbatim (a resident relink keeps the survival mark the
+        // client named, never a silently dropped one — the mark composes
+        // with every command kind).
+        let cfg = rich_config();
+        assert!(
+            cfg.dylibs.iter().all(|d| d.needed),
+            "rich_config carries the named mark"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.dylibs.iter().all(|d| d.needed),
+            "the needed mark crosses byte-for-byte"
+        );
+        // The unmarked face rides too (the default — every pre-M106
+        // dylib list crosses untouched).
+        let mut cfg = rich_config();
+        for d in &mut cfg.dylibs {
+            d.needed = false;
+        }
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.dylibs.iter().all(|d| !d.needed),
+            "the unmarked face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_commons_policy_round_trips() {
+        // v58: a non-default commons policy must survive the round trip
+        // verbatim (a resident relink resolves the commons the client
+        // asked for, never the house default).
+        let cfg = rich_config();
+        assert_eq!(
+            cfg.commons,
+            pgr_core::resolve::CommonsPolicy::SearchDylibs,
+            "rich_config carries the named face"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.commons,
+            pgr_core::resolve::CommonsPolicy::SearchDylibs,
+            "the policy crosses byte-for-byte"
+        );
+        // The error face rides too (the alphabet's tail).
+        let mut cfg = rich_config();
+        cfg.commons = pgr_core::resolve::CommonsPolicy::Error;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.commons,
+            pgr_core::resolve::CommonsPolicy::Error,
+            "the error face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn an_unknown_commons_policy_byte_is_malformed() {
+        // v58: a byte off the four-value alphabet is a malformed frame —
+        // an old server reading a new client's request refuses it (the
+        // M103 reversed-admits shape). The tail byte sits at the fixed
+        // offset the encode order lays out: two requests differing only
+        // in the policy byte differ in exactly one position.
+        let mut base = rich_config();
+        base.commons = pgr_core::resolve::CommonsPolicy::UseDylibs;
+        let mut other = rich_config();
+        other.commons = pgr_core::resolve::CommonsPolicy::UseExtern;
+        let a = LinkRequest {
+            config: base,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: Vec::new(),
+        }
+        .encode();
+        let b = LinkRequest {
+            config: other,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: Vec::new(),
+        }
+        .encode();
+        assert_eq!(a.len(), b.len(), "the alphabet bytes are fixed-width");
+        let diffs: Vec<usize> = a
+            .iter()
+            .zip(b.iter())
+            .enumerate()
+            .filter(|(_, (x, y))| x != y)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(diffs.len(), 1, "exactly the policy byte differs: {diffs:?}");
+        let mut corrupt = a.clone();
+        corrupt[diffs[0]] = 0xFF;
+        let err = LinkRequest::decode(&corrupt).expect_err("the unknown byte is malformed");
+        assert!(
+            matches!(err, DecodeError::Malformed(_)),
+            "the refusal is the malformed frame: {err}"
         );
     }
 
