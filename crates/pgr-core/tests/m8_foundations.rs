@@ -235,7 +235,12 @@ fn revindex_excludes_dead_atoms_when_the_live_set_is_active() {
         obj.compute_atoms(true);
     }
     let mut res = Resolution::default();
-    res.install(&objects).unwrap();
+    res.install(
+        &objects,
+        &interner,
+        pgr_core::resolve::MultiplyDefinedPolicy::Error,
+    )
+    .unwrap();
     res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error, false)
         .unwrap();
     let cfg = LinkConfig {
