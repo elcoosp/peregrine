@@ -302,6 +302,7 @@ fn dead_strip_dylibs_names_the_carriage() {
         exports: vec![b"_greet".to_vec()],
         weak: false,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     });
@@ -312,6 +313,7 @@ fn dead_strip_dylibs_names_the_carriage() {
         exports: vec![b"_nothing".to_vec()],
         weak: false,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     });
