@@ -26,7 +26,7 @@
 //!   decision, not a fixup-level one (the classic opcode stream plans
 //!   the same shape).
 
-use pgr_core::layout::{LinkConfig, OutputType};
+use pgr_core::layout::{LinkConfig, OutputType, UuidSource};
 use pgr_core::link::{LinkInput, link};
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 use pgr_format::{LoadCommandIter, LoadCommandKind, MachHeader64};
@@ -77,8 +77,9 @@ fn carries_uuid(image: &[u8]) -> bool {
 
 #[test]
 fn the_default_carries_the_derived_uuid_slot() {
-    assert!(
-        LinkConfig::default().uuid,
+    assert_eq!(
+        LinkConfig::default().uuid_source,
+        UuidSource::Content,
         "the default derives the UUID (the knob suppresses)"
     );
     let layout = plan(|_| {});
@@ -99,7 +100,7 @@ fn the_default_carries_the_derived_uuid_slot() {
 
 #[test]
 fn the_suppression_drops_the_command_and_the_field() {
-    let layout = plan(|c| c.uuid = false);
+    let layout = plan(|c| c.uuid_source = UuidSource::None);
     assert!(
         !carries_uuid(&layout.header_bytes),
         "the suppression drops the command"
@@ -113,7 +114,7 @@ fn the_suppression_drops_the_command_and_the_field() {
 #[test]
 fn the_suppression_is_exactly_one_command_narrower() {
     let carrying = plan(|_| {});
-    let suppressed = plan(|c| c.uuid = false);
+    let suppressed = plan(|c| c.uuid_source = UuidSource::None);
     let carrying_header = MachHeader64::parse(&carrying.header_bytes).expect("parses");
     let suppressed_header = MachHeader64::parse(&suppressed.header_bytes).expect("parses");
     assert_eq!(
@@ -141,7 +142,7 @@ fn the_linkedit_plan_does_not_move() {
     // payload plan (symtab, strtab, trie, function starts) does not
     // move — only the header's command bytes shrink.
     let carrying = plan(|_| {});
-    let suppressed = plan(|c| c.uuid = false);
+    let suppressed = plan(|c| c.uuid_source = UuidSource::None);
     assert_eq!(
         carrying.linkedit.sym_off, suppressed.linkedit.sym_off,
         "the symtab offset does not move"
@@ -165,8 +166,8 @@ fn the_linkedit_plan_does_not_move() {
 
 #[test]
 fn the_suppressed_link_is_deterministic() {
-    let a = plan(|c| c.uuid = false).header_bytes;
-    let b = plan(|c| c.uuid = false).header_bytes;
+    let a = plan(|c| c.uuid_source = UuidSource::None).header_bytes;
+    let b = plan(|c| c.uuid_source = UuidSource::None).header_bytes;
     assert_eq!(a, b, "the double link is stable");
 }
 
@@ -176,7 +177,7 @@ fn the_classic_path_carries_the_decision() {
     // opcode path (`-no_fixup_chains`) plans the same shape.
     let cfg = LinkConfig {
         fixup_chains: false,
-        uuid: false,
+        uuid_source: UuidSource::None,
         ..LinkConfig::default()
     };
     let layout = link(&corpus(), &[], &cfg).expect("the corpus links").layout;
@@ -196,7 +197,7 @@ fn every_output_kind_carries_the_decision() {
     for filetype in [OutputType::Execute, OutputType::Dylib, OutputType::Bundle] {
         let cfg = LinkConfig {
             filetype,
-            uuid: false,
+            uuid_source: UuidSource::None,
             ..LinkConfig::default()
         };
         let layout = link(&corpus(), &[], &cfg).expect("the corpus links").layout;
