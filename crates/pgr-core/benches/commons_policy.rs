@@ -83,6 +83,7 @@ fn dylibs() -> Vec<Dylib> {
         upward: false,
         reexport: false,
         needed: false,
+        hidden: false,
     }]
 }
 
