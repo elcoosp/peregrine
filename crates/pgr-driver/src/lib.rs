@@ -911,28 +911,43 @@ struct PendingFaces {
     time: Option<(pgr_core::TimeCollector, std::time::Instant)>,
     /// The `--trace` collector (`None` when no timeline asked).
     trace: Option<pgr_core::trace::TraceCollector>,
+    /// The `-print_statistics` collector beside the clock the pipeline
+    /// started on (M112; `None` when no report asked — the counts stay
+    /// the product's own).
+    stats: Option<(pgr_core::statistics::StatsCollector, std::time::Instant)>,
+    /// The `-t` reference-trace collector (M113; `None` when no trace
+    /// asked — the visits stay the walk's own).
+    refs: Option<pgr_core::observe::RefsCollector>,
 }
 
 /// The driver's observer slot over the two optional faces (M58/M61/M68):
 /// `--time` feeds the report collector, `--trace` the timeline collector,
 /// both compose behind one subscription — the `None`-forwarding twin of
 /// [`pgr_core::ObserverPair`], the one subscription the pipeline's phases,
-/// the emit half and the flush report through.
+/// the emit half and the flush report through. M112: the `-print_statistics`
+/// collector joins the same subscription (the counts ride the phase
+/// events' own details — the seam never re-derives a number).
 struct FaceSlot<'a> {
     time: Option<&'a mut dyn pgr_core::LinkObserver>,
     trace: Option<&'a mut dyn pgr_core::LinkObserver>,
+    stats: Option<&'a mut dyn pgr_core::LinkObserver>,
+    refs: Option<&'a mut dyn pgr_core::LinkObserver>,
 }
 
 impl<'a> FaceSlot<'a> {
-    /// Slots the two collectors (each face asks for itself; a face that
+    /// Slots the four collectors (each face asks for itself; a face that
     /// did not ask subscribes to nothing).
     fn new(
         time: Option<&'a mut pgr_core::TimeCollector>,
         trace: Option<&'a mut pgr_core::trace::TraceCollector>,
+        stats: Option<&'a mut pgr_core::statistics::StatsCollector>,
+        refs: Option<&'a mut pgr_core::observe::RefsCollector>,
     ) -> Self {
         Self {
             time: time.map(|t| t as &'a mut dyn pgr_core::LinkObserver),
             trace: trace.map(|t| t as &'a mut dyn pgr_core::LinkObserver),
+            stats: stats.map(|s| s as &'a mut dyn pgr_core::LinkObserver),
+            refs: refs.map(|r| r as &'a mut dyn pgr_core::LinkObserver),
         }
     }
 }
@@ -943,6 +958,12 @@ impl pgr_core::LinkObserver for FaceSlot<'_> {
             obs.on_phase(event.clone());
         }
         if let Some(obs) = self.trace.as_deref_mut() {
+            obs.on_phase(event.clone());
+        }
+        if let Some(obs) = self.stats.as_deref_mut() {
+            obs.on_phase(event.clone());
+        }
+        if let Some(obs) = self.refs.as_deref_mut() {
             obs.on_phase(event);
         }
     }
@@ -952,6 +973,12 @@ impl pgr_core::LinkObserver for FaceSlot<'_> {
             obs.on_task(task.clone());
         }
         if let Some(obs) = self.trace.as_deref_mut() {
+            obs.on_task(task.clone());
+        }
+        if let Some(obs) = self.stats.as_deref_mut() {
+            obs.on_task(task.clone());
+        }
+        if let Some(obs) = self.refs.as_deref_mut() {
             obs.on_task(task);
         }
     }
@@ -961,8 +988,35 @@ impl pgr_core::LinkObserver for FaceSlot<'_> {
             obs.on_note(note.clone());
         }
         if let Some(obs) = self.trace.as_deref_mut() {
+            obs.on_note(note.clone());
+        }
+        if let Some(obs) = self.stats.as_deref_mut() {
+            obs.on_note(note.clone());
+        }
+        if let Some(obs) = self.refs.as_deref_mut() {
             obs.on_note(note);
         }
+    }
+
+    fn on_reference(&mut self, event: pgr_core::observe::ReferenceEvent) {
+        if let Some(obs) = self.refs.as_deref_mut() {
+            obs.on_reference(event);
+        }
+    }
+}
+
+/// The M113 `-t` reference-trace face (the driver's consumer face): each
+/// reference Pass 2's resolve visited prints to stderr as the cold lane's
+/// line — the same face the served tail's client prints (the M62
+/// convention; the wire carries the facts, the face never re-shapes).
+fn print_references(events: &[pgr_core::observe::ReferenceEvent]) {
+    for event in events {
+        tracing::debug!(
+            symbol = %event.name,
+            from = %event.from,
+            "the resolve visited a symbol reference"
+        );
+        eprintln!("pgr: reference: {}", event.render());
     }
 }
 
@@ -1132,6 +1186,18 @@ fn link_to_image_recorded(
                         source,
                     })?;
                 }
+                // M112: the served link-statistics report prints beside
+                // the resident link (the session's own run's counts, the
+                // v63 tail carried them — the cold lane's face, verbatim;
+                // the fallback below prints the one-shot's own report).
+                if let Some(served) = &img.statistics {
+                    eprint!("{}", served.render());
+                }
+                // M113: the served reference trace prints beside the
+                // resident link (the session's own Pass 2 visits, the v64
+                // tail carried them verbatim — the same face the fallback
+                // prints).
+                print_references(&img.references);
                 // M79: the served answers print beside the resident link
                 // — the session's own renders, verbatim (the wire never
                 // re-shapes the face the client prints; the vacuous
@@ -1234,6 +1300,8 @@ fn link_to_image_recorded(
                     PendingFaces {
                         time: None,
                         trace: None,
+                        stats: None,
+                        refs: None,
                     },
                     served_gate,
                 ));
@@ -1251,19 +1319,29 @@ fn link_to_image_recorded(
     // hold it. The resident path above captures through the wire; this
     // half serves the one-shot path.
     prepared.config.record_resolution = opts.incremental;
-    // M58/M61/M68: `--time`/`--time-json`/`--trace` subscribe the
-    // collectors to the M54 observation seam — the same pipeline,
-    // observed (the parity gate is the seam's own contract: neither face
-    // moves a byte of the plan). Both faces read the one observed run;
-    // the [`FaceSlot`] serves them together when both ride, and stays
-    // the subscription the emit half reports through below.
+    // M58/M61/M68/M112: `--time`/`--time-json`/`--trace`/
+    // `-print_statistics` subscribe the collectors to the M54 observation
+    // seam — the same pipeline, observed (the parity gate is the seam's
+    // own contract: neither face moves a byte of the plan). The faces
+    // read the one observed run; the [`FaceSlot`] serves them together
+    // when any ride, and stays the subscription the emit half reports
+    // through below.
     let started = std::time::Instant::now();
     let mut times = pgr_core::TimeCollector::default();
     let mut traces = pgr_core::trace::TraceCollector::new();
+    let mut stats = pgr_core::statistics::StatsCollector::default();
+    let mut refs = pgr_core::observe::RefsCollector::default();
+    let timing = opts.time
+        || opts.time_json
+        || opts.trace_path.is_some()
+        || opts.config.print_statistics
+        || opts.config.trace_refs;
     let result = if timing {
         let mut slot = FaceSlot::new(
             (opts.time || opts.time_json).then_some(&mut times),
             opts.trace_path.is_some().then_some(&mut traces),
+            opts.config.print_statistics.then_some(&mut stats),
+            opts.config.trace_refs.then_some(&mut refs),
         );
         // M65: the ladder's handover note leads the report — the
         // collectors carry it into the run that actually produced the
@@ -1374,6 +1452,8 @@ fn link_to_image_recorded(
         let mut slot = FaceSlot::new(
             (opts.time || opts.time_json).then_some(&mut times),
             opts.trace_path.is_some().then_some(&mut traces),
+            opts.config.print_statistics.then_some(&mut stats),
+            opts.config.trace_refs.then_some(&mut refs),
         );
         pgr_emit::build_image_fused_observed(&result.layout, &result.objects, &mut slot)?
     } else {
@@ -1426,6 +1506,8 @@ fn link_to_image_recorded(
     let faces = PendingFaces {
         time: (opts.time || opts.time_json).then_some((times, started)),
         trace: opts.trace_path.is_some().then_some(traces),
+        stats: opts.config.print_statistics.then_some((stats, started)),
+        refs: opts.config.trace_refs.then_some(refs),
     };
     let record = if opts.incremental {
         Some(pgr_emit::incremental::LinkRecord::record(
@@ -2345,19 +2427,27 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     // two).
     let mut handover_note: Option<pgr_core::observe::LinkNote> = None;
     if opts.incremental {
-        let timing = opts.time || opts.time_json || opts.trace_path.is_some();
+        // M112: the stats face rides the ladder — the run that produced
+        // the output reports the counts its own product carried (the
+        // patched image's own size, the relink plan's own slots).
+        let timing = opts.time
+            || opts.time_json
+            || opts.trace_path.is_some()
+            || opts.config.print_statistics
+            || opts.config.trace_refs;
         let ladder = if timing {
             let started = std::time::Instant::now();
             let mut times = pgr_core::TimeCollector::default();
             let mut traces = pgr_core::trace::TraceCollector::new();
-            let relink = if opts.trace_path.is_some() && (opts.time || opts.time_json) {
-                let mut pair = pgr_core::ObserverPair::new(&mut times, &mut traces);
-                incremental_relink(opts, Some(&mut pair))
-            } else if opts.trace_path.is_some() {
-                incremental_relink(opts, Some(&mut traces))
-            } else {
-                incremental_relink(opts, Some(&mut times))
-            };
+            let mut stats = pgr_core::statistics::StatsCollector::default();
+            let mut refs = pgr_core::observe::RefsCollector::default();
+            let mut slot = FaceSlot::new(
+                (opts.time || opts.time_json).then_some(&mut times),
+                opts.trace_path.is_some().then_some(&mut traces),
+                opts.config.print_statistics.then_some(&mut stats),
+                opts.config.trace_refs.then_some(&mut refs),
+            );
+            let relink = incremental_relink(opts, Some(&mut slot));
             match relink {
                 Ok(outcome) => {
                     let total = started.elapsed();
@@ -2377,6 +2467,22 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
                                 source,
                             },
                         )?;
+                    }
+                    // M112: the ladder's own report — the counts the
+                    // relink's product carried, rendered to stderr at the
+                    // end of the link (the M58 convention's face, one
+                    // report per run).
+                    if opts.config.print_statistics {
+                        let report =
+                            stats.finish(outcome.fixup_slots, outcome.file_size, started.elapsed());
+                        eprint!("{}", report.render());
+                    }
+                    // M113: the ladder's own trace — the visits the
+                    // replay's Pass 2 recorded (the full fallback's walk
+                    // rides its own), printed to stderr at the end of the
+                    // link (one trace per run).
+                    if opts.config.trace_refs {
+                        print_references(&refs.finish());
                     }
                     Some(Ok(outcome))
                 }
@@ -2455,11 +2561,19 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
     // order through the emit half, the total band measuring the wall
     // through the flush (the reports print beside the link, not inside
     // it — the M58 convention, now with the whole pipeline on the rows).
-    if faces.time.is_some() || faces.trace.is_some() {
+    // M112: the stats face's collector rides the same subscription — the
+    // counts rode the phase events, the product's own fill happens here.
+    if faces.time.is_some()
+        || faces.trace.is_some()
+        || faces.stats.is_some()
+        || faces.refs.is_some()
+    {
         {
             let mut slot = FaceSlot::new(
                 faces.time.as_mut().map(|(times, _)| times),
                 faces.trace.as_mut(),
+                faces.stats.as_mut().map(|(stats, _)| stats),
+                faces.refs.as_mut(),
             );
             write_image_observed(&linked.image, Path::new(&opts.output), &mut slot)?;
         }
@@ -2493,6 +2607,23 @@ pub fn run(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
                     }
                 })?;
             }
+        }
+        // M112: the link-statistics report — the counts the run's own
+        // passes and product reported, rendered to stderr at the end of
+        // the link (the report is a measurement; the bytes never move).
+        if let Some((stats, started)) = faces.stats.take() {
+            let report = stats.finish(
+                linked.fixup_slots,
+                linked.image.len() as u64,
+                started.elapsed(),
+            );
+            eprint!("{}", report.render());
+        }
+        // M113: the reference trace — the visits the run's own Pass 2
+        // recorded, printed to stderr at the end of the link (one trace
+        // per run; the bytes never move).
+        if let Some(refs) = faces.refs.take() {
+            print_references(&refs.finish());
         }
     } else {
         write_image(&linked.image, Path::new(&opts.output))?;
@@ -3566,6 +3697,23 @@ pub fn usage() -> String {
     s.push_str("                               warnings to a hard exit 1 (M109);\n");
     s.push_str("                               the default exits 0 with the\n");
     s.push_str("                               warnings printed (refused with -r)\n");
+    s.push_str("  -t                           print a trace of all symbol references\n");
+    s.push_str("                               to stderr (M113): each symbol Pass 2's\n");
+    s.push_str("                               resolve visits, once per visit in the\n");
+    s.push_str("                               walk's own order — a measurement, never\n");
+    s.push_str("                               a layout product (refused with -r: the\n");
+    s.push_str("                               object's symtab is the input's,\n");
+    s.push_str("                               verbatim)\n");
+    s.push_str("  -print_statistics            print the link statistics report\n");
+    s.push_str("                               to stderr at the end of the link\n");
+    s.push_str("                               (M112): the objects parsed, the\n");
+    s.push_str("                               symbols interned, the fixups\n");
+    s.push_str("                               planned, the bytes emitted and the\n");
+    s.push_str("                               wall time — a measurement, never a\n");
+    s.push_str("                               layout product (refused with -r:\n");
+    s.push_str("                               the object path has no full-emit\n");
+    s.push_str("                               layout or fixup planning to report\n");
+    s.push_str("                               in the same way)\n");
     s.push_str("  -u <symbol>                  force the symbol to be defined\n");
     s.push_str("  -U <symbol>                  mark the symbol undefined while linking (M39):\n");
     s.push_str("                               the definition drops, the reference binds\n");
