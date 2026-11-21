@@ -202,6 +202,7 @@ fn the_resolve_reuse_replay_rides_the_policy() {
             &objects,
             &interner,
             pgr_core::resolve::MultiplyDefinedPolicy::Error,
+            &mut None,
         )
         .expect("the names install");
     resolution
