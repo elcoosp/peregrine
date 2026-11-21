@@ -63,6 +63,7 @@ pub mod dynamic;
 pub mod export_trie;
 pub mod init_offsets;
 pub mod misc;
+pub mod objc;
 pub mod pair;
 pub mod report_json;
 pub mod sarif;
@@ -171,6 +172,10 @@ pub enum Code {
     /// not ride below the platform's chained-fixups floor (that dyld
     /// cannot consume the section).
     InitOffsets,
+    /// The `ObjC` registration shape is malformed (M115): the
+    /// `__objc_catlist`/`__objc_nlcatlist` sections dyld's registration
+    /// walk consumes ride broken pointer strides.
+    ObjcRegistration,
     /// Suspicious but non-fatal condition.
     Suspicious,
     /// A consumer-side check's own code (M67): the token a
@@ -187,7 +192,7 @@ impl Code {
     /// tooling can enumerate the surface the way `Check::ALL` enumerates
     /// the families). A consumer-side check's own tokens ride
     /// [`Code::Custom`] outside this table.
-    pub const ALL: [Code; 22] = [
+    pub const ALL: [Code; 23] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -208,6 +213,7 @@ impl Code {
         Code::FixupsFloor,
         Code::UnwindInfo,
         Code::Tlv,
+        Code::ObjcRegistration,
         Code::InitOffsets,
         Code::Suspicious,
     ];
@@ -236,6 +242,7 @@ impl Code {
             Code::FixupsFloor => "fixups_floor",
             Code::UnwindInfo => "unwind_info",
             Code::Tlv => "tlv",
+            Code::ObjcRegistration => "objc_registration",
             Code::InitOffsets => "init_offsets",
             Code::Suspicious => "suspicious",
             Code::Custom(token) => token,
