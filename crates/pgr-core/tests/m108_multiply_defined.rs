@@ -12,15 +12,10 @@
 //! the relocatable output refuses the non-default faces (the object's symtab
 //! is the input's, verbatim).
 
-use pgr_core::LinkError;
 use pgr_core::ids::FileId;
-use pgr_core::interner::Interner;
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, Parallelism, link, link_reloc};
-use pgr_core::object::InputObject;
-use pgr_core::propagate::{SectionDigest, section_digests};
-use pgr_core::resolve::{MultiplyDefinedPolicy, Resolution, ResolutionSnapshot, UndefinedPolicy};
-use pgr_core::resolve_reuse::{install_reused, plan_reuse};
+use pgr_core::resolve::MultiplyDefinedPolicy;
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
 /// A small object defining `name` strongly over its `__text` (one `ret`),
@@ -47,68 +42,6 @@ fn definer(object_name: &str, symbol: &str, with_main: bool) -> ObjectBuilder {
         });
     }
     b
-}
-
-/// Parses the builders in command-line order and interns every symbol name
-/// (the same Pass 1 + interning batch `link` runs).
-fn parse(builders: &[ObjectBuilder]) -> (Interner, Vec<InputObject>) {
-    let mut names: Vec<Vec<u8>> = Vec::new();
-    let mut objects = Vec::new();
-    for (i, spec) in builders.iter().enumerate() {
-        let bytes = spec.build().unwrap();
-        let mut obj = InputObject::parse(FileId(i as u32), spec.name(), bytes).unwrap();
-        names.append(&mut obj.take_symbol_names());
-        objects.push(obj);
-    }
-    let (interner, ids) = Interner::build(&names);
-    let mut cursor = 0usize;
-    for obj in &mut objects {
-        let take = obj.symbols.len();
-        obj.finish(&ids[cursor..cursor + take]).unwrap();
-        cursor += take;
-    }
-    (interner, objects)
-}
-
-/// The full Pass 2 under `policy` (the reference shape the reuse path must
-/// reproduce).
-fn full_resolve(
-    objects: &[InputObject],
-    interner: &Interner,
-    policy: MultiplyDefinedPolicy,
-) -> Result<Resolution, LinkError> {
-    let mut res = Resolution::default();
-    res.install(objects, interner, policy)?;
-    res.require_all_resolved(interner, objects, UndefinedPolicy::Error, false)?;
-    res.apply_multiply_defined_policy(policy, interner, objects)?;
-    Ok(res)
-}
-
-/// The reused Pass 2: plan the reuse from the recorded state, then install
-/// it — the collision decision rides the replay (the policy is config).
-fn reused_resolve(
-    recorded: &ResolutionSnapshot,
-    prev: &[SectionDigest],
-    objects: &[InputObject],
-    interner: &Interner,
-    policy: MultiplyDefinedPolicy,
-) -> Result<Resolution, LinkError> {
-    let plan = plan_reuse(recorded, prev, interner, objects, &[], &[])
-        .map_err(|f| panic!("unexpected reuse fallback: {f}"))?;
-    let mut res = install_reused(
-        &plan,
-        recorded,
-        interner,
-        objects,
-        &[],
-        &[],
-        &[],
-        UndefinedPolicy::Error,
-        false,
-        policy,
-    )?;
-    res.apply_multiply_defined_policy(policy, interner, objects)?;
-    Ok(res)
 }
 
 #[test]
