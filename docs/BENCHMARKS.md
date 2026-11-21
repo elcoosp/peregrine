@@ -1028,3 +1028,11 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
 ### M111 — the read-only-relocations policy
 
 - `read_only_relocs` (`cargo bench -p pgr-core --bench read_only_relocs`): the link across the three `-read_only_relocs` faces over the 64-object corpus (a read-only-target slot per object: the `error` face prices the refusal walk, the `warning`/`suppress` faces price the identical image plus the advisory derivation). Recorded on the dev sandbox (bounded `--measurement-time 1`): the warning and suppress faces land within noise of each other and of the un-knobbed link (the policy is the exit's, never the bytes').
+
+### M112 — the link-statistics report
+
+- `print_statistics` (`cargo bench -p pgr-core --bench print_statistics`): the seam's near-parity — the stats collector rides the M54 observation seam (two count updates per phase event, seven per segmented link, regardless of the corpus size) beside the unobserved link over the observer bench's 64-object corpus, plus the render's O(rows) price. Recorded on the dev sandbox (bounded `--measurement-time 1`): the two faces land within noise of each other (the unobserved face the reference — the shape-parity gate).
+
+### M113 — the reference trace
+
+- `trace_refs` (`cargo bench -p pgr-core --bench trace_refs`): the seam's near-parity — the refs collector rides the M54 observation seam's `on_reference` face (one event per reference the resolve visits, 64 per link over this corpus) beside the unobserved link. Recorded on the dev sandbox (bounded `--measurement-time 1`): the two faces land within noise of each other (the unobserved face the reference — the shape-parity gate).
