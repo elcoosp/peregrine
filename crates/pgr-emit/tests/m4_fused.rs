@@ -114,6 +114,7 @@ fn bench_dylib(exports: &[&str]) -> Dylib {
         exports: exports.iter().map(|s| s.as_bytes().to_vec()).collect(),
         weak: false,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     }
