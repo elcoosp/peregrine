@@ -1384,11 +1384,12 @@ fn record_v5_round_trips_the_resolution_snapshot() {
 
     // The resolution snapshot rides the record since v5 (the M9
     // resolve wiring); M30's `__LINKEDIT` plan bump moved the format
-    // to v6, M82's family byte to v7, M99's named-UUID byte to v8 —
-    // the snapshot contract crosses them unchanged.
+    // to v6, M82's family byte to v7, M99's named-UUID byte to v8,
+    // M114's source byte to v9 — the snapshot contract crosses them
+    // unchanged.
     assert_eq!(
-        record.format_version, 8,
-        "the record format is v8 (the M99 bump)"
+        record.format_version, 9,
+        "the record format is v9 (the M114 bump)"
     );
     let snap = record
         .resolution
@@ -1818,7 +1819,7 @@ fn record_v8_carries_the_named_uuid() {
         Some(NAMED_A),
         "the record carries the decision the plan echoed"
     );
-    let decoded = LinkRecord::decode(&record.encode()).expect("the v8 record decodes");
+    let decoded = LinkRecord::decode(&record.encode()).expect("the record decodes");
     assert_eq!(
         decoded.named_uuid,
         Some(NAMED_A),
