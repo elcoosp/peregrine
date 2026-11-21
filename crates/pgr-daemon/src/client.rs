@@ -132,6 +132,22 @@ pub struct ResidentImage {
     /// (the suppress face derives the walk, prints none of it; the
     /// lookup face intends the ride).
     pub multiply_warnings: Vec<String>,
+    /// The served link-statistics report (v63, M112): `Some` when the
+    /// request's config carries `-print_statistics` — the session's own
+    /// run's counts, the fields the cold lane's report carries (the
+    /// count fields byte-identical parity-gated, the wall the clock's),
+    /// rendered by the driver to stderr at the end of the link (the M62
+    /// convention; the daemon never writes the client's stderr). `None`
+    /// when unasked (the tail rode absent) or on the fallback path (the
+    /// one-shot link collects its own report).
+    pub statistics: Option<pgr_core::statistics::LinkStatistics>,
+    /// The served reference trace (v64, M113): the references the
+    /// session's own Pass 2 visited when the request's config carries
+    /// `-t` — the facts the driver renders through the cold lane's face
+    /// (`pgr: reference: …`, the M62 convention; the daemon never writes
+    /// the client's stderr). Empty when unasked (the tail rode empty) or
+    /// on the fallback path (the one-shot link collects its own trace).
+    pub references: Vec<pgr_core::observe::ReferenceEvent>,
     /// How the image tail crossed (v5): [`Transport::Full`] or the tile
     /// summary (what the benches and the driver's outcome line record).
     pub transport: Transport,
@@ -468,6 +484,16 @@ impl DaemonClient {
                     // (M108, `-multiply_defined warning`) — the client
                     // prints each as the cold lane's `pgr: warning:` face.
                     let multiply_warnings = crate::protocol::decode_multiply_warnings(&mut r)?;
+                    // The v63 tail: the served link-statistics report when
+                    // the request asked (the session's own run's counts,
+                    // the M62 convention — the driver prints the cold
+                    // lane's face), absent otherwise.
+                    let statistics = crate::protocol::decode_statistics(&mut r)?;
+                    // The v64 tail: the served reference trace when the
+                    // request asked (the session's own Pass 2 visits, the
+                    // facts the driver renders — the M62 convention),
+                    // empty otherwise.
+                    let references = crate::protocol::decode_references(&mut r)?;
                     r.done()?;
                     return Ok(ResidentImage {
                         image,
@@ -486,6 +512,8 @@ impl DaemonClient {
                         map_text,
                         policy_warnings,
                         multiply_warnings,
+                        statistics,
+                        references,
                         transport,
                     });
                 }
