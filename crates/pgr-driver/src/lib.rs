@@ -56,6 +56,11 @@ enum DylibKind {
     /// against it; the command kind stays a plain load, the mark is a
     /// survival opt-out, not a command kind).
     Needed,
+    /// `-hidden_framework` (M110: the hidden-dylib mark through the
+    /// framework search — the dylib's exports resolve but its load
+    /// command drops; the mark rides beside the kind bytes, the
+    /// command kind is whatever the load's own obligations name).
+    Hidden,
 }
 
 /// The driver outcome: bytes written, plus the plan for diagnostics.
@@ -626,6 +631,7 @@ pub fn scan_dylib(path: &str, bytes: &[u8]) -> Result<Dylib, DriverError> {
         weak: false,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     })
@@ -727,6 +733,7 @@ pub fn tbd_to_dylib_cached(
         weak,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     };
@@ -1692,15 +1699,18 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         };
         if looks_like_tbd(&bytes) {
             // M106: a `-needed-l` basename carries the needed mark (the
-            // `-l` search is shared, the mark is per name).
+            // `-l` search is shared, the mark is per name). M110: a
+            // `-hidden-l` basename carries the hidden mark the same way.
             let mut dylib = tbd_to_dylib_cached(&path, &bytes, false, cache.as_ref())?;
             dylib.needed = opts.needed_libs.iter().any(|n| n == name);
+            dylib.hidden = opts.hidden_libs.iter().any(|n| n == name);
             dylibs.push(dylib);
         } else if pgr_format::MachHeader64::parse(&bytes)
             .is_ok_and(|h| h.filetype == pgr_format::consts::MH_DYLIB)
         {
             let mut scanned = scan_dylib(&path, &bytes)?;
             scanned.needed = opts.needed_libs.iter().any(|n| n == name);
+            scanned.hidden = opts.hidden_libs.iter().any(|n| n == name);
             dylibs.push(scanned);
         } else if pgr_format::is_archive(&bytes) {
             push_archive(&mut archives, &path, bytes, opts)?;
@@ -1728,7 +1738,12 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
     // M106: the needed frameworks resolve after the upward ones (the
     // order is plain, re-export, weak, lazy, upward, then needed — the
     // survival mark rides last; an empty list leaves every pre-M106
-    // link byte-identical).
+    // link byte-identical). M110: the hidden frameworks resolve after
+    // the needed ones (the order is plain, re-export, weak, lazy,
+    // upward, needed, then hidden — the command-drop mark rides last;
+    // a hidden dylib carries no load command, so its list position
+    // names no ordinal and an empty list leaves every pre-M110 link
+    // byte-identical).
     let framework_dirs = opts::effective_framework_dirs(&opts.framework_dirs, &opts.syslibroots);
     for (name, kind) in opts
         .frameworks
@@ -1750,6 +1765,11 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
             opts.needed_frameworks
                 .iter()
                 .map(|n| (n, DylibKind::Needed)),
+        )
+        .chain(
+            opts.hidden_frameworks
+                .iter()
+                .map(|n| (n, DylibKind::Hidden)),
         )
     {
         // M60: the framework search rides the record like the `-l`
@@ -1800,6 +1820,12 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         // kind — a needed framework loads as `LC_LOAD_DYLIB` (the mark
         // composes with every kind's obligation).
         dylib.needed = kind == DylibKind::Needed;
+        // M110: the hidden mark drops the load command entirely (the
+        // dylib's exports resolve; no command rides) — it composes with
+        // the weak/lazy kinds' obligations (their command would drop
+        // either way) and the re-export obligation refuses it (the
+        // layout re-check).
+        dylib.hidden = kind == DylibKind::Hidden;
         dylibs.push(dylib);
     }
     // M5 `-sectcreate`: section contents from a file, carried as a synthetic
@@ -2146,6 +2172,9 @@ fn map_input(
         // M106: the needed-dylib mark — the survival opt-out under
         // `-dead_strip_dylibs` (the command kind stays a plain load).
         dylib.needed = opts_index.is_some_and(|i| opts.needed_library_inputs.contains(&i));
+        // M110: the hidden-dylib mark — the load command drops (the
+        // exports resolve; weak rides flat, strong refuses).
+        dylib.hidden = opts_index.is_some_and(|i| opts.hidden_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
     }
@@ -2159,6 +2188,7 @@ fn map_input(
         dylib.lazy = opts_index.is_some_and(|i| opts.lazy_library_inputs.contains(&i));
         dylib.upward = opts_index.is_some_and(|i| opts.upward_library_inputs.contains(&i));
         dylib.needed = opts_index.is_some_and(|i| opts.needed_library_inputs.contains(&i));
+        dylib.hidden = opts_index.is_some_and(|i| opts.hidden_library_inputs.contains(&i));
         dylibs.push(dylib);
         return Ok(());
     }
@@ -2170,11 +2200,14 @@ fn map_input(
     }
     let marked_reexport = opts_index.is_some_and(|i| opts.reexport_library_inputs.contains(&i));
     let marked_needed = opts_index.is_some_and(|i| opts.needed_library_inputs.contains(&i));
-    if marked_reexport || marked_needed {
+    let marked_hidden = opts_index.is_some_and(|i| opts.hidden_library_inputs.contains(&i));
+    if marked_reexport || marked_needed || marked_hidden {
         let what = if marked_reexport {
             "-reexport_library input is not a dylib (.tbd or Mach-O)"
-        } else {
+        } else if marked_needed {
             "-needed_library input is not a dylib (.tbd or Mach-O)"
+        } else {
+            "-hidden_library input is not a dylib (.tbd or Mach-O)"
         };
         return Err(DriverError::Tbd {
             path: path.to_string(),
@@ -3490,6 +3523,16 @@ pub fn usage() -> String {
     s.push_str("  -needed_framework <name>     the needed mark through the -F search (M106)\n");
     s.push_str("  -needed-l <name> | -needed-l<name>   the needed mark through the -L\n");
     s.push_str("                               search (M106)\n");
+    s.push_str("  -hidden_library <path>       the dylib's exports resolve but its load\n");
+    s.push_str("                               command drops (M110): weak references\n");
+    s.push_str("                               ride dyld's flat lookup, strong ones\n");
+    s.push_str("                               refuse the link\n");
+    s.push_str("  -hidden_framework <name>     the hidden mark through the -F search (M110)\n");
+    s.push_str("  -hidden-l <name> | -hidden-l<name>   the hidden mark through the -L\n");
+    s.push_str("                               search (M110)\n");
+    s.push_str("  -read_only_relocs <policy>   the policy for relocations in read-only\n");
+    s.push_str("                               segments (M111): error (default) |\n");
+    s.push_str("                               warning | suppress\n");
     s.push_str("  -exported_symbols_list <f>   export only the listed symbols\n");
     s.push_str("  -unexported_symbols_list <f> hide the listed symbols (N_PEXT)\n");
     s.push_str("  -exported_symbol <name>      export only this symbol (repeatable,\n");
