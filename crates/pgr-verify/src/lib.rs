@@ -58,6 +58,7 @@ pub mod baseline;
 pub mod branch_range;
 pub mod chain_starts;
 pub mod checks;
+pub mod dtrace;
 pub mod dyld_info;
 pub mod dynamic;
 pub mod export_trie;
@@ -176,6 +177,14 @@ pub enum Code {
     /// `__objc_catlist`/`__objc_nlcatlist` sections dyld's registration
     /// walk consumes ride broken pointer strides.
     ObjcRegistration,
+    /// The `DTrace` `DOF` header is malformed (M118): a `__dtrace_dof`
+    /// (`S_DTRACE_DOF`) section's leading bytes are not the `DOF`
+    /// identification magic or the section is too small to carry the
+    /// identification region — the `DTrace` consumer's first walk gates on
+    /// both, mirrored read-side so a malformed section the producer never
+    /// saw still reports (the M115 read-side-backstop shape, one section
+    /// type over).
+    DtraceDof,
     /// Suspicious but non-fatal condition.
     Suspicious,
     /// A consumer-side check's own code (M67): the token a
@@ -192,7 +201,7 @@ impl Code {
     /// tooling can enumerate the surface the way `Check::ALL` enumerates
     /// the families). A consumer-side check's own tokens ride
     /// [`Code::Custom`] outside this table.
-    pub const ALL: [Code; 23] = [
+    pub const ALL: [Code; 24] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -215,6 +224,7 @@ impl Code {
         Code::Tlv,
         Code::ObjcRegistration,
         Code::InitOffsets,
+        Code::DtraceDof,
         Code::Suspicious,
     ];
 
@@ -244,6 +254,7 @@ impl Code {
             Code::Tlv => "tlv",
             Code::ObjcRegistration => "objc_registration",
             Code::InitOffsets => "init_offsets",
+            Code::DtraceDof => "dtrace_dof",
             Code::Suspicious => "suspicious",
             Code::Custom(token) => token,
         }
