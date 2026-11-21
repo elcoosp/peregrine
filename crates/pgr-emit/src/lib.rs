@@ -37,7 +37,7 @@ pub use incremental::{
     read_summary,
 };
 pub use object::{ObjectRelocRefusal, build_object_image};
-pub use signature::{build_superblob, derive_uuid, page_hashes};
+pub use signature::{build_superblob, derive_uuid, page_hashes, random_uuid};
 pub use tile::{build_image_fused, build_image_fused_into, build_image_fused_observed};
 pub use writer::{write_image, write_image_observed};
 
