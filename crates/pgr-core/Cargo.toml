@@ -591,3 +591,21 @@ harness = false
 [[bench]]
 name = "trace_refs"
 harness = false
+
+# M114 — the UUID source (`-random_uuid`): the shape-parity gate — the
+# carried faces' plans are byte-identical (the source is the emit's
+# identity write, never the plan's) and the suppressed face is exactly
+# one 24-byte command narrower, over the corpus the M32/M99 uuid
+# benches share.
+[[bench]]
+name = "random_uuid"
+harness = false
+
+# M115 — the ObjC category-merging decision (`-no_objc_category_merging`):
+# the shape-parity gate — the merged plan drops the registration section,
+# the disabled plan keeps it, and the unmergeable corpus links
+# byte-identical under either face, over a 32-object category-bearing
+# corpus.
+[[bench]]
+name = "no_objc_category_merging"
+harness = false
