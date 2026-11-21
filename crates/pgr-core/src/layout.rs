@@ -862,6 +862,46 @@ pub struct LinkConfig {
     /// nothing left to elevate; the layout's re-check and `link_reloc`
     /// back the driver refusal).
     pub fatal_warnings: bool,
+    /// M116 — the common-symbol advisory: `-warn_commons` — ld64's
+    /// face ("Print a warning whenever a tentative definition in an
+    /// object file is found [and an external symbol by the same name is
+    /// also found]", the `ld64` man page; "This often means that the
+    /// extern keyword is missing from a variable declaration in a header
+    /// file") is the advisory decision the Pass-2 walk reads (see
+    /// [`crate::resolve::Resolution::apply_warn_commons`]): for every
+    /// input common symbol (`N_UNDF | N_EXT`, non-zero value) whose name
+    /// the finished resolution landed on a definition — a local one (the
+    /// common's own coalesced ride included) or a linked dylib's export —
+    /// the walk records the landing and the driver's advisory face
+    /// tallies it, prints it to stderr and exits 0 (the M103/M108
+    /// warning-face pattern, the M109 tally reading it). The decision is
+    /// orthogonal to the M107 `CommonsPolicy` — it never changes the
+    /// resolution policy itself. The default (`false`) records nothing
+    /// and keeps every pre-knob link byte-identical (the advisory is a
+    /// measurement, never a layout product). The relocatable output
+    /// refuses the knob: the object's symtab is the input's, verbatim
+    /// (there is no resolution landing to advise about — the surface's
+    /// knob refusal mirrored exactly, the M104/M105/M112 pattern; the
+    /// layout's re-check and `link_reloc` back the driver refusal).
+    pub warn_commons: bool,
+    /// M117 — the init/term section suppression: `-no_inits` — the
+    /// decision the Pass-3 classification and the header assembly read:
+    /// the `__mod_init_func` (`S_MOD_INIT_FUNC_POINTERS`),
+    /// `__mod_term_func` (`S_MOD_TERM_FUNC_POINTERS`) and
+    /// `__init_offsets` (`S_INIT_FUNC_OFFSETS`) sections drop from the
+    /// output entirely — no bucket, no placed bytes, no fixup slots —
+    /// overriding the M16 transform (no synthetic `__init_offsets`
+    /// piece plans) and the M52 dead-strip roots (the sections never
+    /// place, roots or not). The `LC_ROUTINES_64` command (M48 `-init`
+    /// / M98 `-term`) drops from the header: no init/term machinery
+    /// remains for it to name. The default (`false`) keeps every
+    /// pre-knob link byte-identical, and a corpus without init/term
+    /// sections links byte-identical under either face. The relocatable
+    /// output refuses the knob: the object's sections are the input's,
+    /// verbatim (the surface's knob refusal mirrored exactly, the
+    /// M104/M105 pattern — the layout's re-check and `link_reloc` back
+    /// the driver refusal).
+    pub no_inits: bool,
     /// M111 — the read-only-relocations policy:
     /// `-read_only_relocs <policy>` — ld64's policy for relocations in
     /// read-only segments (the W^X contract's other half; see
@@ -1013,6 +1053,8 @@ impl Default for LinkConfig {
             commons: crate::resolve::CommonsPolicy::default(),
             multiply_defined: crate::resolve::MultiplyDefinedPolicy::default(),
             fatal_warnings: false,
+            warn_commons: false,
+            no_inits: false,
             read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy::default(),
             print_statistics: false,
             trace_refs: false,
@@ -1691,6 +1733,22 @@ pub(crate) fn is_debug_section(segment: &str, name: &str, flags: u32, strip_debu
     strip_debug && (name.starts_with("__debug_") || flags & pgr_format::consts::S_ATTR_DEBUG != 0)
 }
 
+/// M117: the init/term classification — the shapes the `-no_inits`
+/// decision drops. The pointer-section types the M16 transform consumed
+/// (`S_MOD_INIT_FUNC_POINTERS`), the M52 roots rooted
+/// (`S_MOD_TERM_FUNC_POINTERS`) and the offsets form produced
+/// (`S_INIT_FUNC_OFFSETS`) are the init/term machinery — one
+/// classification, every consult (the skip set, the symtab builder)
+/// reads it.
+pub(crate) fn is_init_term_section(flags: u32) -> bool {
+    matches!(
+        flags & pgr_format::consts::SECTION_TYPE_MASK,
+        pgr_format::consts::S_MOD_INIT_FUNC_POINTERS
+            | pgr_format::consts::S_MOD_TERM_FUNC_POINTERS
+            | pgr_format::consts::S_INIT_FUNC_OFFSETS
+    )
+}
+
 /// Classifies one input section into its output bucket.
 fn bucket_for(
     in_sect: &crate::object::InputSection,
@@ -2050,32 +2108,41 @@ pub fn layout(
     // for the transform to own), and a below-floor target's dyld cannot
     // consume `S_INIT_FUNC_OFFSETS` at all. The named form collects the
     // pointer sections it replaces; the default collects none and the
-    // pre-M16 bytes stay bit-identical.
-    let init_specs = match cfg.init_offsets {
-        crate::init_offsets::InitOffsets::Classic => Vec::new(),
-        crate::init_offsets::InitOffsets::Offsets => {
-            if cfg.filetype == OutputType::Relocatable {
-                return Err(LinkError::Layout {
-                    message: "-init_offsets transforms initializer pointers into __init_offsets \
-                              entries, but the -r output preserves input sections verbatim \
-                              (the M10 relocatable contract); drop -init_offsets or link a \
-                              final image"
-                        .into(),
-                });
+    // pre-M16 bytes stay bit-identical. M117: the `-no_inits` suppression
+    // overrides the transform — no init machinery survives (no synthetic
+    // offsets piece plans, the pointer sections drop with the
+    // classification), so the decision collects nothing before the form
+    // is even consulted.
+    let init_specs = if cfg.no_inits {
+        Vec::new()
+    } else {
+        match cfg.init_offsets {
+            crate::init_offsets::InitOffsets::Classic => Vec::new(),
+            crate::init_offsets::InitOffsets::Offsets => {
+                if cfg.filetype == OutputType::Relocatable {
+                    return Err(LinkError::Layout {
+                        message:
+                            "-init_offsets transforms initializer pointers into __init_offsets \
+                                  entries, but the -r output preserves input sections verbatim \
+                                  (the M10 relocatable contract); drop -init_offsets or link a \
+                                  final image"
+                                .into(),
+                    });
+                }
+                let floor = chained_fixups_min_minos(cfg.platform);
+                if cfg.minos < floor {
+                    return Err(LinkError::Layout {
+                        message: format!(
+                            "-init_offsets needs a target at or above the platform's chained-fixups \
+                             floor {floor_version} (the target's dyld cannot consume \
+                             __init_offsets below it); raise the deployment target or use \
+                             -no_init_offsets",
+                            floor_version = version_string(floor),
+                        ),
+                    });
+                }
+                crate::init_offsets::collect_sections(objects)?
             }
-            let floor = chained_fixups_min_minos(cfg.platform);
-            if cfg.minos < floor {
-                return Err(LinkError::Layout {
-                    message: format!(
-                        "-init_offsets needs a target at or above the platform's chained-fixups \
-                         floor {floor_version} (the target's dyld cannot consume \
-                         __init_offsets below it); raise the deployment target or use \
-                         -no_init_offsets",
-                        floor_version = version_string(floor),
-                    ),
-                });
-            }
-            crate::init_offsets::collect_sections(objects)?
         }
     };
     // M18: the stack reserve is an executable decision — `LC_MAIN`
@@ -2523,6 +2590,39 @@ pub fn layout(
                 .into(),
         });
     }
+    // M116: the common-symbol advisory is a resolve-record decision —
+    // the relocatable output's symtab is the input's, verbatim (an
+    // object carries its inputs' tables untouched; there is no
+    // resolution landing to advise about — the M104/M105/M112 pattern).
+    // The refusal rides here (not only on the driver surface and
+    // `link_reloc`) so every caller pays it: a silently inert knob
+    // would claim an advisory the object cannot carry.
+    if cfg.warn_commons && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-warn_commons advises where every tentative definition resolved, \
+                      but the relocatable output's symtab is the input's, verbatim — \
+                      nothing to advise about: drop -warn_commons or link an image (an \
+                      executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M117: the init/term suppression is a final-image decision — the
+    // relocatable output's sections are the input's, verbatim (an
+    // object carries its inputs' sections untouched; there is no init
+    // classification to apply). The refusal rides here (not only on the
+    // driver surface and `link_reloc`) so every caller pays it: a
+    // silently inert knob would claim an init-free shape the object
+    // cannot carry (the M104/M105/M115 pattern).
+    if cfg.no_inits && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-no_inits drops the output's init/term sections (the \
+                      __mod_init_func, __mod_term_func and __init_offsets shapes), but \
+                      the relocatable output's sections are the input's, verbatim — \
+                      nothing to drop: drop -no_inits or link an image (an executable, \
+                      dylib or bundle)"
+                .into(),
+        });
+    }
     // M107: the non-default commons policies are final-image decisions —
     // the relocatable output's symtab is the input's, verbatim (an
     // object carries its inputs' tables untouched; there is no tentative
@@ -2669,6 +2769,26 @@ pub fn layout(
     }
     let init_skip: std::collections::HashSet<(u32, usize)> =
         init_specs.iter().map(|s| (s.file, s.in_sect)).collect();
+    // M117: the `-no_inits` suppression drops the init/term sections
+    // entirely — they join the skip set (the M16 sentinel shape: no
+    // bucket, no placed bytes, no fixup slots — the bucketing loop and
+    // the live-slot counter read one set).
+    let init_skip: std::collections::HashSet<(u32, usize)> = if cfg.no_inits {
+        objects
+            .iter()
+            .enumerate()
+            .flat_map(|(fi, obj)| {
+                obj.sections
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| is_init_term_section(s.flags))
+                    .map(move |(si, _)| (fi as u32, si))
+            })
+            .chain(init_skip)
+            .collect()
+    } else {
+        init_skip
+    };
     let init_entries: usize = init_specs
         .iter()
         .map(|s| (objects[s.file as usize].sections[s.in_sect].size / 8) as usize)
@@ -2982,6 +3102,7 @@ pub fn layout(
         keep_private_externs: cfg.keep_private_externs,
         keep_local_symbols: cfg.keep_local_symbols,
         strip_debug: cfg.strip_debug,
+        no_inits: cfg.no_inits,
     };
     let (mut symbols, dropped_locals) =
         build_symtab(objects, res, interner, &commons, &visible, &symtab_ctx);
@@ -3316,8 +3437,20 @@ pub fn layout(
             None => Ok(None),
         }
     };
-    let init_addr = resolve_dylib_addr(cfg.init_symbol.as_deref(), "init")?;
-    let term_addr = resolve_dylib_addr(cfg.term_symbol.as_deref(), "term")?;
+    // M117: the suppression drops the command beside `-no_inits` — no
+    // init/term machinery remains for `LC_ROUTINES_64` to name (the
+    // resolution never runs, so an unresolvable `-init`/`-term` name is
+    // not a refusal: the command it would ride does not exist).
+    let init_addr = if cfg.no_inits {
+        None
+    } else {
+        resolve_dylib_addr(cfg.init_symbol.as_deref(), "init")?
+    };
+    let term_addr = if cfg.no_inits {
+        None
+    } else {
+        resolve_dylib_addr(cfg.term_symbol.as_deref(), "term")?
+    };
 
     // ---- __LINKEDIT chunks + signature sizing --------------------------------------
     let fixup_payload_size = if fixups.slot_count > 0 && chains_enabled {
@@ -5314,6 +5447,11 @@ struct SymtabContext<'a> {
     /// default) — the symtab's entries into the debug-classified
     /// sections drop with their bytes under the decision.
     strip_debug: bool,
+    /// M117: the init/term section suppression (the off state is the
+    /// default) — the symtab's entries into the dropped init/term
+    /// sections drop with their bytes under the decision (a row whose
+    /// section never ships must not dangle absolute, the M105 shape).
+    no_inits: bool,
 }
 
 /// Builds the output symbol table: locals (file order), ext defs (file
@@ -5349,6 +5487,7 @@ fn build_symtab(
         keep_private_externs,
         keep_local_symbols,
         strip_debug,
+        no_inits,
     ) = (
         ctx.sections,
         ctx.addr_of,
@@ -5358,6 +5497,7 @@ fn build_symtab(
         ctx.keep_private_externs,
         ctx.keep_local_symbols,
         ctx.strip_debug,
+        ctx.no_inits,
     );
     // Output section lookup by (file, input section): (index, base).
     let mut sect_of: std::collections::HashMap<(u32, usize), usize> =
@@ -5443,6 +5583,17 @@ fn build_symtab(
                     let s = &obj.sections[sect];
                     is_debug_section(&s.segment, &s.name, s.flags, true)
                 })
+            {
+                continue;
+            }
+            // M117: the symtab's entries into the dropped init/term
+            // sections drop with their bytes — a row whose section the
+            // suppression classified never ships; the row must not
+            // dangle absolute (the M105 shape, one classification over).
+            if no_inits
+                && sym
+                    .section
+                    .is_some_and(|sect| is_init_term_section(obj.sections[sect].flags))
             {
                 continue;
             }
@@ -6630,6 +6781,11 @@ fn command_size(cfg: &LinkConfig, nsections: usize, fixup_lc: FixupLc, emit_dice
         + usize::from(is_exec) * 24 // LC_MAIN
         + usize::from(
             cfg.filetype == OutputType::Dylib
+                // M117: the suppression drops the command — the
+                // sizing predicate mirrors the assembly's (the
+                // resolved addrs, not the config flags; the
+                // `-no_inits` decision empties them).
+                && !cfg.no_inits
                 && (cfg.init_symbol.is_some() || cfg.term_symbol.is_some()),
         ) * 72 // LC_ROUTINES_64 (M48/M98)
         + 24 // LC_SYMTAB
