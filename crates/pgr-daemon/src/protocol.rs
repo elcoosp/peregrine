@@ -308,8 +308,20 @@ use sha2::{Digest, Sha256};
 /// `error`); a byte the reader refuses is a malformed frame, so an old
 /// server reading a new client's request refuses it (the M103
 /// reversed-admits shape), and a resident relink resolves the commons
-/// the client asked for, never the house default.
-pub const PROTO_VERSION: u32 = 58;
+/// the client asked for, never the house default. **v59** names the
+/// M108 round: the multiply-defined resolution policy
+/// (`-multiply_defined <policy>`) rides the tail after the commons byte
+/// — one byte off the four-value alphabet (`error`, `warning`,
+/// `suppress`, `dynamic_lookup`); a byte the reader refuses is a
+/// malformed frame (the M107 shape one round over), the reply's tail
+/// gains the collision-warning list beside the v54 unresolved-open one,
+/// and a resident relink decides the duplicated names the client asked
+/// for, never the house escalation. **v60** names the M109 round: the
+/// warnings-as-errors exit decision (`-fatal_warnings`/
+/// `-no_fatal_warnings`) rides the tail after the multiply-defined byte
+/// — one byte; the bytes never move (the policy is the exit's, not the
+/// image's), a resident relink exits the shape the client asked for.
+pub const PROTO_VERSION: u32 = 60;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1447,12 +1459,36 @@ pub fn encode_policy_warnings(out: &mut Vec<u8>, entries: &[String]) {
     }
 }
 
+/// Encodes the reply's collision-warning tail (v59, M108): a
+/// count-prefixed list of the session's multiply-defined entries — the
+/// record faces' advisory product, rendered from the session's own
+/// resolved state. The suppress face carries the empty list (the walk
+/// derived it, the exit prints none of it); a non-warning policy never
+/// fills the list. The client prints each entry as the cold lane's
+/// `pgr: warning:` face — the wire never re-shapes the face the client
+/// prints (the M62 convention).
+pub fn encode_multiply_warnings(out: &mut Vec<u8>, entries: &[String]) {
+    put_u32(out, entries.len() as u32);
+    for entry in entries {
+        put_str(out, entry);
+    }
+}
+
 /// Decodes the reply's policy-warning tail (v54; see
 /// [`encode_policy_warnings`] for the shape).
 ///
 /// # Errors
 /// [`DecodeError::Malformed`] on truncation.
 pub(crate) fn decode_policy_warnings(r: &mut Reader<'_>) -> Result<Vec<String>, DecodeError> {
+    (0..r.u32()?).map(|_| r.str()).collect()
+}
+
+/// Decodes the reply's collision-warning tail (v59; see
+/// [`encode_multiply_warnings`] for the shape).
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation.
+pub(crate) fn decode_multiply_warnings(r: &mut Reader<'_>) -> Result<Vec<String>, DecodeError> {
     (0..r.u32()?).map(|_| r.str()).collect()
 }
 
@@ -1915,6 +1951,16 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // alphabet; a resident relink resolves the commons the client
     // asked for, never the pre-M107 house default.
     put_u8(out, cfg.commons.wire());
+    // M108 (v59 wire): the multiply-defined resolution policy rides the
+    // tail after the commons byte — one byte off the four-value
+    // alphabet; a resident relink decides the duplicated names the
+    // client asked for, never the pre-M108 house escalation.
+    put_u8(out, cfg.multiply_defined.wire());
+    // M109 (v60 wire): the warnings-as-errors exit decision rides the
+    // tail after the multiply-defined byte — one byte; the bytes never
+    // move (the policy is the exit's, not the image's), a resident
+    // relink exits the shape the client asked for.
+    put_u8(out, u8::from(cfg.fatal_warnings));
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -2348,6 +2394,17 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // old server reading a new client's alphabet refuses the request,
     // the M103 reversed-admits shape).
     let commons = pgr_core::resolve::CommonsPolicy::from_wire(r.u8()?).ok_or_else(malformed)?;
+    // M108 (v59 wire): the multiply-defined resolution policy — an
+    // unknown byte is malformed (a refusal, never a silently defaulted
+    // policy; an old server reading a new client's alphabet refuses the
+    // request, the M107 shape one round over).
+    let multiply_defined =
+        pgr_core::resolve::MultiplyDefinedPolicy::from_wire(r.u8()?).ok_or_else(malformed)?;
+    // M109 (v60 wire): the warnings-as-errors exit decision — one byte,
+    // no validation beyond the bool (the bytes never move: the policy
+    // is the exit's, not the image's; the session's served link plans
+    // the same shape either way).
+    let fatal_warnings = r.u8()? != 0;
     Ok(LinkConfig {
         ident,
         filetype,
@@ -2427,6 +2484,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         keep_local_symbols,
         strip_debug,
         commons,
+        multiply_defined,
+        fatal_warnings,
         no_dead_strip_inits_and_terms,
         renames,
         cstring_order,
@@ -2682,6 +2741,14 @@ mod tests {
 
             // The v58 tail: a non-default commons policy must survive the round trip.
             commons: pgr_core::resolve::CommonsPolicy::SearchDylibs,
+            // The v59 tail: a non-default multiply-defined policy must
+            // survive the round trip verbatim (the wire never silently
+            // defaults a duplicated name's fate).
+            multiply_defined: pgr_core::resolve::MultiplyDefinedPolicy::Warning,
+            // The v60 tail: the exit policy's escalation decision must
+            // survive the round trip verbatim (the bytes never move —
+            // the decision is the exit's).
+            fatal_warnings: false,
             // The v19 tail: non-default section-alignment floors must
             // survive the round trip verbatim, in flag order (a
             // resident relink aligns the sections the client named,
@@ -5159,6 +5226,188 @@ mod tests {
     }
 
     #[test]
+    fn the_multiply_defined_policy_round_trips() {
+        // v59: a non-default multiply-defined policy must survive the
+        // round trip verbatim (a resident relink decides the collisions
+        // the client asked for, never the house default).
+        let cfg = rich_config();
+        assert_eq!(
+            cfg.multiply_defined,
+            pgr_core::resolve::MultiplyDefinedPolicy::Warning,
+            "rich_config carries the named face"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.multiply_defined,
+            pgr_core::resolve::MultiplyDefinedPolicy::Warning,
+            "the policy crosses byte-for-byte"
+        );
+        // The dynamic_lookup face rides too (the alphabet's tail).
+        let mut cfg = rich_config();
+        cfg.multiply_defined = pgr_core::resolve::MultiplyDefinedPolicy::DynamicLookup;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.multiply_defined,
+            pgr_core::resolve::MultiplyDefinedPolicy::DynamicLookup,
+            "the lookup face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn an_unknown_multiply_defined_policy_byte_is_malformed() {
+        // v59: a byte off the four-value alphabet is a malformed frame —
+        // an old server reading a new client's request refuses it (the
+        // M103 reversed-admits shape). The tail byte sits at the fixed
+        // offset the encode order lays out: two requests differing only
+        // in the policy byte differ in exactly one position.
+        let mut base = rich_config();
+        base.multiply_defined = pgr_core::resolve::MultiplyDefinedPolicy::Error;
+        let mut other = rich_config();
+        other.multiply_defined = pgr_core::resolve::MultiplyDefinedPolicy::Suppress;
+        let a = LinkRequest {
+            config: base,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: Vec::new(),
+        }
+        .encode();
+        let b = LinkRequest {
+            config: other,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: Vec::new(),
+        }
+        .encode();
+        assert_eq!(a.len(), b.len(), "the alphabet bytes are fixed-width");
+        let diffs: Vec<usize> = a
+            .iter()
+            .zip(b.iter())
+            .enumerate()
+            .filter(|(_, (x, y))| x != y)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(diffs.len(), 1, "exactly the policy byte differs: {diffs:?}");
+        let mut corrupt = a.clone();
+        corrupt[diffs[0]] = 0xFF;
+        let err = LinkRequest::decode(&corrupt).expect_err("the unknown byte is malformed");
+        assert!(
+            matches!(err, DecodeError::Malformed(_)),
+            "the refusal is the malformed frame: {err}"
+        );
+    }
+
+    #[test]
+    fn the_fatal_warnings_decision_round_trips() {
+        // v60: the exit policy's escalation decision must survive the
+        // round trip verbatim (a resident relink exits the shape the
+        // client asked for — the bytes never move, the exit face does).
+        let cfg = rich_config();
+        assert!(
+            !cfg.fatal_warnings,
+            "rich_config carries the default's mirror"
+        );
+        let mut cfg = rich_config();
+        cfg.fatal_warnings = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.fatal_warnings,
+            "the decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
     fn the_keep_local_symbols_decision_round_trips() {
         // v55: a non-default symtab-shaping decision must survive the
         // round trip verbatim (a resident relink carries the symtab
@@ -6441,13 +6690,14 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        // `rich_config` carries no tables: drop the five absent bytes the
+        // `rich_config` carries no tables: drop the six absent bytes the
         // encoder just wrote (the M91 tail's slots at the config's end —
         // the rank table, then the cstring table, then the M102
         // bind-at-load byte, then the M104 keep-local-symbols byte, then
-        // the M105 strip-debug byte), the hand-spliced rank table takes
-        // the first place and the cstring absence follows.
-        body.truncate(body.len() - 5);
+        // the M105 strip-debug byte, then the M107 commons-policy byte),
+        // the hand-spliced rank table takes the first place and the
+        // cstring absence follows.
+        body.truncate(body.len() - 8);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -6463,6 +6713,9 @@ mod tests {
         put_u8(&mut body, 0); // the M102 bind-at-load absence
         put_u8(&mut body, 0); // the M104 keep-local-symbols drop face
         put_u8(&mut body, 0); // the M105 strip-debug absence
+        put_u8(&mut body, 0); // the M107 commons-policy absence
+        put_u8(&mut body, 0); // the M108 multiply-defined-policy absence
+        put_u8(&mut body, 0); // the M109 fatal-warnings absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
@@ -6539,7 +6792,7 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        body.truncate(body.len() - 5);
+        body.truncate(body.len() - 8);
         put_u8(&mut body, 0); // the rank table's absence
         // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
@@ -6552,6 +6805,9 @@ mod tests {
         put_u8(&mut body, 0); // the M102 bind-at-load absence
         put_u8(&mut body, 0); // the M104 keep-local-symbols drop face
         put_u8(&mut body, 0); // the M105 strip-debug absence
+        put_u8(&mut body, 0); // the M107 commons-policy absence
+        put_u8(&mut body, 0); // the M108 multiply-defined-policy absence
+        put_u8(&mut body, 0); // the M109 fatal-warnings absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
