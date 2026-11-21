@@ -124,6 +124,14 @@ pub struct ResidentImage {
     /// writes the client's stderr). Empty for every other policy (the
     /// suppress face records the walk, prints none of it).
     pub policy_warnings: Vec<String>,
+    /// The exit policy's collision entries (v59, M108): the session's
+    /// own resolved state when the request's config carries
+    /// `-multiply_defined warning` — each entry prints as the cold
+    /// lane's `pgr: warning:` face (the M62 convention; the daemon
+    /// never writes the client's stderr). Empty for every other policy
+    /// (the suppress face derives the walk, prints none of it; the
+    /// lookup face intends the ride).
+    pub multiply_warnings: Vec<String>,
     /// How the image tail crossed (v5): [`Transport::Full`] or the tile
     /// summary (what the benches and the driver's outcome line record).
     pub transport: Transport,
@@ -456,6 +464,10 @@ impl DaemonClient {
                     // entries (M103, `-undefined warning`) — the client
                     // prints each as the cold lane's `pgr: warning:` face.
                     let policy_warnings = crate::protocol::decode_policy_warnings(&mut r)?;
+                    // The v59 tail: the exit policy's collision entries
+                    // (M108, `-multiply_defined warning`) — the client
+                    // prints each as the cold lane's `pgr: warning:` face.
+                    let multiply_warnings = crate::protocol::decode_multiply_warnings(&mut r)?;
                     r.done()?;
                     return Ok(ResidentImage {
                         image,
@@ -473,6 +485,7 @@ impl DaemonClient {
                         provenance,
                         map_text,
                         policy_warnings,
+                        multiply_warnings,
                         transport,
                     });
                 }
