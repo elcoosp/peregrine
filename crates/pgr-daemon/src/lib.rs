@@ -225,7 +225,17 @@ mod tests {
         // tail after the fatal-warnings byte): a resident relink prices
         // the same read-only targets the cold link prices, never the
         // pre-M111 default refusal.
-        assert_eq!(crate::PROTO_VERSION, 62);
+        // and v63 carries the link-statistics report (M112, the tail
+        // after the read-only-relocs byte): the session's warm pipeline
+        // computes the counts its own run reported and the reply tail
+        // carries the payload (the M62 convention — the client prints
+        // the cold lane's face, the parity gate byte-identical).
+        // and v64 carries the reference trace (M113, the tail after the
+        // statistics byte): the session's warm pipeline records the
+        // references its own Pass 2 visited and the reply tail carries
+        // the facts verbatim (the client renders the cold lane's face —
+        // the trace rides the ladder's replay too).
+        assert_eq!(crate::PROTO_VERSION, 64);
     }
 
     #[test]
