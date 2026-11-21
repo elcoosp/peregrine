@@ -67,3 +67,11 @@ harness = false
 [[bench]]
 name = "verify_gate"
 harness = false
+
+# The M109 fatal-warnings bench: the driver run across the exit faces
+# (the advisory default beside the -fatal_warnings escalation) over the
+# same warning-producing 32-object corpus — a shape-parity gate, the
+# tally is a counter the faces increment as they print.
+[[bench]]
+name = "fatal_warnings"
+harness = false
