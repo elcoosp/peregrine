@@ -166,6 +166,7 @@ fn the_weak_dylib_export_never_refuses() {
         weak: true,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     }];
