@@ -132,6 +132,13 @@ pub struct ResidentImage {
     /// (the suppress face derives the walk, prints none of it; the
     /// lookup face intends the ride).
     pub multiply_warnings: Vec<String>,
+    /// The common-symbol advisory entries (v67, M116): the session's
+    /// own resolved state when the request's config carries
+    /// `-warn_commons` — each entry prints as the cold lane's `pgr:
+    /// warning:` face (the M62 convention; the daemon never writes the
+    /// client's stderr). Empty under the off decision (the walk
+    /// recorded nothing).
+    pub commons_warnings: Vec<String>,
     /// The served link-statistics report (v63, M112): `Some` when the
     /// request's config carries `-print_statistics` — the session's own
     /// run's counts, the fields the cold lane's report carries (the
@@ -484,6 +491,10 @@ impl DaemonClient {
                     // (M108, `-multiply_defined warning`) — the client
                     // prints each as the cold lane's `pgr: warning:` face.
                     let multiply_warnings = crate::protocol::decode_multiply_warnings(&mut r)?;
+                    // The v67 tail: the common-symbol advisory entries
+                    // (M116, `-warn_commons`) — the client prints each
+                    // as the cold lane's `pgr: warning:` face.
+                    let commons_warnings = crate::protocol::decode_commons_warnings(&mut r)?;
                     // The v63 tail: the served link-statistics report when
                     // the request asked (the session's own run's counts,
                     // the M62 convention — the driver prints the cold
@@ -512,6 +523,7 @@ impl DaemonClient {
                         map_text,
                         policy_warnings,
                         multiply_warnings,
+                        commons_warnings,
                         statistics,
                         references,
                         transport,
