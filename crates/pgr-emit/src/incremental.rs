@@ -132,8 +132,12 @@ pub(crate) const MAGIC: &[u8; 8] = b"PGRINC1\0";
 /// it the same way — a config whose identity decision flipped (named ↔
 /// derived, or one named value ↔ another) is the full link's job, never
 /// an in-place identity swap; v1–v7 records decode to `None` and
-/// re-record.
-pub const FORMAT_VERSION: u32 = 8;
+/// re-record. **v9** adds the UUID source ([`LinkRecord::uuid_source`],
+/// M114): the alphabet rides beside the named value the same way — a
+/// config whose source flipped (content ↔ random ↔ none) is the full
+/// link's job, never an in-place identity renegotiation; v1–v8 records
+/// decode to the content source and re-record.
+pub const FORMAT_VERSION: u32 = 9;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -300,6 +304,13 @@ pub struct LinkRecord {
     /// identity decision flipped (named ↔ derived, or one named value ↔
     /// another) is the full link's job, never an in-place identity swap.
     pub named_uuid: Option<[u8; 16]>,
+    /// The image's UUID source (v9, M114): the plan's own echo rides the
+    /// record beside the named value — one source, no re-derivation — so
+    /// the relink ladders admit through it ([`LinkRecord::admits`]): a
+    /// config whose source flipped (content ↔ random ↔ none) is the full
+    /// link's job, never an in-place identity renegotiation (the M99
+    /// named pattern one alphabet over).
+    pub uuid_source: pgr_core::layout::UuidSource,
 }
 
 /// Why the incremental planner fell back to the full link. The fallback is
@@ -361,6 +372,15 @@ pub enum FallbackReason {
         /// What moved.
         detail: String,
     },
+    /// The relink's config flips the image's UUID source the record
+    /// carries (M114): content ↔ random ↔ none. The patch cannot
+    /// renegotiate the image's identity shape in place, so the full
+    /// link writes the source the request named and re-records (the
+    /// M99 named pattern one alphabet over).
+    UuidSource {
+        /// What moved.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for FallbackReason {
@@ -383,6 +403,9 @@ impl std::fmt::Display for FallbackReason {
             Self::ChainFamily { detail } => write!(f, "the chain word family moved: {detail}"),
             Self::NamedUuid { detail } => {
                 write!(f, "the image's named-UUID decision moved: {detail}")
+            }
+            Self::UuidSource { detail } => {
+                write!(f, "the image's UUID source moved: {detail}")
             }
         }
     }
@@ -888,6 +911,10 @@ impl LinkRecord {
             // record rides the plan's echo — one source, no
             // re-derivation.
             named_uuid: layout.named_uuid,
+            // The UUID source the plan echoed (M114): the record rides
+            // the plan's echo beside the named value — one source, no
+            // re-derivation.
+            uuid_source: layout.uuid_source,
         })
     }
 
@@ -906,15 +933,28 @@ impl LinkRecord {
     /// whose identity decision flipped (named ↔ derived, or one named
     /// value ↔ another) refuses with [`FallbackReason::NamedUuid`], the
     /// full link writing the decision the request named and
-    /// re-recording. Both ladders read this one decision (the session's
+    /// re-recording. The image's UUID source is the third (M114): a
+    /// config whose source flipped (content ↔ random ↔ none) refuses
+    /// with [`FallbackReason::UuidSource`] — the M99 named pattern one
+    /// alphabet over. Both ladders read this one decision (the session's
     /// §7.3 ladder and the driver's in-process relink), so neither can
     /// patch across word shapes or identity decisions.
     ///
     /// # Errors
     /// [`FallbackReason::NamedUuid`] when the config's named-UUID
-    /// decision differs from the record's; [`FallbackReason::ChainFamily`]
+    /// decision differs from the record's;
+    /// [`FallbackReason::UuidSource`] when the config's UUID source
+    /// differs from the record's; [`FallbackReason::ChainFamily`]
     /// when the config's chain word family differs from the record's.
     pub fn admits(&self, config: &pgr_core::layout::LinkConfig) -> Result<(), FallbackReason> {
+        if config.uuid_source != self.uuid_source {
+            return Err(FallbackReason::UuidSource {
+                detail: format!(
+                    "the record encodes {:?}, the link asks {:?}",
+                    self.uuid_source, config.uuid_source
+                ),
+            });
+        }
         if config.named_uuid != self.named_uuid {
             return Err(FallbackReason::NamedUuid {
                 detail: format!(
@@ -1065,6 +1105,10 @@ impl LinkRecord {
             }
             None => p.push(0),
         }
+        // v9: the UUID source (M114) — one byte off the three-value
+        // alphabet (the v65 wire shape); the plan's own echo. The
+        // relink ladders admit through it the same way.
+        p.push(self.uuid_source.wire());
 
         let mut out = Vec::with_capacity(HEADER_LEN + p.len());
         out.extend_from_slice(MAGIC);
@@ -1254,6 +1298,9 @@ impl LinkRecord {
             }
             _ => return None,
         };
+        // v9: the UUID source (M114) — one byte off the alphabet; an
+        // unknown byte is record corruption (unreadable → re-record).
+        let uuid_source = pgr_core::layout::UuidSource::from_wire(d.u8()?)?;
         if d.at != d.b.len() || content_digests.len() != sections.len() {
             return None;
         }
@@ -1278,6 +1325,7 @@ impl LinkRecord {
             resolution,
             chain_word_format,
             named_uuid,
+            uuid_source,
         })
     }
 }
@@ -2552,10 +2600,21 @@ fn patch_file<S: PatchSink>(
         // M99: the named value replaces the derivation — the page
         // hashes still hash the zeroed field (the content contract is
         // unchanged), only the identity bytes are the config's own
-        // choice.
-        let uuid = layout
-            .named_uuid
-            .unwrap_or_else(|| signature::derive_uuid(&merged.concat()));
+        // choice. M114: the `Random` face draws the identity at patch
+        // time (fresh per emit — the source is the decision, never the
+        // bytes; the ladders' admission refuses a source flip before
+        // this path runs, so the shape is always the record's own).
+        let uuid = match layout.uuid_source {
+            pgr_core::layout::UuidSource::Random => {
+                signature::random_uuid().map_err(|e| PatchError::Contract {
+                    message: format!("the system entropy source failed: {e}"),
+                })?
+            }
+            // The `Content` face: the named value (M99) or the derivation.
+            _ => layout
+                .named_uuid
+                .unwrap_or_else(|| signature::derive_uuid(&merged.concat())),
+        };
         for (t, tile) in &mut scratches {
             if *t == 0 {
                 let uuid_at = layout.linkedit.uuid_at as usize;
@@ -2812,6 +2871,7 @@ mod tests {
             code_limit: 0x3000,
             chain_word_format: pgr_core::fixups::FixupPointerFormat::Offset64,
             named_uuid: None,
+            uuid_source: pgr_core::layout::UuidSource::Content,
             linkedit: pgr_core::layout::LinkeditPlan {
                 sig_off: 0x3000,
                 sig_size: 0x100,
