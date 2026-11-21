@@ -127,6 +127,12 @@ pub enum Check {
     /// sections the image carries, the `__thread_vars` descriptor
     /// stride, and the descriptors' thread-local data.
     Tlv,
+    /// The `ObjC` registration contract (M115): the
+    /// `__objc_catlist`/`__objc_nlcatlist` sections dyld's registration
+    /// walk consumes ride whole pointer strides, whether the categories
+    /// stay separate (the `-no_objc_category_merging` face) or their
+    /// registration folded into the base classes (the default merge).
+    Objc,
     /// The initializer-surface contract (M94): the
     /// `S_INIT_FUNC_OFFSETS`/`S_MOD_INIT_FUNC_POINTERS` sections dyld's
     /// load-time initializer walk consumes ride whole strides, the
@@ -145,7 +151,7 @@ pub enum Check {
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 12] = [
+    pub const ALL: [Check; 13] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
@@ -154,6 +160,7 @@ impl Check {
         Check::ChainStarts,
         Check::Unwind,
         Check::Tlv,
+        Check::Objc,
         Check::InitOffsets,
         Check::BranchRange,
         Check::DyldInfo,
@@ -172,6 +179,7 @@ impl Check {
             Check::ChainStarts => "chain_starts",
             Check::Unwind => "unwind",
             Check::Tlv => "tlv",
+            Check::Objc => "objc",
             Check::InitOffsets => "init_offsets",
             Check::BranchRange => "branch_range",
             Check::DyldInfo => "dyld_info",
@@ -190,10 +198,11 @@ impl Check {
             Check::ChainStarts => 5,
             Check::Unwind => 6,
             Check::Tlv => 7,
-            Check::InitOffsets => 8,
-            Check::BranchRange => 9,
-            Check::DyldInfo => 10,
-            Check::Signature => 11,
+            Check::Objc => 8,
+            Check::InitOffsets => 9,
+            Check::BranchRange => 10,
+            Check::DyldInfo => 11,
+            Check::Signature => 12,
         }
     }
 }
@@ -448,6 +457,24 @@ impl ImageCheck for UnwindCheck {
 /// The M37 thread-local surface contract.
 struct TlvCheck;
 
+/// The M115 `ObjC` registration contract.
+struct ObjcCheck;
+
+impl ImageCheck for ObjcCheck {
+    fn check(&self) -> Check {
+        Check::Objc
+    }
+    fn summary(&self) -> &'static str {
+        "ObjC registration: __objc_catlist/__objc_nlcatlist pointer strides"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::ObjcRegistration]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        crate::objc::check_objc_registration(ctx.bytes, ctx.report);
+    }
+}
+
 /// The M94 initializer-surface contract.
 struct InitOffsetsCheck;
 
@@ -615,7 +642,7 @@ pub trait CustomCheck: Sync {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 12] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 13] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
@@ -624,6 +651,7 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 12] = [
     &ChainStartsCheck,
     &UnwindCheck,
     &TlvCheck,
+    &ObjcCheck,
     &InitOffsetsCheck,
     &BranchRangeCheck,
     &DyldInfoCheck,
