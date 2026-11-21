@@ -8,7 +8,6 @@
 use pgr_driver::opts;
 use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use std::ffi::OsString;
-use std::path::Path;
 
 fn pointer_object() -> Vec<u8> {
     let mut b = ObjectBuilder::new("hello.o");
@@ -64,7 +63,7 @@ fn main() {
         Err(e) => Err(e.to_string()),
     };
     match outcome {
-        Ok(_) => println!("face (suppress): linked — silent ride"),
+        Ok(()) => println!("face (suppress): linked — silent ride"),
         Err(err) => panic!("the suppress face must not refuse: {err}"),
     }
 
