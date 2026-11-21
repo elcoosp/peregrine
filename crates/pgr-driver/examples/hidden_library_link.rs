@@ -171,7 +171,7 @@ fn main() {
         Err(e) => Err(e.to_string()),
     };
     match outcome {
-        Ok(_) => panic!("the strong bind must refuse"),
+        Ok(()) => panic!("the strong bind must refuse"),
         Err(err) => println!("face 2 (strong bind): refused — {err}"),
     }
 
