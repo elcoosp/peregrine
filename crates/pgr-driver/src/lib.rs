@@ -1242,6 +1242,18 @@ fn link_to_image_recorded(
                     );
                     eprintln!("pgr: warning: multiply defined symbol {entry}");
                 }
+                // M116: the exit policy's common-symbol advisory face —
+                // the session's own resolved state prints as the cold
+                // lane's `pgr: warning:` face (the v67 tail carried them
+                // verbatim; the off decision rides empty by policy).
+                warnings += img.commons_warnings.len();
+                for entry in &img.commons_warnings {
+                    tracing::warn!(
+                        warn_commons = %entry,
+                        "the link exits 0 with a common symbol resolved to a definition"
+                    );
+                    eprintln!("pgr: warning: common symbol {entry}");
+                }
                 // M109: the exit policy reads the tally — under
                 // `-fatal_warnings` the served faces' products are a hard
                 // failure (the image is never written; the one-shot
@@ -1439,6 +1451,9 @@ fn link_to_image_recorded(
     // the suppress face prints nothing, the lookup face intends the
     // ride).
     warnings += print_multiply_defined_warnings(opts, &result);
+    // M116: the common-symbol advisory face — the warn_commons decision
+    // never moves the bytes, the exits still tally the face's product.
+    warnings += print_commons_warnings(opts, &result);
     // M109: the exit policy reads the tally — under `-fatal_warnings`
     // every advisory face's product is a hard failure (the image is
     // never built, never written); the default keeps the advisory exit.
@@ -1642,6 +1657,30 @@ fn print_multiply_defined_warnings(opts: &opts::Options, result: &pgr_core::Link
             "the link exits 0 with a duplicated definition (the first one wins)"
         );
         eprintln!("pgr: warning: multiply defined symbol {entry}");
+        warnings += 1;
+    }
+    warnings
+}
+
+/// M116: the common-symbol advisory face — under `-warn_commons`, every
+/// landing the resolver's common walk recorded prints as a warning (the
+/// M103/M108 advisory-face convention: a span, not a bare eprintln) and
+/// the link still exits 0 — ld64's face ("Print a warning whenever a
+/// tentative definition in an object file is found", the `ld64` man
+/// page). The decision never changes the resolution policy itself; the
+/// default records nothing and prints nothing. Returns the number of
+/// warnings printed (the M109 tally the exit policy reads).
+fn print_commons_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) -> usize {
+    if !opts.config.warn_commons {
+        return 0;
+    }
+    let mut warnings = 0usize;
+    for entry in result.resolution.warn_commons_open() {
+        tracing::warn!(
+            warn_commons = %entry,
+            "the link exits 0 with a common symbol resolved to a definition"
+        );
+        eprintln!("pgr: warning: common symbol {entry}");
         warnings += 1;
     }
     warnings
