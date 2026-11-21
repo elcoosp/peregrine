@@ -171,7 +171,7 @@ fn the_drop_removes_the_unused_and_the_needed_survives() {
     let used = dylib("@rpath/libused.dylib", &["_used"]);
     let mut idle = dylib("@rpath/libidle.dylib", &["_idle"]);
     let image = plan(bytes, vec![used, idle.clone()], |c| {
-        c.dead_strip_dylibs = true
+        c.dead_strip_dylibs = true;
     })
     .layout
     .header_bytes;
