@@ -1003,3 +1003,12 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
   run-to-run span) — the shape gate, the strip moving the classification's Debug class, the
   symtab's debug entries and the two metadata commands, never the `__unwind_info` synthesis.
   The `strip_debug_link` example walks the carried default, the stripped face and the refusal.
+
+
+### M106 — the needed-dylib mark
+
+- `needed_dylibs` (`cargo bench -p pgr-core --bench needed_dylibs`): the link across the needed mark under `-dead_strip_dylibs` — `unmarked_drop` (the unused dylib drops) beside `needed_survives` (the mark keeps it) over the 64-object corpus. Shape-parity gate: the mark is one bool in the survival check. Recorded on the dev sandbox: `unmarked_drop` ≈ 806 µs, `needed_survives` ≈ 786 µs (p = 0.49, parity within noise).
+
+### M107 — the commons resolution policy
+
+- `commons_policy` (`cargo bench -p pgr-core --bench commons_policy`): the link across the four `-commons` faces over the 64-object corpus (a tentative each, a dylib exporting every colliding name). Shape-parity gate: the decision is one Pass-2 walk over the common winners. Recorded on the dev sandbox (bounded `--measurement-time 1`): the four faces land within noise of each other (the default face the reference).
