@@ -140,6 +140,13 @@ pub enum Check {
     /// and the offsets form stays at or above the platform's
     /// chained-fixups floor.
     InitOffsets,
+    /// The `DTrace` `DOF` header contract (M118): every `__dtrace_dof`
+    /// (`S_DTRACE_DOF`) section in the output carries a `DOF` payload
+    /// whose identification magic and bounds the `DTrace` consumer's first
+    /// walk gates on — the read-side backstop the producer's emit-side
+    /// gate (under `-dtrace`) mirrors, regardless of how the section was
+    /// produced.
+    Dtrace,
     /// The `B`/`BL` branch-range decode pass (the veneer gate).
     BranchRange,
     /// The classic `LC_DYLD_INFO(_ONLY)` rebase/bind opcode streams.
@@ -151,7 +158,7 @@ pub enum Check {
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 13] = [
+    pub const ALL: [Check; 14] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
@@ -162,6 +169,7 @@ impl Check {
         Check::Tlv,
         Check::Objc,
         Check::InitOffsets,
+        Check::Dtrace,
         Check::BranchRange,
         Check::DyldInfo,
         Check::Signature,
@@ -181,6 +189,7 @@ impl Check {
             Check::Tlv => "tlv",
             Check::Objc => "objc",
             Check::InitOffsets => "init_offsets",
+            Check::Dtrace => "dtrace",
             Check::BranchRange => "branch_range",
             Check::DyldInfo => "dyld_info",
             Check::Signature => "signature",
@@ -200,9 +209,10 @@ impl Check {
             Check::Tlv => 7,
             Check::Objc => 8,
             Check::InitOffsets => 9,
-            Check::BranchRange => 10,
-            Check::DyldInfo => 11,
-            Check::Signature => 12,
+            Check::Dtrace => 10,
+            Check::BranchRange => 11,
+            Check::DyldInfo => 12,
+            Check::Signature => 13,
         }
     }
 }
@@ -499,6 +509,24 @@ impl ImageCheck for InitOffsetsCheck {
     }
 }
 
+/// The M118 `DTrace` `DOF` header contract.
+struct DtraceCheck;
+
+impl ImageCheck for DtraceCheck {
+    fn check(&self) -> Check {
+        Check::Dtrace
+    }
+    fn summary(&self) -> &'static str {
+        "DTrace DOF header: __dtrace_dof (S_DTRACE_DOF) identification magic and bounds"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::DtraceDof]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        crate::dtrace::check_dtrace_dof(ctx.bytes, ctx.report);
+    }
+}
+
 impl ImageCheck for TlvCheck {
     fn check(&self) -> Check {
         Check::Tlv
@@ -642,7 +670,7 @@ pub trait CustomCheck: Sync {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 13] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 14] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
@@ -653,6 +681,7 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 13] = [
     &TlvCheck,
     &ObjcCheck,
     &InitOffsetsCheck,
+    &DtraceCheck,
     &BranchRangeCheck,
     &DyldInfoCheck,
     &SignatureCheck,
