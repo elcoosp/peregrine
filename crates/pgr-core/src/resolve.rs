@@ -202,6 +202,74 @@ impl CommonsPolicy {
     }
 }
 
+/// M108 — the multiply-defined symbol resolution policy
+/// (`-multiply_defined <policy>`): ld64's duplicate-symbol treatment ("How
+/// to handle multiply defined symbols", the `ld` man page) — the resolver's
+/// other half. Two strong definitions of one name is the collision Pass 2's
+/// install walk escalates; the policy decides what the collision becomes
+/// at the install site (`Resolution::install_sect_def`, private to the
+/// pass) and [`Resolution::apply_multiply_defined_policy`] for the walk
+/// product).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MultiplyDefinedPolicy {
+    /// `-multiply_defined error` (the ld64 and peregrine default): the
+    /// collision refuses the link with the symbol named — the pre-M108
+    /// escalation, unchanged.
+    #[default]
+    Error,
+    /// `-multiply_defined warning`: the first definition wins, the
+    /// collision is recorded and the driver's exit policy prints it as a
+    /// warning while still exiting 0 (the M103 advisory face's shape).
+    Warning,
+    /// `-multiply_defined suppress`: the same first-wins product, nothing
+    /// printed — the walk records the collision, the exit decision
+    /// surfaces none of it.
+    Suppress,
+    /// `-multiply_defined dynamic_lookup`: the duplicated definition
+    /// leaves the winners' table and the name rides the flat-lookup slot
+    /// (dyld resolves it at launch or kills the image) — the M103
+    /// undefined face pattern (`-undefined dynamic_lookup`) applied to
+    /// the duplicate.
+    DynamicLookup,
+}
+
+impl MultiplyDefinedPolicy {
+    /// The wire byte (v59) and the surface alphabet's order.
+    #[must_use]
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::Error => 0,
+            Self::Warning => 1,
+            Self::Suppress => 2,
+            Self::DynamicLookup => 3,
+        }
+    }
+
+    /// The policy from the wire byte (`None` off the alphabet — an old
+    /// server refuses the new values as a malformed request).
+    #[must_use]
+    pub const fn from_wire(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Error),
+            1 => Some(Self::Warning),
+            2 => Some(Self::Suppress),
+            3 => Some(Self::DynamicLookup),
+            _ => None,
+        }
+    }
+
+    /// The flag-word spelling the driver surface accepts.
+    #[must_use]
+    pub const fn flag_word(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Suppress => "suppress",
+            Self::DynamicLookup => "dynamic_lookup",
+        }
+    }
+}
+
 /// The winning definition of a resolved symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Def {
@@ -261,6 +329,22 @@ pub struct Resolution {
     /// `DynamicLookup` (the lookup is the intended shape, nothing to
     /// report).
     unresolved_open: std::collections::BTreeSet<String>,
+    /// M108: the names whose duplicated strong definitions the
+    /// `DynamicLookup` face dropped — the references that now ride the
+    /// flat-lookup slot (the M103 undefined face pattern). The walk in
+    /// [`Self::require_all_resolved`] lands them in `dynamic_lookups`
+    /// directly, never escalating through the `-undefined` policy (the
+    /// drop *is* the intended flat ride).
+    multiply_defined_dynamic: BTreeSet<u32>,
+    /// M108: the collision entries the `Warning`/`Suppress` faces
+    /// derived — one deterministic `"_name" (defined in input a and
+    /// input b)` entry per strong-strong collision, sorted. The exit
+    /// policy reads it (the warning face prints every entry and exits
+    /// 0, the suppress face prints nothing and exits 0 — the same walk
+    /// product, the M103 convention); `Error` never records (its
+    /// product is the refusal at the install site) and `DynamicLookup`
+    /// intends the ride (nothing to report).
+    multiply_defined_open: std::collections::BTreeSet<String>,
 }
 
 impl Resolution {
@@ -306,11 +390,21 @@ impl Resolution {
     }
 
     /// Installs every definition of every object (Pass 2 step 1) and records
-    /// undefined references.
+    /// undefined references. The install walk pays the
+    /// [`MultiplyDefinedPolicy`] at the collision site (M108): the default
+    /// (`Error`) escalates exactly as it always has, the record faces keep
+    /// the first definition, the lookup face drops the duplicated slot —
+    /// the interner names the symbol the refusal or the record carries.
     ///
     /// # Errors
-    /// [`LinkError::Symbol`] on duplicate strong definitions.
-    pub fn install(&mut self, objects: &[InputObject]) -> Result<(), LinkError> {
+    /// [`LinkError::Symbol`] on duplicate strong definitions under the
+    /// default policy (the symbol named).
+    pub fn install(
+        &mut self,
+        objects: &[InputObject],
+        interner: &Interner,
+        policy: MultiplyDefinedPolicy,
+    ) -> Result<(), LinkError> {
         for obj in objects {
             for (sym_i, sym) in obj.symbols.iter().enumerate() {
                 if sym.stab || !sym.external {
@@ -344,6 +438,8 @@ impl Resolution {
                             common_align: 0,
                             common_size: 0,
                         },
+                        interner,
+                        policy,
                     )?;
                 } else if sym.is_common() {
                     self.install_common(key, obj.file, sym_i, sym);
@@ -358,8 +454,23 @@ impl Resolution {
         Ok(())
     }
 
-    /// Installs one `N_SECT` definition under the precedence rules.
-    fn install_sect_def(&mut self, key: u32, def: Def) -> Result<(), LinkError> {
+    /// Installs one `N_SECT` definition under the precedence rules; the
+    /// M108 policy decides the strong-strong tie (the resolver's
+    /// multiple-definition check — the escalation becomes the policy's
+    /// decision).
+    fn install_sect_def(
+        &mut self,
+        key: u32,
+        def: Def,
+        interner: &Interner,
+        policy: MultiplyDefinedPolicy,
+    ) -> Result<(), LinkError> {
+        // The lookup face already dropped this name: every later
+        // definition of it (strong or weak) drops too — the name rides
+        // the flat-lookup slot entirely.
+        if self.multiply_defined_dynamic.contains(&key) {
+            return Ok(());
+        }
         match self.defs.get(&key) {
             None => {
                 self.defs.insert(key, def);
@@ -374,16 +485,39 @@ impl Resolution {
                 core::cmp::Ordering::Equal => {
                     // Two pulled members or two direct objects claiming the
                     // same strong symbol: a genuine duplicate. Direct vs
-                    // archive never reaches Equal (ranks 1/2 < 3/4).
+                    // archive never reaches Equal (ranks 1/2 < 3/4). The
+                    // M108 policy decides the tie:
                     if def.rank == Rank::Strong || def.rank == Rank::ArchiveStrong {
-                        Err(LinkError::Symbol {
-                            name: String::new(),
-                            message: format!(
-                                "duplicate strong definition of symbol #{} in input {} (also \
-                                 defined in input {})",
-                                key, def.file.0, existing.file.0
-                            ),
-                        })
+                        match policy {
+                            MultiplyDefinedPolicy::Error => Err(LinkError::Symbol {
+                                name: interner.name(crate::ids::StringId(key)),
+                                message: format!(
+                                    "duplicate strong definition of symbol {} in input {} (also \
+                                     defined in input {})",
+                                    interner.name(crate::ids::StringId(key)),
+                                    def.file.0,
+                                    existing.file.0
+                                ),
+                            }),
+                            // The record faces: the first definition wins
+                            // (command-line order — the pre-M108 tie
+                            // shape); the collision is the apply walk's
+                            // product, derived from the resolved state so
+                            // both resolve paths reach the same entries.
+                            MultiplyDefinedPolicy::Warning | MultiplyDefinedPolicy::Suppress => {
+                                Ok(())
+                            }
+                            // The lookup face: the duplicated slot leaves
+                            // the winners' table — the references ride the
+                            // flat-lookup slot (the M103 undefined face
+                            // pattern), never escalating through the
+                            // `-undefined` policy.
+                            MultiplyDefinedPolicy::DynamicLookup => {
+                                self.defs.remove(&key);
+                                self.multiply_defined_dynamic.insert(key);
+                                Ok(())
+                            }
+                        }
                     } else {
                         // Weak/weak or common/common ties: lower file index
                         // wins (TDD §5 Pass 2 tie-break).
@@ -398,8 +532,13 @@ impl Resolution {
     }
 
     /// Installs a common symbol: coalesces size/align; loses to any `N_SECT`
-    /// definition (TDD §5 Pass 2: "a real definition beats a common").
+    /// definition (TDD §5 Pass 2: "a real definition beats a common"). A
+    /// name the M108 lookup face dropped never re-installs (the flat ride
+    /// owns the slot).
     fn install_common(&mut self, key: u32, file: FileId, sym: usize, isym: &InputSymbol) {
+        if self.multiply_defined_dynamic.contains(&key) {
+            return;
+        }
         let align = isym.common_align.unwrap_or(0).min(15);
         match self.defs.get(&key) {
             None => {
@@ -634,6 +773,68 @@ impl Resolution {
         }
     }
 
+    /// M108 — the multiply-defined resolution policy's walk product: the
+    /// collision entries the record faces surface, derived from the
+    /// resolved state so both resolve paths reach the same entries (the
+    /// policy is config, not a lane product — the M107 pattern). The
+    /// decision itself landed at the install site
+    /// (`install_sect_def`, private to the pass); this walk is the record faces'
+    /// advisory product: for every strong-strong collision the winner's
+    /// file loses to, one deterministic `"_name" (defined in input a and
+    /// input b)` entry, sorted. The default (`Error`) never reaches here
+    /// with a collision (the install refused); `DynamicLookup` intends
+    /// the ride (nothing to report).
+    ///
+    /// # Errors
+    /// Never on the default (the install refused the collision); the
+    /// record faces always succeed.
+    pub fn apply_multiply_defined_policy(
+        &mut self,
+        policy: MultiplyDefinedPolicy,
+        interner: &Interner,
+        objects: &[InputObject],
+    ) -> Result<(), LinkError> {
+        self.multiply_defined_open.clear();
+        match policy {
+            MultiplyDefinedPolicy::Error | MultiplyDefinedPolicy::DynamicLookup => Ok(()),
+            MultiplyDefinedPolicy::Warning | MultiplyDefinedPolicy::Suppress => {
+                for obj in objects {
+                    for sym in &obj.symbols {
+                        // The collision the policy prices: two strong
+                        // `N_SECT` definitions (direct-direct or
+                        // pulled-pulled — the `install_sect_def` tie). A
+                        // weak definition, a common and a pulled member
+                        // against a direct definition never collide (the
+                        // rank order decides those silently).
+                        if sym.stab || !sym.external || !sym.is_defined() || sym.weak_def {
+                            continue;
+                        }
+                        let Some(winner) = self.defs.get(&sym.name.0) else {
+                            continue;
+                        };
+                        if winner.file == obj.file {
+                            continue;
+                        }
+                        let collides = match winner.rank {
+                            Rank::Strong => !obj.from_archive,
+                            Rank::ArchiveStrong => obj.from_archive,
+                            _ => false,
+                        };
+                        if !collides {
+                            continue;
+                        }
+                        self.multiply_defined_open.insert(format!(
+                            "\"{}\" (defined in input {} and input {})",
+                            interner.name(sym.name),
+                            winner.file.0,
+                            obj.file.0
+                        ));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
     /// The unresolved-open escalation for names the commons policy
     /// un-defined (M107): the names with no in-image definition, no
     /// dylib export and no loader export left — the exact lane
@@ -652,6 +853,14 @@ impl Resolution {
                 || self.dylib_exports.contains_key(key)
                 || self.loader_exports.contains(key)
             {
+                continue;
+            }
+            // M108: a name the multiply-defined lookup face dropped rides
+            // the flat-lookup slot already — the commons walk never
+            // escalates it (the drop is the intended bind, the same lane
+            // `require_all_resolved` lands it in).
+            if self.multiply_defined_dynamic.contains(key) {
+                self.dynamic_lookups.insert(*key);
                 continue;
             }
             let Some(&(file, _)) = refs.first() else {
@@ -755,6 +964,14 @@ impl Resolution {
                 || self.dylib_exports.contains_key(key)
                 || self.loader_exports.contains(key)
             {
+                continue;
+            }
+            // M108: a name the multiply-defined lookup face dropped rides
+            // the flat-lookup slot directly — the drop *is* the intended
+            // dynamic bind, never an escalation through the `-undefined`
+            // policy (the M103 record shapes stay the undefined walk's).
+            if self.multiply_defined_dynamic.contains(key) {
+                self.dynamic_lookups.insert(*key);
                 continue;
             }
             let (file, sym) = refs.first().copied().unwrap_or((FileId(0), 0));
@@ -885,6 +1102,18 @@ impl Resolution {
         self.unresolved_open.iter().map(String::as_str)
     }
 
+    /// The collision entries the multiply-defined record faces derived
+    /// (M108): one deterministic `"_name" (defined in input a and input
+    /// b)` entry per strong-strong collision, sorted. The exit policy
+    /// reads it — the warning face prints every entry to stderr and
+    /// exits 0, the suppress face prints nothing and exits 0 (the same
+    /// walk product, the M103 convention). `Error` never records (its
+    /// product is the refusal at the install site) and `DynamicLookup`
+    /// intends the ride (nothing to report).
+    pub fn multiply_defined_open(&self) -> impl Iterator<Item = &str> {
+        self.multiply_defined_open.iter().map(String::as_str)
+    }
+
     /// True when at least one *bind* in the image is weak (dyld semantics
     /// flag `MH_BINDS_TO_WEAK`): a reference that resolves to a dylib
     /// export or a dynamic lookup, carried by a weak-referenced symbol.
@@ -900,6 +1129,17 @@ impl Resolution {
                         .is_some_and(|sym| sym.weak_ref)
                 })
         })
+    }
+
+    /// Records a name the multiply-defined lookup face dropped (M108, the
+    /// reuse replay's re-derivation): the references ride the flat-lookup
+    /// slot. A `-U`-marked name never lands here (its strip owns the slot
+    /// — the full walk never installed it, the flat ride is not its fate).
+    pub(crate) fn mark_multiply_defined_dynamic(&mut self, key: u32) {
+        if self.make_undefined.contains(&key) {
+            return;
+        }
+        self.multiply_defined_dynamic.insert(key);
     }
 
     /// The winning definition for a name, if any.
@@ -951,11 +1191,20 @@ impl Resolution {
     /// precedence rules (M9 tier-2c): the same decision `install` reaches,
     /// fed from the snapshot instead of an object walk. A `-U`-marked
     /// name (M39) skips the install — the full walk never installed one.
+    /// The M108 policy rides: the collision site decides exactly as the
+    /// full walk's does (the policy is config, not a lane product).
     ///
     /// # Errors
     /// [`LinkError::Symbol`] on a duplicate strong definition — the same
-    /// error `install` lands on for the same candidate stream.
-    pub(crate) fn replay_candidate(&mut self, key: u32, cand: &DefLite) -> Result<(), LinkError> {
+    /// error `install` lands on for the same candidate stream under the
+    /// default policy.
+    pub(crate) fn replay_candidate(
+        &mut self,
+        key: u32,
+        cand: &DefLite,
+        interner: &Interner,
+        policy: MultiplyDefinedPolicy,
+    ) -> Result<(), LinkError> {
         if self.make_undefined.contains(&key) {
             return Ok(());
         }
@@ -964,7 +1213,7 @@ impl Resolution {
                 self.replay_common(key, cand);
                 Ok(())
             }
-            _ => self.install_sect_def(key, Def::from(cand.clone())),
+            _ => self.install_sect_def(key, Def::from(cand.clone()), interner, policy),
         }
     }
 
@@ -1200,7 +1449,7 @@ impl ResolutionSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rank, Resolution, UndefinedPolicy};
+    use super::{MultiplyDefinedPolicy, Rank, Resolution, UndefinedPolicy};
     use crate::ids::FileId;
     use crate::interner::Interner;
     use crate::object::InputObject;
@@ -1224,7 +1473,8 @@ mod tests {
             cursor += take;
         }
         let mut res = Resolution::default();
-        res.install(&objects).unwrap();
+        res.install(&objects, &interner, MultiplyDefinedPolicy::Error)
+            .unwrap();
         (interner, objects, res)
     }
 
@@ -1383,7 +1633,7 @@ mod tests {
             names.append(&mut obj.take_symbol_names());
             objects.push(obj);
         }
-        let (_interner, ids) = Interner::build(&names);
+        let (interner, ids) = Interner::build(&names);
         let mut cursor = 0usize;
         for obj in &mut objects {
             let take = obj.symbols.len();
@@ -1391,7 +1641,9 @@ mod tests {
             cursor += take;
         }
         let mut res = Resolution::default();
-        let err = res.install(&objects).unwrap_err();
+        let err = res
+            .install(&objects, &interner, MultiplyDefinedPolicy::Error)
+            .unwrap_err();
         assert!(err.to_string().contains("duplicate strong"), "{err}");
     }
 
