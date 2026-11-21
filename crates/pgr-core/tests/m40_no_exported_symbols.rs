@@ -204,6 +204,7 @@ fn f_dylib(reexport: bool) -> Dylib {
         // the export-trie gates never read it (the trie is this file's
         // subject), the default absence is the pre-M106 shape.
         needed: false,
+        hidden: false,
     }
 }
 
