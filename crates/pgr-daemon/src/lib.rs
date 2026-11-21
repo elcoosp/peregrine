@@ -204,8 +204,20 @@ mod tests {
         // kept default — and v56 carries the debug-section suppression
         // (M105, the config tail): a resident relink carries the
         // debug-free shape the client asked for, never the pre-M105
-        // debug-carrying default.
-        assert_eq!(crate::PROTO_VERSION, 56);
+        // debug-carrying default — and v57 carries the needed-dylib mark
+        // (M106, one byte per dylib after the upward kind byte): a
+        // resident relink keeps the survival mark the client named,
+        // never a silently dropped one — and v58 carries the commons
+        // resolution policy (M107, the config tail after the
+        // debug-suppression byte): a resident relink resolves the
+        // commons the client asked for, never the house default — and
+        // v59 carries the multiply-defined resolution policy (M108, the
+        // tail after the commons byte): a resident relink decides the
+        // duplicated names the client asked for, never the house
+        // escalation — and v60 carries the warnings-as-errors exit
+        // decision (M109, the tail after the multiply-defined byte): a
+        // resident relink exits the shape the client asked for.
+        assert_eq!(crate::PROTO_VERSION, 60);
     }
 
     #[test]
