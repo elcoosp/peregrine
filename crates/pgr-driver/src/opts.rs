@@ -1129,6 +1129,34 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-warn_commons` surface conflict (M116): the common-symbol
+    /// advisory is a resolve-record decision — the relocatable output's
+    /// symtab is the input's, verbatim (its symbol table rides the
+    /// inputs untouched; there is no resolution landing to advise
+    /// about). The verdict names the shape conflict; the help is the
+    /// fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    WarnCommonsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-no_inits` surface conflict (M117): the init/term section
+    /// suppression is a final-image decision — the relocatable output's
+    /// sections are the input's, verbatim (its sections ride the inputs
+    /// untouched; there is no init classification to apply). The verdict
+    /// names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    NoInitsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -2696,6 +2724,27 @@ fn apply_flag(
         "-no_objc_category_merging" => {
             opts.config.objc_category_merging = false;
         }
+        // M116: ld64's `-warn_commons` — the common-symbol advisory face.
+        // The decision rides the M107 `CommonsPolicy` seam without
+        // changing the resolution policy itself: where every input
+        // common symbol's name resolved (a local definition or a linked
+        // dylib's export), the resolver records the landing and the
+        // exit policy prints it as a warning, still exiting 0. The
+        // relocatable conflict is `finish`'s — it sees the whole
+        // surface.
+        "-warn_commons" => {
+            opts.config.warn_commons = true;
+        }
+        // M117: ld64's init/term section suppression — the
+        // `__mod_init_func`, `__mod_term_func` and `__init_offsets`
+        // sections drop from the output entirely, overriding the M16
+        // transform and the M52 dead-strip roots, and the `LC_ROUTINES_64`
+        // command (M48 `-init` / M98 `-term`) drops from the header (no
+        // init/term machinery remains). The relocatable conflict is
+        // `finish`'s — it sees the whole surface.
+        "-no_inits" => {
+            opts.config.no_inits = true;
+        }
         // M99: the named output UUID — the other half of the M32
         // suppression. ld64's `-uuid <uuid>` names the image's identity:
         // the 8-4-4-4-12 hex form validates here (36 chars, hyphens at
@@ -3647,6 +3696,36 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             fix: "drop -no_objc_category_merging or link an image (an executable, dylib \
                   or bundle)"
                 .into(),
+        });
+    }
+    // M116: the common-symbol advisory's surface conflict — the
+    // relocatable output's symtab is the input's, verbatim (there is no
+    // resolution landing to advise about). An explicitly named knob that
+    // cannot apply is a refusal, never a silently dropped one (the
+    // library's re-checks back this so no caller can plan the shape
+    // either).
+    if opts.config.warn_commons && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::WarnCommonsConflict {
+            verdict: "-warn_commons advises where every tentative definition resolved, \
+                      but the relocatable output's symtab is the input's, verbatim"
+                .into(),
+            fix: "drop -warn_commons or link an image (an executable, dylib or bundle)".into(),
+        });
+    }
+    // M117: the init/term suppression's surface conflict — the
+    // relocatable output's sections are the input's, verbatim (there is
+    // no init classification to apply). An explicitly named knob that
+    // cannot apply is a refusal, never a silently dropped one (the
+    // library's re-checks back this so no caller can plan the shape
+    // either).
+    if opts.config.no_inits && opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+        return Err(OptsError::NoInitsConflict {
+            verdict: "-no_inits drops the output's init/term sections (the \
+                      __mod_init_func, __mod_term_func and __init_offsets shapes), \
+                      but the relocatable output's sections are the input's, verbatim"
+                .into(),
+            fix: "drop -no_inits or link an image (an executable, dylib or bundle)".into(),
         });
     }
     // M40: the export-trie suppression is an executable decision — a
