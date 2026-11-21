@@ -90,6 +90,17 @@ pub struct Dylib {
     /// command kind stays upward), and `lazy` outranks it (one load
     /// command per dylib; the driver marks one kind per path).
     pub upward: bool,
+    /// M106 `-needed_library`/`-needed_framework`/`-needed-l`: the
+    /// needed-dylib mark — ld64's "needed" loads ("means to really link
+    /// with the dylib even if no symbols are used from it", the `ld`
+    /// man page). The mark is the [`-dead_strip_dylibs`](crate::layout::LinkConfig::dead_strip_dylibs)
+    /// exemption scoped to the load command: under the drop every unused
+    /// dylib leaves the header, a needed one survives. It composes with
+    /// every command kind (weak, lazy, upward, re-export) — it is a
+    /// survival mark, not a command kind; a needed dylib loads as
+    /// `LC_LOAD_DYLIB` unless another kind's obligation names its
+    /// command.
+    pub needed: bool,
 }
 
 /// What to do with references no input and no dylib resolves.
@@ -115,6 +126,80 @@ pub enum UndefinedPolicy {
     /// exits 0. ld64's silent face: the holes ride to load time
     /// unannounced at link time.
     Suppress,
+}
+
+/// M107 — the commons resolution policy (`-commons <policy>`): what a
+/// tentative definition (a common — `N_UNDF | N_EXT` with a non-zero
+/// value) becomes when a linked dylib also exports the name. The
+/// tentative is both a would-be definition and a reference; the policy
+/// decides its fate in the Pass-2 walk
+/// ([`Resolution::apply_commons_policy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommonsPolicy {
+    /// `-commons use_dylibs` (the default): the house shape — the
+    /// tentative coalesces (max size/align) and rides as a local
+    /// definition, and the in-image definition beats the two-level
+    /// export (the resolver's own rank order: any definition in this
+    /// image, a common included, outranks a dylib export). The dylibs
+    /// are consulted for the name only when nothing in the image claims
+    /// it. Every pre-knob link is byte-identical (ld64's default
+    /// treatment: the tentative becomes a real definition).
+    #[default]
+    UseDylibs,
+    /// `-commons search_dylibs`: the dylibs are searched first — a
+    /// dylib's definition replaces the tentative (the reference binds
+    /// to the exporting dylib, no local definition lands); when no
+    /// dylib exports the name, the common rides as a local definition
+    /// (ld64's `use_dylibs` treatment: "check linked dylibs for
+    /// definitions and use them to replace tentative definitions from
+    /// object files", the `ld` man page).
+    SearchDylibs,
+    /// `-commons use_extern`: the common rides as an external
+    /// reference, never a local definition — the definition side drops
+    /// always; the references resolve against a dylib export when one
+    /// exists and follow the `-undefined` policy otherwise.
+    UseExtern,
+    /// `-commons error`: a tentative whose name a linked dylib also
+    /// exports refuses the link with the symbol named (ld64's error
+    /// face); with no dylib exporting the name the common rides.
+    Error,
+}
+
+impl CommonsPolicy {
+    /// The wire byte (v58) and the surface alphabet's order.
+    #[must_use]
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::UseDylibs => 0,
+            Self::SearchDylibs => 1,
+            Self::UseExtern => 2,
+            Self::Error => 3,
+        }
+    }
+
+    /// The policy from the wire byte (`None` off the alphabet — an old
+    /// server refuses the new values as a malformed request).
+    #[must_use]
+    pub const fn from_wire(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::UseDylibs),
+            1 => Some(Self::SearchDylibs),
+            2 => Some(Self::UseExtern),
+            3 => Some(Self::Error),
+            _ => None,
+        }
+    }
+
+    /// The flag-word spelling the driver surface accepts.
+    #[must_use]
+    pub const fn flag_word(self) -> &'static str {
+        match self {
+            Self::UseDylibs => "use_dylibs",
+            Self::SearchDylibs => "search_dylibs",
+            Self::UseExtern => "use_extern",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// The winning definition of a resolved symbol.
@@ -403,8 +488,11 @@ impl Resolution {
     /// exports, so the provider cannot be proven unreachable). The
     /// re-export dylibs always ride: their `LC_REEXPORT_DYLIB` command
     /// is an identity obligation and their REEXPORT nodes join the
-    /// image's export trie. Returns the kept dylibs in command order —
-    /// the `LinkConfig.dylibs` replacement the header assembly reads.
+    /// image's export trie. The M106 needed-dylib marks ride too (the
+    /// per-dylib opt-out — "means to really link with the dylib even if
+    /// no symbols are used from it", the `ld` man page). Returns the
+    /// kept dylibs in command order — the `LinkConfig.dylibs`
+    /// replacement the header assembly reads.
     #[must_use]
     pub fn dead_strip_dylibs(&mut self) -> Vec<Dylib> {
         // Used ordinals: every referenced name whose bind names a dylib
@@ -425,11 +513,12 @@ impl Resolution {
             }
         }
         // The kept list rides in command order; re-exports are identity
-        // obligations (the trie contract cannot survive their drop).
+        // obligations (the trie contract cannot survive their drop) and
+        // the needed marks are the per-dylib survival opt-out (M106).
         let mut kept: Vec<Dylib> = Vec::new();
         let mut remap: Vec<Option<u16>> = Vec::with_capacity(self.dylibs.len());
         for (i, dylib) in self.dylibs.iter().enumerate() {
-            if dylib.reexport || used[i] {
+            if dylib.reexport || dylib.needed || used[i] {
                 kept.push(dylib.clone());
                 remap.push(Some(kept.len() as u16));
             } else {
@@ -452,6 +541,138 @@ impl Resolution {
         self.dylib_exports = compacted;
         self.dylibs.clone_from(&kept);
         kept
+    }
+
+    /// M107 — the commons resolution policy (`-commons <policy>`): the
+    /// tentative symbol's fate is the policy's decision. The walk runs
+    /// after the dylib list installs (the two-level export map is the
+    /// search surface) and before the undefined walk and the M42
+    /// unused-dylib drop (a dropped tentative lets the exporting dylib
+    /// serve the bind — the drop's use-decision reads the post-policy
+    /// winners). The default face is a no-op (every pre-knob link is
+    /// byte-identical); the non-default faces refuse on the relocatable
+    /// output (the object's symtab is the input's, verbatim — the
+    /// layout's re-check and `link_reloc` back the driver refusal).
+    ///
+    /// # Errors
+    /// [`LinkError::Symbol`] on the `error` face's conflict (the symbol
+    /// named), or on an [`CommonsPolicy::UseExtern`] name the `-undefined`
+    /// policy escalates (the same aggregate the undefined walk lands).
+    pub fn apply_commons_policy(
+        &mut self,
+        policy: CommonsPolicy,
+        undefined_policy: UndefinedPolicy,
+        interner: &Interner,
+    ) -> Result<(), LinkError> {
+        if policy == CommonsPolicy::UseDylibs {
+            return Ok(());
+        }
+        // The tentative fate: every common winner the policy un-defines
+        // or refuses, in name order (the deterministic aggregate the
+        // house errors carry).
+        let mut dropped: Vec<u32> = Vec::new();
+        let mut conflicts: Vec<String> = Vec::new();
+        for (&key, def) in &self.defs {
+            if def.rank != Rank::Common {
+                continue;
+            }
+            let exported = self.dylib_exports.contains_key(&key);
+            match policy {
+                CommonsPolicy::UseDylibs => {}
+                CommonsPolicy::SearchDylibs => {
+                    // The dylibs are searched first: a dylib's definition
+                    // replaces the tentative; a search miss keeps the
+                    // common riding as a local definition.
+                    if exported {
+                        dropped.push(key);
+                    }
+                }
+                CommonsPolicy::UseExtern => {
+                    // The definition side drops always — the reference
+                    // side follows the ordinary resolution (the dylib
+                    // export when one exists, the `-undefined` policy
+                    // otherwise).
+                    dropped.push(key);
+                }
+                CommonsPolicy::Error => {
+                    // The conflict face: a tentative a dylib also
+                    // exports refuses with the symbol named; a
+                    // conflict-free tentative rides.
+                    if exported {
+                        conflicts.push(format!(
+                            "\"{}\" (a linked dylib also exports the name — -commons error \
+                             refuses the conflict)",
+                            interner.name(crate::ids::StringId(key))
+                        ));
+                    }
+                }
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(LinkError::Symbol {
+                name: String::new(),
+                message: format!(
+                    "common symbol(s) conflict with a linked dylib: {}",
+                    conflicts.join(", ")
+                ),
+            });
+        }
+        for key in dropped {
+            self.defs.remove(&key);
+        }
+        // The un-defined names nothing else resolves follow the
+        // `-undefined` policy like any unresolved reference (the
+        // `use_extern` face's escalation lane; the M103 record shapes).
+        let missing = self.unresolved_externals(undefined_policy, interner);
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(LinkError::Symbol {
+                name: String::new(),
+                message: format!("undefined symbol(s): {}", missing.join(", ")),
+            })
+        }
+    }
+
+    /// The unresolved-open escalation for names the commons policy
+    /// un-defined (M107): the names with no in-image definition, no
+    /// dylib export and no loader export left — the exact lane
+    /// [`Self::require_all_resolved`] walks for symtab references. The
+    /// policy decides the escalation: the default refuses (the
+    /// deterministic `"name" (referenced from file)` entry), the
+    /// lookup/warning/suppress faces record the flat-lookup ride.
+    fn unresolved_externals(
+        &mut self,
+        policy: UndefinedPolicy,
+        interner: &Interner,
+    ) -> Vec<String> {
+        let mut missing: Vec<String> = Vec::new();
+        for (key, refs) in &self.references {
+            if self.defs.contains_key(key)
+                || self.dylib_exports.contains_key(key)
+                || self.loader_exports.contains(key)
+            {
+                continue;
+            }
+            let Some(&(file, _)) = refs.first() else {
+                continue;
+            };
+            let name = interner.name(crate::ids::StringId(*key));
+            match policy {
+                UndefinedPolicy::DynamicLookup => {
+                    self.dynamic_lookups.insert(*key);
+                }
+                UndefinedPolicy::Warning | UndefinedPolicy::Suppress => {
+                    self.dynamic_lookups.insert(*key);
+                    self.unresolved_open
+                        .insert(format!("\"{name}\" (referenced from input {})", file.0));
+                }
+                UndefinedPolicy::Error => {
+                    missing.push(format!("\"{name}\" (referenced from input {})", file.0));
+                }
+            }
+        }
+        missing
     }
 
     /// Verifies every referenced name resolves (Pass 2, static + dylib
