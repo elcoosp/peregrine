@@ -188,6 +188,7 @@ fn a_dylib_export_names_its_provider() {
         exports: vec![b"_greet".to_vec()],
         weak: false,
         reexport: false,
+        needed: false,
         lazy: false,
         upward: false,
     });
