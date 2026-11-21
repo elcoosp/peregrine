@@ -25,7 +25,7 @@ const OBJECTS: usize = 64;
 /// collision surface every face walks. One bind slot against each
 /// duplicated name keeps the winners live.
 fn corpus() -> Vec<LinkInput> {
-    use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
+    use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
     (0..OBJECTS)
         .map(|i| {
             let mut b = ObjectBuilder::new(&format!("obj_{i:03}.o"));
