@@ -66,6 +66,7 @@ fn weak_dylib() -> Dylib {
         weak: true,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     }
