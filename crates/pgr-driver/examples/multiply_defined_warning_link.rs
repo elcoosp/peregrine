@@ -11,7 +11,6 @@ use pgr_driver::opts;
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 use pgr_verify::{Options as VerifyOptions, verify};
 use std::ffi::OsString;
-use std::path::PathBuf;
 
 fn definer(name: &str, with_main: bool, fill: u8) -> Vec<u8> {
     let mut b = ObjectBuilder::new(name);
