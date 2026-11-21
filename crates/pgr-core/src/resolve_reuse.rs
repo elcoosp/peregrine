@@ -49,7 +49,9 @@ use crate::ids::StringId;
 use crate::interner::Interner;
 use crate::object::InputObject;
 use crate::propagate::seeds;
-use crate::resolve::{DefLite, Dylib, Resolution, ResolutionSnapshot, UndefinedPolicy};
+use crate::resolve::{
+    DefLite, Dylib, MultiplyDefinedPolicy, Resolution, ResolutionSnapshot, UndefinedPolicy,
+};
 use std::collections::BTreeSet;
 
 /// The recorded Pass-2 state a relink reuses through
@@ -264,6 +266,10 @@ pub fn install_reused(
     make_undefined: &[StringId],
     policy: UndefinedPolicy,
     no_weak_imports: bool,
+    // M108: the multiply-defined resolution policy rides the replay —
+    // the collision site decides exactly as the full walk's does (the
+    // policy is config, not a lane product, the M107 pattern).
+    multiply_defined: MultiplyDefinedPolicy,
 ) -> Result<Resolution, LinkError> {
     let span = tracing::info_span!(
         "resolve_reuse_install",
@@ -307,6 +313,18 @@ pub fn install_reused(
                 continue;
             }
             let Some(Some(lite)) = slots.get(sym) else {
+                // M108: the multiply-defined lookup face's drop — the
+                // previous walk never recorded a winner for this strong
+                // definition (the duplicated slot left the table). The
+                // policy is config: the replay re-derives the drop and
+                // the name rides the flat-lookup slot exactly as the
+                // cold walk plans it (the M103 undefined face pattern).
+                if multiply_defined == MultiplyDefinedPolicy::DynamicLookup
+                    && s.is_defined()
+                    && !s.weak_def
+                {
+                    res.mark_multiply_defined_dynamic(s.name.0);
+                }
                 continue; // a losing candidate — the replay owns this name
             };
             if redecide_ids.binary_search(&s.name.0).is_ok() {
@@ -355,7 +373,7 @@ pub fn install_reused(
         let Ok(idx) = redecide_map.binary_search_by(|probe| probe.0.cmp(name)) else {
             continue; // the name vanished with its seeded candidates
         };
-        res.replay_candidate(redecide_map[idx].1, cand)?;
+        res.replay_candidate(redecide_map[idx].1, cand, interner, multiply_defined)?;
     }
     tracing::debug!(replayed = replay.len(), "the precedence replay finished");
     // 3. References: the recorded site set is digest-vouched to equal the
