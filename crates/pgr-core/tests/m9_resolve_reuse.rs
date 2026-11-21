@@ -50,7 +50,11 @@ fn full_resolve(
     dylibs: &[Dylib],
 ) -> Result<Resolution, pgr_core::LinkError> {
     let mut res = Resolution::default();
-    res.install(objects)?;
+    res.install(
+        objects,
+        interner,
+        pgr_core::resolve::MultiplyDefinedPolicy::Error,
+    )?;
     if !dylibs.is_empty() {
         let export_ids: Vec<pgr_core::ids::StringId> = dylibs
             .iter()
@@ -60,6 +64,11 @@ fn full_resolve(
         res.install_dylibs(dylibs, &export_ids);
     }
     res.require_all_resolved(interner, objects, UndefinedPolicy::Error, false)?;
+    res.apply_multiply_defined_policy(
+        pgr_core::resolve::MultiplyDefinedPolicy::Error,
+        interner,
+        objects,
+    )?;
     Ok(res)
 }
 
@@ -85,6 +94,7 @@ fn reused_resolve(
         &[],
         UndefinedPolicy::Error,
         false,
+        pgr_core::resolve::MultiplyDefinedPolicy::Error,
     )
 }
 
