@@ -216,8 +216,16 @@ mod tests {
         // duplicated names the client asked for, never the house
         // escalation — and v60 carries the warnings-as-errors exit
         // decision (M109, the tail after the multiply-defined byte): a
-        // resident relink exits the shape the client asked for.
-        assert_eq!(crate::PROTO_VERSION, 60);
+        // resident relink exits the shape the client asked for — and v61
+        // carries the hidden-dylib mark (M110, one byte per dylib after
+        // the needed byte): a resident relink drops the same load
+        // command the cold link drops, never a silently flattened
+        // hidden load.
+        // and v62 carries the read-only-relocations policy (M111, the
+        // tail after the fatal-warnings byte): a resident relink prices
+        // the same read-only targets the cold link prices, never the
+        // pre-M111 default refusal.
+        assert_eq!(crate::PROTO_VERSION, 62);
     }
 
     #[test]
