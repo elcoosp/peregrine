@@ -903,6 +903,22 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M118: the dtrace DOF processing is a final-image decision — the
+    // relocatable output's sections are the input's, verbatim (its
+    // sections ride the inputs untouched; there is no DOF header to
+    // validate at emit). The re-check backs the driver surface's earlier
+    // refusal: no library caller can plan the shape either (the
+    // M104/M105/M117 pattern).
+    if cfg.dtrace {
+        return Err(LinkError::Layout {
+            message: "-dtrace validates the output's __dtrace_dof (DOF) section \
+                      headers and links them into the image, but the relocatable \
+                      output's sections are the input's, verbatim — nothing to validate \
+                      or assemble: drop -dtrace or link an image (an executable, dylib \
+                      or bundle)"
+                .into(),
+        });
+    }
     // M28: the section-alignment floors are a packing-engine decision —
     // the relocatable output plans no segments and carries its input
     // sections verbatim, so a named floor has nothing to land on. The
