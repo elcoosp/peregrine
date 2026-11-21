@@ -303,6 +303,7 @@ fn dead_strip_dylibs_names_the_carriage() {
         weak: false,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     });
@@ -314,6 +315,7 @@ fn dead_strip_dylibs_names_the_carriage() {
         weak: false,
         reexport: false,
         needed: false,
+        hidden: false,
         lazy: false,
         upward: false,
     });
