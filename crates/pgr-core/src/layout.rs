@@ -801,6 +801,38 @@ pub struct LinkConfig {
     /// unchanged (the read-side backstop — the image's own W^X walk —
     /// is the producer's mirror, never a policy reader).
     pub read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy,
+    /// M112 — the link-statistics report: `-print_statistics` — ld64's
+    /// flag ("Print statistics about the linker's performance") is the
+    /// report decision the driver's exit face reads: the counts the
+    /// link's own passes already had in hand — the objects Pass 1 parsed
+    /// and the names the interner batched (the M54 observation seam's
+    /// phase details, [`crate::statistics::StatsCollector`] reading them),
+    /// the fixups Pass 3 planned and the bytes the emit produced (the
+    /// layout and the image) — and the wall time the run took, rendered
+    /// to stderr at the end of the link. The default (`false`) keeps
+    /// every pre-knob link byte-identical: the report is a measurement,
+    /// never a layout product — the bytes never move. The relocatable
+    /// output refuses the knob: the object path has no full-emit layout
+    /// or fixup planning to report in the same way (the surface's knob
+    /// refusal mirrored exactly, the M104/M105 pattern — the layout's
+    /// re-check and `link_reloc` back the driver refusal).
+    pub print_statistics: bool,
+    /// M113 — the reference trace: `-t` — ld64's reference tracing ("Print
+    /// a trace of all symbol references") is the resolve's trace face the
+    /// M54 observation seam carries: a new
+    /// [`crate::observe::LinkObserver::on_reference`] event per symbol
+    /// Pass 2's resolve visits (the name as the resolver saw it, the
+    /// input that carries it — one event per visit, in the walk's own
+    /// order, both resolve paths riding: the full install's walk and the
+    /// resolve-reuse replay's reference re-walk), printed to stderr by
+    /// the driver. The default (`false`) keeps every pre-knob link
+    /// byte-identical: the trace is a measurement, never a layout
+    /// product — the bytes never move. The relocatable output refuses
+    /// the knob: the object's symtab is the input's, verbatim (the
+    /// surface's knob refusal mirrored exactly, the M104/M105/M112
+    /// pattern — the layout's re-check and `link_reloc` back the driver
+    /// refusal).
+    pub trace_refs: bool,
     /// M52 — the dead-strip init/term roots: `-no_dead_strip_inits_and_terms`
     /// — ld64's flag ("The linker never dead strips initialization and
     /// termination routines") is the Pass-2 decision the dead-strip root
@@ -904,6 +936,8 @@ impl Default for LinkConfig {
             multiply_defined: crate::resolve::MultiplyDefinedPolicy::default(),
             fatal_warnings: false,
             read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy::default(),
+            print_statistics: false,
+            trace_refs: false,
             no_dead_strip_inits_and_terms: false,
             renames: crate::rename::SectionRenames::default(),
             cstring_order: None,
