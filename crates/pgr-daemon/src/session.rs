@@ -167,6 +167,14 @@ pub struct ServedLink {
     /// entries cross verbatim; the client prints the cold lane's face
     /// (the M62 convention).
     pub policy_warnings: Vec<String>,
+    /// The exit policy's collision entries (v59, M108): the session's
+    /// own resolved state rendered when the request's config carries
+    /// `-multiply_defined warning` — the list the cold lane prints as
+    /// warnings and still exits 0 (the suppress face carries the empty
+    /// list: the walk derived it, the exit prints none of it). The
+    /// entries cross verbatim; the client prints the cold lane's face
+    /// (the M62 convention).
+    pub multiply_warnings: Vec<String>,
 }
 
 /// M103 (v54): the exit policy's warning face — the session's own
@@ -182,6 +190,26 @@ fn serve_policy_warnings(
         pgr_core::resolve::UndefinedPolicy::Warning => {
             resolution.unresolved_open().map(str::to_owned).collect()
         }
+        _ => Vec::new(),
+    }
+}
+
+/// M108 (v59): the exit policy's collision face — the session's own
+/// resolved state renders the multiply-defined list the cold lane
+/// prints (the client prints it; the daemon never writes the client's
+/// stderr). The warning face fills the list; every other policy
+/// carries the empty one (`suppress` derived it, the exit prints none
+/// of it — `dynamic_lookup` intends the ride, `error` never reaches a
+/// served link).
+fn serve_multiply_warnings(
+    config: &pgr_core::layout::LinkConfig,
+    resolution: &pgr_core::resolve::Resolution,
+) -> Vec<String> {
+    match config.multiply_defined {
+        pgr_core::resolve::MultiplyDefinedPolicy::Warning => resolution
+            .multiply_defined_open()
+            .map(str::to_owned)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -599,6 +627,7 @@ impl ResidentSession {
             provenance,
             map_text,
             policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
+            multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
         })
     }
 
@@ -803,9 +832,11 @@ impl ResidentSession {
             map_text: None,
             // The relocatable walk refuses the non-escalating policies at
             // the core (an object has no load-time bind to warn or
-            // suppress — the M103 `-r` refusal), so the list is
-            // structurally empty here; it rides for shape fidelity.
+            // suppress — the M103 `-r` refusal; the M108 refusal mirrors
+            // it for the collision faces), so the lists are structurally
+            // empty here; they ride for shape fidelity.
             policy_warnings: serve_policy_warnings(&req.config, &linked.resolution),
+            multiply_warnings: serve_multiply_warnings(&req.config, &linked.resolution),
         })
     }
 
@@ -1054,6 +1085,7 @@ impl ResidentSession {
                 // a product), so its own walk serves the exit face — the
                 // same list the cold lane prints.
                 policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
+                multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
             });
         }
         let patch_started = std::time::Instant::now();
@@ -1206,6 +1238,7 @@ impl ResidentSession {
             // product), so its own walk serves the exit face — the same
             // list the cold lane prints.
             policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
+            multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
         })
     }
 
@@ -1570,6 +1603,48 @@ mod tests {
         let greet_bytes = greet();
         let (mut req, hashes) = request(&hello, &greet_bytes);
         req.config.commons = pgr_core::resolve::CommonsPolicy::SearchDylibs;
+        let mut session = ResidentSession::default();
+        for h in &hashes {
+            let bytes = if *h == content_hash(&hello) {
+                hello.clone()
+            } else {
+                greet_bytes.clone()
+            };
+            session.store_blob(h, bytes).unwrap();
+        }
+        let cold = session.link(&req).unwrap().image;
+        let warm = session.link(&req).unwrap().image;
+        assert_eq!(
+            cold, warm,
+            "the policy's resolve shape is the session's own plan"
+        );
+        let inputs: Vec<pgr_core::LinkInput> = vec![
+            pgr_core::LinkInput {
+                name: "hello.o".into(),
+                bytes: hello.clone(),
+            },
+            pgr_core::LinkInput {
+                name: "greet.o".into(),
+                bytes: greet_bytes.clone(),
+            },
+        ];
+        let one_shot =
+            pgr_core::link_cached(&inputs, &[], &req.config, pgr_core::Parallelism::Auto, None)
+                .unwrap();
+        let image = pgr_emit::build_image_fused(&one_shot.layout, &one_shot.objects).unwrap();
+        assert_eq!(image, cold, "session link == one-shot link, byte for byte");
+    }
+
+    #[test]
+    fn the_multiply_defined_shape_serves_byte_identical() {
+        // M108: the multiply-defined resolution policy rides the config
+        // tail — the warm pipeline plans the same resolve shape the cold
+        // lane plans (the parity gate is byte-identical; the policy is
+        // config, not a lane product — the M81/M107 pattern).
+        let hello = hello_main();
+        let greet_bytes = greet();
+        let (mut req, hashes) = request(&hello, &greet_bytes);
+        req.config.multiply_defined = pgr_core::resolve::MultiplyDefinedPolicy::Warning;
         let mut session = ResidentSession::default();
         for h in &hashes {
             let bytes = if *h == content_hash(&hello) {
