@@ -22,6 +22,7 @@ pub mod archive;
 pub mod commands;
 pub mod consts;
 pub mod cursor;
+pub mod dof;
 pub mod dyld_info;
 pub mod error;
 pub mod fixups;
@@ -43,6 +44,7 @@ pub use commands::{
     BuildToolVersion, BuildVersionCommand, DataInCodeEntry, DylibCommand, DylinkerCommand,
     EntryPointCommand, LinkeditDataCommand, SourceVersionCommand, UuidCommand, read_data_in_code,
 };
+pub use dof::{DofError, is_dtrace_dof_section, validate_dof_header};
 pub use error::FormatError;
 pub use header::MachHeader64;
 pub use load_command::{LoadCommandIter, LoadCommandKind, ParsedCommand};
