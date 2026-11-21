@@ -200,6 +200,10 @@ fn f_dylib(reexport: bool) -> Dylib {
         lazy: false,
         upward: false,
         reexport,
+        // M106: the needed-dylib mark rides the struct beside the kinds —
+        // the export-trie gates never read it (the trie is this file's
+        // subject), the default absence is the pre-M106 shape.
+        needed: false,
     }
 }
 
