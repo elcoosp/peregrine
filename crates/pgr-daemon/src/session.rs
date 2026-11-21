@@ -175,6 +175,24 @@ pub struct ServedLink {
     /// entries cross verbatim; the client prints the cold lane's face
     /// (the M62 convention).
     pub multiply_warnings: Vec<String>,
+    /// The served link-statistics report (v63, M112): `Some` when the
+    /// request's config carries `-print_statistics` — the counts the
+    /// session's own run reported (the warm pipeline's product: the
+    /// request's inputs, the interner batch, the layout's fixups, the
+    /// image bytes) and the wall time the run took. The count fields
+    /// match the cold lane's seam-carried report field-for-field (the
+    /// parity gate is byte-identical); the wall is the clock's — a
+    /// measurement, never a layout product. The client prints the cold
+    /// lane's face (the M62 convention).
+    pub statistics: Option<pgr_core::statistics::LinkStatistics>,
+    /// The served reference trace (v64, M113): the references the
+    /// session's own Pass 2 visited (the M54 seam's `on_reference` face,
+    /// [`pgr_core::observe::RefsCollector`] subscribed) when the
+    /// request's config carries `-t` — the facts the client renders
+    /// through the cold lane's face (the M62 convention). The empty list
+    /// when the config never asked (the decode side's absent shape) and
+    /// on the relocatable walk (the core refuses the knob beside `-r`).
+    pub references: Vec<pgr_core::observe::ReferenceEvent>,
 }
 
 /// M103 (v54): the exit policy's warning face — the session's own
@@ -212,6 +230,30 @@ fn serve_multiply_warnings(
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// M112 (v63): the served link-statistics report — the counts the
+/// session's own run reported (the warm pipeline's product: the
+/// request's inputs, the interner batch, the layout's fixups, the image
+/// bytes) and the wall time the run took. `None` when the request's
+/// config never asked (an unasked report never crosses the wire) and on
+/// the relocatable walk (the core refuses the knob beside `-r` — the
+/// object shape has no full-emit layout or fixup planning to report).
+fn serve_statistics(
+    req: &crate::protocol::LinkRequest,
+    result: &pgr_core::LinkResult,
+    image_len: u64,
+    wall: std::time::Duration,
+) -> Option<pgr_core::statistics::LinkStatistics> {
+    req.config
+        .print_statistics
+        .then(|| pgr_core::statistics::LinkStatistics {
+            objects: req.inputs.len(),
+            interned: result.interner.len(),
+            fixup_slots: result.layout.fixups.slot_count,
+            bytes: image_len,
+            wall,
+        })
 }
 
 /// The verdict's effective shape (M72): the strict pass's report with
@@ -522,7 +564,44 @@ impl ResidentSession {
         let started = std::time::Instant::now();
         let mut time_collector = pgr_core::TimeCollector::default();
         let mut traces = pgr_core::trace::TraceCollector::new();
-        let result = if req.time && req.trace {
+        // M113 (v64): the reference trace rides the seam — the
+        // [`pgr_core::observe::RefsCollector`] subscribed beside the
+        // timing faces when the request's config carries `-t` (the
+        // observers nest through [`pgr_core::ObserverPair`]; the trace
+        // never moves a byte of the plan — the M54 parity gate).
+        let mut refs = pgr_core::observe::RefsCollector::default();
+        let result = if req.time && req.trace && req.config.trace_refs {
+            let mut timing = pgr_core::ObserverPair::new(&mut time_collector, &mut traces);
+            let mut pair = pgr_core::ObserverPair::new(&mut timing, &mut refs);
+            pgr_core::link_from_objects_observed(
+                objects,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                None,
+                Some(&mut pair),
+            )?
+        } else if req.trace && req.config.trace_refs {
+            let mut pair = pgr_core::ObserverPair::new(&mut traces, &mut refs);
+            pgr_core::link_from_objects_observed(
+                objects,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                None,
+                Some(&mut pair),
+            )?
+        } else if req.time && req.config.trace_refs {
+            let mut pair = pgr_core::ObserverPair::new(&mut time_collector, &mut refs);
+            pgr_core::link_from_objects_observed(
+                objects,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                None,
+                Some(&mut pair),
+            )?
+        } else if req.time && req.trace {
             let mut pair = pgr_core::ObserverPair::new(&mut time_collector, &mut traces);
             pgr_core::link_from_objects_observed(
                 objects,
@@ -550,8 +629,25 @@ impl ResidentSession {
                 None,
                 Some(&mut time_collector),
             )?
+        } else if req.config.trace_refs {
+            pgr_core::link_from_objects_observed(
+                objects,
+                &archives,
+                &req.config,
+                Parallelism::Auto,
+                None,
+                Some(&mut refs),
+            )?
         } else {
             pgr_core::link_from_objects(objects, &archives, &req.config, Parallelism::Auto, None)?
+        };
+        // M113 (v64): the visits the run's own Pass 2 recorded (the
+        // empty list when the config never asked — an unasked trace
+        // crosses nothing).
+        let references = if req.config.trace_refs {
+            refs.finish()
+        } else {
+            Vec::new()
         };
         pgr_core::check_load_symbols(&result, &req.force_load)?;
         let entryoff = result.layout.entryoff;
@@ -613,6 +709,10 @@ impl ResidentSession {
         let map_text = req
             .map
             .then(|| pgr_core::map::build_link_map(&result.layout, &result.interner).render());
+        // M112 (v63): the report's product reads the image's length
+        // before the struct literal moves the bytes (the field
+        // expressions evaluate in order).
+        let statistics = serve_statistics(req, &result, image.len() as u64, started.elapsed());
         Ok(ServedLink {
             image,
             entryoff,
@@ -628,6 +728,8 @@ impl ResidentSession {
             map_text,
             policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
             multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
+            statistics,
+            references,
         })
     }
 
@@ -834,9 +936,14 @@ impl ResidentSession {
             // the core (an object has no load-time bind to warn or
             // suppress — the M103 `-r` refusal; the M108 refusal mirrors
             // it for the collision faces), so the lists are structurally
-            // empty here; they ride for shape fidelity.
+            // empty here; they ride for shape fidelity. The statistics
+            // report rides `None` for the same reason: the core refuses
+            // the knob beside `-r` (the object shape has no full-emit
+            // layout or fixup planning to report).
             policy_warnings: serve_policy_warnings(&req.config, &linked.resolution),
             multiply_warnings: serve_multiply_warnings(&req.config, &linked.resolution),
+            statistics: None,
+            references: Vec::new(),
         })
     }
 
@@ -951,7 +1058,47 @@ impl ResidentSession {
             }
             Err(_) => return Err(RelinkDecline::Fallback),
         }
-        let result = if req.time && req.trace {
+        // M113 (v64): the reference trace rides the replay too — the
+        // [`pgr_core::observe::RefsCollector`] subscribed beside the
+        // timing faces when the request's config carries `-t` (the
+        // replay's reference re-walk reports the same visits the full
+        // path does — the trace is the run's own Pass-2 record).
+        let mut refs = pgr_core::observe::RefsCollector::default();
+        let result = if req.time && req.trace && req.config.trace_refs {
+            let mut timing = pgr_core::ObserverPair::new(&mut time_collector, &mut traces);
+            let mut pair = pgr_core::ObserverPair::new(&mut timing, &mut refs);
+            pgr_core::link_from_objects_observed(
+                objects.to_vec(),
+                archives,
+                &cfg,
+                Parallelism::Auto,
+                None,
+                Some(&mut pair),
+            )
+            .map_err(|e| RelinkDecline::Error(e.into()))?
+        } else if req.trace && req.config.trace_refs {
+            let mut pair = pgr_core::ObserverPair::new(&mut traces, &mut refs);
+            pgr_core::link_from_objects_observed(
+                objects.to_vec(),
+                archives,
+                &cfg,
+                Parallelism::Auto,
+                None,
+                Some(&mut pair),
+            )
+            .map_err(|e| RelinkDecline::Error(e.into()))?
+        } else if req.time && req.config.trace_refs {
+            let mut pair = pgr_core::ObserverPair::new(&mut time_collector, &mut refs);
+            pgr_core::link_from_objects_observed(
+                objects.to_vec(),
+                archives,
+                &cfg,
+                Parallelism::Auto,
+                None,
+                Some(&mut pair),
+            )
+            .map_err(|e| RelinkDecline::Error(e.into()))?
+        } else if req.time && req.trace {
             let mut pair = pgr_core::ObserverPair::new(&mut time_collector, &mut traces);
             pgr_core::link_from_objects_observed(
                 objects.to_vec(),
@@ -982,9 +1129,26 @@ impl ResidentSession {
                 Some(&mut time_collector),
             )
             .map_err(|e| RelinkDecline::Error(e.into()))?
+        } else if req.config.trace_refs {
+            pgr_core::link_from_objects_observed(
+                objects.to_vec(),
+                archives,
+                &cfg,
+                Parallelism::Auto,
+                None,
+                Some(&mut refs),
+            )
+            .map_err(|e| RelinkDecline::Error(e.into()))?
         } else {
             pgr_core::link_from_objects(objects.to_vec(), archives, &cfg, Parallelism::Auto, None)
                 .map_err(|e| RelinkDecline::Error(e.into()))?
+        };
+        // M113 (v64): the visits the replay's own Pass 2 recorded (the
+        // empty list when the config never asked).
+        let references = if req.config.trace_refs {
+            refs.finish()
+        } else {
+            Vec::new()
         };
         pgr_core::check_load_symbols(&result, &req.force_load)
             .map_err(|e| RelinkDecline::Error(e.into()))?;
@@ -1086,6 +1250,8 @@ impl ResidentSession {
                 // same list the cold lane prints.
                 policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
                 multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
+                statistics: serve_statistics(req, &result, prev.len() as u64, started.elapsed()),
+                references,
             });
         }
         let patch_started = std::time::Instant::now();
@@ -1213,6 +1379,10 @@ impl ResidentSession {
             result.liveness.as_ref(),
         )
         .map_err(RelinkDecline::Error)?;
+        // M112 (v63): the report's product reads the image's length
+        // before the struct literal moves the bytes (the field
+        // expressions evaluate in order).
+        let statistics = serve_statistics(req, &result, image.len() as u64, started.elapsed());
         Ok(ServedLink {
             image,
             entryoff: result.layout.entryoff,
@@ -1239,6 +1409,8 @@ impl ResidentSession {
             // list the cold lane prints.
             policy_warnings: serve_policy_warnings(&req.config, &result.resolution),
             multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
+            statistics,
+            references,
         })
     }
 
