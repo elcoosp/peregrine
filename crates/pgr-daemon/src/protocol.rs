@@ -356,15 +356,29 @@ use std::time::Duration;
 /// byte-identical; the `random` face's identity is the emit's own
 /// per-emit draw), and the ladder's replay rides the decision (the
 /// record's v9 source byte, the M81 pattern — the decision is config,
-/// not a product).
-/// the record's v9 source byte, the M81 pattern — the decision is
-/// config, not a product). **v66** names the M115 round: the `ObjC`
+/// not a product). **v66** names the M115 round: the `ObjC`
 /// category-merging disable (`-no_objc_category_merging`) rides the
 /// tail after the UUID-source byte — one byte; the session's warm
 /// pipeline plans the same registration shape the cold link plans (the
 /// parity gate is byte-identical; the merge is Pass 3's own decision,
-/// the replay re-plans the shape the config names).
-pub const PROTO_VERSION: u32 = 66;
+/// the replay re-plans the shape the config names). **v67** names the
+/// M116 round: the common-symbol advisory (`-warn_commons`) rides the
+/// tail after the category-merging byte — one byte; the session's warm
+/// pipeline derives the same advisory product the cold walk derives
+/// (the advisory is a measurement, never a layout product — the bytes
+/// never move) and the reply tail carries the session's own
+/// common-symbol landing entries verbatim (the M62 convention — the
+/// v54/v59 warning-tail shape, the client prints the cold lane's `pgr:
+/// warning:` face); the ladder's replay rides the decision (the M81
+/// pattern — the decision is config, not a product). **v68** names the
+/// M117 round: the init/term section suppression (`-no_inits`) rides
+/// the tail after the advisory byte — one byte; the session's warm
+/// pipeline plans the same init-free shape the cold link plans (the
+/// parity gate is byte-identical — the suppression is Pass 3's own
+/// decision, the replay re-plans the shape the config names), and the
+/// `LC_ROUTINES_64` command drops from the served header exactly as
+/// the cold header drops it.
+pub const PROTO_VERSION: u32 = 68;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1535,6 +1549,29 @@ pub(crate) fn decode_multiply_warnings(r: &mut Reader<'_>) -> Result<Vec<String>
     (0..r.u32()?).map(|_| r.str()).collect()
 }
 
+/// Encodes the reply's common-symbol advisory tail (v67, M116): a
+/// count-prefixed list of the session's own common-symbol landing
+/// entries — the advisory face's product, rendered from the session's
+/// own resolved state. The off decision carries the empty list (the
+/// walk recorded nothing). The client prints each entry as the cold
+/// lane's `pgr: warning:` face — the wire never re-shapes the face the
+/// client prints (the M62 convention).
+pub fn encode_commons_warnings(out: &mut Vec<u8>, entries: &[String]) {
+    put_u32(out, entries.len() as u32);
+    for entry in entries {
+        put_str(out, entry);
+    }
+}
+
+/// Decodes the reply's common-symbol advisory tail (v67; see
+/// [`encode_commons_warnings`] for the shape).
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation.
+pub(crate) fn decode_commons_warnings(r: &mut Reader<'_>) -> Result<Vec<String>, DecodeError> {
+    (0..r.u32()?).map(|_| r.str()).collect()
+}
+
 // ---- the v64 references tail ---------------------------------------------------
 
 /// Encodes the reply's reference-trace tail (v64, M113): a present byte,
@@ -1929,6 +1966,17 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // suppression shape); a resident relink plans the same registration
     // shape the client asked for, never the pre-M115 merging default.
     put_u8(out, u8::from(!cfg.objc_category_merging));
+    // M116 (v67 wire): the common-symbol advisory rides the tail after
+    // the category-merging byte — one byte; a resident relink derives
+    // the same advisory product the client asked for (the decision is
+    // config, the M81 pattern), never the pre-M116 silent default.
+    put_u8(out, u8::from(cfg.warn_commons));
+    // M117 (v68 wire): the init/term section suppression rides the tail
+    // after the advisory byte — one byte; a resident relink plans the
+    // same init-free shape the client asked for (the suppression is
+    // Pass 3's own decision, the M81 replay rides the config), never
+    // the pre-M117 carrying default.
+    put_u8(out, u8::from(cfg.no_inits));
     // M33 (v24 wire): the private-extern keep rides the tail after the
     // UUID suppression — one byte; a resident relink carries the
     // private-extern decision the client asked for, never the pre-M33
@@ -2387,6 +2435,16 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // validation beyond the bool (the default merges; the disable keeps
     // the registration verbatim).
     let no_objc_category_merging = r.u8()? != 0;
+    // M116 (v67 wire): the common-symbol advisory — one byte, no
+    // validation beyond the bool (the decision never changes the
+    // resolution policy; the advisory product derives from the
+    // resolution on both resolve paths).
+    let warn_commons = r.u8()? != 0;
+    // M117 (v68 wire): the init/term section suppression — one byte, no
+    // validation beyond the bool (the suppression is Pass 3's own
+    // decision; the output-kind conflict the core re-checks refuse at
+    // link time).
+    let no_inits = r.u8()? != 0;
     // M33 (v24 wire): the private-extern keep — one byte, no
     // validation beyond the bool (the conversion is the default; the
     // input `N_PEXT` bit names where the decision fires).
@@ -2651,6 +2709,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         function_starts: !no_function_starts,
         uuid_source,
         objc_category_merging: !no_objc_category_merging,
+        warn_commons,
+        no_inits,
         keep_private_externs,
         compact_unwind: !no_compact_unwind,
         header_pad_max_install_names: header_pad_max,
@@ -2687,12 +2747,12 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
 mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, ServedExport,
-        ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_map_bytes,
-        decode_policy_warnings, decode_provenance_bytes, decode_references, decode_statistics,
-        decode_time_report, decode_trace_bytes, decode_verify_report_bytes, encode_map,
-        encode_policy_warnings, encode_provenance, encode_references, encode_statistics,
-        encode_time_report, encode_trace, encode_verify_report, put_str, put_u8, put_u32, put_u64,
-        read_pattern,
+        ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_commons_warnings,
+        decode_map_bytes, decode_policy_warnings, decode_provenance_bytes, decode_references,
+        decode_statistics, decode_time_report, decode_trace_bytes, decode_verify_report_bytes,
+        encode_commons_warnings, encode_map, encode_policy_warnings, encode_provenance,
+        encode_references, encode_statistics, encode_time_report, encode_trace,
+        encode_verify_report, put_str, put_u8, put_u32, put_u64, read_pattern,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
@@ -2999,6 +3059,12 @@ mod tests {
             // for, never the pre-M32 always-carried content default).
             uuid_source: pgr_core::layout::UuidSource::None,
             objc_category_merging: false,
+            // The v67 tail: the common-symbol advisory rides non-default
+            // here — the decision the round-trip test flips.
+            warn_commons: true,
+            // The v68 tail: the init/term suppression rides the default
+            // here — the knob the round-trip test flips.
+            no_inits: false,
             // The v24 tail: a non-default private-extern keep must
             // survive the round trip verbatim (a resident relink
             // carries the private-extern decision the client asked
@@ -5887,6 +5953,134 @@ mod tests {
         assert!(
             back.config.fatal_warnings,
             "the decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_warn_commons_decision_round_trips() {
+        // v67: the common-symbol advisory's decision must survive the
+        // round trip verbatim (a resident relink derives the same
+        // advisory product the client asked for — the decision is
+        // config, the M81 pattern; rich_config carries the named face).
+        let cfg = rich_config();
+        assert!(cfg.warn_commons, "rich_config carries the v67 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.warn_commons,
+            "the advisory decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M116 silent shape).
+        let mut cfg = rich_config();
+        cfg.warn_commons = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.warn_commons,
+            "the off decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_commons_warning_tail_round_trips() {
+        // v67: the advisory face's landing entries cross verbatim — the
+        // client prints the cold lane's face (the M62 convention); the
+        // off decision's empty list rides as the empty list.
+        let entries = vec![
+            "'_tentative' resolved to 'input 1'".to_string(),
+            "'_coalesced' resolved to 'input 0'".to_string(),
+        ];
+        let mut body = Vec::new();
+        encode_commons_warnings(&mut body, &entries);
+        let back = decode_commons_warnings(&mut Reader::new(&body)).expect("the tail decodes");
+        assert_eq!(back, entries, "the entries cross verbatim, in order");
+        let mut empty = Vec::new();
+        encode_commons_warnings(&mut empty, &[]);
+        let back = decode_commons_warnings(&mut Reader::new(&empty)).expect("the tail decodes");
+        assert!(
+            back.is_empty(),
+            "the off decision's empty list rides as the empty list"
+        );
+    }
+
+    #[test]
+    fn the_no_inits_decision_round_trips() {
+        // v68: the init/term suppression's decision must survive the
+        // round trip verbatim (a resident relink plans the same
+        // init-free shape the client asked for — the suppression is
+        // Pass 3's own decision, the replay re-plans the shape the
+        // config names).
+        let mut cfg = rich_config();
+        assert!(!cfg.no_inits, "rich_config carries the default");
+        cfg.no_inits = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.no_inits,
+            "the suppression crosses byte-for-byte"
         );
     }
 
