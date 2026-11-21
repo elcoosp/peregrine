@@ -206,7 +206,7 @@ fn bench_resolve(c: &mut Criterion) {
 
         let (interner, objects) = parse(&baseline);
         let mut res = Resolution::default();
-        res.install(&objects, &interner, MultiplyDefinedPolicy::Error)
+        res.install(&objects, &interner, MultiplyDefinedPolicy::Error, &mut None)
             .unwrap();
         res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error, false)
             .unwrap();
@@ -246,6 +246,7 @@ fn bench_resolve(c: &mut Criterion) {
                         &relink_objects,
                         &relink_interner,
                         MultiplyDefinedPolicy::Error,
+                        &mut None,
                     )
                     .unwrap();
                     r.require_all_resolved(
@@ -279,6 +280,7 @@ fn bench_resolve(c: &mut Criterion) {
                         // install (the collision tie's decision) — the
                         // bench prices the default escalation.
                         MultiplyDefinedPolicy::Error,
+                        &mut None,
                     )
                     .unwrap()
                 });
