@@ -902,6 +902,29 @@ pub struct LinkConfig {
     /// M104/M105 pattern — the layout's re-check and `link_reloc` back
     /// the driver refusal).
     pub no_inits: bool,
+    /// M118 — the `DTrace` `DOF` section processing: `-dtrace` — the
+    /// decision the Pass-1 classification, the Pass-4 emit and the
+    /// verifier's read-side backstop read. A `__dtrace_dof`
+    /// (`S_DTRACE_DOF`) section is recognized as a dtrace payload —
+    /// distinct from the generic `S_ATTR_DEBUG` debug class (the
+    /// section rides its regular bucket as load-time bytes, never the
+    /// debug-drop the `-S` strip applies, the M105/M118 distinction) —
+    /// and under the decision the emit validates its `DOF` header (the
+    /// identification magic and the bounds, the `DTrace` consumer's first
+    /// walk gates) before the section links into the output. The
+    /// verifier backstops the contract read-side on every
+    /// `S_DTRACE_DOF` section in the output (the producer's gate
+    /// mirrored, the M115 read-side-backstop shape — a malformed header
+    /// the producer never saw still reports). The default (`false`)
+    /// carries a `__dtrace_dof` section's bytes verbatim (no emit
+    /// validation; the read-side backstop still gates) and keeps every
+    /// pre-knob link byte-identical; a corpus without a `__dtrace_dof`
+    /// section links byte-identical under either face. The relocatable
+    /// output refuses the knob: the object's sections are the input's,
+    /// verbatim (the surface's knob refusal mirrored exactly, the
+    /// M104/M105 pattern — the layout's re-check and `link_reloc` back
+    /// the driver refusal).
+    pub dtrace: bool,
     /// M111 — the read-only-relocations policy:
     /// `-read_only_relocs <policy>` — ld64's policy for relocations in
     /// read-only segments (the W^X contract's other half; see
@@ -1055,6 +1078,7 @@ impl Default for LinkConfig {
             fatal_warnings: false,
             warn_commons: false,
             no_inits: false,
+            dtrace: false,
             read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy::default(),
             print_statistics: false,
             trace_refs: false,
@@ -1320,6 +1344,13 @@ pub struct Layout {
     /// derivation; `None` keeps the derivation). The incremental patch
     /// paths and the record read the echo — one source, no re-derivation.
     pub named_uuid: Option<[u8; 16]>,
+    /// M118: echo of the config's `-dtrace` decision (the face the emit
+    /// serves — under the decision the emit validates every
+    /// `__dtrace_dof` section's `DOF` header before the bytes link into
+    /// the output; the off face carries the section verbatim, the
+    /// verifier's read-side backstop gating either way). The emit reads
+    /// the echo — one source, no re-derivation.
+    pub dtrace: bool,
     /// The Mach-O file type (`MH_EXECUTE`/`MH_DYLIB`/`MH_BUNDLE`).
     pub filetype: u32,
     /// M11 rung 1: the order-file entries that matched **no** placed
@@ -1677,6 +1708,7 @@ fn bucket_inputs(
     renames: &crate::rename::SectionRenames,
     strip_debug: bool,
     objc_category_merging: bool,
+    dtrace: bool,
     defined_class_bases: &std::collections::HashSet<Vec<u8>>,
 ) -> Result<(BucketTable, Vec<Vec<usize>>, usize), LinkError> {
     let mut buckets: Vec<(String, String, u32, bool)> = Vec::new(); // (seg, name, flags, zerofill)
@@ -1700,6 +1732,7 @@ fn bucket_inputs(
                 renames,
                 strip_debug,
                 objc_category_merging,
+                dtrace,
                 defined_class_bases,
                 interner,
             )?;
@@ -1758,6 +1791,7 @@ fn bucket_for(
     renames: &crate::rename::SectionRenames,
     strip_debug: bool,
     objc_category_merging: bool,
+    dtrace: bool,
     defined_class_bases: &std::collections::HashSet<Vec<u8>>,
     interner: &Interner,
 ) -> Result<usize, LinkError> {
@@ -1791,7 +1825,16 @@ fn bucket_for(
     // names and the `S_ATTR_DEBUG` attribute widen the class under the
     // named decision (the default buckets them as normal load-time
     // bytes, the pre-M105 shape).
-    if is_debug_section(seg, name, in_sect.flags, strip_debug) {
+    // M118: under `-dtrace`, an `S_DTRACE_DOF` section is recognized as a
+    // dtrace payload — distinct from the generic `S_ATTR_DEBUG` debug
+    // class the `-S` strip drops (the section rides its regular bucket as
+    // load-time bytes and the emit validates its DOF header; the debug
+    // classification never drops a payload the decision recognized, the
+    // M105/M118 distinction). Without `-dtrace` the classification is
+    // inert — the section rides its regular bucket verbatim (the pre-knob
+    // shape; the read-side backstop still gates the header).
+    let is_dtrace_payload = dtrace && pgr_format::is_dtrace_dof_section(in_sect.flags);
+    if !is_dtrace_payload && is_debug_section(seg, name, in_sect.flags, strip_debug) {
         return Ok(usize::MAX); // the Debug class: no load-time bytes
     }
     if !matches!(seg, "__TEXT" | "__DATA_CONST" | "__DATA") {
@@ -2623,6 +2666,23 @@ pub fn layout(
                 .into(),
         });
     }
+    // M118: the dtrace DOF processing is a final-image decision — the
+    // relocatable output's sections are the input's, verbatim (an object
+    // carries its inputs' sections untouched; there is no DOF header to
+    // validate at emit — the bytes ride as-is). The refusal rides here
+    // (not only on the driver surface and `link_reloc`) so every caller
+    // pays it: a silently inert knob would claim a DOF-validated shape
+    // the object cannot carry (the M104/M105/M117 pattern).
+    if cfg.dtrace && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-dtrace validates the output's __dtrace_dof (DOF) section \
+                      headers and links them into the image, but the relocatable \
+                      output's sections are the input's, verbatim — nothing to validate \
+                      or assemble: drop -dtrace or link an image (an executable, dylib \
+                      or bundle)"
+                .into(),
+        });
+    }
     // M107: the non-default commons policies are final-image decisions —
     // the relocatable output's symtab is the input's, verbatim (an
     // object carries its inputs' tables untouched; there is no tentative
@@ -2812,6 +2872,7 @@ pub fn layout(
         &cfg.renames,
         cfg.strip_debug,
         cfg.objc_category_merging,
+        cfg.dtrace,
         &defined_class_bases,
     )?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
@@ -3642,6 +3703,7 @@ pub fn layout(
         ident: cfg.ident.clone(),
         uuid_source: cfg.uuid_source,
         named_uuid: cfg.named_uuid,
+        dtrace: cfg.dtrace,
         filetype: cfg.filetype.filetype(),
         image_base,
         order_unmatched,
