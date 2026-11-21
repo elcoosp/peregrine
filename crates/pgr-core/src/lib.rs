@@ -102,7 +102,7 @@ pub use init_offsets::{InitOffsets, InitOffsetsError};
 pub use interner::Interner;
 pub use layout::{
     CopyRun, Layout, LinkConfig, OutputSymbol, OutputType, PatchOp, Piece, PlacedSection,
-    ResolvedFile, SegmentPlan,
+    ResolvedFile, SegmentPlan, UuidSource,
 };
 pub use link::{
     LinkArchive, LinkArchiveMember, LinkInput, LinkResult, Parallelism, RelocLink,
