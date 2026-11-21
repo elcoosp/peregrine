@@ -24,7 +24,7 @@ use pgr_core::link::Parallelism;
 use pgr_core::link::link_from_objects;
 use pgr_core::object::InputObject;
 use pgr_core::propagate::section_digests;
-use pgr_core::resolve::{Resolution, ResolutionSnapshot, UndefinedPolicy};
+use pgr_core::resolve::{MultiplyDefinedPolicy, Resolution, ResolutionSnapshot, UndefinedPolicy};
 use pgr_core::resolve_reuse::{ResolveReuseSeed, install_reused, plan_reuse};
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
@@ -206,7 +206,8 @@ fn bench_resolve(c: &mut Criterion) {
 
         let (interner, objects) = parse(&baseline);
         let mut res = Resolution::default();
-        res.install(&objects).unwrap();
+        res.install(&objects, &interner, MultiplyDefinedPolicy::Error)
+            .unwrap();
         res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error, false)
             .unwrap();
         let snapshot = ResolutionSnapshot::capture(&objects, &interner, &res, &[], &[]);
@@ -241,7 +242,12 @@ fn bench_resolve(c: &mut Criterion) {
             |b, ()| {
                 b.iter(|| {
                     let mut r = Resolution::default();
-                    r.install(&relink_objects).unwrap();
+                    r.install(
+                        &relink_objects,
+                        &relink_interner,
+                        MultiplyDefinedPolicy::Error,
+                    )
+                    .unwrap();
                     r.require_all_resolved(
                         &relink_interner,
                         &relink_objects,
@@ -269,6 +275,10 @@ fn bench_resolve(c: &mut Criterion) {
                         &[],
                         UndefinedPolicy::Error,
                         false,
+                        // M108: the multiply-defined policy rides the
+                        // install (the collision tie's decision) — the
+                        // bench prices the default escalation.
+                        MultiplyDefinedPolicy::Error,
                     )
                     .unwrap()
                 });
