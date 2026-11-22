@@ -328,8 +328,9 @@ fn the_family_joins_the_registry_in_canonical_order() {
     );
     assert_eq!(
         Check::ALL.len(),
-        13,
-        "one family per rung, M115 is the thirteenth and M94 the twelfth"
+        17,
+        "one family per rung — the sixteen M0–M129 families plus the M131 \
+         literal family (the registry grew under M118/M119/M129 and M131)"
     );
     let set = CheckSet::parse("init_offsets").expect("the token parses");
     assert_eq!(set.to_string(), "init_offsets");
