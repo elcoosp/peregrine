@@ -416,7 +416,7 @@ use std::time::Duration;
 /// verbatim (the M62 convention — the client prints the cold lane's
 /// face); the ladder's replay rides the decision (the M81 pattern — the
 /// decision is config, not a product). **v73** names the M122 round: the
-/// PIE positive-form twin (`-pie`) rides the tail after the warn_duplicate
+/// PIE positive-form twin (`-pie`) rides the tail after the `warn_duplicate`
 /// byte — one byte; the session's warm pipeline plans the same `MH_PIE`
 /// shape the cold link plans (the parity gate is byte-identical — the
 /// decision is the header flag word, the M27 `-no_pie` pair's
@@ -431,8 +431,23 @@ use std::time::Duration;
 /// — the advisory is a Pass-2 walk, the resolution policy itself
 /// unchanged, the M109/M116 pattern), and the ladder's replay rides
 /// the decision (the M81 pattern — the decision is config, not a
-/// product).
-pub const PROTO_VERSION: u32 = 74;
+/// product). **v75** names the M124 round: the first segment's base
+/// address (`-seg1addr <address>`) rides the tail after the
+/// weak-reference-mismatches byte — a present-byte plus the validated
+/// vmaddr (the same shape `-image_base` rides, one base knob over); the
+/// session's warm pipeline plans the same shifted `__TEXT` vmaddr the
+/// cold link plans (the parity gate is byte-identical — the base is a
+/// layout product the constant-delta resolver reads, the M15/M19
+/// pattern), and the ladder's replay rides the decision (the M81
+/// pattern — the decision is config, not a product). **v76** names the
+/// M125 round: the CPU subtype override (`-force_cpusubtype_ALL`) rides
+/// the tail after the first-segment-base decision — one byte; the
+/// session's warm pipeline plans the same `CPU_SUBTYPE_ARM64_ALL`
+/// header word the cold link plans (the parity gate is byte-identical
+/// — the cpusubtype word is ALL either way, the M122 `-pie` pattern
+/// over the cpusubtype word), and the ladder's replay rides the
+/// decision (the M81 pattern — the decision is config, not a product).
+pub const PROTO_VERSION: u32 = 76;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -2099,6 +2114,31 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // unchanged, the M81 replay rides the config), never the pre-M123
     // carrying default.
     put_u8(out, cfg.weak_reference_mismatches.wire());
+    // M124 (v75 wire): the first segment's base address rides the tail
+    // after the weak-reference-mismatches byte — a present-byte plus the
+    // validated vmaddr (the same shape `-image_base` rides, one base
+    // knob over); a resident relink lays out the shifted `__TEXT` vmaddr
+    // the client asked for (the base is a layout product the
+    // constant-delta resolver reads, the M15/M19 pattern), never the
+    // pre-M124 carrying default. The output-kind refusals (bundles,
+    // `-r`) and the one-base-per-kind overlap fire on the cold link
+    // before a request carries the byte; the wire never silently widens
+    // a shape the surface refused.
+    match cfg.seg1addr {
+        Some(s) => {
+            put_u8(out, 1);
+            put_u64(out, s.vmaddr());
+        }
+        None => put_u8(out, 0),
+    }
+    // M125 (v76 wire): the CPU subtype override rides the tail after the
+    // first-segment-base decision — one byte; a resident relink plans
+    // the same `CPU_SUBTYPE_ARM64_ALL` header word the client asked for
+    // (the cpusubtype word is ALL either way — the knob is byte-identity,
+    // the M122 `-pie` pattern over the cpusubtype word; the `-r`
+    // refusal fires on the cold link before a request carries the byte),
+    // never the pre-M125 carrying default.
+    put_u8(out, u8::from(cfg.force_cpusubtype_all));
     // M33 (v24 wire): the private-extern keep rides the tail after the
     // UUID suppression — one byte; a resident relink carries the
     // private-extern decision the client asked for, never the pre-M33
@@ -2606,6 +2646,22 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     let weak_reference_mismatches =
         pgr_core::resolve::WeakReferenceMismatchesPolicy::from_wire(r.u8()?)
             .ok_or_else(malformed)?;
+    // M124 (v75 wire): the first segment's base address — the same
+    // validation the flag parse pays, so a zero or misaligned base is
+    // malformed, never a silently shifted address space (the
+    // output-kind refusals fire on the cold link before a request
+    // carries the byte; the wire never silently widens a shape the
+    // surface refused).
+    let seg1addr = match r.u8()? {
+        0 => None,
+        _ => Some(pgr_core::seg1addr::Seg1Addr::from_override(r.u64()?).map_err(|_| malformed())?),
+    };
+    // M125 (v76 wire): the CPU subtype override — one byte, no
+    // validation beyond the bool (the cpusubtype word is ALL either
+    // way — the knob is byte-identity, the M122 `-pie` pattern over the
+    // cpusubtype word; the `-r` refusal fires on the cold link before a
+    // request carries the byte).
+    let force_cpusubtype_all = r.u8()? != 0;
     // M33 (v24 wire): the private-extern keep — one byte, no
     // validation beyond the bool (the conversion is the default; the
     // input `N_PEXT` bit names where the decision fires).
@@ -2857,6 +2913,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         seg_prots,
         stack_size,
         image_base,
+        seg1addr,
+        force_cpusubtype_all,
         umbrella,
         sub_clients,
         dyld_envs,
@@ -3041,6 +3099,24 @@ mod tests {
                 pgr_core::image_base::ImageBase::from_override(0x6_0000)
                     .expect("the base validates"),
             ),
+            // The v75 tail: a non-default first-segment base must survive
+            // the round trip verbatim (a resident relink lays out the
+            // shifted `__TEXT` vmaddr the client named, never the
+            // constant-delta default). The rich config carries both
+            // `-image_base` and `-seg1addr` for wire parity alone — the
+            // round trip never links, so the one-base-per-kind overlap
+            // the cold link refuses never fires here (the cold fixture
+            // is the encode/decode shape, not a linkable config).
+            seg1addr: Some(
+                pgr_core::seg1addr::Seg1Addr::from_override(0x4000_0000)
+                    .expect("the first segment base validates"),
+            ),
+            // The v76 tail: a non-default `-force_cpusubtype_ALL` must
+            // survive the round trip verbatim (a resident relink plans
+            // the same `CPU_SUBTYPE_ARM64_ALL` header word the client
+            // asked for — the cpusubtype word is ALL either way, the
+            // M122 `-pie` pattern over the cpusubtype word).
+            force_cpusubtype_all: true,
             // The v13 tail: a non-default umbrella region must survive
             // the round trip verbatim, in flag order (a resident relink
             // emits the region the client named, never the pre-M20
@@ -6732,6 +6808,226 @@ mod tests {
             back.config.weak_reference_mismatches,
             pgr_core::resolve::WeakReferenceMismatchesPolicy::Error,
             "the default face crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_seg1addr_decision_round_trips() {
+        // v75: the first segment's base address must survive the round
+        // trip verbatim (a resident relink lays out the shifted
+        // `__TEXT` vmaddr the client asked for — the base is a layout
+        // product the constant-delta resolver reads, the M15/M19
+        // pattern, the M81 replay rides the config).
+        let cfg = rich_config();
+        let expected = cfg
+            .seg1addr
+            .map(pgr_core::seg1addr::Seg1Addr::vmaddr)
+            .expect("rich_config carries the v75 knob");
+        assert_eq!(
+            expected, 0x4000_0000,
+            "rich_config carries a non-default first segment base"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config
+                .seg1addr
+                .map(pgr_core::seg1addr::Seg1Addr::vmaddr),
+            Some(expected),
+            "the first segment base crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M124 carrying shape — the
+        // constant-delta floor the kind table names, every pre-knob
+        // link byte-identical).
+        let mut cfg = rich_config();
+        cfg.seg1addr = None;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.seg1addr.is_none(),
+            "the absence crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn a_wire_garbage_seg1addr_is_malformed() {
+        // v75: the wire carries the first segment base as a validated
+        // vmaddr — a present byte naming a zero or misaligned base is a
+        // malformed frame, never a silently shifted address space (the
+        // same validation the flag parse pays, the M15/M19 shape).
+        // Encode the same request once with a named base and once
+        // without: the streams agree up to the present byte (0x01 named
+        // vs 0x00 absent), then the named stream carries 8 vmaddr bytes
+        // the absent stream does not — the first differing byte is the
+        // present byte, and the 8 bytes after it are the vmaddr. Corrupt
+        // those to a misaligned value and the decode re-pays the
+        // validation and refuses.
+        let mk = |seg1addr: Option<u64>| {
+            let mut cfg = rich_config();
+            if let Some(raw) = seg1addr {
+                cfg.seg1addr = Some(
+                    pgr_core::seg1addr::Seg1Addr::from_override(raw).expect("the base validates"),
+                );
+            } else {
+                cfg.seg1addr = None;
+            }
+            LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode()
+        };
+        let named = mk(Some(0x4000_0000));
+        let absent = mk(None);
+        assert_eq!(
+            named.len(),
+            absent.len() + 8,
+            "the named tail is a present byte + 8-byte vmaddr (9 bytes) over the absent 0x00 byte (1) — 8 over"
+        );
+        let present_at = named
+            .iter()
+            .zip(absent.iter())
+            .position(|(x, y)| x != y)
+            .expect("the present byte differs");
+        assert_eq!(named[present_at], 1, "the named present byte is 0x01");
+        assert_eq!(absent[present_at], 0, "the absent byte is 0x00");
+        let at = present_at + 1;
+        // The tail after the vmaddr re-aligns with the absent stream.
+        assert_eq!(
+            &named[at + 8..],
+            &absent[present_at + 1..],
+            "the rest of the frame re-aligns after the 8-byte vmaddr"
+        );
+        let mut bad = named;
+        bad[at..at + 8].copy_from_slice(&0x3000u64.to_le_bytes());
+        let err = LinkRequest::decode(&bad).unwrap_err();
+        assert!(matches!(err, DecodeError::Malformed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_force_cpusubtype_all_decision_round_trips() {
+        // v76: the CPU subtype override must survive the round trip
+        // verbatim (a resident relink plans the same
+        // `CPU_SUBTYPE_ARM64_ALL` header word the client asked for —
+        // the cpusubtype word is ALL either way, the M122 `-pie` pattern
+        // over the cpusubtype word, the M81 replay rides the config).
+        let cfg = rich_config();
+        assert!(cfg.force_cpusubtype_all, "rich_config carries the v76 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.force_cpusubtype_all,
+            "the force_cpusubtype_all decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M125 carrying shape — the
+        // cpusubtype word is ALL either way, every pre-knob link
+        // byte-identical).
+        let mut cfg = rich_config();
+        cfg.force_cpusubtype_all = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.force_cpusubtype_all,
+            "the off decision crosses byte-for-byte"
         );
     }
 
