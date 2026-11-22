@@ -242,8 +242,15 @@ fn revindex_excludes_dead_atoms_when_the_live_set_is_active() {
         &mut None,
     )
     .unwrap();
-    res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error, false)
-        .unwrap();
+    res.require_all_resolved(
+        &interner,
+        &objects,
+        UndefinedPolicy::Error,
+        false,
+        pgr_core::resolve::ModulePolicy::default(),
+        false,
+    )
+    .unwrap();
     let cfg = LinkConfig {
         dead_strip: true,
         ..LinkConfig::default()
