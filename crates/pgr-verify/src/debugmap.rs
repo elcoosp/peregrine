@@ -110,8 +110,7 @@ pub(crate) fn check_debug_map(bytes: &[u8], parsed: &ParsedImage<'_>, report: &m
             pgr_format::consts::StabKind::Fun => {
                 if sym.n_sect > 0 {
                     fun_begin_depth = fun_begin_depth.saturating_add(1);
-                    if let Some(issue) =
-                        section_address_violation(&sections, sym, i, "N_FUN begin")
+                    if let Some(issue) = section_address_violation(&sections, sym, i, "N_FUN begin")
                     {
                         report.issues.push(issue);
                     }
@@ -141,7 +140,6 @@ pub(crate) fn check_debug_map(bytes: &[u8], parsed: &ParsedImage<'_>, report: &m
         ));
     }
 }
-
 
 /// One collected section (the 1-based `n_sect` index, the segment name,
 /// the section name, the vmaddr, the size) for the address-inside-section
@@ -174,8 +172,10 @@ fn collect_sections(parsed: &ParsedImage<'_>) -> Vec<CollectedSection> {
             let mut sect_name = [0u8; 16];
             seg_name.copy_from_slice(&cmd.bytes[base..base + 16]);
             sect_name.copy_from_slice(&cmd.bytes[base + 16..base + 32]);
-            let vmaddr = u64::from_le_bytes(cmd.bytes[base + 32..base + 40].try_into().unwrap_or([0; 8]));
-            let size = u64::from_le_bytes(cmd.bytes[base + 40..base + 48].try_into().unwrap_or([0; 8]));
+            let vmaddr =
+                u64::from_le_bytes(cmd.bytes[base + 32..base + 40].try_into().unwrap_or([0; 8]));
+            let size =
+                u64::from_le_bytes(cmd.bytes[base + 40..base + 48].try_into().unwrap_or([0; 8]));
             out.push(CollectedSection {
                 seg_name,
                 sect_name,
@@ -223,7 +223,9 @@ fn section_address_violation(
     }
     let sect = &sections[idx - 1];
     let sect_end = sect.vmaddr + sect.size;
-    let seg_name = String::from_utf8_lossy(&sect.seg_name).trim_end_matches('\0').to_string();
+    let seg_name = String::from_utf8_lossy(&sect.seg_name)
+        .trim_end_matches('\0')
+        .to_string();
     let sect_name = String::from_utf8_lossy(&sect.sect_name)
         .trim_end_matches('\0')
         .to_string();
