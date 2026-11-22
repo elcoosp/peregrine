@@ -1081,6 +1081,33 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M124: the first segment's base address — the relocatable output
+    // carries no segments (the M10 rung-1 contract preserves input
+    // sections verbatim, blob-relative), so a named `-seg1addr` has no
+    // first segment to shift (the M15/M19 base-knob refusal shape,
+    // mirrored exactly).
+    if cfg.seg1addr.is_some() {
+        return Err(LinkError::Layout {
+            message: "-seg1addr names the first segment's base address, but the \
+                      relocatable output carries no segments — drop -seg1addr or link \
+                      an executable or a dylib"
+                .into(),
+        });
+    }
+    // M125: the CPU subtype override — the relocatable output's header
+    // is the input's, verbatim (the M10 rung-1 contract — the object is
+    // itself a link input, its cpusubtype word rides untouched), so a
+    // named `-force_cpusubtype_ALL` has no header word to patch (the
+    // M104/M105/M117 refusal shape, one header word over).
+    if cfg.force_cpusubtype_all {
+        return Err(LinkError::Layout {
+            message: "-force_cpusubtype_ALL forces the output's cpusubtype to \
+                      CPU_SUBTYPE_ARM64_ALL, but the relocatable output's header is the \
+                      input's, verbatim — drop -force_cpusubtype_ALL or link a final \
+                      image (an executable, a dylib or a bundle)"
+                .into(),
+        });
+    }
     if cfg.allow_stack_execute {
         return Err(LinkError::Layout {
             message: "-allow_stack_execute sets the executable's MH_ALLOW_STACK_EXECUTION \
