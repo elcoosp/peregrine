@@ -621,8 +621,17 @@ fn pull_and_intern(
     );
 
     let mut names: Vec<Vec<u8>> = Vec::new();
+    // M129: the per-object stab-name counts ride beside the symbol-name
+    // counts so the interner's flat `ids` slice partitions back to each
+    // object's symbols then its stabs (file order preserved — the same
+    // order the debug-map plan emits).
+    let mut stab_name_counts: Vec<usize> = Vec::with_capacity(objects.len());
     for obj in &mut objects {
         names.append(&mut obj.take_symbol_names());
+        let stab_names = obj.take_stab_names();
+        let n = stab_names.len();
+        names.extend(stab_names);
+        stab_name_counts.push(n);
     }
     // Dylib export names join the interner batch *after* the object symbol
     // stream, so the object id slices stay stable (M2 two-level namespace).
@@ -666,7 +675,7 @@ fn pull_and_intern(
     let intern_started = Instant::now();
     let (interner, ids) = Interner::build_with(&names, parallel.is_parallel());
     let mut cursor = 0usize;
-    for obj in &mut objects {
+    for (obj_idx, obj) in objects.iter_mut().enumerate() {
         let take = obj.symbols.len();
         if cursor + take > ids.len() {
             return Err(LinkError::Internal {
@@ -675,6 +684,18 @@ fn pull_and_intern(
         }
         obj.finish(&ids[cursor..cursor + take])?;
         cursor += take;
+        // M129: patch the stab names with their slice of ids (the names
+        // joined the batch right after this object's symbol names).
+        let stab_take = stab_name_counts[obj_idx];
+        if stab_take > 0 {
+            if cursor + stab_take > ids.len() {
+                return Err(LinkError::Internal {
+                    message: "interner table shorter than the stab-name stream".into(),
+                });
+            }
+            obj.finish_stabs(&ids[cursor..cursor + stab_take]);
+            cursor += stab_take;
+        }
     }
     emit_phase(
         observer,
