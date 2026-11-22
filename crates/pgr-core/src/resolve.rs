@@ -392,6 +392,76 @@ impl ReadOnlyRelocsPolicy {
     }
 }
 
+/// M123 — the weak-reference-mismatches policy
+/// (`-weak_reference_mismatches <policy>`): ld64's policy for a symbol
+/// referenced both weakly and strongly across the input set (the
+/// `N_WEAK_REF` bit on a symbol's `n_desc` — the weak-import contract's
+/// resolve-side cousin). A typed three-value alphabet on [`LinkConfig`]:
+/// `error` (the peregrine default — the link refuses when a name's
+/// reference sites mix weak and strong, the collision named), `weak`
+/// (the advisory face records the mismatch, the resolution policy
+/// itself unchanged — the bytes never move, the M109/M116 pattern),
+/// `non-weak` (the advisory face records the mismatch the other way —
+/// same shape, the M103/M108 pattern's twin). The decision is a
+/// measurement, never a layout product: the walk runs after Pass 2's
+/// resolution settles and derives, from the resolved state, which
+/// names carry a weak/strong reference mix — recording one
+/// deterministic `'name' (referenced weakly in input A and strongly in
+/// input B)'` entry; the driver's advisory face prints the entries to
+/// stderr and exits 0 (the M103/M108 warning-face pattern). The
+/// relocatable output refuses the non-default faces (the object's
+/// symtab is the input's, verbatim — the M104/M105/M111 pattern).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WeakReferenceMismatchesPolicy {
+    /// `-weak_reference_mismatches error` (the default): a name whose
+    /// reference sites mix weak and strong refuses the link (the
+    /// collision named — the two sites, the M108 refusal shape).
+    #[default]
+    Error,
+    /// `-weak_reference_mismatches weak`: the advisory face records the
+    /// mismatch, the resolution policy itself unchanged (the bytes
+    /// never move — the M109/M116 pattern); the driver prints the
+    /// entries to stderr and exits 0.
+    Weak,
+    /// `-weak_reference_mismatches non-weak`: the advisory face records
+    /// the mismatch the other way (the M103/M108 pattern's twin — same
+    /// detection, same record, same exit).
+    NonWeak,
+}
+
+impl WeakReferenceMismatchesPolicy {
+    /// The wire byte (the v74 alphabet; an unknown byte is a malformed
+    /// frame — the M103 reversed-admits shape).
+    #[must_use]
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::Error => 0,
+            Self::Weak => 1,
+            Self::NonWeak => 2,
+        }
+    }
+    /// The wire byte's face (`None` off the alphabet — the decoder
+    /// refuses, never silently defaults).
+    #[must_use]
+    pub const fn from_wire(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Error),
+            1 => Some(Self::Weak),
+            2 => Some(Self::NonWeak),
+            _ => None,
+        }
+    }
+    /// The `ld`-man-page spelling the surface errors name.
+    #[must_use]
+    pub const fn flag_word(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Weak => "weak",
+            Self::NonWeak => "non-weak",
+        }
+    }
+}
+
 /// M119 — the dylib module contract policy (`-single_module`/
 /// `-multi_module`): ld64's dylib module-table shape ("The `-single_module`
 /// option forces the resulting executable to be treated as a single
@@ -559,6 +629,16 @@ pub struct Resolution {
     /// record from the resolved state on both resolve paths (the M107
     /// config pattern), the M81 replay riding the same way.
     warn_duplicate_open: std::collections::BTreeSet<String>,
+    /// M123: the weak-reference-mismatch advisory entries the
+    /// [`Self::apply_weak_reference_mismatches`] walk derived — one
+    /// deterministic `'name' (referenced weakly in input A and strongly
+    /// in input B)'` entry per name whose reference sites mix the
+    /// `N_WEAK_REF` bit. The advisory is a measurement, never a layout
+    /// product (the bytes never move — the M109/M116 pattern); the
+    /// default `error` policy refuses the link before the walk runs (the
+    /// walk derives the record only under the non-default `weak` /
+    /// `non-weak` faces the way the M108 warning face does).
+    weak_reference_mismatches_open: std::collections::BTreeSet<String>,
     /// M110: the exports the **hidden** dylibs carry (`-hidden_library`
     /// family) — interned name → the hidden dylib's index in
     /// [`Self::dylibs`], for the diagnostics that name the provider.
@@ -1261,6 +1341,81 @@ impl Resolution {
     /// [`Self::apply_warn_duplicate`]).
     pub fn warn_duplicate_open(&self) -> impl Iterator<Item = &str> {
         self.warn_duplicate_open.iter().map(String::as_str)
+    }
+    /// M123: the weak-reference-mismatches advisory walk. ld64's policy
+    /// for a symbol referenced both weakly and strongly across the input
+    /// set — the `N_WEAK_REF` bit on a symbol's `n_desc`. The walk runs
+    /// after Pass 2's resolution settles (the M107/M116/M121 config
+    /// pattern) and derives, from the resolved `references` map, which
+    /// names carry a weak/strong reference mix: for each name with more
+    /// than one reference site, the walk scans every `(file, sym)` site,
+    /// reads `objects[file].symbols[sym].weak_ref`, and detects a mix
+    /// (some `true`, some `false`). Under the default `error` policy the
+    /// walk refuses the link (the collision named — the two sites); the
+    /// advisory `weak` / `non-weak` faces record one deterministic
+    /// `'name' (referenced weakly in input A and strongly in input B)'`
+    /// entry and the driver prints it to stderr, exiting 0 (the bytes
+    /// never move — the M109/M116 pattern). The `references` map carries
+    /// `(FileId, usize)` only, so the walk re-indexes into `objects` to
+    /// read each site's `weak_ref` bit (the same re-index pattern
+    /// `require_all_resolved`'s `is_weak_ref` read uses).
+    pub fn apply_weak_reference_mismatches(
+        &mut self,
+        policy: WeakReferenceMismatchesPolicy,
+        interner: &Interner,
+        objects: &[InputObject],
+    ) {
+        self.weak_reference_mismatches_open.clear();
+        // The walk records a mismatch entry for every name whose
+        // reference sites mix the `N_WEAK_REF` bit (some `true`, some
+        // `false`), regardless of the policy — the record is the
+        // measurement, the policy is the exit (the M121 pattern: the
+        // walk derives the record, the caller decides the refusal).
+        for (key, refs) in &self.references {
+            if refs.len() < 2 {
+                continue;
+            }
+            let mut weak_file: Option<FileId> = None;
+            let mut strong_file: Option<FileId> = None;
+            for (file, sym) in refs {
+                let is_weak = objects
+                    .get(file.0 as usize)
+                    .and_then(|o| o.symbols.get(*sym).map(|s| s.weak_ref))
+                    == Some(true);
+                if is_weak && weak_file.is_none() {
+                    weak_file = Some(*file);
+                }
+                if !is_weak && strong_file.is_none() {
+                    strong_file = Some(*file);
+                }
+                if weak_file.is_some() && strong_file.is_some() {
+                    let (wf, sf) = (weak_file, strong_file);
+                    self.weak_reference_mismatches_open.insert(format!(
+                        "\"{}\" (referenced weakly in input {} and strongly in input {})",
+                        interner.name(crate::ids::StringId(*key)),
+                        wf.map_or(0, |f| f.0),
+                        sf.map_or(0, |f| f.0)
+                    ));
+                    break;
+                }
+            }
+        }
+        // The default `error` policy's refusal is the caller's (the
+        // link refuses if the record is non-empty — the M108 refusal
+        // shape). The advisory `weak` / `non-weak` faces leave the
+        // record for the driver to print (the bytes never move — the
+        // M109/M116 pattern). The `policy` parameter names the face
+        // the caller reads the record under (kept here so the signature
+        // mirrors `apply_warn_commons` / `apply_warn_duplicate`).
+        let _ = policy;
+    }
+
+    /// The weak-reference-mismatch advisory entries the M123 walk
+    /// derived (see [`Self::apply_weak_reference_mismatches`]).
+    pub fn weak_reference_mismatches_open(&self) -> impl Iterator<Item = &str> {
+        self.weak_reference_mismatches_open
+            .iter()
+            .map(String::as_str)
     }
     /// The unresolved-open escalation for names the commons policy
     /// un-defined (M107): the names with no in-image definition, no
