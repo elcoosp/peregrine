@@ -58,6 +58,7 @@ pub mod baseline;
 pub mod branch_range;
 pub mod chain_starts;
 pub mod checks;
+pub mod debugmap;
 pub mod dtrace;
 pub mod dyld_info;
 pub mod dynamic;
@@ -194,6 +195,17 @@ pub enum Code {
     /// regardless of how the table was produced (a malformed table the
     /// producer never wrote still reports).
     ModuleTable,
+    /// The debug-map stabs are malformed (M129): the `ld64`-shaped
+    /// `n_type` rows the producer's debug-map plan re-addresses onto
+    /// placed live atoms (so `lldb`/`dsymutil` find the DWARF in the
+    /// `.o` files) ride a malformed shape — an `N_OSO` row whose path
+    /// is empty or whose mtime is zero, a `N_FUN` begin row whose
+    /// address leaves its defining section, an unbalanced `N_FUN`
+    /// begin/end pair, or a stab row under `-S` (the existing
+    /// strip-debug flag drops the whole map). The read-side backstop
+    /// the producer's debug-map emit-side gate mirrors, regardless of
+    /// how the stabs were produced.
+    DebugMap,
     /// Suspicious but non-fatal condition.
     Suspicious,
     /// A consumer-side check's own code (M67): the token a
@@ -210,7 +222,7 @@ impl Code {
     /// tooling can enumerate the surface the way `Check::ALL` enumerates
     /// the families). A consumer-side check's own tokens ride
     /// [`Code::Custom`] outside this table.
-    pub const ALL: [Code; 25] = [
+    pub const ALL: [Code; 26] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -235,6 +247,7 @@ impl Code {
         Code::InitOffsets,
         Code::DtraceDof,
         Code::ModuleTable,
+        Code::DebugMap,
         Code::Suspicious,
     ];
 
@@ -266,6 +279,7 @@ impl Code {
             Code::InitOffsets => "init_offsets",
             Code::DtraceDof => "dtrace_dof",
             Code::ModuleTable => "module_table",
+            Code::DebugMap => "debug_map",
             Code::Suspicious => "suspicious",
             Code::Custom(token) => token,
         }
