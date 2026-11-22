@@ -154,6 +154,15 @@ pub enum Check {
     /// within the symbol table — the read-side backstop the producer's
     /// emit-side gate mirrors, regardless of how the table was produced.
     ModuleTable,
+    /// The debug-map stabs contract (M129): the `ld64`-shaped `n_type`
+    /// rows `lldb`/`dsymutil` walk — `N_OSO` well-formedness (a non-empty
+    /// path and a nonzero mtime), `N_FUN` bracketing (every begin row
+    /// pairs with an end row), section-bearing stab addresses inside
+    /// their defining section, and no stabs under `-S` (the existing
+    /// strip-debug flag drops the whole map). The read-side backstop
+    /// the producer's debug-map emit-side gate mirrors, regardless of
+    /// how the stabs were produced.
+    DebugMap,
     /// The `B`/`BL` branch-range decode pass (the veneer gate).
     BranchRange,
     /// The classic `LC_DYLD_INFO(_ONLY)` rebase/bind opcode streams.
@@ -165,7 +174,7 @@ pub enum Check {
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 15] = [
+    pub const ALL: [Check; 16] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
@@ -178,6 +187,7 @@ impl Check {
         Check::InitOffsets,
         Check::Dtrace,
         Check::ModuleTable,
+        Check::DebugMap,
         Check::BranchRange,
         Check::DyldInfo,
         Check::Signature,
@@ -199,6 +209,7 @@ impl Check {
             Check::InitOffsets => "init_offsets",
             Check::Dtrace => "dtrace",
             Check::ModuleTable => "module_table",
+            Check::DebugMap => "debugmap",
             Check::BranchRange => "branch_range",
             Check::DyldInfo => "dyld_info",
             Check::Signature => "signature",
@@ -220,9 +231,10 @@ impl Check {
             Check::InitOffsets => 9,
             Check::Dtrace => 10,
             Check::ModuleTable => 11,
-            Check::BranchRange => 12,
-            Check::DyldInfo => 13,
-            Check::Signature => 14,
+            Check::DebugMap => 12,
+            Check::BranchRange => 13,
+            Check::DyldInfo => 14,
+            Check::Signature => 15,
         }
     }
 }
@@ -246,15 +258,15 @@ pub struct CheckSetError {
 /// canonical names in verify order (which re-parses to the same set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckSet {
-    mask: u16,
+    mask: u32,
 }
 
-const fn bit(check: Check) -> u16 {
+const fn bit(check: Check) -> u32 {
     1 << check.index()
 }
 
 /// One bit per [`Check::ALL`] entry.
-const ALL_MASK: u16 = (1 << Check::ALL.len()) - 1;
+const ALL_MASK: u32 = (1 << Check::ALL.len()) - 1;
 
 impl CheckSet {
     /// The full pass: every family, exactly what `verify` runs.
@@ -302,7 +314,7 @@ impl CheckSet {
     /// [`CheckSetError`] naming the first unknown (or empty) token and
     /// carrying the canonical names.
     pub fn parse(names: &str) -> Result<Self, CheckSetError> {
-        let mut mask = 0u16;
+        let mut mask = 0u32;
         for token in names.split(',') {
             let token = token.trim();
             match Check::ALL.iter().copied().find(|c| c.as_str() == token) {
@@ -555,6 +567,25 @@ impl ImageCheck for ModuleTableCheck {
     }
 }
 
+/// The M129 debug-map stabs contract.
+struct DebugMapCheck;
+
+impl ImageCheck for DebugMapCheck {
+    fn check(&self) -> Check {
+        Check::DebugMap
+    }
+    fn summary(&self) -> &'static str {
+        "debug-map stabs: N_OSO well-formedness, N_FUN bracketing, \
+         section-bearing addresses inside their defining section, no stabs under -S"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::DebugMap]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        crate::debugmap::check_debug_map(ctx.bytes, ctx.parsed, ctx.report);
+    }
+}
+
 impl ImageCheck for TlvCheck {
     fn check(&self) -> Check {
         Check::Tlv
@@ -698,7 +729,7 @@ pub trait CustomCheck: Sync {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 15] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 16] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
@@ -711,6 +742,7 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 15] = [
     &InitOffsetsCheck,
     &DtraceCheck,
     &ModuleTableCheck,
+    &DebugMapCheck,
     &BranchRangeCheck,
     &DyldInfoCheck,
     &SignatureCheck,
