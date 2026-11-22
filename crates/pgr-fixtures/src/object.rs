@@ -37,6 +37,16 @@ use pgr_format::reloc::RelocationInfo;
 use pgr_format::segment::Section64;
 use pgr_format::symtab::Nlist64;
 
+/// The fixed mtime every `N_OSO` row the fixture builder emits carries
+/// (M129: the debug map's determinism contract — the producer captures
+/// the object's mtime at Pass-0 map time, the fixture captures the same
+/// one for every object so a corpus links byte-identical regardless of
+/// when the fixture ran). The value is the `SOURCE_DATE_EPOCH` Apple's
+/// `ld64` honors when set (the deterministic-build convention): a fixed
+/// 1 (1970-01-01 00:00:01 UTC) so two fixture runs on different hosts at
+/// different wall clocks produce the same `N_OSO` row.
+pub const FIXTURE_OSO_MTIME: u64 = 1;
+
 /// A relocation to attach to a section, section-relative.
 ///
 /// Mirrors the fields the applier reads ([`pgr_format::reloc::RelocationInfo`]
@@ -459,6 +469,100 @@ pub enum ObjectSymbol {
     },
 }
 
+/// A debug-map stab the fixture builder emits, in declaration order
+/// (M129: the `ld64`-shaped `n_type` rows the producer's debug-map plan
+/// re-addresses onto placed live atoms so `lldb`/`dsymutil` find the
+/// DWARF in the `.o` files). The builder emits these as the **first**
+/// locals (clang's own order — stabs precede the plain locals, the
+/// extern defs and the undefineds); the producer carries them through
+/// Pass 1 and re-emits them in the output symtab's locals range.
+///
+/// The eight variants cover the eight `n_type` values
+/// [`pgr_format::consts::stab_kind`] classifies. The `N_OSO` row
+/// carries the object path and a **fixed deterministic mtime**
+/// ([`FIXTURE_OSO_MTIME`]) so two fixture runs on different hosts at
+/// different wall clocks link byte-identical — the determinism contract
+/// the double-link byte-identity gate prices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectStab {
+    /// Source file (`N_SO`): the per-translation-unit anchor. The
+    /// string is the source path; `n_value` is 0 (the closing row of a
+    /// pair carries the directory, the opening row the basename — the
+    /// builder emits one row per call).
+    So {
+        /// Source file path (the basename, the directory, or both —
+        /// the builder emits what it is told).
+        path: String,
+    },
+    /// Object file (`N_OSO`): the `.o` path `dsymutil` opens. The
+    /// `n_value` is the file's mtime; the builder pins it to
+    /// [`FIXTURE_OSO_MTIME`] so the row is reproducible.
+    Oso {
+        /// Object file path.
+        path: String,
+    },
+    /// Function begin (`N_FUN`): the function's name and its
+    /// section-relative address. The producer re-addresses the value
+    /// onto the placed live atom; the paired end row is a separate
+    /// [`ObjectStab::FunEnd`] carrying the function's size as a string.
+    Fun {
+        /// Function name.
+        name: String,
+        /// 0-based index into the builder's section list.
+        section_index: usize,
+        /// Section-relative address.
+        value: u64,
+    },
+    /// Function end (`N_FUN`): the closing row of a `N_FUN` pair. The
+    /// string is the function's size as a null-terminated decimal; the
+    /// `n_value` is 0.
+    FunEnd {
+        /// Function size in bytes (emitted as a decimal string).
+        size: u64,
+    },
+    /// Global symbol (`N_GSYM`): a global's name; the debugger resolves
+    /// the address through the export table at display time.
+    Gsym {
+        /// Symbol name.
+        name: String,
+    },
+    /// Static symbol (`N_STSYM`): a file-static's name and its
+    /// section-relative address.
+    Stsym {
+        /// Symbol name.
+        name: String,
+        /// 0-based index into the builder's section list.
+        section_index: usize,
+        /// Section-relative address.
+        value: u64,
+    },
+    /// Local symbol (`N_LSYM`): a stack-local or scalar local's name
+    /// and a DWARF-location value (the producer carries the value
+    /// verbatim — it does not re-address locals).
+    Lsym {
+        /// Symbol name.
+        name: String,
+        /// The stab's value (a DWARF location, not an address).
+        value: u64,
+    },
+    /// Begin-scope bracket (`N_BNSYM`): opens a `N_FUN` block; the
+    /// `n_value` is the function's section-relative address.
+    Bnsym {
+        /// 0-based index into the builder's section list.
+        section_index: usize,
+        /// Section-relative address.
+        value: u64,
+    },
+    /// End-scope bracket (`N_ENSYM`): closes the `N_BNSYM`/`N_FUN`
+    /// block; the `n_value` is the function's section-relative address.
+    Ensym {
+        /// 0-based index into the builder's section list.
+        section_index: usize,
+        /// Section-relative address.
+        value: u64,
+    },
+}
+
 /// Deterministic arm64 relocatable-object builder.
 ///
 /// Assembles an `MH_OBJECT` image the way clang does: a single
@@ -474,6 +578,10 @@ pub struct ObjectBuilder {
     name: String,
     sections: Vec<ObjectSection>,
     symbols: Vec<ObjectSymbol>,
+    /// M129: the debug-map stabs, in declaration order. Emitted as the
+    /// first locals (clang's order); the producer carries them through
+    /// Pass 1 and re-emits them in the output symtab's locals range.
+    stabs: Vec<ObjectStab>,
     build_version: bool,
     /// `MH_SUBSECTIONS_VIA_SYMBOLS`: the M5 atomizer splits this object's
     /// sections at symbol boundaries.
@@ -498,6 +606,7 @@ impl ObjectBuilder {
             name: name.into(),
             sections: Vec::new(),
             symbols: Vec::new(),
+            stabs: Vec::new(),
             build_version: true,
             subsections: false,
             alt_entries: std::collections::BTreeSet::new(),
@@ -521,6 +630,16 @@ impl ObjectBuilder {
     pub fn add_symbol(&mut self, symbol: ObjectSymbol) -> usize {
         self.symbols.push(symbol);
         self.symbols.len() - 1
+    }
+
+    /// Appends a debug-map stab (M129) and returns the declaration
+    /// index among the stabs. The builder emits stabs as the **first**
+    /// locals (clang's order), so a corpus that links under the
+    /// debug-map plan shares one corpus seam with the tests, benches
+    /// and the `debug_map_link` consumer example.
+    pub fn add_stab(&mut self, stab: ObjectStab) -> usize {
+        self.stabs.push(stab);
+        self.stabs.len() - 1
     }
 
     /// Controls whether `LC_BUILD_VERSION` is emitted (clang emits it).
@@ -636,6 +755,138 @@ impl ObjectBuilder {
             strtab.push(0);
             entries.push((strx, n_type, n_sect, n_desc, value));
         };
+        // M129: the debug-map stabs emit as the **first** locals (clang's
+        // order — stabs precede the plain locals, the extern defs and the
+        // undefineds). The `N_OSO` row carries the fixed mtime
+        // (`FIXTURE_OSO_MTIME`) so the row is reproducible; the
+        // section-bearing stabs (`N_FUN`/`N_STSYM`/`N_BNSYM`/`N_ENSYM`)
+        // carry the blob-relative address the producer re-addresses onto
+        // the placed live atom. The producer carries these through Pass 1
+        // and re-emits them in the output symtab's locals range.
+        for stab in &self.stabs {
+            match stab {
+                ObjectStab::So { path } => {
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        path,
+                        pgr_format::consts::N_SO,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+                ObjectStab::Oso { path } => {
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        path,
+                        pgr_format::consts::N_OSO,
+                        0,
+                        0,
+                        FIXTURE_OSO_MTIME,
+                    );
+                }
+                ObjectStab::Fun {
+                    name,
+                    section_index,
+                    value,
+                } => {
+                    let blob_addr = placed.get(*section_index).map_or(0, |(addr, _)| *addr);
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        name,
+                        pgr_format::consts::N_FUN,
+                        (*section_index + 1) as u8,
+                        0,
+                        blob_addr + *value,
+                    );
+                }
+                ObjectStab::FunEnd { size } => {
+                    // The closing row of a N_FUN pair: the name is the
+                    // function's size as a decimal string, n_value is 0.
+                    let size_str = size.to_string();
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        &size_str,
+                        pgr_format::consts::N_FUN,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+                ObjectStab::Gsym { name } => {
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        name,
+                        pgr_format::consts::N_GSYM,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+                ObjectStab::Stsym {
+                    name,
+                    section_index,
+                    value,
+                } => {
+                    let blob_addr = placed.get(*section_index).map_or(0, |(addr, _)| *addr);
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        name,
+                        pgr_format::consts::N_STSYM,
+                        (*section_index + 1) as u8,
+                        0,
+                        blob_addr + *value,
+                    );
+                }
+                ObjectStab::Lsym { name, value } => {
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        name,
+                        pgr_format::consts::N_LSYM,
+                        0,
+                        0,
+                        *value,
+                    );
+                }
+                ObjectStab::Bnsym {
+                    section_index,
+                    value,
+                } => {
+                    let blob_addr = placed.get(*section_index).map_or(0, |(addr, _)| *addr);
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        "",
+                        pgr_format::consts::N_BNSYM,
+                        (*section_index + 1) as u8,
+                        0,
+                        blob_addr + *value,
+                    );
+                }
+                ObjectStab::Ensym {
+                    section_index,
+                    value,
+                } => {
+                    let blob_addr = placed.get(*section_index).map_or(0, |(addr, _)| *addr);
+                    push_sym(
+                        &mut strtab,
+                        &mut entries,
+                        "",
+                        pgr_format::consts::N_ENSYM,
+                        (*section_index + 1) as u8,
+                        0,
+                        blob_addr + *value,
+                    );
+                }
+            }
+        }
         for (decl_i, sym) in self.symbols.iter().enumerate() {
             match sym {
                 ObjectSymbol::Local(name) => {
@@ -1021,13 +1272,14 @@ pub fn read_relocs(
 #[cfg(test)]
 mod tests {
     use super::{
-        ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol, read_relocs, read_section,
-        read_sym,
+        FIXTURE_OSO_MTIME, ObjectBuilder, ObjectReloc, ObjectSection, ObjectStab, ObjectSymbol,
+        read_relocs, read_section, read_sym,
     };
     use pgr_format::consts::{
         ARM64_RELOC_BRANCH26, ARM64_RELOC_PAGE21, ARM64_RELOC_UNSIGNED, N_EXT, N_SECT, N_TYPE,
         N_UNDF, N_WEAK_DEF, N_WEAK_REF, S_ZEROFILL, get_comm_align, get_library_ordinal,
     };
+    use pgr_format::consts::{N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STSYM, N_STAB};
     use pgr_format::summarize;
 
     /// A minimal valid object: one code section, one def.
@@ -1274,5 +1526,138 @@ mod tests {
         assert_eq!(b.sym_index(d0), 1);
         assert_eq!(b.sym_index(u0), 2);
         assert_eq!(b.sym_index(c0), 3);
+    }
+
+    /// A stab-carrying object: the M129 debug-map seam — `N_SO`, `N_OSO`,
+    /// a `N_FUN` begin/end pair, `N_GSYM`, `N_STSYM`, `N_LSYM` and the
+    /// `N_BNSYM`/`N_ENSYM` bracket, in declaration order (clang's order).
+    fn stab_object() -> ObjectBuilder {
+        let mut b = ObjectBuilder::new("stab.o").set_subsections_via_symbols(true);
+        let text = b.add_section(ObjectSection::text(
+            "__text",
+            [0xC0u8, 0x03, 0x5F, 0xD6].repeat(2),
+            Vec::new(),
+        ));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_main".into(),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+        b.add_stab(ObjectStab::So {
+            path: "main.c".into(),
+        });
+        b.add_stab(ObjectStab::Oso {
+            path: "stab.o".into(),
+        });
+        b.add_stab(ObjectStab::Fun {
+            name: "_main".into(),
+            section_index: text,
+            value: 0,
+        });
+        b.add_stab(ObjectStab::FunEnd { size: 8 });
+        b.add_stab(ObjectStab::Gsym {
+            name: "_main".into(),
+        });
+        b.add_stab(ObjectStab::Stsym {
+            name: "_static_var".into(),
+            section_index: text,
+            value: 4,
+        });
+        b.add_stab(ObjectStab::Lsym {
+            name: "local_int:1".into(),
+            value: 0,
+        });
+        b.add_stab(ObjectStab::Bnsym {
+            section_index: text,
+            value: 0,
+        });
+        b.add_stab(ObjectStab::Ensym {
+            section_index: text,
+            value: 0,
+        });
+        b
+    }
+
+    #[test]
+    fn stab_rows_emit_as_first_locals_with_the_named_n_type() {
+        let bytes = stab_object().build().unwrap();
+        // The stabs emit as the first 8 locals, before `_main` (the
+        // extern def) — clang's order. Each row carries its named
+        // `n_type` (the `N_STAB` bit set) and the `stab_kind` classifies
+        // it back to the kind the producer's debug-map plan routes on.
+        let expected = [N_SO, N_OSO, N_FUN, N_FUN, N_GSYM, N_STSYM, N_LSYM, N_BNSYM, N_ENSYM];
+        assert_eq!(expected.len(), 9);
+        for (i, want) in expected.iter().enumerate() {
+            let sym = read_sym(&bytes, i).unwrap();
+            assert_eq!(
+                sym.n_type, *want,
+                "stab row {i}: n_type 0x{:02x} not the named kind 0x{:02x}",
+                sym.n_type, want
+            );
+            assert!(sym.is_stab(), "stab row {i}: N_STAB bit not set");
+        }
+    }
+
+    #[test]
+    fn n_oso_carries_the_fixed_deterministic_mtime() {
+        let bytes = stab_object().build().unwrap();
+        let oso = read_sym(&bytes, 1).unwrap();
+        assert_eq!(oso.n_type, N_OSO);
+        // The mtime is the fixed constant — two fixture runs on
+        // different hosts at different wall clocks produce the same row
+        // (the determinism contract the double-link byte-identity gate
+        // prices).
+        assert_eq!(oso.n_value, FIXTURE_OSO_MTIME);
+        // A second build reproduces the same bytes.
+        let again = stab_object().build().unwrap();
+        assert_eq!(bytes, again, "the stab object builds byte-identical");
+    }
+
+    #[test]
+    fn n_fun_begin_end_pair_carries_address_then_size_string() {
+        let bytes = stab_object().build().unwrap();
+        let begin = read_sym(&bytes, 2).unwrap();
+        assert_eq!(begin.n_type, N_FUN);
+        assert_eq!(begin.n_sect, 1, "the N_FUN begin row names its section");
+        assert_eq!(begin.n_value, 0, "the N_FUN begin row carries the address");
+        let end = read_sym(&bytes, 3).unwrap();
+        assert_eq!(end.n_type, N_FUN);
+        assert_eq!(end.n_sect, 0, "the N_FUN end row carries no section");
+        assert_eq!(end.n_value, 0, "the N_FUN end row carries a zero value");
+    }
+
+    #[test]
+    fn stab_section_rows_carry_blob_relative_addresses() {
+        let bytes = stab_object().build().unwrap();
+        // N_STSYM at row 5: blob_addr(0) + value(4) = 4.
+        let stsym = read_sym(&bytes, 5).unwrap();
+        assert_eq!(stsym.n_type, N_STSYM);
+        assert_eq!(stsym.n_sect, 1);
+        assert_eq!(stsym.n_value, 4);
+        // N_BNSYM at row 7 and N_ENSYM at row 8: the bracket pair.
+        let bnsym = read_sym(&bytes, 7).unwrap();
+        assert_eq!(bnsym.n_type, N_BNSYM);
+        let ensym = read_sym(&bytes, 8).unwrap();
+        assert_eq!(ensym.n_type, N_ENSYM);
+        assert_eq!(bnsym.n_value, ensym.n_value, "the bracket pair shares the address");
+    }
+
+    #[test]
+    fn stab_object_has_no_stabs_when_none_declared() {
+        // A stab-free object emits zero stab rows — the producer's
+        // debug-map plan skips the whole map when the input carries none
+        // (the pre-M129 shape, byte-identical).
+        let mut b = ObjectBuilder::new("plain.o");
+        let text = b.add_section(ObjectSection::text("__text", vec![0xC0, 0x03, 0x5F, 0xD6], Vec::new()));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_main".into(),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+        let bytes = b.build().unwrap();
+        let sym = read_sym(&bytes, 0).unwrap();
+        assert!(!sym.is_stab(), "the plain object's first row is the def, not a stab");
     }
 }
