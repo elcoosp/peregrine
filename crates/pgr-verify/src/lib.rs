@@ -67,6 +67,7 @@ pub mod init_offsets;
 pub mod misc;
 pub mod module_table;
 pub mod objc;
+pub mod objcstubs;
 pub mod pair;
 pub mod report_json;
 pub mod sarif;
@@ -179,6 +180,14 @@ pub enum Code {
     /// `__objc_catlist`/`__objc_nlcatlist` sections dyld's registration
     /// walk consumes ride broken pointer strides.
     ObjcRegistration,
+    /// The `__objc_stubs` synthesis is malformed (M6/D-R3, M130): the
+    /// `__TEXT,__objc_stubs` section the linker synthesizes for
+    /// `_objc_msgSend$<selector>` callsites rides a broken stride (not a
+    /// whole `OBJC_STUB_SIZE_ARM64`), the wrong section type (not
+    /// `S_SYMBOL_STUBS`), or the paired `__objc_methname` selector
+    /// strings are not NUL-terminated — the read-side backstop the
+    /// producer's stub-synthesis emit-side gate mirrors.
+    ObjcStubs,
     /// The `DTrace` `DOF` header is malformed (M118): a `__dtrace_dof`
     /// (`S_DTRACE_DOF`) section's leading bytes are not the `DOF`
     /// identification magic or the section is too small to carry the
@@ -222,7 +231,7 @@ impl Code {
     /// tooling can enumerate the surface the way `Check::ALL` enumerates
     /// the families). A consumer-side check's own tokens ride
     /// [`Code::Custom`] outside this table.
-    pub const ALL: [Code; 26] = [
+    pub const ALL: [Code; 27] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -244,6 +253,7 @@ impl Code {
         Code::UnwindInfo,
         Code::Tlv,
         Code::ObjcRegistration,
+        Code::ObjcStubs,
         Code::InitOffsets,
         Code::DtraceDof,
         Code::ModuleTable,
@@ -276,6 +286,7 @@ impl Code {
             Code::UnwindInfo => "unwind_info",
             Code::Tlv => "tlv",
             Code::ObjcRegistration => "objc_registration",
+            Code::ObjcStubs => "objc_stubs",
             Code::InitOffsets => "init_offsets",
             Code::DtraceDof => "dtrace_dof",
             Code::ModuleTable => "module_table",
