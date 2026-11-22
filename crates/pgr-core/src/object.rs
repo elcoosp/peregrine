@@ -220,7 +220,6 @@ impl InputSymbol {
     pub const fn is_defined(&self) -> bool {
         self.external && self.section.is_some()
     }
-
     /// True when this is a tentative/common symbol.
     #[must_use]
     pub const fn is_common(&self) -> bool {
@@ -232,6 +231,42 @@ impl InputSymbol {
     pub const fn is_undefined(&self) -> bool {
         self.external && self.section.is_none() && !self.stab && self.value == 0
     }
+}
+
+/// One debug-map stab carried through Pass 1 (M129: the `ld64`-shaped
+/// `n_type` rows the producer's debug-map plan re-addresses onto placed
+/// live atoms so `lldb`/`dsymutil` find the DWARF in the `.o` files).
+///
+/// The Pass 1 parser already classifies each `Nlist64` as a stab via
+/// [`InputSymbol::stab`]; this struct carries the **typed** stab the
+/// producer re-emits: the [`StabKind`], the raw name bytes (interned in
+/// `finish` like the symbol names), the 1-based `n_sect` (for the
+/// section-bearing stabs the plan re-addresses), the `n_desc` and the
+/// `value`. The `value` is section-relative for section stabs (`N_FUN`,
+/// `N_STSYM`, `N_BNSYM`, `N_ENSYM`), the mtime for `N_OSO`, and 0 or a
+/// DWARF location for the name-only stabs (`N_SO`, `N_GSYM`, `N_LSYM`).
+///
+/// Kept in **file order** (the symtab's table order) so the debug-map
+/// plan emits a deterministic sequence: file order, symbol order — the
+/// same order the input carried, the contract `dsymutil` walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputStab {
+    /// The classified stab kind (one of the eight the producer emits).
+    pub kind: pgr_format::consts::StabKind,
+    /// Interned name (patched by [`InputObject::finish`] after
+    /// interning; `StringId(0)` until then).
+    pub name: StringId,
+    /// Raw name bytes in table order (drained into the global interner).
+    pub name_bytes: Vec<u8>,
+    /// 1-based defining section index for section-bearing stabs; 0 for
+    /// the name-only stabs. The plan re-addresses section stabs onto
+    /// the placed live atom in this section.
+    pub n_sect: u8,
+    /// `n_desc` (carried verbatim — the stab descriptor).
+    pub n_desc: u16,
+    /// `n_value`: section-relative (section stabs), the mtime (`N_OSO`),
+    /// or 0 / a DWARF location (name-only stabs).
+    pub value: u64,
 }
 
 /// The decoded parts of one parsed object (the POI cache's rebuild shape).
@@ -254,6 +289,9 @@ pub(crate) struct ObjectParts {
     /// M34 — the cached parse's `__LD,__compact_unwind` rows (the
     /// same address-space table the fresh parse carries).
     pub compact_unwind: Vec<pgr_format::CompactUnwindEntry>,
+    /// M129 — the cached parse's debug-map stabs (the same typed rows
+    /// the fresh parse carries, in file order).
+    pub stabs: Vec<InputStab>,
     /// `MH_SUBSECTIONS_VIA_SYMBOLS`.
     pub subsections_via_symbols: bool,
     /// True for archive members.
@@ -305,6 +343,14 @@ pub struct InputObject {
     /// annotating bytes the object does not carry, or a dangling
     /// personality/LSDA reference, refuses with the typed error.
     pub compact_unwind: Vec<pgr_format::CompactUnwindEntry>,
+    /// M129 — the object's debug-map stabs: the `ld64`-shaped `n_type`
+    /// rows the producer's debug-map plan re-addresses onto placed live
+    /// atoms so `lldb`/`dsymutil` find the DWARF in the `.o` files. In
+    /// file order (the symtab's table order — the deterministic
+    /// sequence `dsymutil` walks). Captured at parse, interned in
+    /// `finish` (the name bytes ride the same interner the symbol
+    /// names ride).
+    pub stabs: Vec<InputStab>,
 }
 
 /// One parallel-decode worker result (the symbol table slice).
@@ -328,6 +374,7 @@ impl InputObject {
             atoms: p.atoms,
             data_in_code: p.data_in_code,
             compact_unwind: p.compact_unwind,
+            stabs: p.stabs,
         }
     }
 
@@ -568,6 +615,12 @@ impl InputObject {
         } else {
             Self::decode_symbols(&bytes, &st, strtab, &sections, 0..st.nsyms as usize, &fail)?
         };
+        // M129: the debug-map stabs — a separate sweep over the symtab
+        // for the rows `stab_kind` classifies (the symbol decode above
+        // skips stabs via `InputSymbol::stab`). Carried in file order
+        // (the symtab's table order — the deterministic sequence
+        // `dsymutil` walks); interned in `finish` like the symbol names.
+        let stabs = Self::decode_stabs(&bytes, &st, strtab, &sections, &fail)?;
 
         let obj = Self {
             file,
@@ -583,8 +636,73 @@ impl InputObject {
             atoms: Vec::new(),
             data_in_code: dice,
             compact_unwind,
+            stabs,
         };
         Ok(obj)
+    }
+
+    /// M129: the debug-map stab sweep — walks the symtab once for the
+    /// rows [`pgr_format::consts::stab_kind`] classifies, in file order.
+    /// Each captured stab carries its typed [`StabKind`], the raw name
+    /// bytes (interned in [`InputObject::finish`]), the 1-based `n_sect`
+    /// (for the section-bearing stabs the plan re-addresses), the
+    /// `n_desc` and the `value` (section-relative — normalized the same
+    /// way the symbol decode normalizes it). Stabs the producer does
+    /// not emit (`N_BINCL`, `N_SOL`, …) classify as `None` and are
+    /// skipped — the producer never re-addresses a row it cannot
+    /// re-emit.
+    fn decode_stabs<F: Fn(String) -> LinkError>(
+        bytes: &[u8],
+        st: &pgr_format::SymtabCommand,
+        strtab: &[u8],
+        sections: &[InputSection],
+        fail: &F,
+    ) -> Result<Vec<InputStab>, LinkError> {
+        let nsyms = st.nsyms as usize;
+        let mut stabs = Vec::new();
+        for i in 0..nsyms {
+            let off = st.symoff as usize + i * 16;
+            let raw: pgr_format::symtab::Nlist64 =
+                pgr_format::cursor::pod_read_unaligned_at(bytes, off)
+                    .map_err(|e| fail(format!("stab {i}: {e}")))?;
+            let Some(kind) = pgr_format::consts::stab_kind(raw.n_type) else {
+                continue;
+            };
+            let name_bytes: &[u8] = if (raw.n_strx as usize) < strtab.len() {
+                let rest = &strtab[raw.n_strx as usize..];
+                let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+                &rest[..end]
+            } else {
+                b""
+            };
+            // Normalize section-bearing stab values to section-relative
+            // (the same normalization the symbol decode applies): the
+            // LLVM single-segment convention carries blob-relative
+            // `n_value`s and nonzero section addresses. The plan
+            // re-addresses the section-relative value onto the placed
+            // live atom in this section.
+            let value = if raw.n_sect > 0 && raw.n_sect as usize <= sections.len() {
+                let base = sections[raw.n_sect as usize - 1].addr;
+                if raw.n_value < base {
+                    return Err(fail(format!(
+                        "stab {i}: n_value {:#x} below section base {:#x}",
+                        raw.n_value, base
+                    )));
+                }
+                raw.n_value - base
+            } else {
+                raw.n_value
+            };
+            stabs.push(InputStab {
+                kind,
+                name: StringId(0), // patched by `finish` after interning
+                name_bytes: name_bytes.to_vec(),
+                n_sect: raw.n_sect,
+                n_desc: raw.n_desc,
+                value,
+            });
+        }
+        Ok(stabs)
     }
 
     /// D1 atomization (M5): fills the atom table for every section —
@@ -791,6 +909,18 @@ impl InputObject {
     #[doc(hidden)]
     pub fn take_symbol_names(&mut self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.symbol_names)
+    }
+
+    /// M129: stab name bytes in file order, handed to the global interner
+    /// build beside the symbol names. Drains each stab's `name_bytes`
+    /// in place (the stab struct stays, the name is re-patched by
+    /// [`InputObject::finish_stabs`]).
+    #[doc(hidden)]
+    pub fn take_stab_names(&mut self) -> Vec<Vec<u8>> {
+        self.stabs
+            .iter_mut()
+            .map(|s| core::mem::take(&mut s.name_bytes))
+            .collect()
     }
 
     /// Borrows the raw symbol names (pre-intern). The S7 pull fixpoint reads
@@ -1002,6 +1132,18 @@ impl InputObject {
             self.sections[si].relocs = decoded;
         }
         Ok(())
+    }
+
+    /// M129: patches the interned [`StringId`]s onto the debug-map stabs
+    /// (Pass 1 phase C — the stab-name twin of [`InputObject::finish`]).
+    /// `stab_name_ids[i]` is the [`StringId`] for stab table position
+    /// `i`, in the order [`InputObject::take_stab_names`] drained.
+    pub fn finish_stabs(&mut self, stab_name_ids: &[StringId]) {
+        for (i, s) in self.stabs.iter_mut().enumerate() {
+            if let Some(&id) = stab_name_ids.get(i) {
+                s.name = id;
+            }
+        }
     }
 
     /// Resolves one relocation's target to an interned name or local section.
