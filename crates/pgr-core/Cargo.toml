@@ -638,3 +638,30 @@ harness = false
 [[bench]]
 name = "dtrace"
 harness = false
+
+# M119 — the dylib module-policy decision (`-single_module`/
+# `-multi_module`): the shape-parity gate — the default `-multi_module`
+# plans no `LC_DYSYMTAB` module table (the legacy zero-module table
+# peregrine always carried, every pre-knob link byte-identical), and
+# `-single_module` dylib emits one 56-byte `DylibModule64` entry whose
+# subranges mirror the `LC_DYSYMTAB`'s locals/extdefs, over the same
+# 32-object dylib corpus.
+[[bench]]
+name = "module_policy"
+harness = false
+
+# M120: the `-executable` override bench — the link cost across the
+# explicit-filetype decision (the override forces `OutputType::Execute`,
+# the same shape the default carries — every pre-knob link byte-identical),
+# over a 32-object executable corpus.
+[[bench]]
+name = "executable"
+harness = false
+
+# M121: the `-warn_duplicate` advisory bench — the link cost across the
+# duplicate-symbol advisory decision (the advisory tallies the duplicate
+# strong-strong collisions without changing the resolution policy), over a
+# 32-object corpus whose second half redefines the first half's symbols.
+[[bench]]
+name = "warn_duplicate"
+harness = false
