@@ -341,6 +341,24 @@ pub struct LinkConfig {
     /// the relocatable output refuses it too (no segments) — the
     /// layout's re-check backs the driver surface's earlier refusal.
     pub image_base: Option<crate::image_base::ImageBase>,
+    /// M124 — the first segment's base address: ld64's `-seg1addr <address>`
+    /// (see [`crate::seg1addr`]) — the explicit override of the
+    /// constant-delta floor. The default (`None`) keeps the
+    /// kind-table base ([`PageZero`](crate::pagezero::PageZero) for
+    /// executables, [`ImageBase`](crate::image_base::ImageBase) for
+    /// dylibs — every pre-M124 link byte-identical) and a named
+    /// override shifts the first segment (`__TEXT` for a dylib; the
+    /// `__PAGEZERO` vmsize *and* the `__TEXT` vmaddr at once for an
+    /// executable — the constant-delta contract `vmaddr = fileoff +
+    /// base` holds either way). The value is validated at construction
+    /// ([`Seg1Addr::from_override`](crate::seg1addr::Seg1Addr::from_override));
+    /// bundles refuse the knob (the loader resolves the base) and the
+    /// relocatable output refuses it too (no segments) — one base knob
+    /// per output kind, never two (`-seg1addr` beside `-pagezero_size`
+    /// or `-image_base` names the same floor twice and the driver
+    /// surface refuses the pair) — the layout's re-check backs the
+    /// driver surface's earlier refusal.
+    pub seg1addr: Option<crate::seg1addr::Seg1Addr>,
     /// M20 — the dylib umbrella region: the `-sub_umbrella` /
     /// `-sub_library` members an umbrella dylib names beside its
     /// `LC_ID_DYLIB` (see [`crate::umbrella`]). The default (the empty
@@ -439,7 +457,7 @@ pub struct LinkConfig {
     pub no_pie: bool,
     /// M122 — the PIE positive-form twin: `-pie` is the explicit-decision
     /// mirror of the M27 `-no_pie` knob (ld64's flag "Force the creation
-    /// of an MH_PIE file" — the M120 `-executable` pattern over the PIE
+    /// of an `MH_PIE` file" — the M120 `-executable` pattern over the PIE
     /// bit). The default (`false`) keeps every pre-M122 link
     /// byte-identical — the bit the executable already carries rides
     /// unchanged — and the named decision holds the bit ON even when a
@@ -453,6 +471,24 @@ pub struct LinkConfig {
     /// knob — the layout's re-check backs the driver surface's earlier
     /// refusal (the M27 refusal shape, mirrored exactly).
     pub pie: bool,
+    /// M125 — the CPU subtype override: ld64's `-force_cpusubtype_ALL`
+    /// ("Force the cpusubtype to `CPU_SUBTYPE_ARM64_ALL`") forces the
+    /// output's `mach_header_64.cpusubtype` word to
+    /// `CPU_SUBTYPE_ARM64_ALL` regardless of the input objects'
+    /// subtypes. The default (`false`) keeps every pre-M125 link
+    /// byte-identical — the segmented path already writes
+    /// `CPU_SUBTYPE_ARM64_ALL` (the arm64 ALL subtype every pre-M125
+    /// image carried), so the knob is byte-identity (the M122 `-pie`
+    /// pattern over the cpusubtype word): the named decision carries
+    /// the same ALL the default does. Executable, dylib and bundle
+    /// outputs accept the knob (the header word is the producer's to
+    /// name); the relocatable output refuses it (the object's header is
+    /// the input's, verbatim — the M104/M105/M117 pattern, `link_reloc`
+    /// and the layout's re-check backing the driver surface's
+    /// `ForceCpuSubtypeConflict`). The verifier's read-side backstop
+    /// accepts the ALL shape without warning (the `check_header` gate
+    /// warns only on a non-ALL subtype).
+    pub force_cpusubtype_all: bool,
     /// M28 — the section-alignment floors: the `-sectalign <seg> <sect>
     /// <align>` decisions the packing engine reads when it aligns each
     /// output section (see [`crate::sect_align`]). The decision is a
@@ -1158,6 +1194,7 @@ impl Default for LinkConfig {
             seg_prots: crate::segprot::SegProts::default(),
             stack_size: None,
             image_base: None,
+            seg1addr: None,
             umbrella: crate::umbrella::Umbrella::new(),
             sub_clients: crate::sub_client::SubClient::new(),
             dyld_envs: crate::dyld_env::DyldEnv::new(),
@@ -1166,6 +1203,7 @@ impl Default for LinkConfig {
             dylinker: None,
             no_pie: false,
             pie: false,
+            force_cpusubtype_all: false,
             allow_stack_execute: false,
             bind_at_load: false,
             keep_local_symbols: true,
@@ -2184,6 +2222,45 @@ pub fn layout(
     live: &crate::deadstrip::LiveSet,
     fold: &crate::icf::FoldPlan,
 ) -> Result<Layout, LinkError> {
+    // M124: the first segment's base address is an executable/dylib
+    // decision — the layout's re-check backs the driver surface's
+    // earlier refusal, so no library caller can plan the shape either:
+    // a bundle's preferred load address is its loader's job (the host
+    // process `dlopen`s the bundle and maps it where it chooses), and
+    // the relocatable output carries no segments (M3). One base knob
+    // per output kind, never two: `-seg1addr` beside `-image_base` (a
+    // dylib) names the same `__TEXT` floor twice and the re-check
+    // refuses the pair (an executable beside `-image_base` is refused
+    // by the M19 re-check just below — the kind guard keeps the
+    // overlap check honest for the one kind both knobs admit).
+    if cfg.seg1addr.is_some() {
+        if !crate::seg1addr::Seg1Addr::admits(cfg.filetype) {
+            let (verdict, fix) = match cfg.filetype {
+                OutputType::Bundle => (
+                    "-seg1addr names the first segment's base address, but a \
+                     bundle's preferred load address is its loader's job",
+                    "the host process dlopens the bundle and maps it where it \
+                     chooses: link an executable or a dylib, or drop -seg1addr",
+                ),
+                _ => (
+                    "-seg1addr names the first segment's base address, but the \
+                     relocatable output carries no segments",
+                    "drop -seg1addr or link an executable or a dylib",
+                ),
+            };
+            return Err(LinkError::Layout {
+                message: format!("{verdict} — {fix}"),
+            });
+        }
+        if cfg.image_base.is_some() {
+            return Err(LinkError::Layout {
+                message: "-seg1addr and -image_base both name the dylib's __TEXT \
+                          base address — one base knob per output kind, never two \
+                          (drop one and relink)"
+                    .into(),
+            });
+        }
+    }
     // M19: the image base is a dylib/bundle decision — the layout's
     // re-check backs the driver surface's earlier refusal, so no library
     // caller can plan the shape either: an executable's base is
@@ -2626,6 +2703,27 @@ pub fn layout(
         };
         return Err(LinkError::Layout {
             message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M125: the CPU subtype override is a segmented-output decision —
+    // the `mach_header_64.cpusubtype` word is the producer's to name
+    // (an executable, a dylib or a bundle all carry the header the
+    // layout emits), but the relocatable output's header is the input's,
+    // verbatim (the M10 rung-1 contract — the object is itself a link
+    // input, its header word rides untouched). The refusal rides here
+    // (not only on the driver surface) so every caller pays it: a
+    // silently dropped knob would claim an ALL subtype the object does
+    // not carry (the M104/M105/M117 refusal shape, one header word
+    // over). The knob is byte-identity on the segmented path (the
+    // default already writes CPU_SUBTYPE_ARM64_ALL), so the refusal is
+    // the only shape the knob can break.
+    if cfg.force_cpusubtype_all && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-force_cpusubtype_ALL forces the output's cpusubtype to \
+                      CPU_SUBTYPE_ARM64_ALL, but the relocatable output's header is \
+                      the input's, verbatim — drop -force_cpusubtype_ALL or link a \
+                      final image (an executable, a dylib or a bundle)"
+                .into(),
         });
     }
     // M51: the stack-execution decision is an executable decision —
@@ -6736,6 +6834,13 @@ fn build_header(
 
     w32(&mut buf, 0, pgr_format::consts::MH_MAGIC_64);
     w32(&mut buf, 4, pgr_format::consts::CPU_TYPE_ARM64);
+    // M125: the cpusubtype word — `CPU_SUBTYPE_ARM64_ALL`. The default
+    // and the named `-force_cpusubtype_ALL` both carry ALL (every
+    // pre-M125 image carried it), so the knob is byte-identity (the
+    // M122 `-pie` pattern over the cpusubtype word): the decision rides
+    // `cfg.force_cpusubtype_all` (the driver surface refuses the knob
+    // on `-r`, the wire v76 carries it), and the byte is ALL either way
+    // — a future subtype-deriving default would read the same field.
     w32(&mut buf, 8, pgr_format::consts::CPU_SUBTYPE_ARM64_ALL);
     w32(&mut buf, 12, hi.filetype.filetype());
     w32(&mut buf, 16, ncmds);
