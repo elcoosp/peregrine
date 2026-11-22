@@ -64,7 +64,14 @@ fn full_resolve(
             .collect();
         res.install_dylibs(dylibs, &export_ids);
     }
-    res.require_all_resolved(interner, objects, UndefinedPolicy::Error, false)?;
+    res.require_all_resolved(
+        interner,
+        objects,
+        UndefinedPolicy::Error,
+        false,
+        pgr_core::resolve::ModulePolicy::default(),
+        false,
+    )?;
     res.apply_multiply_defined_policy(
         pgr_core::resolve::MultiplyDefinedPolicy::Error,
         interner,
@@ -94,6 +101,8 @@ fn reused_resolve(
         &[],
         &[],
         UndefinedPolicy::Error,
+        false,
+        pgr_core::resolve::ModulePolicy::default(),
         false,
         pgr_core::resolve::MultiplyDefinedPolicy::Error,
         &mut None,
