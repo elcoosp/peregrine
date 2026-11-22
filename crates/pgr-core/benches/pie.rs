@@ -1,9 +1,11 @@
-//! The PIE bench (M27): the link cost across the `-no_pie` decisions —
-//! the PIE default (the pre-M27 shape) and the dropped bit over the
-//! same corpus (64 objects, 256 rebase slots). The decision is one bit
-//! in one header word, so the honest expectation is parity — the bench
-//! pins "the released surface never regresses into the link's hot
-//! path" (the same shape gate the M26 loader-path bench rides).
+//! The PIE bench (M27/M122): the link cost across the PIE decisions —
+//! the default (the pre-M27 shape), the dropped bit (`-no_pie`, M27)
+//! and the explicit-decision mirror (`-pie`, M122 — last-wins the pair
+//! the M102 shape names) over the same corpus (64 objects, 256 rebase
+//! slots). The decision is one bit in one header word, so the honest
+//! expectation is parity — the bench pins "the released surface never
+//! regresses into the link's hot path" (the same shape gate the M26
+//! loader-path bench rides).
 //!
 //! Baseline note (docs/BENCHMARKS.md): recorded as a shape-parity gate
 //! on the dev sandbox.
@@ -71,7 +73,7 @@ fn bench_pie(c: &mut Criterion) {
     let mut group = c.benchmark_group("pie");
     let inputs = corpus();
     group.throughput(Throughput::Elements(OBJECTS as u64));
-    for name in ["pie_default", "no_pie"] {
+    for name in ["pie_default", "no_pie", "pie"] {
         group.bench_with_input(
             BenchmarkId::new("link_64_objects", name),
             &name,
@@ -80,6 +82,7 @@ fn bench_pie(c: &mut Criterion) {
                     let cfg = LinkConfig {
                         filetype: OutputType::Execute,
                         no_pie: *name == "no_pie",
+                        pie: *name == "pie",
                         ..LinkConfig::default()
                     };
                     let result = link(black_box(&inputs), &[], &cfg).expect("the corpus links");
