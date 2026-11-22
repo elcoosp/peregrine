@@ -582,6 +582,22 @@ harness = false
 name = "weak_reference_mismatches"
 harness = false
 
+# M124 — the first segment's base address (`-seg1addr`): the shape-parity
+# gate over the default constant-delta floor and a named override (the
+# base is one resolver read at the head of the segment planner — the
+# link cost never regresses when the floor shifts).
+[[bench]]
+name = "seg1addr"
+harness = false
+
+# M125 — the CPU subtype override (`-force_cpusubtype_ALL`): the
+# shape-parity gate over the default cpusubtype word and the named
+# override (the word is CPU_SUBTYPE_ARM64_ALL either way — the knob is
+# byte-identity, the M122 `-pie` pattern over the cpusubtype word).
+[[bench]]
+name = "force_cpusubtype_all"
+harness = false
+
 # M112 — the link-statistics report (`-print_statistics`): the seam's
 # near-parity — the stats collector rides the M54 observation seam (two
 # count updates per phase event, seven per segmented link, regardless of
