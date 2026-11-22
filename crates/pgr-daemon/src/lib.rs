@@ -269,7 +269,37 @@ mod tests {
         // exactly as the cold emit gates it; the ladder's replay rides
         // the decision (the M81 pattern — the decision is config, not a
         // product).
-        assert_eq!(crate::PROTO_VERSION, 69);
+        // and v70 carries the dylib module contract (M119, the tail after
+        // the dtrace byte): the session's warm pipeline plans the same
+        // single-module resolve shape the cold link plans (the parity
+        // gate is byte-identical — the escalation is Pass 2's own
+        // decision, the LC_DYSYMTAB module-table emit Pass 4's, the
+        // replay re-plans the shape the config names), and the verifier's
+        // read-side backstop gates the served module table exactly as the
+        // cold emit gates it; the ladder's replay rides the decision (the
+        // M81 pattern — the decision is config, not a product).
+        // and v71 carries the explicit executable override (M120, the tail
+        // after the module-policy byte): the session's warm pipeline plans
+        // the same MH_EXECUTE shape the cold link plans (the parity gate
+        // is byte-identical — the override forces OutputType::Execute, the
+        // __PAGEZERO/LC_MAIN/no-LC_ID_DYLIB shape the layout and emit
+        // already key on, the replay re-plans the shape the config names),
+        // and the verifier's read-side executable gate refuses an
+        // LC_ID_DYLIB on the served MH_EXECUTE exactly as the cold
+        // layout's re-check refuses it; the ladder's replay rides the
+        // decision (the M81 pattern — the decision is config, not a
+        // product).
+        // and v72 carries the duplicate-symbol advisory (M121, the tail
+        // after the executable byte): the session's warm pipeline plans the
+        // same tally the cold link plans (the parity gate is byte-identical
+        // — the advisory is a Pass-2 walk, the resolution policy itself
+        // unchanged, the replay re-plans the shape the config names), and
+        // the served duplicate_warnings tail carries the session's own
+        // collision entries verbatim (the M62 convention — the client
+        // prints the cold lane's face); the ladder's replay rides the
+        // decision (the M81 pattern — the decision is config, not a
+        // product).
+        assert_eq!(crate::PROTO_VERSION, 72);
     }
 
     #[test]
