@@ -31,6 +31,7 @@ use pgr_format::consts::{
     S_ATTR_SOME_INSTRUCTIONS, S_CSTRING_LITERALS, S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR,
     S_SYMBOL_STUBS, S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_VARIABLES, S_THREAD_LOCAL_ZEROFILL,
     S_ZEROFILL, SECTION_TYPE_MASK, STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
+    is_literal_section,
 };
 use rayon::prelude::*;
 
@@ -4521,11 +4522,15 @@ fn fold_aware_addr(
     atom_or_section_addr(atom_addr, addr_of, file, sect, value)
 }
 
-/// One `__cstring` literal instance (D4): a string atom of one input
-/// section, with the canonical instance it resolves to (itself when no
-/// earlier live copy exists). The piece list carries only canonical
-/// instances; every instance gets an `atom_addr` remap entry so references
-/// into duplicates land on the single output copy.
+/// One D4 mergeable literal instance — a `__cstring` string atom or a
+/// 4/8/16-byte literal atom of one input section, with the canonical
+/// instance it resolves to (itself when no earlier live copy exists). The
+/// piece list carries only canonical instances; every instance gets an
+/// `atom_addr` remap entry so references into duplicates land on the
+/// single output copy. M131 widens the M5 cstring-only record to the full
+/// D4 literal set (`S_CSTRING_LITERALS`, `S_4BYTE_LITERALS`,
+/// `S_8BYTE_LITERALS`, `S_16BYTE_LITERALS`) — the struct is content-blind,
+/// so the fixed-width literals ride the same machinery unchanged.
 #[derive(Debug, Clone)]
 pub struct CStringInstance {
     /// Owning input file.
@@ -4543,9 +4548,13 @@ pub struct CStringInstance {
 /// Builds the per-bucket piece lists (offsets assigned later by `place`).
 /// With dead-strip active (M5/D12), every live atom becomes one piece and
 /// dead atoms are dropped; without it the M1–M4 shape (one piece per input
-/// section) is preserved byte-for-byte. `S_CSTRING_LITERALS` buckets take
-/// the D4 path while `dedup` holds: one piece per unique string (first
-/// live instance canonical), every instance recorded for the remap table.
+/// section) is preserved byte-for-byte. The D4 mergeable literal buckets
+/// (`S_CSTRING_LITERALS`, `S_4BYTE_LITERALS`, `S_8BYTE_LITERALS`,
+/// `S_16BYTE_LITERALS`) take the dedup path while `dedup` holds: one piece
+/// per unique content (first live instance canonical), every instance
+/// recorded for the remap table — M131 widens the M5 cstring-only path to
+/// the fixed-width literals (the cstring machinery is content-keyed and
+/// width-agnostic once the parser splits the section into width atoms).
 /// The M41 `-no_deduplicate` decision falls them through the plain paths
 /// instead — one whole-section piece per input (or atom-granular under
 /// strip/order/fold, the dead literals still dropping) and no remap.
@@ -4591,19 +4600,19 @@ fn build_bucket_pieces(
             if bi == usize::MAX {
                 continue;
             }
-            // D4 while the M41 decision holds: cstring sections collect
-            // string instances; the bucket's pieces are the canonical
-            // (first live) copy of each unique string. With the dedup
-            // off (`-no_deduplicate`) the section falls through to the
-            // plain paths below — the verbatim pass-through.
-            let is_cstring = dedup
-                && !in_sect.zerofill
-                && in_sect.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
-            if is_cstring {
-                // D4: collect this section's string instances; the bucket's
+            // D4 while the M41 decision holds: the mergeable literal
+            // sections (cstring + 4/8/16-byte literals, M131) collect one
+            // instance per atom; the bucket's pieces are the canonical
+            // (first live) copy of each unique content. With the dedup off
+            // (`-no_deduplicate`) the section falls through to the plain
+            // paths below — the verbatim pass-through.
+            let is_literal = dedup && !in_sect.zerofill && is_literal_section(in_sect.flags);
+            if is_literal {
+                // D4: collect this section's literal instances; the bucket's
                 // pieces are the canonical (first live) copy of each unique
-                // string. Deterministic: files in FileId order, strings in
-                // offset order.
+                // content (a string for cstrings, a fixed-width value for
+                // 4/8/16-byte literals). Deterministic: files in FileId
+                // order, atoms in offset order.
                 let bucket = &mut pieces_of_bucket[bi];
                 // D4's find-or-insert: the match form used to hold the
                 // mutable borrow across the insert arm (clippy
@@ -5297,13 +5306,14 @@ fn place(
     let mut veneer_addr_of: std::collections::HashMap<(u32, usize, u32), u64> =
         std::collections::HashMap::new();
     for (si, s) in sections.iter().enumerate() {
-        // D4 while the M41 decision holds: cstring pieces feed the
-        // canonical-address table the remap loop reads. With the dedup
-        // off (`-no_deduplicate`) the pieces are ordinary ones — the
+        // D4 while the M41 decision holds: the mergeable literal pieces
+        // (cstring + 4/8/16-byte literals, M131) feed the canonical-address
+        // table the remap loop reads. With the dedup off
+        // (`-no_deduplicate`) the pieces are ordinary ones — the
         // atom-identity table below must see them (a dead-stripped or
         // ordered link moves literals; the containment lookups read the
         // moved addresses, not the section base).
-        let is_cstring = cfg.deduplicate && s.flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS;
+        let is_literal = cfg.deduplicate && is_literal_section(s.flags);
         for (pi, p) in s.pieces.iter().enumerate() {
             let addr = s.vm_addr + p.offset;
             flat.push(FlatPiece {
@@ -5320,8 +5330,10 @@ fn place(
                     .get(p.file.0 as usize)
                     .and_then(|o| o.sections.get(p.in_sect))
                     .map_or(0, |sect| sect.data.start);
-                if is_cstring {
-                    // D4: the canonical instance's output address.
+                if is_literal {
+                    // D4: the canonical instance's output address (a string
+                    // for cstrings, a fixed-width value for 4/8/16-byte
+                    // literals — M131 widens the M5 cstring-only table).
                     cstring_out.insert(
                         (
                             p.file.0,
@@ -5376,8 +5388,9 @@ fn place(
             }
         }
     }
-    // D4 remap entries: every live cstring instance resolves to its
-    // canonical copy's address plus the in-string offset.
+    // D4 remap entries: every live literal instance (a cstring string or a
+    // 4/8/16-byte literal value, M131) resolves to its canonical copy's
+    // address plus the in-literal offset.
     for (_bi, instances) in &cstring_instances {
         for inst in instances {
             if inst.canonical == usize::MAX {
@@ -5386,7 +5399,7 @@ fn place(
             let canon = &instances[inst.canonical];
             let Some(&canon_addr) = cstring_out.get(&(canon.file, canon.sect, canon.start)) else {
                 return Err(LinkError::Internal {
-                    message: "cstring canonical piece missing from placement".into(),
+                    message: "literal canonical piece missing from placement".into(),
                 });
             };
             atom_addr
@@ -5478,7 +5491,10 @@ fn apply_symbol_order(
         if *zerofill || contract_bucket(name) {
             continue;
         }
-        if *flags & SECTION_TYPE_MASK == S_CSTRING_LITERALS {
+        // D4: the mergeable literal buckets (cstring + 4/8/16-byte literals,
+        // M131) are the dedup surface — the instance remap references the
+        // canonical piece stream, so the rank sort never touches them.
+        if is_literal_section(*flags) {
             continue;
         }
         let pieces = &mut pieces_of_bucket[bi];
@@ -6393,10 +6409,7 @@ struct SymtabContext<'a> {
 /// plain locals and the hidden defs merge after them; the dysymtab
 /// `nlocalsym` count covers the whole locals range (the stab rows plus
 /// the plain locals plus the hidden defs).
-fn build_debug_map(
-    objects: &[InputObject],
-    ctx: &SymtabContext<'_>,
-) -> Vec<OutputSymbol> {
+fn build_debug_map(objects: &[InputObject], ctx: &SymtabContext<'_>) -> Vec<OutputSymbol> {
     // -S drops the whole debug map (the existing flag, no new flag).
     if ctx.strip_debug {
         return Vec::new();
