@@ -1097,3 +1097,11 @@ The `interposable` bench: a shape-parity gate over a 64-object dylib corpus with
 
 The `application_extension` bench: a shape-parity gate over a 64-object executable corpus — the default flags word (no `MH_APP_EXTENSION_SAFE` bit) and a named `-application_extension` override (the bit OR'd into the `mach_header_64.flags` word); the bit is the producer's own app-extension-safe decision (the App Store sandbox compatibility contract the system enforces on a `.appex`'s loaded images — never a layout product), so the two images differ only in the single flags word and the link cost never regresses when the decision is named (the named `false` face is byte-identical to the default — byte-identity, the M122 `-pie` pattern over the flags word); recorded on the dev sandbox (bounded `--measurement-time 1`).
 
+### M129 — the debug-map stabs decision
+
+The `debug_map` bench: the symtab-build throughput (ns) and the output symtab bytes over a generated stab-carrying corpus (`128x2048` and `256x2048` — 128/256 objects × 2048 stab-anchored symbols with the full `N_SO`/`N_OSO`/`N_FUN`/`N_GSYM`/`N_STSYM`/`N_LSYM`/`N_BNSYM`/`N_ENSYM` set), the bench measuring a real cost (the symtab builder's walk over the stab-carrying corpus, the stab re-addressing onto placed live atoms), not a byte-parity assertion — the byte-identity lock is the `m129_debug_map` gate; recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M130 — the ObjC-stubs synthesis decision
+
+The `objc_stubs` bench is pending the M130 synthesis code (the `__objc_stubs` synthesis lane lands in the M130 follow-up — this block records the bench's design ahead of the code, fixing the docs drift the skipped ceremony left). The planned shape: the stub-synthesis throughput (ns) and the output `__objc_stubs`/`__objc_methname` bytes over a generated `_objc_msgSend$<sel>` callsite corpus, the bench measuring the real cost (the selector classification, the stub emission, the `__objc_methname` dedup) once the synthesis lands; recorded on the dev sandbox (bounded `--measurement-time 1`) when the code ships.
+
