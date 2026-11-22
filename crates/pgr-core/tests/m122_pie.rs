@@ -1,5 +1,5 @@
 //! M122 — the PIE positive-form twin (`-pie`): ld64's flag ("Force the
-//! creation of an MH_PIE file") is the explicit-decision mirror of the
+//! creation of an `MH_PIE` file") is the explicit-decision mirror of the
 //! M27 `-no_pie` knob — the M120 `-executable` pattern over the PIE bit.
 //! The default keeps the pre-M122 bytes (every executable already
 //! carries `MH_PIE`); the named decision holds the bit ON even when a
