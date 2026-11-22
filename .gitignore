@@ -25,3 +25,6 @@ ship.toml
 # ship deliverables (validated dirty-tree, not committed)
 ship.toml
 .github/pr-body.md
+
+ship.toml
+.github/pr-body.md
