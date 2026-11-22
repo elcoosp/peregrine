@@ -1,6 +1,6 @@
 //! M129 — the debug-map stabs bench: the symtab-build throughput (ns)
 //! and the output symtab bytes over a generated corpus (>=128 objects ×
-//! >=2k symbols with stabs). The bench measures a **real** cost (the
+//! \>=2k symbols with stabs). The bench measures a **real** cost (the
 //! symtab builder's walk over the stab-carrying corpus, the stab
 //! re-addressing onto placed live atoms), not a byte-parity assertion —
 //! the gate is the debug map's own build, recorded in
@@ -31,9 +31,7 @@ fn stab_object(obj_idx: usize, n_symbols: usize) -> Vec<u8> {
     b.add_stab(ObjectStab::So {
         path: format!("{name}.c"),
     });
-    b.add_stab(ObjectStab::Oso {
-        path: name.clone(),
-    });
+    b.add_stab(ObjectStab::Oso { path: name.clone() });
     for i in 0..n_symbols {
         // The first symbol of the first object is `_main` (the entry the
         // executable link requires); the rest are `_fn_<obj>_<i>`.
@@ -92,25 +90,27 @@ fn bench_symtab_build(c: &mut Criterion) {
         let corpus = stab_corpus(n_objects, n_symbols);
         let input_count = n_objects * n_symbols;
         group.throughput(Throughput::Elements(input_count as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(format!(
-            "{n_objects}x{n_symbols}"
-        )), &corpus, |bencher, corpus| {
-            bencher.iter(|| {
-                let cfg = LinkConfig::default();
-                let result = link(corpus, &[], &cfg).expect("the link runs");
-                // The symtab is `result.layout.symbols`; the bench
-                // measures the build that produced it (the debug-map
-                // stabs re-addressed onto the placed live atoms ride
-                // inside this build).
-                black_box(&result.layout.symbols);
-                // The emitted image's symtab bytes — the output size
-                // the bench records beside the throughput.
-                let image = pgr_emit::build_image(&result.layout, &result.objects)
-                    .expect("the image emits");
-                let symtab_bytes = symtab_byte_len(&image);
-                black_box(symtab_bytes);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{n_objects}x{n_symbols}")),
+            &corpus,
+            |bencher, corpus| {
+                bencher.iter(|| {
+                    let cfg = LinkConfig::default();
+                    let result = link(corpus, &[], &cfg).expect("the link runs");
+                    // The symtab is `result.layout.symbols`; the bench
+                    // measures the build that produced it (the debug-map
+                    // stabs re-addressed onto the placed live atoms ride
+                    // inside this build).
+                    black_box(&result.layout.symbols);
+                    // The emitted image's symtab bytes — the output size
+                    // the bench records beside the throughput.
+                    let image = pgr_emit::build_image(&result.layout, &result.objects)
+                        .expect("the image emits");
+                    let symtab_bytes = symtab_byte_len(&image);
+                    black_box(symtab_bytes);
+                });
+            },
+        );
     }
     group.finish();
 }
