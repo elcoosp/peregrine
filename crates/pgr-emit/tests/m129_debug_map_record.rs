@@ -15,8 +15,8 @@
 
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, Parallelism, link_cached};
-use pgr_emit::incremental::LinkRecord;
 use pgr_emit::build_image_fused;
+use pgr_emit::incremental::LinkRecord;
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectStab, ObjectSymbol};
 
 /// A stab-free corpus: `_main` over a small `__text`.
@@ -85,8 +85,8 @@ fn link_and_record(corpus: &[LinkInput]) -> (LinkRecord, Vec<u8>) {
     };
     let result = link_cached(corpus, &[], &cfg, Parallelism::Auto, None).expect("the link runs");
     let image = build_image_fused(&result.layout, &result.objects).expect("the image emits");
-    let record =
-        LinkRecord::record(&result.layout, &result.objects, &image, None).expect("the record builds");
+    let record = LinkRecord::record(&result.layout, &result.objects, &image, None)
+        .expect("the record builds");
     (record, image)
 }
 
@@ -125,5 +125,9 @@ fn the_same_stab_corpus_records_identically() {
     // byte-identically (the fixed mtime is the determinism anchor).
     let (a, _) = link_and_record(&stab_corpus());
     let (b, _) = link_and_record(&stab_corpus());
-    assert_eq!(a.encode(), b.encode(), "the same stab corpus records identically");
+    assert_eq!(
+        a.encode(),
+        b.encode(),
+        "the same stab corpus records identically"
+    );
 }
