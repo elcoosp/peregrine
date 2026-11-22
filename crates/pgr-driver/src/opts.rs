@@ -449,6 +449,12 @@ pub struct Options {
     /// against the core seam's grammar at parse time; the output-kind
     /// conflict is `finish`'s (it sees the whole surface).
     pub image_base_explicit: bool,
+    /// M124: `-seg1addr` was passed explicitly. The value is validated
+    /// against the core seam's grammar at parse time; the output-kind
+    /// conflict (bundles, `-r`) and the one-base-per-kind overlap
+    /// (`-seg1addr` beside `-pagezero_size` or `-image_base`) are
+    /// `finish`'s (it sees the whole surface).
+    pub seg1addr_explicit: bool,
     /// M28: the `-sectalign` decisions staged in command order. `finish`
     /// inserts them into the config (the core seam validates the value
     /// and refuses a twice-named (segment, section)) after the
@@ -529,6 +535,7 @@ impl Default for Options {
             seg_prot_stage: Vec::new(),
             stack_size_explicit: false,
             image_base_explicit: false,
+            seg1addr_explicit: false,
             sect_align_stage: Vec::new(),
             headerpad_explicit: false,
             uuid_flags_seen: [false; 2],
@@ -824,6 +831,52 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     ImageBaseConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-seg1addr` value the grammar refuses (M124): the base is a
+    /// non-zero multiple of the 16 KiB arm64 page — the same validation
+    /// the core seam pays — and the help names the grammar (the fix,
+    /// not just the verdict).
+    #[error("invalid value for -seg1addr: {value}")]
+    #[diagnostic(help(
+        "the first segment's base is a non-zero multiple of the 16 KiB arm64 page (0x4000), \
+         decimal or 0x-hex — e.g. 0x40000000; the default is 0x100000000"
+    ))]
+    Seg1AddrValue {
+        /// The refused value as written.
+        value: String,
+    },
+    /// A `-seg1addr` surface conflict (M124): the knob names the first
+    /// segment's base — a bundle's preferred load address is its
+    /// loader's job (the host process maps the bundle where it
+    /// chooses), the relocatable output carries no segments, and one
+    /// base knob per output kind means `-seg1addr` beside
+    /// `-pagezero_size` (an executable) or `-image_base` (a dylib)
+    /// names the same floor twice. The verdict names the shape
+    /// conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    Seg1AddrConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-force_cpusubtype_ALL` surface conflict (M125): the knob
+    /// forces the output's `mach_header_64.cpusubtype` word to
+    /// `CPU_SUBTYPE_ARM64_ALL` — the relocatable output's header is the
+    /// input's, verbatim (the M10 rung-1 contract — the object is
+    /// itself a link input, its cpusubtype word rides untouched), so
+    /// the knob has no header word to patch on `-r`. Executable, dylib
+    /// and bundle outputs accept the knob (the header word is the
+    /// producer's to name). The verdict names the shape conflict; the
+    /// help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ForceCpuSubtypeConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -2648,6 +2701,22 @@ fn apply_flag(
             );
             opts.image_base_explicit = true;
         }
+        // M124: the first segment's base address (ld64's `-seg1addr
+        // <address>` — "Set the base address of the first segment"). The
+        // same validation the core seam pays runs here, so the refusal
+        // names the grammar; the output-kind conflict (bundles, `-r`)
+        // and the one-base-per-kind overlap are `finish`'s (it sees the
+        // whole surface).
+        "-seg1addr" => {
+            let v = next_value(args, i, arg)?;
+            let n =
+                parse_number(&v).ok_or_else(|| OptsError::Seg1AddrValue { value: v.clone() })?;
+            opts.config.seg1addr = Some(
+                pgr_core::Seg1Addr::from_override(n)
+                    .map_err(|_| OptsError::Seg1AddrValue { value: v.clone() })?,
+            );
+            opts.seg1addr_explicit = true;
+        }
         // M20: the umbrella region's members. The same validation the
         // core seam pays runs here, so the refusal names the grammar;
         // the output-kind conflict is `finish`'s (it sees the whole
@@ -2762,6 +2831,17 @@ fn apply_flag(
         // `finish`'s (it sees the whole surface).
         "-pie" => {
             opts.config.pie = true;
+        }
+        // M125: the CPU subtype override. ld64's `-force_cpusubtype_ALL`
+        // ("Force the cpusubtype to be CPU_SUBTYPE_ARM64_ALL") forces
+        // the output's `mach_header_64.cpusubtype` word to
+        // `CPU_SUBTYPE_ARM64_ALL` regardless of the input objects'
+        // subtypes. A boolean knob — the default already carries ALL
+        // (every pre-M125 link), so the knob is byte-identity (the M122
+        // `-pie` pattern over the cpusubtype word); the `-r` conflict
+        // is `finish`'s (it sees the whole surface).
+        "-force_cpusubtype_ALL" => {
+            opts.config.force_cpusubtype_all = true;
         }
         // M51: the stack-execution decision. ld64's flag ("Marks
         // executable so that all stacks in the task will be given stack
@@ -3375,6 +3455,85 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             }
             Ot::Dylib | Ot::Bundle => {}
         }
+    }
+    // M124: the first segment's base address is an executable/dylib
+    // decision — a bundle's preferred load address is its loader's job
+    // (the host process `dlopen`s the bundle and maps it where it
+    // chooses), and the relocatable output carries no segments. One
+    // base knob per output kind, never two: `-seg1addr` beside
+    // `-pagezero_size` (an executable) or `-image_base` (a dylib) names
+    // the same `__TEXT` floor twice. An explicitly named knob that
+    // cannot apply — or that names a floor another knob already named
+    // — is a refusal, never a silently dropped one (the library's
+    // re-checks back this so no caller can plan the shape either).
+    if opts.seg1addr_explicit {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Bundle => {
+                return Err(OptsError::Seg1AddrConflict {
+                    verdict: "-seg1addr names the first segment's base address, but \
+                              a bundle's preferred load address is its loader's job"
+                        .into(),
+                    fix: "the host process dlopens the bundle and maps it where it \
+                          chooses: link an executable or a dylib, or drop -seg1addr"
+                        .into(),
+                });
+            }
+            Ot::Relocatable => {
+                return Err(OptsError::Seg1AddrConflict {
+                    verdict: "-seg1addr names the first segment's base address, but \
+                              the relocatable output carries no segments"
+                        .into(),
+                    fix: "drop -seg1addr or link an executable or a dylib".into(),
+                });
+            }
+            Ot::Execute | Ot::Dylib => {}
+        }
+        if opts.pagezero_explicit && opts.config.filetype == Ot::Execute {
+            return Err(OptsError::Seg1AddrConflict {
+                verdict: "-seg1addr and -pagezero_size both name the executable's \
+                          __TEXT base address"
+                    .into(),
+                fix: "one base knob per output kind: drop -pagezero_size or \
+                      -seg1addr and relink"
+                    .into(),
+            });
+        }
+        if opts.image_base_explicit && opts.config.filetype == Ot::Dylib {
+            return Err(OptsError::Seg1AddrConflict {
+                verdict: "-seg1addr and -image_base both name the dylib's __TEXT \
+                          base address"
+                    .into(),
+                fix: "one base knob per output kind: drop -image_base or -seg1addr \
+                      and relink"
+                    .into(),
+            });
+        }
+    }
+    // M125: the CPU subtype override is a segmented-output decision —
+    // the `mach_header_64.cpusubtype` word is the producer's to name
+    // (an executable, a dylib or a bundle all carry the header the
+    // layout emits), but the relocatable output's header is the input's,
+    // verbatim (the M10 rung-1 contract — the object is itself a link
+    // input, its cpusubtype word rides untouched). An explicitly named
+    // knob that cannot apply is a refusal, never a silently dropped one
+    // (the library's re-checks back this so no caller can plan the
+    // shape either — the M104/M105/M117 refusal shape, one header word
+    // over). The knob is byte-identity on the segmented path (the
+    // default already writes CPU_SUBTYPE_ARM64_ALL), so the `-r`
+    // refusal is the only shape the knob can break.
+    if opts.config.force_cpusubtype_all
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::ForceCpuSubtypeConflict {
+            verdict: "-force_cpusubtype_ALL forces the output's cpusubtype to \
+                      CPU_SUBTYPE_ARM64_ALL, but the relocatable output's header is \
+                      the input's, verbatim"
+                .into(),
+            fix: "drop -force_cpusubtype_ALL or link a final image (an executable, \
+                  a dylib or a bundle)"
+                .into(),
+        });
     }
     // M20: the umbrella region is a dylib's identity block — the same
     // refusal shape as the M19 base above: an explicitly named knob
