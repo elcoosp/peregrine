@@ -1254,6 +1254,20 @@ fn link_to_image_recorded(
                     );
                     eprintln!("pgr: warning: common symbol {entry}");
                 }
+                // M121: the exit policy's duplicate-symbol advisory face —
+                // the session's own resolved state prints as the cold
+                // lane's `pgr: warning:` face (the v72 tail carried them
+                // verbatim; the off decision rides empty by policy — under
+                // the default `error` policy a collision refuses the link
+                // before the walk runs).
+                warnings += img.duplicate_warnings.len();
+                for entry in &img.duplicate_warnings {
+                    tracing::warn!(
+                        warn_duplicate = %entry,
+                        "the link exits 0 with a duplicated strong definition (the first one wins)"
+                    );
+                    eprintln!("pgr: warning: duplicate symbol {entry}");
+                }
                 // M109: the exit policy reads the tally — under
                 // `-fatal_warnings` the served faces' products are a hard
                 // failure (the image is never written; the one-shot
@@ -1454,6 +1468,11 @@ fn link_to_image_recorded(
     // M116: the common-symbol advisory face — the warn_commons decision
     // never moves the bytes, the exits still tally the face's product.
     warnings += print_commons_warnings(opts, &result);
+    // M121: the duplicate-symbol advisory face — the warn_duplicate
+    // decision never moves the bytes (the advisory tallies the duplicate
+    // strong definitions found during resolve without changing the
+    // resolution policy), the exit still tallies the face's product.
+    warnings += print_duplicate_warnings(opts, &result);
     // M109: the exit policy reads the tally — under `-fatal_warnings`
     // every advisory face's product is a hard failure (the image is
     // never built, never written); the default keeps the advisory exit.
@@ -1681,6 +1700,32 @@ fn print_commons_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) -
             "the link exits 0 with a common symbol resolved to a definition"
         );
         eprintln!("pgr: warning: common symbol {entry}");
+        warnings += 1;
+    }
+    warnings
+}
+
+/// M121: the duplicate-symbol advisory face — under `-warn_duplicate`,
+/// every duplicate strong-strong collision the resolver's walk recorded
+/// prints as a warning (the M103/M108/M116 advisory-face convention: a
+/// span, not a bare eprintln) and the link still exits 0 — ld64's face
+/// ("Cause ld to print a warning when a duplicate symbol definition is
+/// found"). Distinct from `-multiply_defined warning` (which changes the
+/// resolution policy to first-wins), the decision never changes the
+/// resolution policy itself; the default records nothing and prints
+/// nothing. Returns the number of warnings printed (the M109 tally the
+/// exit policy reads).
+fn print_duplicate_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) -> usize {
+    if !opts.config.warn_duplicate {
+        return 0;
+    }
+    let mut warnings = 0usize;
+    for entry in result.resolution.warn_duplicate_open() {
+        tracing::warn!(
+            warn_duplicate = %entry,
+            "the link exits 0 with a duplicated strong definition (the first one wins)"
+        );
+        eprintln!("pgr: warning: duplicate symbol {entry}");
         warnings += 1;
     }
     warnings
