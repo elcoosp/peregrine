@@ -314,6 +314,38 @@ pub const S_ATTR_LOC_RELOC: u32 = 0x0000_0100;
 /// `reserved1` of a `S_SYMBOL_STUBS` section: bytes per stub entry on arm64.
 pub const STUB_SIZE_ARM64: u32 = 12;
 
+/// M6/D-R3: the `__objc_stubs` section name — modern clang emits one
+/// per-callsite `_objc_msgSend$<selector>` undefined symbol; ld64 resolves
+/// each by synthesizing a fixed-stride stub in this `__TEXT` section that
+/// loads the selector string (from `__objc_methname`) into `x1`, the IMP
+/// (from a `__got` slot bound to `_objc_msgSend`) into `x16`, and branches.
+/// The section reuses `S_SYMBOL_STUBS` (0x8) — the type is the same shape
+/// as `__stubs`; the name distinguishes the objc family so the verifier's
+/// `objcstubs` check and the layout's selector-dedup planner can name it.
+pub const SECT_OBJC_STUBS: &[u8] = b"__objc_stubs";
+/// M6/D-R3: the `__objc_methname` section name — the NUL-terminated
+/// selector strings the synthesized stubs load into `x1`. ld64 dedups
+/// the strings like `S_CSTRING_LITERALS` (one byte per distinct
+/// selector); the section reuses type `S_CSTRING_LITERALS` (0x2).
+pub const SECT_OBJC_METHNAME: &[u8] = b"__objc_methname";
+/// M6/D-R3: `reserved1`/stride of a `S_SYMBOL_STUBS` `__objc_stubs`
+/// section: bytes per synthesized objc-msgSend stub on arm64. The stub
+/// is five 4-byte instructions (the ld64/Mach-O ABI the verifier
+/// crosschecks against a golden):
+/// `adrp x1, <methname@page>; add x1, x1, <methname@pageoff>;
+///  adrp x16, <got@page>; ldr x16, [x16, #<got@pageoff>]; br x16`.
+/// Five words × 4 bytes = 20 bytes per distinct selector.
+pub const OBJC_STUB_SIZE_ARM64: u32 = 20;
+/// M6/D-R3: the undefined-symbol prefix modern clang emits per
+/// `objc_msgSend` callsite — `_objc_msgSend$<selector>`. The Pass-2
+/// detector splits the suffix off the prefix to recover the selector
+/// string the stub loads into `x1`.
+pub const OBJC_MSGSEND_PREFIX: &[u8] = b"_objc_msgSend$";
+/// M6/D-R3: the runtime symbol every objc stub branches through —
+/// `libobjc`'s message dispatcher, the bind target of the paired
+/// `__got` slot.
+pub const OBJC_MSGSEND_SYMBOL: &[u8] = b"_objc_msgSend";
+
 // ---------------------------------------------------------------------------
 // Symbol table (`nlist_64`)
 // ---------------------------------------------------------------------------
@@ -772,7 +804,10 @@ pub const UNWIND_INFO_COMPRESSED_ENTRY_ENCODING_INDEX_SHIFT: u32 = 24;
 #[cfg(test)]
 mod tests {
     use super::{N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STSYM, StabKind, stab_kind};
-    use crate::consts::N_EXT;
+    use crate::consts::{
+        N_EXT, OBJC_MSGSEND_PREFIX, OBJC_MSGSEND_SYMBOL, OBJC_STUB_SIZE_ARM64, SECT_OBJC_METHNAME,
+        SECT_OBJC_STUBS,
+    };
 
     #[test]
     fn stab_kind_round_trips_the_eight_emitted_rows() {
@@ -815,5 +850,21 @@ mod tests {
         for n in [N_SO, N_OSO, N_FUN, N_GSYM, N_STSYM, N_LSYM, N_BNSYM, N_ENSYM] {
             assert!(n & crate::consts::N_STAB != 0, "0x{n:02x} is not a stab");
         }
+    }
+
+    #[test]
+    fn the_objc_stubs_constants_match_the_ld64_abi() {
+        // The section names and the stride mirror ld64's `__objc_stubs`
+        // shape (the Mach-O ABI the verifier's `objcstubs` family
+        // crosschecks against a golden). The stride is five arm64 words
+        // — `adrp x1; add x1; adrp x16; ldr x16; br x16` — so a stub
+        // off the stride is the malformed shape dyld's dispatch would
+        // misread.
+        assert_eq!(SECT_OBJC_STUBS, b"__objc_stubs");
+        assert_eq!(SECT_OBJC_METHNAME, b"__objc_methname");
+        assert_eq!(OBJC_STUB_SIZE_ARM64, 20);
+        assert_eq!(OBJC_STUB_SIZE_ARM64 % 4, 0, "five 4-byte instructions");
+        assert_eq!(OBJC_MSGSEND_PREFIX, b"_objc_msgSend$");
+        assert_eq!(OBJC_MSGSEND_SYMBOL, b"_objc_msgSend");
     }
 }
