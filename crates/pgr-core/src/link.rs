@@ -671,6 +671,17 @@ fn pull_and_intern(
     if intern_header_symbol {
         names.push(b"__mh_execute_header".to_vec());
     }
+    // M6/D-R3: `_objc_msgSend` joins the interner batch when any input
+    // object carries a `_objc_msgSend$<selector>` callsite, so Pass 3's
+    // stub synthesizer can name the runtime dispatcher the paired
+    // `__got` slot binds (the synthesizer never re-interns — the batch
+    // is the single source of `StringId`s, and the name rides it once).
+    let has_objc_callsites = names
+        .iter()
+        .any(|n| crate::objc::is_objc_msgsend_callsite(n));
+    if has_objc_callsites {
+        names.push(pgr_format::consts::OBJC_MSGSEND_SYMBOL.to_vec());
+    }
 
     let intern_started = Instant::now();
     let (interner, ids) = Interner::build_with(&names, parallel.is_parallel());
