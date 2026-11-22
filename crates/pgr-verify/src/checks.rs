@@ -133,6 +133,13 @@ pub enum Check {
     /// stay separate (the `-no_objc_category_merging` face) or their
     /// registration folded into the base classes (the default merge).
     Objc,
+    /// The `__objc_stubs` synthesis contract (M6/D-R3, M130): the
+    /// `__TEXT,__objc_stubs` section the linker synthesizes for
+    /// `_objc_msgSend$<selector>` callsites rides a whole
+    /// `OBJC_STUB_SIZE_ARM64` stride and the `S_SYMBOL_STUBS` type,
+    /// and the paired `__objc_methname` selector strings are
+    /// NUL-terminated.
+    ObjcStubs,
     /// The initializer-surface contract (M94): the
     /// `S_INIT_FUNC_OFFSETS`/`S_MOD_INIT_FUNC_POINTERS` sections dyld's
     /// load-time initializer walk consumes ride whole strides, the
@@ -174,7 +181,7 @@ pub enum Check {
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 16] = [
+    pub const ALL: [Check; 17] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
@@ -184,6 +191,7 @@ impl Check {
         Check::Unwind,
         Check::Tlv,
         Check::Objc,
+        Check::ObjcStubs,
         Check::InitOffsets,
         Check::Dtrace,
         Check::ModuleTable,
@@ -206,6 +214,7 @@ impl Check {
             Check::Unwind => "unwind",
             Check::Tlv => "tlv",
             Check::Objc => "objc",
+            Check::ObjcStubs => "objcstubs",
             Check::InitOffsets => "init_offsets",
             Check::Dtrace => "dtrace",
             Check::ModuleTable => "module_table",
@@ -228,13 +237,14 @@ impl Check {
             Check::Unwind => 6,
             Check::Tlv => 7,
             Check::Objc => 8,
-            Check::InitOffsets => 9,
-            Check::Dtrace => 10,
-            Check::ModuleTable => 11,
-            Check::DebugMap => 12,
-            Check::BranchRange => 13,
-            Check::DyldInfo => 14,
-            Check::Signature => 15,
+            Check::ObjcStubs => 9,
+            Check::InitOffsets => 10,
+            Check::Dtrace => 11,
+            Check::ModuleTable => 12,
+            Check::DebugMap => 13,
+            Check::BranchRange => 14,
+            Check::DyldInfo => 15,
+            Check::Signature => 16,
         }
     }
 }
@@ -507,6 +517,19 @@ impl ImageCheck for ObjcCheck {
     }
 }
 
+/// The M6/D-R3 (M130) `__objc_stubs` synthesis contract.
+struct ObjcStubsCheck;
+impl ImageCheck for ObjcStubsCheck {
+    fn check(&self) -> Check { Check::ObjcStubs }
+    fn summary(&self) -> &'static str {
+        "ObjC stubs: __objc_stubs stride/type, __objc_methname NUL-terminated"
+    }
+    fn codes(&self) -> &'static [Code] { &[Code::ObjcStubs] }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        crate::objcstubs::check_objc_stubs(ctx.bytes, ctx.report);
+    }
+}
+
 /// The M94 initializer-surface contract.
 struct InitOffsetsCheck;
 
@@ -729,7 +752,7 @@ pub trait CustomCheck: Sync {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 16] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 17] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
@@ -739,6 +762,7 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 16] = [
     &UnwindCheck,
     &TlvCheck,
     &ObjcCheck,
+    &ObjcStubsCheck,
     &InitOffsetsCheck,
     &DtraceCheck,
     &ModuleTableCheck,
