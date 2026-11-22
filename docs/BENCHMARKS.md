@@ -1085,3 +1085,15 @@ The `seg1addr` bench: a shape-parity gate over a 64-object executable corpus —
 
 The `force_cpusubtype_all` bench: a shape-parity gate over a 64-object executable corpus — the default cpusubtype word and a named `-force_cpusubtype_ALL` override; the word is `CPU_SUBTYPE_ARM64_ALL` either way (the default already carries it — the knob is byte-identity, the M122 `-pie` pattern over the cpusubtype word), so the two images are byte-identical and the link cost never regresses when the decision is named; recorded on the dev sandbox (bounded `--measurement-time 1`).
 
+### M126 — the output's atomization bit decision
+
+The `subsections_via_symbols` bench: a shape-parity gate over a 64-object executable corpus — the default flags word (no `MH_SUBSECTIONS_VIA_SYMBOLS` bit) and a named `-allow_subsections_via_symbols` override (the bit OR'd into the `mach_header_64.flags` word); the bit is the producer's own atomization decision (the dead-strip and ICF passes already read the bit from input objects since M5 — the output decision names whether the *producer* marks its own image atomizable, never a layout product), so the two images differ only in the single flags word and the link cost never regresses when the decision is named (the named `false` face is byte-identical to the default — byte-identity, the M122 `-pie` pattern over the flags word); recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M127 — the interpose-all dylib mark decision
+
+The `interposable` bench: a shape-parity gate over a 64-object dylib corpus with no weak-defined exports — the default flags word (no `MH_WEAK_DEFINES | MH_BINDS_TO_WEAK` bits) and a named `-interposable` override (both bits OR'd into the `mach_header_64.flags` word); the bits are the producer's own interpose-all decision (they ride the weak-define presence the M2 trie already priced — a dylib with no weak defines never carried the bits, so the named `false` face is byte-identical to the default — byte-identity, the M122 `-pie` pattern over the flags word), so the two images differ only in the single flags word and the link cost never regresses when the decision is named; recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M128 — the app-extension-safe mark decision
+
+The `application_extension` bench: a shape-parity gate over a 64-object executable corpus — the default flags word (no `MH_APP_EXTENSION_SAFE` bit) and a named `-application_extension` override (the bit OR'd into the `mach_header_64.flags` word); the bit is the producer's own app-extension-safe decision (the App Store sandbox compatibility contract the system enforces on a `.appex`'s loaded images — never a layout product), so the two images differ only in the single flags word and the link cost never regresses when the decision is named (the named `false` face is byte-identical to the default — byte-identity, the M122 `-pie` pattern over the flags word); recorded on the dev sandbox (bounded `--measurement-time 1`).
+
