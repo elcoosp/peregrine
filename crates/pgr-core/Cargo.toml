@@ -731,3 +731,13 @@ harness = false
 [[bench]]
 name = "debug_map"
 harness = false
+
+# M131: the literal-merge throughput bench — the D4 dedup's own price over
+# a generated 4-byte-literal corpus (32 objects × 16 literals, half shared)
+# beside the `-no_deduplicate` verbatim pass-through. The bench measures a
+# real cost (the per-bucket hash-bin find-or-insert over the fixed-width
+# literal atoms), not a byte-parity assertion — the byte-identity lock is
+# the `m131_literal_merge` gate; the numbers ride docs/BENCHMARKS.md.
+[[bench]]
+name = "literal_merge"
+harness = false
