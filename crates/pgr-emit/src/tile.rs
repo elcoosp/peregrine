@@ -435,6 +435,16 @@ impl<'a> TileCtx<'a> {
         if le.indirect_size > 0 {
             blob_spans.push(span(le.indirect_off, indirect.len() as u64, indirect));
         }
+        // M119: under -single_module the dylib carries one LC_DYSYMTAB
+        // module table entry — the fused path must write the same chunk
+        // the reference path writes (the M4 byte-identity contract).
+        if !layout.module_table.is_empty() {
+            blob_spans.push(span(
+                le.modtab_off,
+                layout.module_table.len() as u64,
+                &layout.module_table,
+            ));
+        }
         if let Some(cs) = layout
             .sections
             .iter()
