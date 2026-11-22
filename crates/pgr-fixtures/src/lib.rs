@@ -2028,7 +2028,8 @@ pub mod object;
 
 pub use archive::ArchiveBuilder;
 pub use object::{
-    ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol, read_relocs, read_section, read_sym,
+    FIXTURE_OSO_MTIME, ObjectBuilder, ObjectReloc, ObjectSection, ObjectStab, ObjectSymbol,
+    read_relocs, read_section, read_sym,
 };
 
 pub(crate) fn pad_name(name: &[u8]) -> [u8; 16] {
