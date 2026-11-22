@@ -299,7 +299,7 @@ mod tests {
         // prints the cold lane's face); the ladder's replay rides the
         // decision (the M81 pattern — the decision is config, not a
         // product).
-        assert_eq!(crate::PROTO_VERSION, 72);
+        assert_eq!(crate::PROTO_VERSION, 79);
     }
 
     #[test]
