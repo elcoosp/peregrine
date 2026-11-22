@@ -468,8 +468,15 @@ fn harness(
         &mut None,
     )
     .unwrap();
-    full.require_all_resolved(&interner, &objects, UndefinedPolicy::DynamicLookup, false)
-        .unwrap();
+    full.require_all_resolved(
+        &interner,
+        &objects,
+        UndefinedPolicy::DynamicLookup,
+        false,
+        pgr_core::resolve::ModulePolicy::default(),
+        false,
+    )
+    .unwrap();
     let snapshot = ResolutionSnapshot::capture(&objects, &interner, &full, &[], &[]);
     let digests = section_digests(&objects);
     (interner, objects, full, snapshot, digests)
@@ -491,6 +498,8 @@ fn the_reuse_replay_honors_the_mark() {
         &[],
         &mark_ids,
         UndefinedPolicy::DynamicLookup,
+        false,
+        pgr_core::resolve::ModulePolicy::default(),
         false,
         pgr_core::resolve::MultiplyDefinedPolicy::Error,
         &mut None,
