@@ -64,6 +64,7 @@ pub mod dynamic;
 pub mod export_trie;
 pub mod init_offsets;
 pub mod misc;
+pub mod module_table;
 pub mod objc;
 pub mod pair;
 pub mod report_json;
@@ -185,6 +186,14 @@ pub enum Code {
     /// saw still reports (the M115 read-side-backstop shape, one section
     /// type over).
     DtraceDof,
+    /// The `LC_DYSYMTAB` module table is malformed (M119): the
+    /// `modtaboff`/`nmodtab` the command carries point outside the file,
+    /// or a module entry's `ilocalsym`/`nlocalsym`/`iextdefsym`/
+    /// `nextdefsym` subrange exceeds the symbol table — the read-side
+    /// backstop the producer's `-single_module` emit-side gate mirrors,
+    /// regardless of how the table was produced (a malformed table the
+    /// producer never wrote still reports).
+    ModuleTable,
     /// Suspicious but non-fatal condition.
     Suspicious,
     /// A consumer-side check's own code (M67): the token a
@@ -201,7 +210,7 @@ impl Code {
     /// tooling can enumerate the surface the way `Check::ALL` enumerates
     /// the families). A consumer-side check's own tokens ride
     /// [`Code::Custom`] outside this table.
-    pub const ALL: [Code; 24] = [
+    pub const ALL: [Code; 25] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -225,6 +234,7 @@ impl Code {
         Code::ObjcRegistration,
         Code::InitOffsets,
         Code::DtraceDof,
+        Code::ModuleTable,
         Code::Suspicious,
     ];
 
@@ -255,6 +265,7 @@ impl Code {
             Code::ObjcRegistration => "objc_registration",
             Code::InitOffsets => "init_offsets",
             Code::DtraceDof => "dtrace_dof",
+            Code::ModuleTable => "module_table",
             Code::Suspicious => "suspicious",
             Code::Custom(token) => token,
         }
