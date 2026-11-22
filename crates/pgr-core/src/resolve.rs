@@ -458,6 +458,22 @@ pub struct Resolution {
     /// record from the resolved state on both resolve paths (the M107
     /// config pattern), the M81 replay riding the same way.
     warn_commons_open: std::collections::BTreeSet<String>,
+    /// M121: the duplicate-strong advisory entries `-warn_duplicate`
+    /// derived — one deterministic `"_name" (defined in input a and
+    /// input b)` entry per strong-strong collision the Pass-2 resolve
+    /// found (the same collision the `multiply_defined` policy prices),
+    /// sorted. Distinct from [`Self::multiply_defined_open`]: the
+    /// advisory tallies the collisions found during resolve *without*
+    /// changing the resolution policy (the default `error` still applies
+    /// unless overridden — under the default a collision refuses the
+    /// link and the walk never runs; the advisory rides the non-default
+    /// faces the way the M108/M116 warning faces do). The driver's
+    /// advisory face tallies the entries, prints them to stderr and
+    /// exits 0 (the M103/M108/M116 warning-face pattern); the decision
+    /// never changes the resolution policy itself — the walk derives the
+    /// record from the resolved state on both resolve paths (the M107
+    /// config pattern), the M81 replay riding the same way.
+    warn_duplicate_open: std::collections::BTreeSet<String>,
     /// M110: the exports the **hidden** dylibs carry (`-hidden_library`
     /// family) — interned name → the hidden dylib's index in
     /// [`Self::dylibs`], for the diagnostics that name the provider.
@@ -1091,6 +1107,75 @@ impl Resolution {
     /// [`Self::apply_warn_commons`]).
     pub fn warn_commons_open(&self) -> impl Iterator<Item = &str> {
         self.warn_commons_open.iter().map(String::as_str)
+    }
+    /// M121 — the duplicate-symbol advisory walk (`-warn_duplicate`):
+    /// ld64's face ("Cause ld to print a warning when a duplicate symbol
+    /// definition is found") — the advisory product the driver's warning
+    /// face tallies. Distinct from [`Self::apply_multiply_defined_policy`]
+    /// (which changes the resolution policy to first-wins under
+    /// `-multiply_defined warning`), the advisory never changes the
+    /// resolution policy itself: it tallies the duplicate strong
+    /// definitions found during Pass 2 resolve and the exit policy prints
+    /// them as warnings, still exiting 0. The default (`false`) records
+    /// nothing and every pre-M121 link is byte-identical (the advisory is
+    /// a measurement, never a layout product — the M109/M116 pattern's
+    /// face). The walk mirrors the `multiply_defined` policy's
+    /// collision-detection (the same strong-strong tie
+    /// [`Self::install_sect_def`] prices), derived from the resolved
+    /// state so both resolve paths reach the same entries (the M107
+    /// config pattern — the replay rides the decision, the M81 pattern).
+    /// Under the default `error` policy a collision refuses the link
+    /// before this walk runs (the policy's product is the refusal itself);
+    /// the advisory rides the non-default faces the way the M108 warning
+    /// face does.
+    pub fn apply_warn_duplicate(
+        &mut self,
+        warn: bool,
+        interner: &Interner,
+        objects: &[InputObject],
+    ) {
+        self.warn_duplicate_open.clear();
+        if !warn {
+            return;
+        }
+        for obj in objects {
+            for sym in &obj.symbols {
+                // The collision the advisory prices: two strong
+                // `N_SECT` definitions (direct-direct or pulled-pulled —
+                // the `install_sect_def` tie). A weak definition, a
+                // common and a pulled member against a direct definition
+                // never collide (the rank order decides those silently).
+                if sym.stab || !sym.external || !sym.is_defined() || sym.weak_def {
+                    continue;
+                }
+                let Some(winner) = self.defs.get(&sym.name.0) else {
+                    continue;
+                };
+                if winner.file == obj.file {
+                    continue;
+                }
+                let collides = match winner.rank {
+                    Rank::Strong => !obj.from_archive,
+                    Rank::ArchiveStrong => obj.from_archive,
+                    _ => false,
+                };
+                if !collides {
+                    continue;
+                }
+                self.warn_duplicate_open.insert(format!(
+                    "\"{}\" (defined in input {} and input {})",
+                    interner.name(sym.name),
+                    winner.file.0,
+                    obj.file.0
+                ));
+            }
+        }
+    }
+
+    /// The duplicate-symbol advisory entries the M121 walk derived (see
+    /// [`Self::apply_warn_duplicate`]).
+    pub fn warn_duplicate_open(&self) -> impl Iterator<Item = &str> {
+        self.warn_duplicate_open.iter().map(String::as_str)
     }
     /// The unresolved-open escalation for names the commons policy
     /// un-defined (M107): the names with no in-image definition, no
