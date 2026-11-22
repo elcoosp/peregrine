@@ -26,6 +26,10 @@ criterion = { workspace = true }
 # driver's surface tests ride it (the strict contract reads the
 # decision, not a constant).
 pgr-verify = { workspace = true }
+# M129: the debug-map gate emits the full image in-process to walk the
+# output symtab's stab rows (the header-only check the M102–M128 tests
+# ride does not carry the symtab).
+pgr-emit = { workspace = true }
 # The consumer example installs a subscriber under PGR_TRACING=1 so the
 # resolve-reuse seams (`resolve_reuse_plan`/`resolve_reuse_install`) are
 # watchable — the same inert-until-subscriber convention the binaries use.
@@ -716,4 +720,14 @@ harness = false
 # 32-object corpus whose second half redefines the first half's symbols.
 [[bench]]
 name = "warn_duplicate"
+harness = false
+
+# M129: the debug-map stabs bench — the symtab-build throughput (ns) and
+# the output symtab bytes over a generated corpus (>=128 objects × >=2k
+# symbols with stabs). The bench measures a real cost (the symtab
+# builder's walk over the stab-carrying corpus), not a byte-parity
+# assertion — the gate is the debug map's own build, recorded in
+# docs/BENCHMARKS.md.
+[[bench]]
+name = "debug_map"
 harness = false
