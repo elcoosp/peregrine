@@ -153,6 +153,16 @@ fn symbol_constants_match_object() {
         N_SECT,
         N_PBUD,
         N_INDR,
+        // M129: the eight debug-map stab `n_type` values (the ld64-shaped
+        // rows the debug-map plan re-addresses onto placed live atoms).
+        N_SO,
+        N_OSO,
+        N_FUN,
+        N_GSYM,
+        N_STSYM,
+        N_LSYM,
+        N_BNSYM,
+        N_ENSYM,
         REFERENCE_TYPE,
         REFERENCE_FLAG_UNDEFINED_NON_LAZY,
         REFERENCE_FLAG_UNDEFINED_LAZY,
