@@ -23,10 +23,10 @@
 
 use crate::protocol::{
     LinkRequest, PROTO_VERSION, TAG_BLOB, TAG_BYE, TAG_ERROR, TAG_HELLO, TAG_HELLO_ACK, TAG_IMAGE,
-    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_commons_warnings, encode_map,
-    encode_multiply_warnings, encode_policy_warnings, encode_provenance, encode_references,
-    encode_statistics, encode_time_report, encode_trace, encode_verify_report, put_bytes, put_hash,
-    put_str, put_u8, put_u32, put_u64,
+    TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_commons_warnings, encode_duplicate_warnings,
+    encode_map, encode_multiply_warnings, encode_policy_warnings, encode_provenance,
+    encode_references, encode_statistics, encode_time_report, encode_trace, encode_verify_report,
+    put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
 };
 use crate::session::ResidentSession;
 use std::io::{Read, Write};
@@ -351,6 +351,10 @@ fn serve_link(
             // `-warn_commons`) — the session's own resolved state
             // renders, the client prints the cold lane's face.
             encode_commons_warnings(&mut b, &served.commons_warnings);
+            // The v72 tail: the duplicate-symbol advisory entries (M121,
+            // `-warn_duplicate`) — the session's own resolved state
+            // renders, the client prints the cold lane's face.
+            encode_duplicate_warnings(&mut b, &served.duplicate_warnings);
             // The v63 tail: the link-statistics report when the request
             // asked (the session's own run's counts, the M62 convention
             // — the client prints the cold lane's face), absent otherwise.
