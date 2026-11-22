@@ -882,6 +882,61 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-allow_subsections_via_symbols` surface conflict (M126): the
+    /// knob ORs `MH_SUBSECTIONS_VIA_SYMBOLS` into the output's
+    /// `mach_header_64.flags` word — the relocatable output's header is
+    /// the input's, verbatim (the M10 rung-1 contract — the object is
+    /// itself a link input, its flags word rides untouched), so the
+    /// knob has no header word to patch on `-r`. The default (`false`)
+    /// keeps every pre-M126 link byte-identical (the segmented path
+    /// never set the bit). Executable, dylib and bundle outputs accept
+    /// the knob (the header word is the producer's to name). The
+    /// verdict names the shape conflict; the help is the fix — the
+    /// house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    SubsectionsViaSymbolsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-interposable` surface conflict (M127): the knob marks a
+    /// dylib's exports as interposable — `MH_WEAK_DEFINES |
+    /// MH_BINDS_TO_WEAK` OR into the output's `mach_header_64.flags`
+    /// word. An executable's identity is `LC_MAIN` (the kernel loads
+    /// it), a bundle dlopens without an export table to interpose, and
+    /// the relocatable output's header is the input's, verbatim (the M10
+    /// rung-1 contract — the object is itself a link input, its flags
+    /// word rides untouched). The default (`false`) keeps every pre-M127
+    /// link byte-identical. The verdict names the shape conflict; the
+    /// help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    InterposableConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-application_extension` surface conflict (M128): the knob ORs
+    /// `MH_APP_EXTENSION_SAFE` into the output's `mach_header_64.flags`
+    /// word — the relocatable output's header is the input's, verbatim
+    /// (the M10 rung-1 contract — the object is itself a link input, its
+    /// flags word rides untouched), so the knob has no header word to
+    /// patch on `-r`. The default (`false`) keeps every pre-M128 link
+    /// byte-identical. Executable, dylib and bundle outputs accept the
+    /// knob (the header word is the producer's to name). The verdict
+    /// names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ApplicationExtensionConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// A `-sub_umbrella`/`-sub_library` member the core seam refuses
     /// (M20): non-empty, NUL-free, named once. The seam's refusal rides
     /// the help — the grammar the flag accepts, not just the verdict.
@@ -2843,6 +2898,45 @@ fn apply_flag(
         "-force_cpusubtype_ALL" => {
             opts.config.force_cpusubtype_all = true;
         }
+        // M126: the output image's atomization decision. ld64's flags
+        // `-allow_subsections_via_symbols`/`-no_allow_subsections_via_symbols`
+        // ("Turn on/off the `MH_SUBSECTIONS_VIA_SYMBOLS` bit in the
+        // output mach-O header") — a boolean pair, last-wins (the M102
+        // `-bind_at_load`/`-no_bind_at_load` shape): the emit reads
+        // `cfg.subsections_via_symbols`. The default (`false`) keeps
+        // every pre-M126 link byte-identical (the segmented path never
+        // set the bit); the `-r` conflict is `finish`'s (it sees the
+        // whole surface).
+        "-allow_subsections_via_symbols" => {
+            opts.config.subsections_via_symbols = true;
+        }
+        "-no_allow_subsections_via_symbols" => {
+            opts.config.subsections_via_symbols = false;
+        }
+        // M127: the dylib's export-interposability decision. ld64's
+        // `-interposable` marks a dylib's exports as interposable — the
+        // loader consults `MH_WEAK_DEFINES | MH_BINDS_TO_WEAK` on the
+        // image's `mach_header_64.flags` word to treat every export as
+        // overridable at runtime. A boolean knob — the default (`false`)
+        // keeps every pre-M127 link byte-identical (the bits ride the
+        // weak-define presence the M2 trie already priced); the
+        // output-kind conflicts (executable, bundle, `-r`) are
+        // `finish`'s (it sees the whole surface).
+        "-interposable" => {
+            opts.config.interposable = true;
+        }
+        // M128: the app-extension-safe decision. ld64's
+        // `-application_extension` marks the image as
+        // app-extension-safe — the loader consults
+        // `MH_APP_EXTENSION_SAFE` on the image's
+        // `mach_header_64.flags` word for the App Store's sandbox
+        // compatibility contract. A boolean knob — the default (`false`)
+        // keeps every pre-M128 link byte-identical (the segmented path
+        // never set the bit); the `-r` conflict is `finish`'s (it sees
+        // the whole surface).
+        "-application_extension" => {
+            opts.config.application_extension = true;
+        }
         // M51: the stack-execution decision. ld64's flag ("Marks
         // executable so that all stacks in the task will be given stack
         // execution privilege") — a boolean knob like the M27 PIE
@@ -3532,6 +3626,90 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 .into(),
             fix: "drop -force_cpusubtype_ALL or link a final image (an executable, \
                   a dylib or a bundle)"
+                .into(),
+        });
+    }
+    // M126: the output image's atomization decision — the
+    // `MH_SUBSECTIONS_VIA_SYMBOLS` bit is the producer's to name (an
+    // executable, a dylib or a bundle all carry the header the layout
+    // emits), but the relocatable output's header is the input's,
+    // verbatim (the M10 rung-1 contract — the object is itself a link
+    // input, its flags word rides untouched). The default (`false`)
+    // never refused before (the pre-M126 shape), so the refusal fires
+    // only on the named `true` face (the M104/M105/M117 refusal shape,
+    // one header word over, mirrored exactly so no library caller can
+    // plan the shape either — the layout's re-check and `link_reloc`
+    // back this).
+    if opts.config.subsections_via_symbols
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::SubsectionsViaSymbolsConflict {
+            verdict: "-allow_subsections_via_symbols sets the output's \
+                      MH_SUBSECTIONS_VIA_SYMBOLS bit, but the relocatable output's \
+                      header is the input's, verbatim"
+                .into(),
+            fix: "drop -allow_subsections_via_symbols or link a final image (an \
+                  executable, a dylib or a bundle)"
+                .into(),
+        });
+    }
+    // M127: the dylib's export-interposability decision — the knob is a
+    // dylib's decision (an executable's identity is `LC_MAIN` — the
+    // kernel loads it; a bundle dlopens without an export table to
+    // interpose; the relocatable output's header is the input's,
+    // verbatim). The M104/M105/M117 refusal shape, mirrored exactly so
+    // no library caller can plan the shape either. The default (`false`)
+    // never refused before (the pre-M127 shape), so the refusal fires
+    // only on the named `true` face.
+    if opts.config.interposable && opts.config.filetype != pgr_core::layout::OutputType::Dylib {
+        let (verdict, fix) = match opts.config.filetype {
+            pgr_core::layout::OutputType::Execute => (
+                "-interposable marks a dylib's exports as interposable, but \
+                 this output is an executable"
+                    .into(),
+                "an executable's identity is LC_MAIN (the kernel loads it), \
+                 not an export table to interpose: link a dylib (-dylib) or \
+                 drop -interposable"
+                    .into(),
+            ),
+            pgr_core::layout::OutputType::Bundle => (
+                "-interposable marks a dylib's exports as interposable, but \
+                 this output is a bundle"
+                    .into(),
+                "a bundle dlopens without an export table to interpose: link \
+                 a dylib (-dylib) or drop -interposable"
+                    .into(),
+            ),
+            _ => (
+                "-interposable marks a dylib's exports as interposable, but \
+                 the relocatable output's header is the input's, verbatim"
+                    .into(),
+                "drop -interposable or link a dylib".into(),
+            ),
+        };
+        return Err(OptsError::InterposableConflict { verdict, fix });
+    }
+    // M128: the app-extension-safe decision — the
+    // `MH_APP_EXTENSION_SAFE` bit is the producer's to name (an
+    // executable, a dylib or a bundle all carry the header the layout
+    // emits), but the relocatable output's header is the input's,
+    // verbatim (the M10 rung-1 contract — the object is itself a link
+    // input, its flags word rides untouched). The default (`false`)
+    // never refused before (the pre-M128 shape), so the refusal fires
+    // only on the named `true` face (the M104/M105/M117 refusal shape,
+    // one header word over, mirrored exactly so no library caller can
+    // plan the shape either — the layout's re-check and `link_reloc`
+    // back this).
+    if opts.config.application_extension
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::ApplicationExtensionConflict {
+            verdict: "-application_extension sets the output's \
+                      MH_APP_EXTENSION_SAFE bit, but the relocatable output's \
+                      header is the input's, verbatim"
+                .into(),
+            fix: "drop -application_extension or link a final image (an \
+                  executable, a dylib or a bundle)"
                 .into(),
         });
     }
