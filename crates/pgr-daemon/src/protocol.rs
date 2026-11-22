@@ -447,7 +447,28 @@ use std::time::Duration;
 /// — the cpusubtype word is ALL either way, the M122 `-pie` pattern
 /// over the cpusubtype word), and the ladder's replay rides the
 /// decision (the M81 pattern — the decision is config, not a product).
-pub const PROTO_VERSION: u32 = 76;
+/// **v77** names the M126 round: the output image's atomization
+/// decision (`-allow_subsections_via_symbols`) rides the tail after the
+/// CPU-subtype override — one byte; the session's warm pipeline plans
+/// the same `MH_SUBSECTIONS_VIA_SYMBOLS` flags word the cold link
+/// plans (the parity gate is byte-identical — the bit is header-level,
+/// the producer's to name, the M122 `-pie` pattern over the flags
+/// word), and the ladder's replay rides the decision (the M81 pattern).
+/// **v78** names the M127 round: the dylib's export-interposability
+/// decision (`-interposable`) rides the tail after the atomization
+/// decision — one byte; the session's warm pipeline plans the same
+/// `MH_WEAK_DEFINES | MH_BINDS_TO_WEAK` flags word the cold link plans
+/// (the parity gate is byte-identical — the bits are header-level, the
+/// producer's to name, the M122 `-pie` pattern over the flags word),
+/// and the ladder's replay rides the decision (the M81 pattern).
+/// **v79** names the M128 round: the app-extension-safe decision
+/// (`-application_extension`) rides the tail after the interposable
+/// decision — one byte; the session's warm pipeline plans the same
+/// `MH_APP_EXTENSION_SAFE` flags word the cold link plans (the parity
+/// gate is byte-identical — the bit is header-level, the producer's to
+/// name, the M122 `-pie` pattern over the flags word), and the
+/// ladder's replay rides the decision (the M81 pattern).
+pub const PROTO_VERSION: u32 = 79;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -2139,6 +2160,34 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // refusal fires on the cold link before a request carries the byte),
     // never the pre-M125 carrying default.
     put_u8(out, u8::from(cfg.force_cpusubtype_all));
+    // M126 (v77 wire): the output image's atomization decision rides
+    // the tail after the CPU-subtype override — one byte; a resident
+    // relink plans the same `MH_SUBSECTIONS_VIA_SYMBOLS` flags word the
+    // client asked for (the bit is header-level, the producer's to
+    // name — the segmented path's `build_header` is the decision site;
+    // the `-r` refusal fires on the cold link before a request carries
+    // the byte), never the pre-M126 absence (the default never set the
+    // bit, every pre-knob link byte-identical).
+    put_u8(out, u8::from(cfg.subsections_via_symbols));
+    // M127 (v78 wire): the dylib's export-interposability decision
+    // rides the tail after the atomization decision — one byte; a
+    // resident relink plans the same `MH_WEAK_DEFINES | MH_BINDS_TO_WEAK`
+    // flags word the client asked for (the bits are header-level, the
+    // producer's to name — the segmented path's `build_header` is the
+    // decision site; the output-kind refusals fire on the cold link
+    // before a request carries the byte), never the pre-M127 absence
+    // (the default never set the bits on a no-weak-define dylib, every
+    // pre-knob link byte-identical).
+    put_u8(out, u8::from(cfg.interposable));
+    // M128 (v79 wire): the app-extension-safe decision rides the tail
+    // after the interposable decision — one byte; a resident relink
+    // plans the same `MH_APP_EXTENSION_SAFE` flags word the client asked
+    // for (the bit is header-level, the producer's to name — the
+    // segmented path's `build_header` is the decision site; the `-r`
+    // refusal fires on the cold link before a request carries the byte),
+    // never the pre-M128 absence (the default never set the bit, every
+    // pre-knob link byte-identical).
+    put_u8(out, u8::from(cfg.application_extension));
     // M33 (v24 wire): the private-extern keep rides the tail after the
     // UUID suppression — one byte; a resident relink carries the
     // private-extern decision the client asked for, never the pre-M33
@@ -2662,6 +2711,21 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // cpusubtype word; the `-r` refusal fires on the cold link before a
     // request carries the byte).
     let force_cpusubtype_all = r.u8()? != 0;
+    // M126 (v77 wire): the output image's atomization decision — one
+    // byte, no validation beyond the bool (the bit is header-level,
+    // the producer's to name; the `-r` refusal fires on the cold link
+    // before a request carries the byte).
+    let subsections_via_symbols = r.u8()? != 0;
+    // M127 (v78 wire): the dylib's export-interposability decision —
+    // one byte, no validation beyond the bool (the bits are
+    // header-level, the producer's to name; the output-kind refusals
+    // fire on the cold link before a request carries the byte).
+    let interposable = r.u8()? != 0;
+    // M128 (v79 wire): the app-extension-safe decision — one byte, no
+    // validation beyond the bool (the bit is header-level, the
+    // producer's to name; the `-r` refusal fires on the cold link
+    // before a request carries the byte).
+    let application_extension = r.u8()? != 0;
     // M33 (v24 wire): the private-extern keep — one byte, no
     // validation beyond the bool (the conversion is the default; the
     // input `N_PEXT` bit names where the decision fires).
@@ -2915,6 +2979,9 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         image_base,
         seg1addr,
         force_cpusubtype_all,
+        subsections_via_symbols,
+        interposable,
+        application_extension,
         umbrella,
         sub_clients,
         dyld_envs,
@@ -3117,6 +3184,21 @@ mod tests {
             // asked for — the cpusubtype word is ALL either way, the
             // M122 `-pie` pattern over the cpusubtype word).
             force_cpusubtype_all: true,
+            // The v77 tail: the output image's atomization decision
+            // rides the default-flipped face here — the decision the
+            // round-trip test flips (the bit is off by default, so the
+            // rich fixture carries it on).
+            subsections_via_symbols: true,
+            // The v78 tail: the dylib's export-interposability decision
+            // rides the default-flipped face here — the decision the
+            // round-trip test flips (the bits are off by default on a
+            // no-weak-define dylib, so the rich fixture carries them on).
+            interposable: true,
+            // The v79 tail: the app-extension-safe decision rides the
+            // default-flipped face here — the decision the round-trip
+            // test flips (the bit is off by default, so the rich
+            // fixture carries it on).
+            application_extension: true,
             // The v13 tail: a non-default umbrella region must survive
             // the round trip verbatim, in flag order (a resident relink
             // emits the region the client named, never the pre-M20
@@ -7027,6 +7109,220 @@ mod tests {
         .expect("the frame decodes");
         assert!(
             !back.config.force_cpusubtype_all,
+            "the off decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_subsections_via_symbols_decision_round_trips() {
+        // v77: the output image's atomization decision must survive the
+        // round trip verbatim (a resident relink plans the same
+        // `MH_SUBSECTIONS_VIA_SYMBOLS` flags word the client asked for —
+        // the bit is header-level, the producer's to name, the M81
+        // replay rides the config).
+        let cfg = rich_config();
+        assert!(
+            cfg.subsections_via_symbols,
+            "rich_config carries the v77 knob"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.subsections_via_symbols,
+            "the subsections_via_symbols decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M126 absence — the bit is off
+        // by default, every pre-knob link byte-identical).
+        let mut cfg = rich_config();
+        cfg.subsections_via_symbols = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.subsections_via_symbols,
+            "the off decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_interposable_decision_round_trips() {
+        // v78: the dylib's export-interposability decision must survive
+        // the round trip verbatim (a resident relink plans the same
+        // `MH_WEAK_DEFINES | MH_BINDS_TO_WEAK` flags word the client
+        // asked for — the bits are header-level, the producer's to
+        // name, the M81 replay rides the config).
+        let cfg = rich_config();
+        assert!(cfg.interposable, "rich_config carries the v78 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.interposable,
+            "the interposable decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M127 absence — the bits are
+        // off by default on a no-weak-define dylib, every pre-knob link
+        // byte-identical).
+        let mut cfg = rich_config();
+        cfg.interposable = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.interposable,
+            "the off decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_application_extension_decision_round_trips() {
+        // v79: the app-extension-safe decision must survive the round
+        // trip verbatim (a resident relink plans the same
+        // `MH_APP_EXTENSION_SAFE` flags word the client asked for — the
+        // bit is header-level, the producer's to name, the M81 replay
+        // rides the config).
+        let cfg = rich_config();
+        assert!(
+            cfg.application_extension,
+            "rich_config carries the v79 knob"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.application_extension,
+            "the application_extension decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M128 absence — the bit is off
+        // by default, every pre-knob link byte-identical).
+        let mut cfg = rich_config();
+        cfg.application_extension = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.application_extension,
             "the off decision crosses byte-for-byte"
         );
     }
