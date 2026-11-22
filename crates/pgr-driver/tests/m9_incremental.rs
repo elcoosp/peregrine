@@ -772,12 +772,13 @@ fn record_v5_carries_the_resolution_and_the_relink_renews_it() {
     // plan — the resolve wiring's v5 gate rides, bumped to v6; M82: the
     // chain word family joins the record, bumped to v7; M99: the named
     // output UUID joins the plan's echo, bumped to v8; M114: the UUID
-    // source joins the plan's echo, bumped to v9 (the sidecar the
-    // relink renews rides the fresh byte either way).
+    // source joins the plan's echo, bumped to v9; M119: the LC_DYSYMTAB
+    // module-table offset joins the plan tail, bumped to v10 (the
+    // sidecar the relink renews rides the fresh byte either way).
     assert_eq!(
-        first.format_version, 9,
-        "the M30 carriage, the M82 family, the M99 name and the M114 source \
-         bump the record format to v9"
+        first.format_version, 10,
+        "the M30 carriage, the M82 family, the M99 name, the M114 source \
+         and the M119 module-table offset bump the record format to v10"
     );
     let snap = first
         .resolution
