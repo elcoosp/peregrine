@@ -591,6 +591,15 @@ pub struct Resolution {
     /// directly, never escalating through the `-undefined` policy (the
     /// drop *is* the intended flat ride).
     multiply_defined_dynamic: BTreeSet<u32>,
+    /// M6/D-R3: the `_objc_msgSend$<selector>` callsite names modern clang
+    /// emits as undefineds — the synthesizer (Pass 3) resolves each by
+    /// planning a `__TEXT,__objc_stubs` stub and a paired `__got` slot
+    /// bound to `_objc_msgSend`. These names never ride the dylib-export
+    /// or loader-export lanes; the synthesizer is their resolution, so
+    /// [`Self::require_all_resolved`] early-continues for them (the
+    /// pre-synthesizer `ld64` shape — the callsite family is its own
+    /// lane, neither a missing-symbol error nor a runtime lookup).
+    objc_stub_names: BTreeSet<u32>,
     /// M108: the collision entries the `Warning`/`Suppress` faces
     /// derived — one deterministic `"_name" (defined in input a and
     /// input b)` entry per strong-strong collision, sorted. The exit
@@ -759,6 +768,14 @@ impl Resolution {
                         .entry(key)
                         .or_default()
                         .push((obj.file, sym_i));
+                    // M6/D-R3: a `_objc_msgSend$<selector>` callsite is
+                    // its own resolution lane — the synthesizer (Pass 3)
+                    // plans the `__objc_stubs` stub and the paired
+                    // `__got` slot bound to `_objc_msgSend`, so the name
+                    // never rides the missing-symbol error lane.
+                    if crate::objc::is_objc_msgsend_callsite(interner.name(sym.name).as_bytes()) {
+                        self.objc_stub_names.insert(key);
+                    }
                     // M113: the reference-trace face — one event per visit
                     // (the name as the resolver saw it, the input that
                     // carries it), built only when a subscriber rides (the
@@ -914,6 +931,26 @@ impl Resolution {
     #[must_use]
     pub fn is_loader_export(&self, id: StringId) -> bool {
         self.loader_exports.contains(&id.0)
+    }
+
+    /// M6/D-R3: true when the name is a `_objc_msgSend$<selector>`
+    /// callsite the synthesizer resolves (Pass 3 plans the
+    /// `__objc_stubs` entry and the paired `__got` slot). The
+    /// resolution lane these names ride instead of the error lane —
+    /// `require_all_resolved` early-continues for them.
+    #[must_use]
+    pub fn is_objc_msgsend_callsite(&self, id: StringId) -> bool {
+        self.objc_stub_names.contains(&id.0)
+    }
+
+    /// M6/D-R3: the interned names of every `_objc_msgSend$<selector>`
+    /// callsite the synthesizer resolves, in insertion (scan) order —
+    /// the canonical order `scan_needs` reads to plan the
+    /// `__objc_stubs` pieces (first-use, mirroring the `__stubs`
+    /// family's own contract).
+    #[must_use]
+    pub fn objc_stub_names(&self) -> &BTreeSet<u32> {
+        &self.objc_stub_names
     }
 
     /// Installs the dylib list (Pass 2 step 1b) and resolves two-level
@@ -1533,6 +1570,12 @@ impl Resolution {
                     {
                         continue;
                     }
+                    // M6/D-R3: a `_objc_msgSend$<selector>` callsite's
+                    // resolution is the synthesizer (Pass 3's
+                    // `__objc_stubs` plan), not a missing-symbol error.
+                    if self.objc_stub_names.contains(&id.0) {
+                        continue;
+                    }
                     // M110: the relocation's only provider is a hidden
                     // dylib (the `-U` wording below never applies — the
                     // name resolves against a provider, just one no
@@ -1612,6 +1655,13 @@ impl Resolution {
                 || self.dylib_exports.contains_key(key)
                 || self.loader_exports.contains(key)
             {
+                continue;
+            }
+            // M6/D-R3: the `_objc_msgSend$<selector>` callsite family
+            // resolves through the synthesizer — the symtab walk never
+            // escalates these names (the `__objc_stubs` plan is their
+            // resolution, the paired `__got` slot binds `_objc_msgSend`).
+            if self.objc_stub_names.contains(key) {
                 continue;
             }
             // M108: a name the multiply-defined lookup face dropped rides
