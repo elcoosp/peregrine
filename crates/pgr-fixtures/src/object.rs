@@ -1315,7 +1315,9 @@ mod tests {
         ARM64_RELOC_BRANCH26, ARM64_RELOC_PAGE21, ARM64_RELOC_UNSIGNED, N_EXT, N_SECT, N_TYPE,
         N_UNDF, N_WEAK_DEF, N_WEAK_REF, S_ZEROFILL, get_comm_align, get_library_ordinal,
     };
-    use pgr_format::consts::{N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STSYM, N_STAB};
+    use pgr_format::consts::{
+        N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STSYM,
+    };
     use pgr_format::summarize;
 
     /// A minimal valid object: one code section, one def.
@@ -1622,7 +1624,9 @@ mod tests {
         // extern def) — clang's order. Each row carries its named
         // `n_type` (the `N_STAB` bit set) and the `stab_kind` classifies
         // it back to the kind the producer's debug-map plan routes on.
-        let expected = [N_SO, N_OSO, N_FUN, N_FUN, N_GSYM, N_STSYM, N_LSYM, N_BNSYM, N_ENSYM];
+        let expected = [
+            N_SO, N_OSO, N_FUN, N_FUN, N_GSYM, N_STSYM, N_LSYM, N_BNSYM, N_ENSYM,
+        ];
         assert_eq!(expected.len(), 9);
         for (i, want) in expected.iter().enumerate() {
             let sym = read_sym(&bytes, i).unwrap();
@@ -1676,7 +1680,10 @@ mod tests {
         assert_eq!(bnsym.n_type, N_BNSYM);
         let ensym = read_sym(&bytes, 8).unwrap();
         assert_eq!(ensym.n_type, N_ENSYM);
-        assert_eq!(bnsym.n_value, ensym.n_value, "the bracket pair shares the address");
+        assert_eq!(
+            bnsym.n_value, ensym.n_value,
+            "the bracket pair shares the address"
+        );
     }
 
     #[test]
@@ -1685,7 +1692,11 @@ mod tests {
         // debug-map plan skips the whole map when the input carries none
         // (the pre-M129 shape, byte-identical).
         let mut b = ObjectBuilder::new("plain.o");
-        let text = b.add_section(ObjectSection::text("__text", vec![0xC0, 0x03, 0x5F, 0xD6], Vec::new()));
+        let text = b.add_section(ObjectSection::text(
+            "__text",
+            vec![0xC0, 0x03, 0x5F, 0xD6],
+            Vec::new(),
+        ));
         b.add_symbol(ObjectSymbol::Defined {
             name: "_main".into(),
             section_index: text,
@@ -1694,7 +1705,10 @@ mod tests {
         });
         let bytes = b.build().unwrap();
         let sym = read_sym(&bytes, 0).unwrap();
-        assert!(!sym.is_stab(), "the plain object's first row is the def, not a stab");
+        assert!(
+            !sym.is_stab(),
+            "the plain object's first row is the def, not a stab"
+        );
     }
 
     #[test]
