@@ -147,6 +147,13 @@ pub enum Check {
     /// gate (under `-dtrace`) mirrors, regardless of how the section was
     /// produced.
     Dtrace,
+    /// The `LC_DYSYMTAB` module table contract (M119): when the command
+    /// carries a module table (`nmodtab > 0`, the `-single_module` shape),
+    /// the table's bytes fit the file and every entry's
+    /// `ilocalsym`/`nlocalsym`/`iextdefsym`/`nextdefsym` subrange stays
+    /// within the symbol table — the read-side backstop the producer's
+    /// emit-side gate mirrors, regardless of how the table was produced.
+    ModuleTable,
     /// The `B`/`BL` branch-range decode pass (the veneer gate).
     BranchRange,
     /// The classic `LC_DYLD_INFO(_ONLY)` rebase/bind opcode streams.
@@ -158,7 +165,7 @@ pub enum Check {
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 14] = [
+    pub const ALL: [Check; 15] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
@@ -170,6 +177,7 @@ impl Check {
         Check::Objc,
         Check::InitOffsets,
         Check::Dtrace,
+        Check::ModuleTable,
         Check::BranchRange,
         Check::DyldInfo,
         Check::Signature,
@@ -190,6 +198,7 @@ impl Check {
             Check::Objc => "objc",
             Check::InitOffsets => "init_offsets",
             Check::Dtrace => "dtrace",
+            Check::ModuleTable => "module_table",
             Check::BranchRange => "branch_range",
             Check::DyldInfo => "dyld_info",
             Check::Signature => "signature",
@@ -210,9 +219,10 @@ impl Check {
             Check::Objc => 8,
             Check::InitOffsets => 9,
             Check::Dtrace => 10,
-            Check::BranchRange => 11,
-            Check::DyldInfo => 12,
-            Check::Signature => 13,
+            Check::ModuleTable => 11,
+            Check::BranchRange => 12,
+            Check::DyldInfo => 13,
+            Check::Signature => 14,
         }
     }
 }
@@ -527,6 +537,24 @@ impl ImageCheck for DtraceCheck {
     }
 }
 
+/// The M119 `LC_DYSYMTAB` module table contract.
+struct ModuleTableCheck;
+
+impl ImageCheck for ModuleTableCheck {
+    fn check(&self) -> Check {
+        Check::ModuleTable
+    }
+    fn summary(&self) -> &'static str {
+        "LC_DYSYMTAB module table: modtaboff/nmodtab bounds and per-entry symtab subranges"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::ModuleTable]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        crate::module_table::check_module_table(ctx.bytes, ctx.report);
+    }
+}
+
 impl ImageCheck for TlvCheck {
     fn check(&self) -> Check {
         Check::Tlv
@@ -670,7 +698,7 @@ pub trait CustomCheck: Sync {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 14] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 15] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
@@ -682,6 +710,7 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 14] = [
     &ObjcCheck,
     &InitOffsetsCheck,
     &DtraceCheck,
+    &ModuleTableCheck,
     &BranchRangeCheck,
     &DyldInfoCheck,
     &SignatureCheck,
