@@ -1108,6 +1108,52 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M126: the output image's atomization decision — the relocatable
+    // output's header is the input's, verbatim (the M10 rung-1 contract
+    // — the object is itself a link input, its flags word rides
+    // untouched), so a named `-allow_subsections_via_symbols` has no
+    // header word to patch (the M104/M105/M117 refusal shape, one
+    // header word over). The default (`false`) never refused before
+    // (the pre-M126 shape).
+    if cfg.subsections_via_symbols {
+        return Err(LinkError::Layout {
+            message: "-allow_subsections_via_symbols sets the output's \
+                      MH_SUBSECTIONS_VIA_SYMBOLS bit, but the relocatable output's \
+                      header is the input's, verbatim — drop \
+                      -allow_subsections_via_symbols or link a final image (an \
+                      executable, a dylib or a bundle)"
+                .into(),
+        });
+    }
+    // M127: the dylib's export-interposability decision — the
+    // relocatable output's header is the input's, verbatim (the M10
+    // rung-1 contract), and the knob is a dylib's decision in any case
+    // (the M104/M105/M117 refusal shape, one header word over). The
+    // default (`false`) never refused before (the pre-M127 shape).
+    if cfg.interposable {
+        return Err(LinkError::Layout {
+            message: "-interposable marks a dylib's exports as interposable, \
+                      but the relocatable output's header is the input's, \
+                      verbatim — drop -interposable or link a dylib"
+                .into(),
+        });
+    }
+    // M128: the app-extension-safe decision — the relocatable output's
+    // header is the input's, verbatim (the M10 rung-1 contract — the
+    // object is itself a link input, its flags word rides untouched),
+    // so a named `-application_extension` has no header word to patch
+    // (the M104/M105/M117 refusal shape, one header word over). The
+    // default (`false`) never refused before (the pre-M128 shape).
+    if cfg.application_extension {
+        return Err(LinkError::Layout {
+            message: "-application_extension sets the output's \
+                      MH_APP_EXTENSION_SAFE bit, but the relocatable output's \
+                      header is the input's, verbatim — drop \
+                      -application_extension or link a final image (an \
+                      executable, a dylib or a bundle)"
+                .into(),
+        });
+    }
     if cfg.allow_stack_execute {
         return Err(LinkError::Layout {
             message: "-allow_stack_execute sets the executable's MH_ALLOW_STACK_EXECUTION \
