@@ -133,13 +133,6 @@ pub enum Check {
     /// stay separate (the `-no_objc_category_merging` face) or their
     /// registration folded into the base classes (the default merge).
     Objc,
-    /// The `__objc_stubs` synthesis contract (M6/D-R3, M130): the
-    /// `__TEXT,__objc_stubs` section the linker synthesizes for
-    /// `_objc_msgSend$<selector>` callsites rides a whole
-    /// `OBJC_STUB_SIZE_ARM64` stride and the `S_SYMBOL_STUBS` type,
-    /// and the paired `__objc_methname` selector strings are
-    /// NUL-terminated.
-    ObjcStubs,
     /// The initializer-surface contract (M94): the
     /// `S_INIT_FUNC_OFFSETS`/`S_MOD_INIT_FUNC_POINTERS` sections dyld's
     /// load-time initializer walk consumes ride whole strides, the
@@ -177,6 +170,16 @@ pub enum Check {
     /// The SuperBlob/CodeDirectory layout and the SHA-256 page-hash
     /// recompute.
     Signature,
+    /// The mergeable literal-pool contract (M131, the D4 completion): the
+    /// `S_4BYTE_LITERALS`/`S_8BYTE_LITERALS`/`S_16BYTE_LITERALS` sections
+    /// the producer's D4 dedup emits ride a whole atom-width stride and an
+    /// alignment at or above the width's own power of two (4→2, 8→3,
+    /// 16→4) — the read-side backstop the producer's dedup emit-side gate
+    /// mirrors, regardless of how the section was produced. The dedup
+    /// correctness itself (one canonical copy per unique value) is pinned
+    /// byte-identity by the `m131_literal_merge` gate, the M5 cstring
+    /// precedent (cstrings carry no verify family).
+    Literal,
 }
 
 impl Check {
@@ -191,7 +194,6 @@ impl Check {
         Check::Unwind,
         Check::Tlv,
         Check::Objc,
-        Check::ObjcStubs,
         Check::InitOffsets,
         Check::Dtrace,
         Check::ModuleTable,
@@ -199,6 +201,7 @@ impl Check {
         Check::BranchRange,
         Check::DyldInfo,
         Check::Signature,
+        Check::Literal,
     ];
 
     /// Stable string identifier (the `--checks` token).
@@ -214,7 +217,6 @@ impl Check {
             Check::Unwind => "unwind",
             Check::Tlv => "tlv",
             Check::Objc => "objc",
-            Check::ObjcStubs => "objcstubs",
             Check::InitOffsets => "init_offsets",
             Check::Dtrace => "dtrace",
             Check::ModuleTable => "module_table",
@@ -222,6 +224,7 @@ impl Check {
             Check::BranchRange => "branch_range",
             Check::DyldInfo => "dyld_info",
             Check::Signature => "signature",
+            Check::Literal => "literal",
         }
     }
 
@@ -237,14 +240,14 @@ impl Check {
             Check::Unwind => 6,
             Check::Tlv => 7,
             Check::Objc => 8,
-            Check::ObjcStubs => 9,
-            Check::InitOffsets => 10,
-            Check::Dtrace => 11,
-            Check::ModuleTable => 12,
-            Check::DebugMap => 13,
-            Check::BranchRange => 14,
-            Check::DyldInfo => 15,
-            Check::Signature => 16,
+            Check::InitOffsets => 9,
+            Check::Dtrace => 10,
+            Check::ModuleTable => 11,
+            Check::DebugMap => 12,
+            Check::BranchRange => 13,
+            Check::DyldInfo => 14,
+            Check::Signature => 15,
+            Check::Literal => 16,
         }
     }
 }
@@ -517,19 +520,6 @@ impl ImageCheck for ObjcCheck {
     }
 }
 
-/// The M6/D-R3 (M130) `__objc_stubs` synthesis contract.
-struct ObjcStubsCheck;
-impl ImageCheck for ObjcStubsCheck {
-    fn check(&self) -> Check { Check::ObjcStubs }
-    fn summary(&self) -> &'static str {
-        "ObjC stubs: __objc_stubs stride/type, __objc_methname NUL-terminated"
-    }
-    fn codes(&self) -> &'static [Code] { &[Code::ObjcStubs] }
-    fn run(&self, ctx: &mut CheckContext<'_>) {
-        crate::objcstubs::check_objc_stubs(ctx.bytes, ctx.report);
-    }
-}
-
 /// The M94 initializer-surface contract.
 struct InitOffsetsCheck;
 
@@ -606,6 +596,25 @@ impl ImageCheck for DebugMapCheck {
     }
     fn run(&self, ctx: &mut CheckContext<'_>) {
         crate::debugmap::check_debug_map(ctx.bytes, ctx.parsed, ctx.report);
+    }
+}
+
+/// The M131 mergeable literal-pool contract (the D4 completion).
+struct LiteralCheck;
+
+impl ImageCheck for LiteralCheck {
+    fn check(&self) -> Check {
+        Check::Literal
+    }
+    fn summary(&self) -> &'static str {
+        "mergeable literal pools: __literal4/8/16 ride a whole atom-width \
+         stride and an alignment at or above the width's own power of two"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::Literal]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        crate::literal::check_literals(ctx.bytes, ctx.parsed, ctx.report);
     }
 }
 
@@ -762,7 +771,6 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 17] = [
     &UnwindCheck,
     &TlvCheck,
     &ObjcCheck,
-    &ObjcStubsCheck,
     &InitOffsetsCheck,
     &DtraceCheck,
     &ModuleTableCheck,
@@ -770,6 +778,7 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 17] = [
     &BranchRangeCheck,
     &DyldInfoCheck,
     &SignatureCheck,
+    &LiteralCheck,
 ];
 
 /// The built-in check registry, in canonical verify order.
