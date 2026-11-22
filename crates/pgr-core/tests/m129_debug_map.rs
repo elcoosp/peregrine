@@ -23,10 +23,8 @@
 
 use pgr_core::layout::LinkConfig;
 use pgr_core::link::{LinkInput, link};
-use pgr_fixtures::{
-    FIXTURE_OSO_MTIME, ObjectBuilder, ObjectSection, ObjectStab, ObjectSymbol,
-};
-use pgr_format::consts::{N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STSYM, N_STAB};
+use pgr_fixtures::{FIXTURE_OSO_MTIME, ObjectBuilder, ObjectSection, ObjectStab, ObjectSymbol};
+use pgr_format::consts::{N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STAB, N_STSYM};
 use pgr_format::symtab::Nlist64;
 use pgr_verify::{Options as VerifyOptions, verify};
 
@@ -132,7 +130,9 @@ fn the_default_emits_the_debug_map_stabs_as_the_first_locals() {
     let syms = symtab_entries(&image);
     // The first 9 rows are the debug-map stabs (clang's order — stabs
     // precede the plain locals, the extern defs and the undefineds).
-    let stab_n_types = [N_SO, N_OSO, N_FUN, N_FUN, N_GSYM, N_STSYM, N_LSYM, N_BNSYM, N_ENSYM];
+    let stab_n_types = [
+        N_SO, N_OSO, N_FUN, N_FUN, N_GSYM, N_STSYM, N_LSYM, N_BNSYM, N_ENSYM,
+    ];
     assert!(
         syms.len() >= stab_n_types.len(),
         "the image carries at least the 9 stab rows (got {})",
@@ -142,8 +142,7 @@ fn the_default_emits_the_debug_map_stabs_as_the_first_locals() {
         assert_eq!(
             syms[i].n_type, *want,
             "stab row {i}: n_type 0x{:02x} not the named kind 0x{:02x}",
-            syms[i].n_type,
-            want
+            syms[i].n_type, want
         );
         assert!(syms[i].is_stab(), "stab row {i}: the N_STAB bit is set");
     }
@@ -179,11 +178,17 @@ fn the_n_fun_begin_row_carries_the_re_addressed_output_vaddr() {
     let syms = symtab_entries(&image);
     // N_FUN begin is row 2.
     assert_eq!(syms[2].n_type, N_FUN);
-    assert_eq!(syms[2].n_sect, 1, "the N_FUN begin row names its output section");
+    assert_eq!(
+        syms[2].n_sect, 1,
+        "the N_FUN begin row names its output section"
+    );
     // The value is the output vaddr of `_main` (re-addressed from the
     // input's section-relative 0 onto the placed `__text` atom). It is
     // nonzero (the link placed `__text` at a nonzero vaddr).
-    assert!(syms[2].n_value != 0, "the N_FUN begin row carries a re-addressed vaddr");
+    assert!(
+        syms[2].n_value != 0,
+        "the N_FUN begin row carries a re-addressed vaddr"
+    );
     // The N_FUN end row is row 3: n_value 0, the size in the name.
     assert_eq!(syms[3].n_type, N_FUN);
     assert_eq!(syms[3].n_sect, 0, "the N_FUN end row carries no section");
@@ -262,8 +267,10 @@ fn dead_strip_drops_the_n_fun_of_a_dead_function() {
         name: "two.o".to_string(),
         bytes: b.build().expect("the fixture builds"),
     }];
-    let mut cfg = LinkConfig::default();
-    cfg.dead_strip = true;
+    let cfg = LinkConfig {
+        dead_strip: true,
+        ..LinkConfig::default()
+    };
     let result = link(&corpus, &[], &cfg).expect("the link runs");
     let image = pgr_emit::build_image(&result.layout, &result.objects).expect("the image emits");
     let syms = symtab_entries(&image);
