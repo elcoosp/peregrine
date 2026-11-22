@@ -24,7 +24,9 @@ use pgr_core::link::Parallelism;
 use pgr_core::link::link_from_objects;
 use pgr_core::object::InputObject;
 use pgr_core::propagate::section_digests;
-use pgr_core::resolve::{MultiplyDefinedPolicy, Resolution, ResolutionSnapshot, UndefinedPolicy};
+use pgr_core::resolve::{
+    ModulePolicy, MultiplyDefinedPolicy, Resolution, ResolutionSnapshot, UndefinedPolicy,
+};
 use pgr_core::resolve_reuse::{ResolveReuseSeed, install_reused, plan_reuse};
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
@@ -208,8 +210,15 @@ fn bench_resolve(c: &mut Criterion) {
         let mut res = Resolution::default();
         res.install(&objects, &interner, MultiplyDefinedPolicy::Error, &mut None)
             .unwrap();
-        res.require_all_resolved(&interner, &objects, UndefinedPolicy::Error, false)
-            .unwrap();
+        res.require_all_resolved(
+            &interner,
+            &objects,
+            UndefinedPolicy::Error,
+            false,
+            ModulePolicy::default(),
+            false,
+        )
+        .unwrap();
         let snapshot = ResolutionSnapshot::capture(&objects, &interner, &res, &[], &[]);
         let prev = section_digests(&objects);
 
@@ -254,6 +263,8 @@ fn bench_resolve(c: &mut Criterion) {
                         &relink_objects,
                         UndefinedPolicy::Error,
                         false,
+                        ModulePolicy::default(),
+                        false,
                     )
                     .unwrap();
                     r
@@ -275,6 +286,8 @@ fn bench_resolve(c: &mut Criterion) {
                         &[],
                         &[],
                         UndefinedPolicy::Error,
+                        false,
+                        ModulePolicy::default(),
                         false,
                         // M108: the multiply-defined policy rides the
                         // install (the collision tie's decision) — the
