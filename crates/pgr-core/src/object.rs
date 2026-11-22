@@ -707,6 +707,9 @@ impl InputObject {
 
     /// D1 atomization (M5): fills the atom table for every section —
     /// `S_CSTRING_LITERALS` sections split at their NUL terminators (D4),
+    /// `S_4BYTE_LITERALS`/`S_8BYTE_LITERALS`/`S_16BYTE_LITERALS` sections
+    /// split at their fixed 4/8/16-byte widths (D4 completion, M131 — the
+    /// dedup and dead-strip passes need one atom per literal value),
     /// `MH_SUBSECTIONS_VIA_SYMBOLS` sections at symbol boundaries (D1,
     /// `N_ALT_ENTRY` merges into the preceding atom; only when the link
     /// dead-strips — merging needs only the string split), everything else
@@ -734,6 +737,23 @@ impl InputObject {
                     if end > i {
                         ranges.push(i..end);
                     }
+                    i = end;
+                }
+                self.atoms.push(ranges);
+                continue;
+            }
+            if let Some(width) = pgr_format::consts::literal_atom_width(sect.flags) {
+                // D4 completion (M131): one atom per fixed-width literal
+                // (4/8/16 bytes). A trailing partial atom (malformed input
+                // whose size is not a whole multiple of the width) keeps its
+                // own range so the section stays linkable — the dedup pass
+                // reads the bytes the range names, never assuming the width.
+                let w = u64::from(width);
+                let mut ranges: Vec<core::ops::Range<u64>> = Vec::new();
+                let mut i = 0u64;
+                while i < sect.size {
+                    let end = (i + w).min(sect.size);
+                    ranges.push(i..end);
                     i = end;
                 }
                 self.atoms.push(ranges);
