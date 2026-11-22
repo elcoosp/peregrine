@@ -180,11 +180,34 @@ pub fn defines_objc_metadata(name: &[u8]) -> bool {
     classify_objc_metadata(name).is_some()
 }
 
+/// M6/D-R3: the `_objc_msgSend$<selector>` callsite family. Modern clang
+/// emits one undefined `_objc_msgSend$<selector>` symbol per
+/// `objc_msgSend` callsite; ld64 resolves each by synthesizing a stub in
+/// `__TEXT,__objc_stubs` that loads the selector string (from
+/// `__objc_methname`) into `x1`, the IMP (from a `__got` slot bound to
+/// `_objc_msgSend`) into `x16`, and branches. This classifier splits the
+/// selector suffix off the prefix — the string the synthesizer dedups
+/// into `__objc_methname` (NUL-terminated, content-addressed like
+/// `S_CSTRING_LITERALS`). Returns [`None`] for every other name (the
+/// metadata families above, plain dylib calls, defined symbols).
+#[must_use]
+pub fn objc_msgsend_selector(name: &[u8]) -> Option<&[u8]> {
+    name.strip_prefix(pgr_format::consts::OBJC_MSGSEND_PREFIX)
+}
+
+/// M6/D-R3: true when the name is a `_objc_msgSend$<selector>` callsite
+/// the stub synthesizer resolves (the install-walk's classifier — the
+/// resolution lane these names ride instead of the error lane).
+#[must_use]
+pub fn is_objc_msgsend_callsite(name: &[u8]) -> bool {
+    objc_msgsend_selector(name).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        OBJC_METADATA_PREFIXES, OBJC1_METADATA_PREFIXES, ObjcFamily, classify_objc_metadata,
-        defines_objc_metadata,
+        OBJC1_METADATA_PREFIXES, OBJC_METADATA_PREFIXES, ObjcFamily, classify_objc_metadata,
+        defines_objc_metadata, is_objc_msgsend_callsite, objc_msgsend_selector,
     };
 
     #[test]
@@ -274,6 +297,62 @@ mod tests {
             assert!(
                 !defines_objc_metadata(name),
                 "{:?} is not one of the two named ObjC1 forms",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    #[test]
+    fn the_msgsend_callsite_classifies_its_selector() {
+        // The modern clang callsite family: one undefined
+        // `_objc_msgSend$<selector>` per `objc_msgSend` call. The
+        // classifier splits the selector suffix the synthesizer dedups
+        // into `__objc_methname`.
+        for (name, sel) in [
+            (&b"_objc_msgSend$count"[..], &b"count"[..]),
+            (b"_objc_msgSend$initWithFrame:options:", b"initWithFrame:options:"),
+            (b"_objc_msgSend$alloc", b"alloc"),
+            (b"_objc_msgSend$myCategory_selector:foo:", b"myCategory_selector:foo:"),
+        ] {
+            assert_eq!(
+                objc_msgsend_selector(name),
+                Some(sel),
+                "{:?} splits its selector suffix",
+                String::from_utf8_lossy(name)
+            );
+            assert!(
+                is_objc_msgsend_callsite(name),
+                "{:?} is the msgSend callsite family",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    #[test]
+    fn the_msgsend_classifier_stays_out_of_everything_else() {
+        // The metadata families, plain dylib calls and defined symbols
+        // never classify as a msgSend callsite — the synthesizer never
+        // engages for them (the `-ObjC` pull, the `__stubs` family and
+        // the in-image definitions ride their own lanes).
+        for name in [
+            &b"_OBJC_CLASS_$_Dog"[..],
+            b".objc_class_name_Dog",
+            b"_objc_msgSend",
+            b"_printf",
+            b"_main",
+            b"_objc_msgSend_extra",     // not the `$` form
+            b"objc_msgSend$count",      // missing the leading underscore
+            b"",
+        ] {
+            assert_eq!(
+                objc_msgsend_selector(name),
+                None,
+                "{:?} is not a msgSend callsite",
+                String::from_utf8_lossy(name)
+            );
+            assert!(
+                !is_objc_msgsend_callsite(name),
+                "{:?} rides no synthesizer",
                 String::from_utf8_lossy(name)
             );
         }
