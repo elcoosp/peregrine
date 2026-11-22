@@ -796,6 +796,8 @@ mod tests {
             uuid_source: crate::layout::UuidSource::Content,
             named_uuid: None,
             dtrace: false,
+            module_policy: crate::resolve::ModulePolicy::default(),
+            module_table: Vec::new(),
             filetype: 2,
             order_unmatched: Vec::new(),
             cstring_order_unmatched: Vec::new(),
