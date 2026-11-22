@@ -25,13 +25,8 @@
 
 use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report};
-use pgr_format::consts::{S_ATTR_DEBUG, stab_kind};
+use pgr_format::consts::stab_kind;
 use pgr_format::symtab::Nlist64;
-
-/// The `__DWARF` segment name stabs point at (the segment `dsymutil`
-/// opens the `.o`'s DWARF through). Stabs riding without it is the
-/// "stabs under `-S`" shape.
-const DWARF_SEGMENT: &[u8] = b"__DWARF";
 
 /// Walks the `LC_SYMTAB` for stab rows (the `N_STAB`-bit entries) and
 /// reports the four debug-map contract violations. The check is total
