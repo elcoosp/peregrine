@@ -6042,6 +6042,209 @@ struct SymtabContext<'a> {
     no_inits: bool,
 }
 
+/// M129: the debug-map stabs the producer re-emits in the output
+/// symtab's locals range — the `ld64`-shaped `n_type` rows `lldb`/
+/// `dsymutil` walk to find the DWARF in the `.o` files. Emitted as the
+/// **first** locals (clang's order — stabs precede the plain locals,
+/// the extern defs and the undefineds), in file order (the symtab's
+/// table order — the deterministic sequence `dsymutil` walks).
+///
+/// Re-addressing mirrors the symbol path: a section-bearing stab
+/// (`N_FUN`, `N_STSYM`, `N_BNSYM`, `N_ENSYM`) re-addresses onto the
+/// placed live atom via the same `sym_addr`/`osect_of`/`sym_live`
+/// helpers the plain locals use. Dead-strip drops a `N_FUN` whose
+/// function died; ICF folds a `N_FUN` whose atom folded (the canonical
+/// copy carries its own row, the duplicate drops). The name-only stabs
+/// (`N_SO`, `N_OSO`, `N_GSYM`, `N_LSYM`) ride whenever the object
+/// contributed at least one live section-bearing stab (the object's
+/// file anchor rides iff the object's bytes shipped).
+///
+/// `-S` (the existing `strip_debug` flag, no new flag) drops the whole
+/// map — the producer emits zero stab rows, the pre-M129 shape (the
+/// debug sections already dropped under `-S` at M105; the stabs ride
+/// the same suppression).
+///
+/// Returns the stab rows in file order (the locals-range prefix). The
+/// plain locals and the hidden defs merge after them; the dysymtab
+/// `nlocalsym` count covers the whole locals range (the stab rows plus
+/// the plain locals plus the hidden defs).
+fn build_debug_map(
+    objects: &[InputObject],
+    ctx: &SymtabContext<'_>,
+) -> Vec<OutputSymbol> {
+    // -S drops the whole debug map (the existing flag, no new flag).
+    if ctx.strip_debug {
+        return Vec::new();
+    }
+    let fold = ctx.fold;
+    let addr_of = ctx.addr_of;
+    let atom_addr = ctx.atom_addr;
+    let live = ctx.live;
+    let sections = ctx.sections;
+    // The same fold-aware address + liveness the plain locals use.
+    let sym_addr = |obj: &InputObject, sect: usize, value: u64| -> Option<u64> {
+        fold_aware_addr(fold, objects, atom_addr, addr_of, obj.file.0, sect, value)
+    };
+    let sym_live_atom = |obj: &InputObject, sect: usize, value: u64| -> bool {
+        if !live.is_active() {
+            return true;
+        }
+        let ranges = obj.atoms_of(sect);
+        if ranges.is_empty() {
+            return true;
+        }
+        let idx = ranges
+            .partition_point(|r| r.start <= value)
+            .saturating_sub(1);
+        !live.is_atom_dead(obj.file.0, sect, ranges[idx].start)
+    };
+    let osect_of = |file: u32, sect: usize, value: u64| -> u8 {
+        let key = if fold.is_empty() {
+            (file, sect)
+        } else {
+            objects
+                .get(file as usize)
+                .and_then(|obj| containing_atom_start(obj, sect, value))
+                .and_then(|start| fold.canonical_of(file, sect, start))
+                .map_or((file, sect), |(cf, cs, _)| (cf, cs))
+        };
+        // The placed section index for a folded stab is the canonical
+        // copy's section (the same fallback the plain locals use).
+        let mut found = usize::MAX;
+        for (si, s) in sections.iter().enumerate() {
+            for p in &s.pieces {
+                if !p.zerofill && p.file.0 == key.0 && p.in_sect == key.1 {
+                    found = si;
+                    break;
+                }
+            }
+            if found != usize::MAX {
+                break;
+            }
+        }
+        if found == usize::MAX {
+            // Fall back to the address-containing section (the M41/D4
+            // shape: a stab whose atom merged away entirely resolves
+            // through its remapped address).
+            if let Some(obj) = objects.get(file as usize)
+                && let Some(addr) = sym_addr(obj, sect, value)
+            {
+                for (si, s) in sections.iter().enumerate() {
+                    if !s.zerofill && s.vm_addr <= addr && addr < s.vm_addr + s.size {
+                        return (si + 1) as u8;
+                    }
+                }
+            }
+            return 0;
+        }
+        (found + 1) as u8
+    };
+    let mut rows = Vec::new();
+    for obj in objects {
+        if obj.stabs.is_empty() {
+            continue;
+        }
+        // One pass over the object's stabs in file order. A
+        // section-bearing stab (`N_FUN`/`N_STSYM`/`N_BNSYM`/`N_ENSYM`)
+        // re-addresses onto the placed live atom: dead-strip drops a
+        // stab whose atom died, ICF drops a stab whose atom folded to a
+        // canonical copy (the canonical copy's own stab rides). A
+        // name-only stab (`N_SO`/`N_OSO`/`N_GSYM`/`N_LSYM`) rides iff the
+        // object contributed at least one live section stab — the file
+        // anchor rides iff the object's bytes shipped. The two passes
+        // (a liveness pre-pass, then the emit pass) keep the name-only
+        // stabs in their file position while gating them on the
+        // section-stab liveness.
+        let any_live_section = obj.stabs.iter().any(|s| {
+            let is_section = matches!(
+                s.kind,
+                pgr_format::consts::StabKind::Fun
+                    | pgr_format::consts::StabKind::Stsym
+                    | pgr_format::consts::StabKind::Bnsym
+                    | pgr_format::consts::StabKind::Ensym
+            );
+            if !is_section || s.n_sect == 0 {
+                return false;
+            }
+            let sect = (s.n_sect as usize) - 1;
+            if !sym_live_atom(obj, sect, s.value) {
+                return false;
+            }
+            // ICF: a folded-to-canonical stab drops (the canonical's
+            // own stab rides instead).
+            if !fold.is_empty()
+                && let Some(start) = containing_atom_start(obj, sect, s.value)
+                && let Some((cf, cs, _)) = fold.canonical_of(obj.file.0, sect, start)
+                && (cf, cs) != (obj.file.0, sect)
+            {
+                return false;
+            }
+            sym_addr(obj, sect, s.value).is_some()
+        });
+        if !any_live_section {
+            // The object contributed no live section stab — its file
+            // anchor and name-only stabs drop with it (the object's
+            // bytes did not ship).
+            continue;
+        }
+        for s in &obj.stabs {
+            let n_type = s.kind.n_type();
+            // A section-bearing stab re-addresses onto a placed live atom;
+            // a N_FUN end row (the closing row of the pair) carries
+            // `n_sect == 0` and rides verbatim as a name-only stab (its
+            // name is the function's size as a decimal string).
+            let is_section = s.n_sect > 0
+                && matches!(
+                    s.kind,
+                    pgr_format::consts::StabKind::Fun
+                        | pgr_format::consts::StabKind::Stsym
+                        | pgr_format::consts::StabKind::Bnsym
+                        | pgr_format::consts::StabKind::Ensym
+                );
+            if is_section {
+                let Some(sect) = (s.n_sect as usize).checked_sub(1) else {
+                    continue;
+                };
+                // Dead-strip drops a section stab whose atom died.
+                if !sym_live_atom(obj, sect, s.value) {
+                    continue;
+                }
+                // ICF: a folded-to-canonical stab drops.
+                if !fold.is_empty()
+                    && let Some(start) = containing_atom_start(obj, sect, s.value)
+                    && let Some((cf, cs, _)) = fold.canonical_of(obj.file.0, sect, start)
+                    && (cf, cs) != (obj.file.0, sect)
+                {
+                    continue;
+                }
+                let Some(value) = sym_addr(obj, sect, s.value) else {
+                    continue;
+                };
+                rows.push(OutputSymbol {
+                    name: s.name,
+                    n_type,
+                    n_sect: osect_of(obj.file.0, sect, s.value),
+                    n_desc: s.n_desc,
+                    value,
+                    external: false,
+                });
+            } else {
+                // Name-only stab: rides verbatim (the mtime for N_OSO,
+                // 0 for N_SO/N_GSYM, the DWARF location for N_LSYM).
+                rows.push(OutputSymbol {
+                    name: s.name,
+                    n_type,
+                    n_sect: 0,
+                    n_desc: s.n_desc,
+                    value: s.value,
+                    external: false,
+                });
+            }
+        }
+    }
+    rows
+}
+
 /// Builds the output symbol table: locals (file order), ext defs (file
 /// order), commons (name order); `n_sect` remapped to output sections.
 /// M3: hidden externals (export filters) become private externals
@@ -6055,6 +6258,11 @@ struct SymtabContext<'a> {
 /// return beside the table either way: the function-starts stream still
 /// covers the local functions the `-x` face strips from the symtab
 /// (ld64 strips the symtab rows, never the start addresses).
+///
+/// M129: the debug-map stabs emit as the **first** locals (clang's
+/// order), re-addressed onto placed live atoms (dead-strip drops dead
+/// rows, ICF folds to the canonical copy); `-S` drops the whole map
+/// (the existing `strip_debug` flag, no new flag).
 ///
 /// Returns `(symtab rows, plain-local rows dropped from the table —
 /// empty under the keep face)`.
@@ -6122,6 +6330,13 @@ fn build_symtab(
     let mut locals: Vec<((u32, u32), OutputSymbol)> = Vec::new();
     let mut hidden: Vec<((u32, u32), OutputSymbol)> = Vec::new();
     let mut out: Vec<OutputSymbol> = Vec::new();
+
+    // M129: the debug-map stabs emit as the first locals (clang's
+    // order), re-addressed onto placed live atoms. `-S` drops the whole
+    // map (the existing `strip_debug` flag, no new flag).
+    let debug_map = build_debug_map(objects, ctx);
+    let debug_map_len = debug_map.len();
+    out.extend(debug_map);
 
     // M6 ICF: a symbol inside a folded atom reports the canonical copy's
     // output section (its own piece is not placed). M41/D4: a definition
@@ -6341,9 +6556,15 @@ fn build_symtab(
         )
     };
     // Merge hidden defs into the locals range (both sides already sorted by
-    // (file, sym); a stable merge keeps the canonical order).
+    // (file, sym); a stable merge keeps the canonical order). The debug
+    // map rides at the front of `out` (M129), so the plain locals and
+    // hidden defs splice in *after* it — the order is debug map → plain
+    // locals/hidden → extern defs (clang's locals order).
     if hidden.is_empty() {
-        out.splice(0..0, merged_locals.into_iter().map(|(_, s)| s));
+        out.splice(
+            debug_map_len..debug_map_len,
+            merged_locals.into_iter().map(|(_, s)| s),
+        );
     } else {
         let mut merged: Vec<OutputSymbol> = Vec::with_capacity(merged_locals.len() + hidden.len());
         let mut h = hidden.into_iter().peekable();
@@ -6358,7 +6579,7 @@ fn build_symtab(
             merged.push(sym);
         }
         merged.extend(h.map(|(_, s)| s));
-        out.splice(0..0, merged);
+        out.splice(debug_map_len..debug_map_len, merged);
     }
     (out, stream_locals)
 }
