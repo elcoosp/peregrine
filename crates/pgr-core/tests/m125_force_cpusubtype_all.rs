@@ -1,5 +1,5 @@
 //! M125 — the CPU subtype override (`-force_cpusubtype_ALL`): ld64's
-//! flag ("Force the cpusubtype to be CPU_SUBTYPE_ARM64_ALL") forces the
+//! flag ("Force the cpusubtype to be `CPU_SUBTYPE_ARM64_ALL`") forces the
 //! output's `mach_header_64.cpusubtype` word to `CPU_SUBTYPE_ARM64_ALL`
 //! regardless of the input objects' subtypes. The default keeps the
 //! pre-M125 bytes (every image already carries ALL — the segmented path
