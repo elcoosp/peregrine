@@ -1025,6 +1025,24 @@ pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
                 ));
             }
         }
+        MH_EXECUTE => {
+            // M120: an executable's identity is `LC_MAIN`, never
+            // `LC_ID_DYLIB` — the emit never writes the command for a
+            // non-dylib (the `-executable` override forces `MH_EXECUTE`),
+            // and this read-side backstop mirrors the contract on every
+            // `MH_EXECUTE` so a malformed image the producer never saw
+            // still reports (the M115 read-side-backstop shape, the
+            // `MH_BUNDLE` arm's twin — the layout's `-install_name`
+            // re-check is the producer-side gate this mirrors).
+            if n_id > 0 {
+                report.issues.push(Issue::error(
+                    Code::LoadCommandMalformed,
+                    "LC_ID_DYLIB is only valid in dylibs (an executable's identity is \
+                     LC_MAIN, never an install name)",
+                    None,
+                ));
+            }
+        }
         _ => {}
     }
 }
