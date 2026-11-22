@@ -82,7 +82,7 @@ use pgr_core::export_filter::SymbolPattern;
 use pgr_core::fixups::FixupPointerFormat;
 use pgr_core::icf::IcfMode;
 use pgr_core::layout::{LinkConfig, OutputType};
-use pgr_core::resolve::{Dylib, UndefinedPolicy};
+use pgr_core::resolve::{Dylib, ModulePolicy, UndefinedPolicy};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
@@ -386,8 +386,37 @@ use std::time::Duration;
 /// names), and the verifier's read-side backstop gates the served
 /// `__dtrace_dof` section exactly as the cold emit gates it; the
 /// ladder's replay rides the decision (the M81 pattern — the decision
-/// is config, not a product).
-pub const PROTO_VERSION: u32 = 69;
+/// is config, not a product). **v70** names the M119 round: the dylib
+/// module contract (`-single_module`/`-multi_module`) rides the tail
+/// after the dtrace byte — one byte (the enum value, the
+/// `ModulePolicy::wire` alphabet); the session's warm pipeline plans the
+/// same single-module resolve shape the cold link plans (the parity gate
+/// is byte-identical — the escalation is Pass 2's own decision, the
+/// `LC_DYSYMTAB` module-table emit Pass 4's, the replay re-plans the
+/// shape the config names), and the verifier's read-side backstop gates
+/// the served module table exactly as the cold emit gates it; the
+/// ladder's replay rides the decision (the M81 pattern — the decision
+/// is config, not a product). **v71** names the M120 round: the explicit
+/// executable override (`-executable`) rides the tail after the
+/// module-policy byte — one byte; the session's warm pipeline plans the
+/// same `MH_EXECUTE` shape the cold link plans (the parity gate is
+/// byte-identical — the override forces `OutputType::Execute`, the
+/// `__PAGEZERO`/`LC_MAIN`/no-`LC_ID_DYLIB` shape the layout and emit
+/// already key on, the replay re-plans the shape the config names), and
+/// the verifier's read-side executable gate refuses an `LC_ID_DYLIB` on
+/// the served `MH_EXECUTE` exactly as the cold layout's re-check refuses
+/// it; the ladder's replay rides the decision (the M81 pattern — the
+/// decision is config, not a product). **v72** names the M121 round: the
+/// duplicate-symbol advisory (`-warn_duplicate`) rides the tail after the
+/// executable byte — one byte; the session's warm pipeline plans the same
+/// tally the cold link plans (the parity gate is byte-identical — the
+/// advisory is a Pass-2 walk, the resolution policy itself unchanged, the
+/// replay re-plans the shape the config names), and the served
+/// `duplicate_warnings` tail carries the session's own collision entries
+/// verbatim (the M62 convention — the client prints the cold lane's
+/// face); the ladder's replay rides the decision (the M81 pattern — the
+/// decision is config, not a product).
+pub const PROTO_VERSION: u32 = 72;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1581,6 +1610,31 @@ pub(crate) fn decode_commons_warnings(r: &mut Reader<'_>) -> Result<Vec<String>,
     (0..r.u32()?).map(|_| r.str()).collect()
 }
 
+/// Encodes the reply's duplicate-symbol advisory tail (v72, M121): a
+/// count-prefixed list of the session's own duplicate-strong collision
+/// entries — the advisory face's product, rendered from the session's
+/// own resolved state. The off decision carries the empty list (the
+/// walk recorded nothing — under the default `error` policy a collision
+/// refuses the link before the walk runs). The client prints each entry
+/// as the cold lane's `pgr: warning:` face — the wire never re-shapes
+/// the face the client prints (the M62 convention, the v67 commons tail
+/// shape one warning over).
+pub fn encode_duplicate_warnings(out: &mut Vec<u8>, entries: &[String]) {
+    put_u32(out, entries.len() as u32);
+    for entry in entries {
+        put_str(out, entry);
+    }
+}
+
+/// Decodes the reply's duplicate-symbol advisory tail (v72; see
+/// [`encode_duplicate_warnings`] for the shape).
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation.
+pub(crate) fn decode_duplicate_warnings(r: &mut Reader<'_>) -> Result<Vec<String>, DecodeError> {
+    (0..r.u32()?).map(|_| r.str()).collect()
+}
+
 // ---- the v64 references tail ---------------------------------------------------
 
 /// Encodes the reply's reference-trace tail (v64, M113): a present byte,
@@ -1992,6 +2046,29 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // is Pass 1's own decision, the emit validation Pass 4's, the M81
     // replay rides the config), never the pre-M118 carrying default.
     put_u8(out, u8::from(cfg.dtrace));
+    // M119 (v70 wire): the dylib module contract rides the tail after the
+    // dtrace byte — one byte (the enum value, the `ModulePolicy::wire`
+    // alphabet); a resident relink plans the same single-module resolve
+    // shape the client asked for (the escalation is Pass 2's own
+    // decision, the LC_DYSYMTAB module-table emit Pass 4's, the M81
+    // replay rides the config), never the pre-M119 multi-module default.
+    put_u8(out, cfg.module_policy.wire());
+    // M120 (v71 wire): the explicit executable override rides the tail
+    // after the module-policy byte — one byte; a resident relink plans
+    // the same MH_EXECUTE shape the client asked for (the override forces
+    // `OutputType::Execute`, the `__PAGEZERO`/`LC_MAIN`/no-`LC_ID_DYLIB`
+    // shape the layout and emit already key on, the M81 replay rides the
+    // config), never the pre-M120 inferred default. The byte carries the
+    // *explicit* decision distinct from the filetype byte at the head
+    // (the resident lane's parity gate is byte-identical either way).
+    put_u8(out, u8::from(cfg.executable));
+    // M121 (v72 wire): the duplicate-symbol advisory rides the tail after
+    // the executable byte — one byte; a resident relink plans the same
+    // tally the client asked for (the advisory is a Pass-2 walk, the M81
+    // replay rides the config — the resolution policy itself is
+    // unchanged, the default `error` still applies unless overridden),
+    // never the pre-M121 silent default.
+    put_u8(out, u8::from(cfg.warn_duplicate));
     // M33 (v24 wire): the private-extern keep rides the tail after the
     // UUID suppression — one byte; a resident relink carries the
     // private-extern decision the client asked for, never the pre-M33
@@ -2466,6 +2543,26 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // read-side backstop the output-kind conflict the core re-checks
     // refuse cannot reach).
     let dtrace = r.u8()? != 0;
+    // M119 (v70 wire): the dylib module contract — an unknown byte is
+    // malformed (a refusal, never a silently defaulted policy; an old
+    // server reading a new client's alphabet refuses the request, the
+    // M103 reversed-admits shape). The escalation is Pass 2's own
+    // decision; the LC_DYSYMTAB module-table emit is Pass 4's, the
+    // verifier's read-side backstop the output-kind conflict the core
+    // re-checks refuse cannot reach.
+    let module_policy = ModulePolicy::from_wire(r.u8()?).ok_or_else(malformed)?;
+    // M120 (v71 wire): the explicit executable override — one byte, no
+    // validation beyond the bool (the override forces `OutputType::Execute`
+    // at the driver; the layout re-check refuses an `LC_ID_DYLIB` install
+    // name beside it, the verifier's read-side executable gate mirrors
+    // the contract, the `-r` conflict the core re-checks refuse).
+    let executable = r.u8()? != 0;
+    // M121 (v72 wire): the duplicate-symbol advisory — one byte, no
+    // validation beyond the bool (the advisory is a Pass-2 walk; the
+    // resolution policy itself is unchanged — the default `error` still
+    // applies unless overridden; the `-r` conflict the core re-checks
+    // refuse).
+    let warn_duplicate = r.u8()? != 0;
     // M33 (v24 wire): the private-extern keep — one byte, no
     // validation beyond the bool (the conversion is the default; the
     // input `N_PEXT` bit names where the decision fires).
@@ -2733,6 +2830,9 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         warn_commons,
         no_inits,
         dtrace,
+        module_policy,
+        executable,
+        warn_duplicate,
         keep_private_externs,
         compact_unwind: !no_compact_unwind,
         header_pad_max_install_names: header_pad_max,
@@ -2770,9 +2870,10 @@ mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, ServedExport,
         ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_commons_warnings,
-        decode_map_bytes, decode_policy_warnings, decode_provenance_bytes, decode_references,
-        decode_statistics, decode_time_report, decode_trace_bytes, decode_verify_report_bytes,
-        encode_commons_warnings, encode_map, encode_policy_warnings, encode_provenance,
+        decode_duplicate_warnings, decode_map_bytes, decode_policy_warnings,
+        decode_provenance_bytes, decode_references, decode_statistics, decode_time_report,
+        decode_trace_bytes, decode_verify_report_bytes, encode_commons_warnings,
+        encode_duplicate_warnings, encode_map, encode_policy_warnings, encode_provenance,
         encode_references, encode_statistics, encode_time_report, encode_trace,
         encode_verify_report, put_str, put_u8, put_u32, put_u64, read_pattern,
     };
@@ -3093,6 +3194,25 @@ mod tests {
             // carries the bytes verbatim, the read-side backstop gating
             // either way).
             dtrace: true,
+            // The v70 tail: the dylib module contract rides non-default
+            // here — the decision the round-trip test flips (the
+            // single-module face escalates unresolved strong references
+            // and emits one LC_DYSYMTAB module-table entry; the
+            // multi-module default keeps the legacy zero-module shape,
+            // every pre-knob link byte-identical).
+            module_policy: pgr_core::resolve::ModulePolicy::SingleModule,
+            // The v71 tail: the explicit executable override rides
+            // non-default here — the decision the round-trip test flips
+            // (the byte carries the *explicit* decision distinct from the
+            // filetype byte at the head; the resident lane's parity gate
+            // is byte-identical either way).
+            executable: true,
+            // The v72 tail: the duplicate-symbol advisory rides
+            // non-default here — the decision the round-trip test flips
+            // (the advisory is a Pass-2 walk; the resolution policy itself
+            // is unchanged, the default `error` still applies unless
+            // overridden).
+            warn_duplicate: true,
             // The v24 tail: a non-default private-extern keep must
             // survive the round trip verbatim (a resident relink
             // carries the private-extern decision the client asked
@@ -6074,6 +6194,30 @@ mod tests {
     }
 
     #[test]
+    fn the_duplicate_warning_tail_round_trips() {
+        // v72: the advisory face's duplicate-strong collision entries cross
+        // verbatim — the client prints the cold lane's face (the M62
+        // convention); the off decision's empty list rides as the empty
+        // list (under the default `error` policy a collision refuses the
+        // link before the walk runs).
+        let entries = vec![
+            "\"_dup\" (defined in input 0 and input 1)".to_string(),
+            "\"_twin\" (defined in input 2 and input 3)".to_string(),
+        ];
+        let mut body = Vec::new();
+        encode_duplicate_warnings(&mut body, &entries);
+        let back = decode_duplicate_warnings(&mut Reader::new(&body)).expect("the tail decodes");
+        assert_eq!(back, entries, "the entries cross verbatim, in order");
+        let mut empty = Vec::new();
+        encode_duplicate_warnings(&mut empty, &[]);
+        let back = decode_duplicate_warnings(&mut Reader::new(&empty)).expect("the tail decodes");
+        assert!(
+            back.is_empty(),
+            "the off decision's empty list rides as the empty list"
+        );
+    }
+
+    #[test]
     fn the_no_inits_decision_round_trips() {
         // v68: the init/term suppression's decision must survive the
         // round trip verbatim (a resident relink plans the same
@@ -6178,6 +6322,219 @@ mod tests {
         .expect("the frame decodes");
         assert!(
             !back.config.dtrace,
+            "the off decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_module_policy_decision_round_trips() {
+        // v70: the dylib module contract's decision must survive the
+        // round trip verbatim (a resident relink plans the same
+        // single-module resolve shape the client asked for — the
+        // escalation is Pass 2's own decision, the LC_DYSYMTAB
+        // module-table emit Pass 4's, the M81 replay rides the config).
+        let cfg = rich_config();
+        assert!(
+            cfg.module_policy.is_single(),
+            "rich_config carries the v70 knob"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.module_policy.is_single(),
+            "the single-module decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M119 multi-module shape — the
+        // legacy zero-module table peregrine always carried, every
+        // pre-knob link byte-identical).
+        let mut cfg = rich_config();
+        cfg.module_policy = pgr_core::resolve::ModulePolicy::MultiModule;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.module_policy,
+            pgr_core::resolve::ModulePolicy::MultiModule,
+            "the multi-module decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_executable_decision_round_trips() {
+        // v71: the explicit executable override's decision must survive
+        // the round trip verbatim (a resident relink plans the same
+        // MH_EXECUTE shape the client asked for — the override forces
+        // `OutputType::Execute`, the __PAGEZERO/LC_MAIN/no-LC_ID_DYLIB
+        // shape the layout and emit already key on, the M81 replay rides
+        // the config).
+        let cfg = rich_config();
+        assert!(cfg.executable, "rich_config carries the v71 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.executable,
+            "the explicit-override decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M120 inferred shape — the
+        // filetype byte at the head carries Execute either way, every
+        // pre-knob link byte-identical).
+        let mut cfg = rich_config();
+        cfg.executable = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.executable,
+            "the off decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_warn_duplicate_decision_round_trips() {
+        // v72: the duplicate-symbol advisory's decision must survive the
+        // round trip verbatim (a resident relink plans the same tally the
+        // client asked for — the advisory is a Pass-2 walk, the resolution
+        // policy itself unchanged, the M81 replay rides the config).
+        let cfg = rich_config();
+        assert!(cfg.warn_duplicate, "rich_config carries the v72 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.warn_duplicate,
+            "the advisory decision crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M121 silent shape — the walk
+        // records nothing, every pre-knob link byte-identical).
+        let mut cfg = rich_config();
+        cfg.warn_duplicate = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            !back.config.warn_duplicate,
             "the off decision crosses byte-for-byte"
         );
     }
