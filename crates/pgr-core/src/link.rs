@@ -325,6 +325,8 @@ pub fn link_from_objects_observed(
                     &make_undefined_ids,
                     cfg.undefined_policy,
                     cfg.no_weak_imports,
+                    cfg.module_policy,
+                    cfg.flat_namespace,
                     cfg.multiply_defined,
                     &mut observer,
                 );
@@ -381,6 +383,8 @@ pub fn link_from_objects_observed(
             &objects,
             cfg.undefined_policy,
             cfg.no_weak_imports,
+            cfg.module_policy,
+            cfg.flat_namespace,
         )?;
         full
     };
@@ -455,6 +459,13 @@ pub fn link_from_objects_observed(
     // named; the relocatable path refuses the knob (the walk never runs
     // there — the object's symtab is the input's, verbatim).
     res.apply_warn_commons(cfg.warn_commons, &interner, &objects);
+    // M121: the duplicate-symbol advisory rides the same post-resolve walk
+    // (the M107/M116 config pattern) — the advisory never changes the
+    // resolution policy itself; the walk derives the duplicate-strong
+    // collisions the `multiply_defined` policy prices, the M81 replay
+    // riding the same way. The relocatable path refuses the knob before
+    // the resolve runs (the object's symtab is the input's, verbatim).
+    res.apply_warn_duplicate(cfg.warn_duplicate, &interner, &objects);
     // The record side: capture the finished Pass-2 state when the caller
     // asked for it (the `-incremental` record), so the v5 record section
     // carries it to the next relink.
@@ -919,6 +930,48 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M119: the dylib module contract is a final-image decision — the
+    // relocatable output's symtab is the input's, verbatim (its sections
+    // and tables ride the inputs untouched; there is no LC_DYSYMTAB
+    // module table to shape, no single-module escalation to apply). The
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either (the M104/M105/M117 pattern).
+    if cfg.module_policy.is_single() {
+        return Err(LinkError::Layout {
+            message: "-single_module shapes the output's LC_DYSYMTAB module table \
+                      and escalates unresolved strong references, but the relocatable \
+                      output's symtab is the input's, verbatim — nothing to shape or \
+                      escalate: drop -single_module or link an image (an executable, \
+                      dylib or bundle)"
+                .into(),
+        });
+    }
+    // M120: `-executable` forces an `MH_EXECUTE` output — `link_reloc` is
+    // the `-r` path whose `MH_OBJECT` is the input's filetype verbatim. The
+    // re-check backs the driver surface's earlier refusal: no library
+    // caller can plan the shape either (the M104/M105/M117 pattern).
+    if cfg.executable {
+        return Err(LinkError::Layout {
+            message: "-executable forces an MH_EXECUTE output, but link_reloc is the \
+                      -r path whose MH_OBJECT preserves the input's filetype verbatim — \
+                      drop -executable or drop -r (link an image)"
+                .into(),
+        });
+    }
+    // M121: the duplicate-symbol advisory reads the resolution the object
+    // path never produces — the relocatable output's symtab is the input's,
+    // verbatim (there is no resolution landing to tally). The re-check
+    // backs the driver surface's earlier refusal: no library caller can
+    // plan the shape either (the M104/M105/M116 pattern).
+    if cfg.warn_duplicate {
+        return Err(LinkError::Layout {
+            message: "-warn_duplicate tallies the duplicate strong definitions found \
+                      during resolve, but the relocatable output's symtab is the \
+                      input's, verbatim — nothing to tally: drop -warn_duplicate or \
+                      link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
     // M28: the section-alignment floors are a packing-engine decision —
     // the relocatable output plans no segments and carries its input
     // sections verbatim, so a named floor has nothing to land on. The
@@ -1166,6 +1219,12 @@ fn link_reloc_inner(
     // with the image path's (the install site's escalation is the
     // product, the walk is the record faces' advisory).
     res.apply_multiply_defined_policy(cfg.multiply_defined, &interner, &objects)?;
+    // M121: the advisory walk keeps the relocatable path's contract
+    // symmetric with the image path's — the re-check above refused the
+    // knob (the object's symtab is the input's, verbatim), so under the
+    // default the call records nothing; the symmetry holds for any caller
+    // the re-check admits.
+    res.apply_warn_duplicate(cfg.warn_duplicate, &interner, &objects);
     emit_phase(
         &mut observer,
         Phase::Resolve,
