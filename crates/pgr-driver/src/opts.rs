@@ -981,6 +981,19 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-pie` surface conflict (M122): the M27 `-no_pie` refusal
+    /// mirrored exactly — `MH_PIE` is an executable-only bit, the
+    /// kernel loads a dylib or a bundle itself, and the relocatable
+    /// output carries no loader semantics at all. The verdict names
+    /// the shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    PieConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-allow_stack_execute` surface conflict (M51):
     /// `MH_ALLOW_STACK_EXECUTION` is an executable-only bit — the
     /// kernel loads a dylib or a bundle itself, and the relocatable
@@ -1394,6 +1407,20 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     ReadOnlyRelocsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-weak_reference_mismatches <policy>` surface conflict (M123):
+    /// the weak-reference-mismatches policy cannot apply where it was
+    /// requested (the relocatable output's references ride untouched —
+    /// no resolve walk prices them). The verdict names the shape
+    /// conflict; the help is the fix — the house convention (the M111
+    /// refusal shape, mirrored exactly).
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    WeakReferenceMismatchesConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -1927,6 +1954,28 @@ fn apply_flag(
                     return Err(OptsError::InvalidValue {
                         flag: arg.into(),
                         value: format!("{other} (error | warning | suppress)"),
+                    });
+                }
+            };
+        }
+        // M123: the weak-reference-mismatches policy — ld64's
+        // `-weak_reference_mismatches <policy>` (the `N_WEAK_REF` bit
+        // on a symbol's `n_desc` — the weak-import contract's
+        // resolve-side cousin): `error` refuses a weak/strong
+        // reference mix (the default — the collision named), `weak`
+        // records the mismatch and exits 0 (the advisory face — the
+        // bytes never move, the M109/M116 pattern), `non-weak` the
+        // advisory twin (the M103/M108 pattern).
+        "-weak_reference_mismatches" => {
+            let v = next_value(args, i, arg)?;
+            opts.config.weak_reference_mismatches = match v.as_str() {
+                "error" => pgr_core::resolve::WeakReferenceMismatchesPolicy::Error,
+                "weak" => pgr_core::resolve::WeakReferenceMismatchesPolicy::Weak,
+                "non-weak" => pgr_core::resolve::WeakReferenceMismatchesPolicy::NonWeak,
+                other => {
+                    return Err(OptsError::InvalidValue {
+                        flag: arg.into(),
+                        value: format!("{other} (error | weak | non-weak)"),
                     });
                 }
             };
@@ -2703,6 +2752,16 @@ fn apply_flag(
         // `finish`'s (it sees the whole surface).
         "-no_pie" => {
             opts.config.no_pie = true;
+        }
+        // M122: the PIE positive-form twin — ld64's `-pie` ("Force the
+        // creation of an MH_PIE file") is the explicit-decision mirror of
+        // the M27 `-no_pie` knob (the M120 `-executable` pattern over the
+        // PIE bit). A boolean knob — last-wins the `-no_pie` pair (the
+        // M102 `-bind_at_load`/`-no_bind_at_load` shape: the emit reads
+        // `cfg.pie || !cfg.no_pie`); the output-kind conflict is
+        // `finish`'s (it sees the whole surface).
+        "-pie" => {
+            opts.config.pie = true;
         }
         // M51: the stack-execution decision. ld64's flag ("Marks
         // executable so that all stacks in the task will be given stack
@@ -3588,6 +3647,29 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             Ot::Execute => {}
         }
     }
+    // M122: the PIE positive-form twin — the `-pie` knob is the
+    // explicit-decision mirror of the M27 `-no_pie` pair, and the same
+    // executable-only contract holds (the kernel loads a dylib or a
+    // bundle itself, the relocatable output carries no loader
+    // semantics). The refusal shape is the M27 refusal mirrored
+    // exactly: an explicitly named knob that cannot apply is a refusal,
+    // never a silently dropped one.
+    if opts.config.pie {
+        use pgr_core::layout::OutputType as Ot;
+        match opts.config.filetype {
+            Ot::Dylib | Ot::Bundle | Ot::Relocatable => {
+                return Err(OptsError::PieConflict {
+                    verdict: "-pie sets the executable's MH_PIE flag, but this \
+                              output is not an executable"
+                        .into(),
+                    fix: "MH_PIE is an executable-only bit — the kernel loads a dylib \
+                          or a bundle itself: link an executable or drop the flag"
+                        .into(),
+                });
+            }
+            Ot::Execute => {}
+        }
+    }
     // M51: the stack-execution decision is an executable decision —
     // `MH_ALLOW_STACK_EXECUTION` is the executable-only bit (the kernel
     // loads a dylib or a bundle itself), the same refusal shape as the
@@ -4060,6 +4142,31 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 opts.config.read_only_relocs.flag_word()
             ),
             fix: "drop -read_only_relocs or link a segmented output (an executable, \
+                  dylib or bundle)"
+                .into(),
+        });
+    }
+    // M123: the weak-reference-mismatches policy's surface conflict. The
+    // non-default faces decide what a weak/strong reference mix becomes
+    // (the `N_WEAK_REF` bit on a symbol's `n_desc` — the weak-import
+    // contract's resolve-side cousin), and the relocatable output's
+    // references ride untouched (no resolve walk prices them). An
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one (the library's re-checks back this so no
+    // caller can plan the shape either — the M111 refusal shape,
+    // mirrored exactly).
+    if opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+        && opts.config.weak_reference_mismatches
+            != pgr_core::resolve::WeakReferenceMismatchesPolicy::Error
+    {
+        return Err(OptsError::WeakReferenceMismatchesConflict {
+            verdict: format!(
+                "-weak_reference_mismatches {} records the weak/strong reference \
+                 mismatch, but the relocatable output's references ride untouched — \
+                 nothing to record",
+                opts.config.weak_reference_mismatches.flag_word()
+            ),
+            fix: "drop -weak_reference_mismatches or link an image (an executable, \
                   dylib or bundle)"
                 .into(),
         });
