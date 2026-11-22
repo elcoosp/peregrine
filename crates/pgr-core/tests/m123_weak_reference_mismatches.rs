@@ -181,8 +181,7 @@ fn the_silent_shape_records_nothing_under_any_face() {
         let entries: Vec<&str> = result.resolution.weak_reference_mismatches_open().collect();
         assert!(
             entries.is_empty(),
-            "no mix records nothing under {:?}",
-            policy
+            "no mix records nothing under {policy:?}"
         );
     }
 }
@@ -226,8 +225,7 @@ fn the_relocatable_output_refuses_the_non_default_faces() {
         let msg = err.to_string();
         assert!(
             msg.contains("-weak_reference_mismatches") && msg.contains("relocatable"),
-            "the refusal names the knob and the relocatable shape ({:?}): {msg}",
-            policy
+            "the refusal names the knob and the relocatable shape ({policy:?}): {msg}"
         );
     }
 }
