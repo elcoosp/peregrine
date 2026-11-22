@@ -489,6 +489,59 @@ pub struct LinkConfig {
     /// accepts the ALL shape without warning (the `check_header` gate
     /// warns only on a non-ALL subtype).
     pub force_cpusubtype_all: bool,
+    /// M126 — the output image's atomization decision:
+    /// `-allow_subsections_via_symbols`/`-no_allow_subsections_via_symbols`
+    /// (ld64's flags "Turn on/off the `MH_SUBSECTIONS_VIA_SYMBOLS` bit
+    /// in the output mach-O header"). The segmented path's
+    /// `build_header` reads the bool — `true` ORs
+    /// `MH_SUBSECTIONS_VIA_SYMBOLS` into the output's
+    /// `mach_header_64.flags` word (the atomization the dead-strip and
+    /// ICF passes already read from *input* objects since M5; the
+    /// output decision names whether the *producer* marks its own
+    /// image atomizable). The default (`false`) keeps every pre-M126
+    /// link byte-identical — the segmented path never set the bit, so
+    /// the named `false` face is the pre-knob shape (byte-identity, the
+    /// M122 `-pie` pattern over the flags word). The relocatable output
+    /// refuses the knob (the object's header is the input's, verbatim —
+    /// the M104/M105/M117 pattern, `link_reloc` and the layout's
+    /// re-check backing the driver surface's
+    /// `SubsectionsViaSymbolsConflict`). The verifier's read-side
+    /// backstop accepts the bit without warning.
+    pub subsections_via_symbols: bool,
+    /// M127 — the dylib's export-interposability decision:
+    /// `-interposable` (ld64's flag marks a dylib's exports as
+    /// interposable — the loader consults `MH_WEAK_DEFINES |
+    /// MH_BINDS_TO_WEAK` on the image's `mach_header_64.flags` word to
+    /// treat every export as overridable at runtime). The segmented
+    /// path's `build_header` reads the bool — `true` ORs both bits into
+    /// the flags word regardless of whether the dylib already carries
+    /// weak defines. The default (`false`) keeps every pre-M127 link
+    /// byte-identical — the bits ride the weak-define presence the M2
+    /// trie already priced; a dylib with no weak defines never carried
+    /// the bits, so the named `false` face is the pre-knob shape
+    /// (byte-identity, the M122 `-pie` pattern over the flags word). The
+    /// knob is a dylib's decision — an executable, a bundle and the
+    /// relocatable output all refuse it (the M104/M105/M117 pattern,
+    /// `link_reloc` and the layout's re-check backing the driver
+    /// surface's `InterposableConflict`). The verifier's read-side
+    /// backstop accepts the bits without warning.
+    pub interposable: bool,
+    /// M128 — the app-extension-safe decision:
+    /// `-application_extension` (ld64's flag marks the image as
+    /// app-extension-safe — the loader consults `MH_APP_EXTENSION_SAFE`
+    /// on the image's `mach_header_64.flags` word for the App Store's
+    /// sandbox compatibility contract). The segmented path's
+    /// `build_header` reads the bool — `true` ORs the bit into the
+    /// flags word. The default (`false`) keeps every pre-M128 link
+    /// byte-identical — the segmented path never set the bit, so the
+    /// named `false` face is the pre-knob shape (byte-identity, the M122
+    /// `-pie` pattern over the flags word). The relocatable output
+    /// refuses the knob (the object's header is the input's, verbatim —
+    /// the M104/M105/M117 pattern, `link_reloc` and the layout's
+    /// re-check backing the driver surface's
+    /// `ApplicationExtensionConflict`). The verifier's read-side
+    /// backstop accepts the bit without warning.
+    pub application_extension: bool,
     /// M28 — the section-alignment floors: the `-sectalign <seg> <sect>
     /// <align>` decisions the packing engine reads when it aligns each
     /// output section (see [`crate::sect_align`]). The decision is a
@@ -1204,6 +1257,9 @@ impl Default for LinkConfig {
             no_pie: false,
             pie: false,
             force_cpusubtype_all: false,
+            subsections_via_symbols: false,
+            interposable: false,
+            application_extension: false,
             allow_stack_execute: false,
             bind_at_load: false,
             keep_local_symbols: true,
@@ -2723,6 +2779,76 @@ pub fn layout(
                       CPU_SUBTYPE_ARM64_ALL, but the relocatable output's header is \
                       the input's, verbatim — drop -force_cpusubtype_ALL or link a \
                       final image (an executable, a dylib or a bundle)"
+                .into(),
+        });
+    }
+    // M126: the output image's atomization decision — the relocatable
+    // output's header is the input's, verbatim (the M10 rung-1 contract
+    // — the object is itself a link input, its flags word rides
+    // untouched), so a named `-allow_subsections_via_symbols` has no
+    // header word to patch. The default (`false`) never refused before
+    // (the pre-M126 shape), so the refusal fires only on the named
+    // `true` face — the M104/M105/M117 refusal shape, one header word
+    // over, mirrored here so no library caller can plan the shape
+    // either.
+    if cfg.subsections_via_symbols && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-allow_subsections_via_symbols sets the output's \
+                      MH_SUBSECTIONS_VIA_SYMBOLS bit, but the relocatable output's \
+                      header is the input's, verbatim — drop \
+                      -allow_subsections_via_symbols or link a final image (an \
+                      executable, a dylib or a bundle)"
+                .into(),
+        });
+    }
+    // M127: the dylib's export-interposability decision — the knob is a
+    // dylib's decision (an executable's identity is `LC_MAIN` — the
+    // kernel loads it; a bundle dlopens without an export table to
+    // interpose; the relocatable output's header is the input's,
+    // verbatim). The M104/M105/M117 refusal shape, mirrored here so no
+    // library caller can plan the shape either. The default (`false`)
+    // never refused before (the pre-M127 shape), so the refusal fires
+    // only on the named `true` face.
+    if cfg.interposable && cfg.filetype != OutputType::Dylib {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Execute => (
+                "-interposable marks a dylib's exports as interposable, but \
+                 this output is an executable",
+                "an executable's identity is LC_MAIN (the kernel loads it), \
+                 not an export table to interpose: link a dylib (-dylib) or \
+                 drop -interposable",
+            ),
+            OutputType::Bundle => (
+                "-interposable marks a dylib's exports as interposable, but \
+                 this output is a bundle",
+                "a bundle dlopens without an export table to interpose: link \
+                 a dylib (-dylib) or drop -interposable",
+            ),
+            _ => (
+                "-interposable marks a dylib's exports as interposable, but \
+                 the relocatable output's header is the input's, verbatim",
+                "drop -interposable or link a dylib",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
+    // M128: the app-extension-safe decision — the relocatable output's
+    // header is the input's, verbatim (the M10 rung-1 contract — the
+    // object is itself a link input, its flags word rides untouched),
+    // so a named `-application_extension` has no header word to patch.
+    // The default (`false`) never refused before (the pre-M128 shape),
+    // so the refusal fires only on the named `true` face — the
+    // M104/M105/M117 refusal shape, one header word over, mirrored here
+    // so no library caller can plan the shape either.
+    if cfg.application_extension && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-application_extension sets the output's \
+                      MH_APP_EXTENSION_SAFE bit, but the relocatable output's \
+                      header is the input's, verbatim — drop \
+                      -application_extension or link a final image (an \
+                      executable, a dylib or a bundle)"
                 .into(),
         });
     }
@@ -6872,6 +6998,48 @@ fn build_header(
     // plans the same word.
     if is_exec && cfg.bind_at_load {
         flags |= pgr_format::consts::MH_BINDATLOAD;
+    }
+    // M126: the output image's atomization decision — the named
+    // `-allow_subsections_via_symbols` ORs `MH_SUBSECTIONS_VIA_SYMBOLS`
+    // into the flags word (the atomization the dead-strip and ICF
+    // passes already read from *input* objects since M5; the output
+    // decision names whether the *producer* marks its own image
+    // atomizable). The default (`false`) keeps every pre-M126 link
+    // byte-identical — the segmented path never set the bit; the bit is
+    // header-level, not fixup-level, so the classic opcode path plans
+    // the same word. The `-r` refusal fired above (the object's header
+    // is the input's, verbatim), so the bit rides a segmented image or
+    // no image at all.
+    if cfg.subsections_via_symbols {
+        flags |= pgr_format::consts::MH_SUBSECTIONS_VIA_SYMBOLS;
+    }
+    // M127: the dylib's export-interposability decision — the named
+    // `-interposable` ORs `MH_WEAK_DEFINES | MH_BINDS_TO_WEAK` into the
+    // flags word regardless of whether the dylib already carries weak
+    // defines (the interpose-all contract the loader consults to treat
+    // every export as overridable at runtime). The default (`false`)
+    // keeps every pre-M127 link byte-identical — the bits ride the
+    // weak-define presence the M2 trie already priced; a dylib with no
+    // weak defines never carried the bits, so the named `false` face is
+    // the pre-knob shape (byte-identity, the M122 `-pie` pattern over the
+    // flags word). The output-kind refusals (executable, bundle, `-r`)
+    // fire on the cold link before a request carries the byte; the bit
+    // is header-level, so the classic opcode path plans the same word.
+    if cfg.interposable {
+        flags |= pgr_format::consts::MH_WEAK_DEFINES | pgr_format::consts::MH_BINDS_TO_WEAK;
+    }
+    // M128: the app-extension-safe decision — the named
+    // `-application_extension` ORs `MH_APP_EXTENSION_SAFE` into the
+    // flags word (the App Store's sandbox-compatibility contract —
+    // dyld consults the bit to gate the loaded image's
+    // app-extension-readiness). The default (`false`) keeps every
+    // pre-M128 link byte-identical — the segmented path never set the
+    // bit; the bit is header-level, so the classic opcode path plans
+    // the same word. The `-r` refusal fired above (the object's header
+    // is the input's, verbatim), so the bit rides a segmented image or
+    // no image at all.
+    if cfg.application_extension {
+        flags |= pgr_format::consts::MH_APP_EXTENSION_SAFE;
     }
     if hi.filetype == OutputType::Dylib && !hi.has_reexports {
         flags |= pgr_format::consts::MH_NO_REEXPORTED_DYLIBS;
