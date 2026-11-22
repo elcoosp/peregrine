@@ -420,6 +420,7 @@ name = "pgr-core"
 version = "0.22.0"
 dependencies = [
  "criterion",
+ "pgr-emit",
  "pgr-fixtures",
  "pgr-format",
  "pgr-verify",
