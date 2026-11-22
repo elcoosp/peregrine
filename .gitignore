@@ -8,6 +8,7 @@ Cargo.lock.bak
 .DS_Store
 commit.sh
 ship.sh
+# ship ceremony (generated locally, never committed; validated dirty-tree)
 ship.toml
 .github/pr-body.md
 .github/commit-plan.tsv
@@ -17,14 +18,3 @@ docs/launch.md
 /core
 # the link cache's default directory name when a test runs from a crate root
 .pgr-cache/
-
-# ship ceremony (generated locally, never committed)
-ship.toml
-.github/pr-body.md
-
-# ship deliverables (validated dirty-tree, not committed)
-ship.toml
-.github/pr-body.md
-
-ship.toml
-.github/pr-body.md
