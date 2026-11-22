@@ -96,7 +96,7 @@ same pipeline in a resident session for warm relinks.
 | `pgr-core` | Passes 1–3: interning, resolution, layout, ICF, dead-strip, thunks, fixup planning, caches, reverse reference index, slack policy, the validated image-knob decisions |
 | `pgr-emit` | Passes 4–5: fused tile emit, ad-hoc signing, writer pool — plus the incremental engine (record, plan, clone-and-patch) and `-r` object assembly |
 | `pgr-verify` | the read-side verifier: library + CLI, selectable checks, JSON and SARIF reports, baseline diffs |
-| `pgr-daemon` | `pgrd`: versioned wire protocol (v60), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit, the served per-pass time report
+| `pgr-daemon` | `pgrd`: versioned wire protocol (the value of `pgr_daemon::PROTO_VERSION`, the single source of truth in `crates/pgr-daemon/src/protocol.rs`), persistent sessions (POIs + bytes + emit buffer + resident output), the served incremental audit, the served per-pass time report
 | `pgr-fixtures` | deterministic Mach-O object/archive builders shared by tests, benches and the fuzz corpus |
 
 ## Fast edit loops
@@ -406,7 +406,7 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 
 
 Every knob ships the same way: a validated decision in the library, verifier gates for the
-shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (protocol v58)
+shapes it can break, a parity bench, a runnable consumer example, daemon-wire carriage (the value of `pgr_daemon::PROTO_VERSION`, the single source of truth in `crates/pgr-daemon/src/protocol.rs` — never a hardcoded number to drift again)
 
 
 **Still on the roadmap:** the Apple Silicon hardware gates · LTO object execution ·
