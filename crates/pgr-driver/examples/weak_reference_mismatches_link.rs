@@ -94,7 +94,7 @@ fn main() {
     .collect();
     match pgr_driver::run(&opts::parse(&argv).expect("parses")) {
         Ok(_) => unreachable!("the error face refuses the mix"),
-        Err(err) => eprintln!("\nthe refusal (verdict + fix):\n{}", err),
+        Err(err) => eprintln!("\nthe refusal (verdict + fix):\n{err}"),
     }
 
     // 3. The -r refusal: the non-default face refuses on the
