@@ -657,9 +657,7 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
         let n_desc = r.u32()? as u16;
         let value = r.u64()?;
         let name_bytes = r.bytes()?.to_vec();
-        let Some(kind) = pgr_format::consts::stab_kind(n_type) else {
-            return None;
-        };
+        let kind = pgr_format::consts::stab_kind(n_type)?;
         stabs.push(crate::object::InputStab {
             kind,
             name: crate::ids::StringId(0),
