@@ -139,6 +139,16 @@ pub struct ResidentImage {
     /// client's stderr). Empty under the off decision (the walk
     /// recorded nothing).
     pub commons_warnings: Vec<String>,
+    /// The duplicate-symbol advisory entries (v72, M121): the session's
+    /// own resolved state when the request's config carries
+    /// `-warn_duplicate` — each duplicate-strong collision the Pass-2
+    /// resolve found prints as the cold lane's `pgr: warning:` face (the
+    /// M62 convention; the daemon never writes the client's stderr). The
+    /// resolution policy itself is unchanged (the default `error` still
+    /// applies unless overridden — under the default a collision refuses
+    /// the link before the walk runs, so the off decision carries the
+    /// empty list).
+    pub duplicate_warnings: Vec<String>,
     /// The served link-statistics report (v63, M112): `Some` when the
     /// request's config carries `-print_statistics` — the session's own
     /// run's counts, the fields the cold lane's report carries (the
@@ -495,6 +505,10 @@ impl DaemonClient {
                     // (M116, `-warn_commons`) — the client prints each
                     // as the cold lane's `pgr: warning:` face.
                     let commons_warnings = crate::protocol::decode_commons_warnings(&mut r)?;
+                    // The v72 tail: the duplicate-symbol advisory entries
+                    // (M121, `-warn_duplicate`) — the client prints each
+                    // as the cold lane's `pgr: warning:` face.
+                    let duplicate_warnings = crate::protocol::decode_duplicate_warnings(&mut r)?;
                     // The v63 tail: the served link-statistics report when
                     // the request asked (the session's own run's counts,
                     // the M62 convention — the driver prints the cold
@@ -524,6 +538,7 @@ impl DaemonClient {
                         policy_warnings,
                         multiply_warnings,
                         commons_warnings,
+                        duplicate_warnings,
                         statistics,
                         references,
                         transport,
