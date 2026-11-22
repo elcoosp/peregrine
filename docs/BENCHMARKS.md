@@ -1056,3 +1056,16 @@ The `no_inits` bench: a shape-parity gate over a 32-object init-bearing corpus (
 ### M118 — the dtrace DOF section processing decision
 
 The `dtrace` bench: a shape-parity gate over a 32-object dtrace-bearing corpus (each object carrying one `__dtrace_dof` (`S_DTRACE_DOF`) section whose head carries the `DOF` identification magic) — the carrying corpus keeps its section under the default and under the decision (the classification recognizes the payload, never drops it; the emit validates the `DOF` header at emit), the payload rides under `-S` too (distinct from the debug class), and a corpus without a `__dtrace_dof` section links byte-identical under either face; recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M119 — the dylib module-policy decision
+
+The `module_policy` bench: a shape-parity gate over a 32-object dylib corpus (each object carrying one defined `_fn_N`) — the default `-multi_module` plans no `LC_DYSYMTAB` module table (`nmodtab = 0`, the legacy zero-module table peregrine always carried, every pre-knob link byte-identical), and `-single_module` dylib emits one 56-byte `DylibModule64` entry whose subranges mirror the `LC_DYSYMTAB`'s locals/extdefs (the whole image as one module); recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M120 — the executable-override decision
+
+The `executable` bench: a shape-parity gate over a 32-object executable corpus (each object carrying one defined `_fn_N`, the first carrying `_main`) — the default `Execute` filetype carries the executable shape (`MH_EXECUTE`, `__PAGEZERO` first, `LC_MAIN`, no `LC_ID_DYLIB`), and the explicit `-executable` override forces `OutputType::Execute` (the same shape — the decision never moves the bytes, every pre-knob link byte-identical); recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M121 — the duplicate-symbol advisory decision
+
+The `warn_duplicate` bench: a shape-parity gate over a 32-object corpus whose second half redefines the first half's symbols (the duplicate strong-strong collisions the advisory tallies) — under the `warning` policy the first definition wins; `-warn_duplicate` tallies the collisions (one per pair) without changing the resolution policy, and the bytes never move under either face (the advisory is a measurement, never a layout product); recorded on the dev sandbox (bounded `--measurement-time 1`).
+
