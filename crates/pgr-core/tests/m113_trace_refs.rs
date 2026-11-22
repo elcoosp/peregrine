@@ -264,6 +264,8 @@ fn the_replay_rereports_the_references_in_walk_order() {
         &[],
         pgr_core::resolve::UndefinedPolicy::Error,
         false,
+        pgr_core::resolve::ModulePolicy::default(),
+        false,
         pgr_core::resolve::MultiplyDefinedPolicy::Error,
         &mut slot,
     )
