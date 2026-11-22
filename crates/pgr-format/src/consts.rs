@@ -337,6 +337,126 @@ pub const N_PBUD: u8 = 0xc;
 /// Indirect (`N_TYPE` value).
 pub const N_INDR: u8 = 0xa;
 
+// ---------------------------------------------------------------------------
+// Stab debug-map entries (the ld64-shaped `n_type` values the M129
+// debug-map milestone emits so `lldb`/`dsymutil` find DWARF in the `.o`
+// files). These are the eight the producer's debug-map plan re-addresses
+// onto the placed live atoms: the source-file anchor (`N_SO`), the
+// object-file anchor (`N_OSO`, the row `dsymutil` walks to open the
+// `.o`'s DWARF), the per-function begin/end pair (`N_FUN`), the global
+// symbol anchor (`N_GSYM`), the static-data anchor (`N_STSYM`), the
+// local-symbol record (`N_LSYM`) and the bracketing pair (`N_BNSYM`/
+// `N_ENSYM`). Each value carries the `N_STAB` bit (≥ 0x20 under the
+// mask) and is cross-checked against the vendored Apple headers in
+// `tests/constants_crosscheck.rs`.
+// ---------------------------------------------------------------------------
+
+/// Stab: source file name (`N_SO`) — the per-translation-unit anchor
+/// `lldb`/`dsymutil` reads first (the `n_value` is 0 for the closing
+/// row, the directory then the basename ride two consecutive rows).
+pub const N_SO: u8 = 0x64;
+/// Stab: object file name (`N_OSO`) — the `.o` path `dsymutil` opens;
+/// `n_value` carries the file's mtime, the string the path.
+pub const N_OSO: u8 = 0x66;
+/// Stab: function name (`N_FUN`) — the begin row carries the function's
+/// name and its output address; the closing row carries a zero
+/// `n_value` and the function's size as a null-terminated decimal string.
+pub const N_FUN: u8 = 0x24;
+/// Stab: global symbol (`N_GSYM`) — a global's name; the debugger
+/// resolves the address through the export table at display time.
+pub const N_GSYM: u8 = 0x20;
+/// Stab: static symbol (`N_STSYM`) — a file-static's name and output
+/// address (the data-side analog of `N_FUN`).
+pub const N_STSYM: u8 = 0x26;
+/// Stab: local symbol (`N_LSYM`) — a stack-local or scalar local's
+/// type record (the DWARF `.debug_info` row the debugger unwinds).
+pub const N_LSYM: u8 = 0x80;
+/// Stab: begin-scope bracket (`N_BNSYM`) — opens a `N_FUN` block the
+/// bracketing pair closes (the `n_value` is the function address).
+pub const N_BNSYM: u8 = 0x2e;
+/// Stab: end-scope bracket (`N_ENSYM`) — closes the `N_BNSYM`/`N_FUN`
+/// block (the `n_value` is the function address).
+pub const N_ENSYM: u8 = 0x4e;
+
+/// The stab kinds the M129 debug-map plan emits, in the order the
+/// producer re-addresses them. The variants cover the eight
+/// `n_type` values above (the producer never emits the other stabs the
+/// `N_STAB` mask allows — `N_BINCL`/`N_SOL`/`N_RSYM`/`N_SLINE`/… ride
+/// DWARF's own section, not the symtab's debug map); classifying the
+/// raw `n_type` into the named kind keeps the debug-map plan and the
+/// verifier's `debugmap` family on one enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StabKind {
+    /// Source file (`N_SO`).
+    So,
+    /// Object file (`N_OSO`) — the `.o` path + mtime.
+    Oso,
+    /// Function (`N_FUN`) — the begin row (the closing row pairs it).
+    Fun,
+    /// Global symbol (`N_GSYM`).
+    Gsym,
+    /// Static symbol (`N_STSYM`).
+    Stsym,
+    /// Local symbol (`N_LSYM`).
+    Lsym,
+    /// Begin-scope bracket (`N_BNSYM`).
+    Bnsym,
+    /// End-scope bracket (`N_ENSYM`).
+    Ensym,
+}
+
+impl StabKind {
+    /// The `n_type` byte this kind emits (the inverse of
+    /// [`stab_kind`]).
+    #[must_use]
+    pub const fn n_type(self) -> u8 {
+        match self {
+            StabKind::So => N_SO,
+            StabKind::Oso => N_OSO,
+            StabKind::Fun => N_FUN,
+            StabKind::Gsym => N_GSYM,
+            StabKind::Stsym => N_STSYM,
+            StabKind::Lsym => N_LSYM,
+            StabKind::Bnsym => N_BNSYM,
+            StabKind::Ensym => N_ENSYM,
+        }
+    }
+}
+
+/// Classifies an `n_type` byte as one of the eight debug-map stab
+/// kinds, or `None` when the byte is not a stab (`N_STAB` bit clear) or
+/// is a stab the producer does not emit (`N_BINCL`, `N_SOL`, …). The
+/// producer's debug-map plan and the verifier's `debugmap` family both
+/// route on this one enumeration so a byte that classifies as a stab
+/// in exactly one place re-addresses and validates in exactly one
+/// place.
+///
+/// # Examples
+///
+/// ```
+/// use pgr_format::consts::{N_FUN, N_OSO, stab_kind, StabKind};
+/// assert_eq!(stab_kind(N_OSO), Some(StabKind::Oso));
+/// assert_eq!(stab_kind(N_FUN), Some(StabKind::Fun));
+/// assert_eq!(stab_kind(0x00), None); // not a stab
+/// ```
+#[must_use]
+pub const fn stab_kind(n_type: u8) -> Option<StabKind> {
+    if n_type & N_STAB == 0 {
+        return None;
+    }
+    Some(match n_type {
+        N_SO => StabKind::So,
+        N_OSO => StabKind::Oso,
+        N_FUN => StabKind::Fun,
+        N_GSYM => StabKind::Gsym,
+        N_STSYM => StabKind::Stsym,
+        N_LSYM => StabKind::Lsym,
+        N_BNSYM => StabKind::Bnsym,
+        N_ENSYM => StabKind::Ensym,
+        _ => return None,
+    })
+}
+
 /// `n_desc` reference-flag mask (bits 0-2).
 pub const REFERENCE_TYPE: u16 = 0x7;
 /// Undefined, non-lazy reference.
@@ -648,3 +768,52 @@ pub const UNWIND_INFO_COMPRESSED_ENTRY_FUNC_OFFSET_MASK: u32 = 0x00FF_FFFF;
 /// and the page-local array second (libunwind's two-tier decode) —
 /// the M35 rung rides tier one.
 pub const UNWIND_INFO_COMPRESSED_ENTRY_ENCODING_INDEX_SHIFT: u32 = 24;
+
+#[cfg(test)]
+mod tests {
+    use super::{N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STSYM, StabKind, stab_kind};
+    use crate::consts::N_EXT;
+
+    #[test]
+    fn stab_kind_round_trips_the_eight_emitted_rows() {
+        for kind in [
+            StabKind::So,
+            StabKind::Oso,
+            StabKind::Fun,
+            StabKind::Gsym,
+            StabKind::Stsym,
+            StabKind::Lsym,
+            StabKind::Bnsym,
+            StabKind::Ensym,
+        ] {
+            assert_eq!(stab_kind(kind.n_type()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn stab_kind_rejects_non_stab_types() {
+        // A non-stab `n_type` (any value under the N_STAB mask) classifies
+        // as no stab — the helper is the single classifier the debug-map
+        // plan and the verifier's debugmap family both route on.
+        assert_eq!(stab_kind(N_EXT), None);
+        assert_eq!(stab_kind(0x00), None);
+        assert_eq!(stab_kind(0x0e), None);
+    }
+
+    #[test]
+    fn stab_kind_rejects_stabs_the_producer_does_not_emit() {
+        // N_BINCL (0x82) and N_SOL (0x84) carry the N_STAB bit but ride
+        // DWARF's own section, never the symtab's debug map — the helper
+        // returns None for them so a stray row never re-addresses.
+        assert_eq!(stab_kind(0x82), None);
+        assert_eq!(stab_kind(0x84), None);
+        assert_eq!(stab_kind(0xc0), None); // N_LBRAC
+    }
+
+    #[test]
+    fn stab_named_constants_carry_the_stab_bit() {
+        for n in [N_SO, N_OSO, N_FUN, N_GSYM, N_STSYM, N_LSYM, N_BNSYM, N_ENSYM] {
+            assert!(n & crate::consts::N_STAB != 0, "0x{n:02x} is not a stab");
+        }
+    }
+}
