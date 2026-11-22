@@ -1390,6 +1390,28 @@ pub enum SynthKind {
         /// The called symbol.
         name: StringId,
     },
+    /// M6/D-R3: one `__TEXT,__objc_stubs` entry — a fixed-stride
+    /// (`OBJC_STUB_SIZE_ARM64`-byte) arm64 stub that loads the selector
+    /// string (from `__objc_methname`) into `x1`, the IMP (from a
+    /// `__got` slot bound to `_objc_msgSend`) into `x16`, and branches.
+    /// `callsite` is the `_objc_msgSend$<selector>` name the stub
+    /// resolves; the selector suffix dedups into `__objc_methname`
+    /// (keyed by the same `callsite` id — the suffix is a pure function
+    /// of the callsite name, so dedup-on-callsite is dedup-on-selector).
+    ObjcStubSlot {
+        /// The `_objc_msgSend$<selector>` callsite name this stub resolves.
+        callsite: StringId,
+    },
+    /// M6/D-R3: one deduped `__TEXT,__objc_methname` selector string —
+    /// a NUL-terminated cstring the paired objc stub loads into `x1`.
+    /// `callsite` is the `_objc_msgSend$<selector>` name whose suffix
+    /// is the selector string (the piece's `synth.bytes` carry the
+    /// NUL-terminated suffix; the stub's `adrp x1`/`add x1` reaches
+    /// this piece's address, looked up by `callsite`).
+    ObjcMethname {
+        /// The callsite name whose selector suffix this methname carries.
+        callsite: StringId,
+    },
     /// M6 branch veneer: `adrp x16/add x16/br x16` reaching `target`
     /// through ADRP's ±4 GiB window, inserted right after the branch site
     /// `(file, input section, reloc offset)` (see [`crate::thunks`]).
@@ -1689,6 +1711,16 @@ struct SynthNeeds {
     got_set: std::collections::BTreeSet<u32>,
     /// Names with stubs (dedup helper).
     stub_set: std::collections::BTreeSet<u32>,
+    /// M6/D-R3: the `_objc_msgSend$<selector>` callsite names, in
+    /// first-use order — one `__objc_stubs` entry per distinct name
+    /// (the selector suffix dedups into `__objc_methname`).
+    objc_stubs: Vec<StringId>,
+    /// M6/D-R3: the dedup helper for `objc_stubs` (the interned name id).
+    objc_stub_set: std::collections::BTreeSet<u32>,
+    /// M6/D-R3: the interned name id of `_objc_msgSend` (the runtime
+    /// dispatcher the paired `__got` slot binds). Interned once on the
+    /// first msgSend callsite; `None` carries the no-objc-stub corpus.
+    objc_msgsend_id: Option<StringId>,
 }
 
 impl SynthNeeds {
@@ -1702,6 +1734,20 @@ impl SynthNeeds {
         self.push_got(id);
         if self.stub_set.insert(id.0) {
             self.stubs.push(id);
+        }
+    }
+
+    /// M6/D-R3: records one `_objc_msgSend$<selector>` callsite and (on
+    /// the first one) the paired `_objc_msgSend` GOT slot the stub
+    /// branches through. Dedupes on the callsite name so the corpus's
+    /// repeated callsites of the same selector plan exactly one stub.
+    fn push_objc_stub(&mut self, callsite: StringId, msgsend: StringId) {
+        if self.objc_msgsend_id.is_none() {
+            self.objc_msgsend_id = Some(msgsend);
+            self.push_got(msgsend);
+        }
+        if self.objc_stub_set.insert(callsite.0) {
+            self.objc_stubs.push(callsite);
         }
     }
 }
@@ -1746,6 +1792,44 @@ fn scan_needs(
                         | RelocKind::PointerToGot => needs.push_got(id),
                         _ => {}
                     }
+                    continue;
+                }
+                // M6/D-R3: a `_objc_msgSend$<selector>` callsite is its
+                // own synthesis lane — the `__objc_stubs` stub (one per
+                // distinct selector) and the paired `__got` slot bound
+                // to `_objc_msgSend`. The call site is a real `BL`
+                // (`Branch26`) the synthesizer redirects through the
+                // stub; a non-branch reloc to a callsite is the
+                // producer's malformed callsite (clang emits `BL` only).
+                if res.is_objc_msgsend_callsite(id) {
+                    if !matches!(r.kind, RelocKind::Branch26) {
+                        return Err(LinkError::Unsupported {
+                            file: obj.name.clone(),
+                            message: format!(
+                                "a `_objc_msgSend$<selector>` callsite must be a branch \
+                                 (BL) relocation, not {:?} (modern clang emits one BL per \
+                                 callsite; ld64 synthesizes the stub the branch reaches)",
+                                r.kind
+                            ),
+                        });
+                    }
+                    let name = interner.name(id);
+                    let Some(sel) = crate::objc::objc_msgsend_selector(name.as_bytes()) else {
+                        return Err(LinkError::Internal {
+                            message: format!(
+                                "callsite \"{}\" classified as msgSend but the selector \
+                                 split failed",
+                                name
+                            ),
+                        });
+                    };
+                    let msgsend = interner.lookup(pgr_format::consts::OBJC_MSGSEND_SYMBOL).ok_or_else(|| LinkError::Internal {
+                        message: "_objc_msgSend was not interned (the link.rs batch should have \
+                                  added it when a callsite rode the corpus)"
+                            .into(),
+                    })?;
+                    let _ = sel; // the selector string dedups at methname placement
+                    needs.push_objc_stub(id, msgsend);
                     continue;
                 }
                 if res.dylib_ordinal(id).is_none()
@@ -2105,6 +2189,11 @@ struct SynthBuckets {
     got: bool,
     stubs: bool,
     unwind: bool,
+    /// M6/D-R3: the `__objc_stubs` + `__objc_methname` buckets exist when
+    /// the corpus carries any `_objc_msgSend$<selector>` callsite (the
+    /// synthesizer plans one stub per distinct selector and dedups the
+    /// selector strings into `__objc_methname`).
+    objc_stubs: bool,
 }
 
 fn prepare_buckets(
@@ -2126,6 +2215,29 @@ fn prepare_buckets(
             "__TEXT".into(),
             "__stubs".into(),
             S_SYMBOL_STUBS | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
+            false,
+        ));
+    }
+    if synth.objc_stubs {
+        // M6/D-R3: the objc-msgSend stub section rides beside `__stubs`
+        // (same `S_SYMBOL_STUBS` type — the stride `reserved1` carries
+        // `OBJC_STUB_SIZE_ARM64`; the name distinguishes the family the
+        // verifier's `objcstubs` check reads).
+        buckets.push((
+            "__TEXT".into(),
+            String::from_utf8(pgr_format::consts::SECT_OBJC_STUBS.to_vec())
+                .expect("SECT_OBJC_STUBS is ASCII"),
+            S_SYMBOL_STUBS | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
+            false,
+        ));
+        // M6/D-R3: the deduped selector-string section rides beside the
+        // stubs (the `S_CSTRING_LITERALS` type the cstring dedup path
+        // reads — the synthesizer NUL-terminates each selector string).
+        buckets.push((
+            "__TEXT".into(),
+            String::from_utf8(pgr_format::consts::SECT_OBJC_METHNAME.to_vec())
+                .expect("SECT_OBJC_METHNAME is ASCII"),
+            S_CSTRING_LITERALS,
             false,
         ));
     }
@@ -2179,6 +2291,7 @@ fn canonical_rank(segment: &str, name: &str) -> u64 {
     let name: u64 = match (segment, name) {
         ("__TEXT", "__text") | ("__DATA_CONST", "__const") | ("__DATA", "__data") => 0,
         ("__TEXT", "__stubs") | ("__DATA_CONST", "__got") | ("__DATA", "__bss") => 1,
+        ("__TEXT", "__objc_stubs") | ("__TEXT", "__objc_methname") => 1,
         ("__TEXT", "__const") | ("__DATA", "__common") => 2,
         ("__TEXT", "__cstring") => 3,
         ("__TEXT", "__chain_starts") => 4,
@@ -2207,6 +2320,14 @@ struct PlacedState {
     got_slot_addr: std::collections::BTreeMap<u32, u64>,
     /// Interned name id → stub vaddr (M2, in `__stubs` order).
     stub_addr: std::collections::BTreeMap<u32, u64>,
+    /// M6/D-R3: interned callsite name id → `__objc_stubs` vaddr. The
+    /// Branch26 to an `_objc_msgSend$<selector>` undefined redirects
+    /// through this table (mirrors `stub_addr`'s dylib-call redirect).
+    objc_stub_addr: std::collections::BTreeMap<u32, u64>,
+    /// M6/D-R3: interned callsite name id → `__objc_methname` vaddr.
+    /// The stub's `adrp x1`/`add x1` patches against this address
+    /// (the selector string the stub loads into `x1`).
+    objc_methname_addr: std::collections::BTreeMap<u32, u64>,
     /// M6: branch site `(file, in_sect, reloc offset)` → veneer vaddr.
     /// The relocation scan redirects out-of-range branches through this
     /// table instead of erroring.
@@ -3411,6 +3532,7 @@ pub fn layout(
             got: !needs.got.is_empty(),
             stubs: !needs.stubs.is_empty(),
             unwind: emit_unwind,
+            objc_stubs: !needs.objc_stubs.is_empty(),
         },
         &init_specs,
     );
@@ -3853,6 +3975,17 @@ pub fn layout(
         }
     }
     for id in &needs.stubs {
+        match sym_index.get(&id.0) {
+            Some(i) => indirect_syms.push(*i),
+            None => indirect_syms.push(INDIRECT_SYMBOL_LOCAL),
+        }
+    }
+    // M6/D-R3: `__objc_stubs` indirect entries — one per stub, naming
+    // the `_objc_msgSend$<selector>` callsite's symtab row (the
+    // undefined the stub resolves). A callsite no symtab row carries
+    // (stripped under `-x`) rides `INDIRECT_SYMBOL_LOCAL`, the same
+    // convention `__stubs` uses for its locals.
+    for id in &needs.objc_stubs {
         match sym_index.get(&id.0) {
             Some(i) => indirect_syms.push(*i),
             None => indirect_syms.push(INDIRECT_SYMBOL_LOCAL),
@@ -4682,6 +4815,28 @@ fn stub_template() -> Vec<u8> {
     b
 }
 
+/// M6/D-R3: the arm64 `__objc_stubs` prologue before patching — five
+/// words (20 bytes, `OBJC_STUB_SIZE_ARM64`), the ld64/Mach-O ABI the
+/// verifier crosschecks against a golden:
+/// `adrp x1, <methname@page>`     — load the selector string's page
+/// `add x1, x1, <methname@pageoff>`— the selector string address (x1 is
+///   `objc_msgSend`'s selector register)
+/// `adrp x16, <got@page>`          — load the `_objc_msgSend` GOT slot's page
+/// `ldr x16, [x16, #<got@pageoff>]`— the IMP (the `_objc_msgSend` GOT
+///   slot the chained-fixup bind resolves)
+/// `br x16`                        — tail-call the dispatcher
+/// The immediates are zero placeholders Pass B patches against the
+/// resolved methname and got-slot addresses.
+fn objc_stub_template() -> Vec<u8> {
+    let mut b = Vec::with_capacity(pgr_format::consts::OBJC_STUB_SIZE_ARM64 as usize);
+    b.extend_from_slice(&0x9000_0001u32.to_le_bytes()); // adrp x1, <methname@page>
+    b.extend_from_slice(&0x9100_0021u32.to_le_bytes()); // add x1, x1, <methname@pageoff>
+    b.extend_from_slice(&0x9000_0010u32.to_le_bytes()); // adrp x16, <got@page>
+    b.extend_from_slice(&0xF940_0210u32.to_le_bytes()); // ldr x16, [x16, #<got@pageoff>]
+    b.extend_from_slice(&0xD61F_0200u32.to_le_bytes()); // br x16
+    b
+}
+
 /// M119: builds the one `LC_DYSYMTAB` module-table entry a `-single_module`
 /// dylib carries — a 56-byte `dylib_module_64` whose `ilocalsym`/
 /// `nlocalsym`/`iextdefsym`/`nextdefsym` subranges mirror the
@@ -4795,6 +4950,73 @@ fn place(
                 synth: Some(SynthPiece {
                     kind: SynthKind::StubSlot { name: *id },
                     bytes: stub_template(),
+                }),
+            });
+        }
+    }
+    // ---- M6/D-R3: __objc_stubs entries + __objc_methname strings --------
+    // One stub per distinct selector (first-use order from scan_needs),
+    // each `OBJC_STUB_SIZE_ARM64` bytes of the ld64 arm64 shape
+    // (`adrp x1/add x1` → methname; `adrp x16/ldr x16` → got; `br x16`).
+    // The selector strings dedup into `__objc_methname` (one
+    // NUL-terminated cstring per distinct selector — dedup keyed by the
+    // callsite id, whose suffix is the selector). The stub bytes are the
+    // zero placeholder Pass B patches against the methname and got addrs.
+    if let Some(bi) = buckets
+        .iter()
+        .position(|(seg, name, _, _)| seg == "__TEXT" && name == "__objc_stubs")
+    {
+        for id in &needs.objc_stubs {
+            pieces_of_bucket[bi].push(Piece {
+                file: FileId(u32::MAX),
+                in_sect: usize::MAX,
+                in_range: 0..0,
+                offset: 0,
+                size: u64::from(pgr_format::consts::OBJC_STUB_SIZE_ARM64),
+                align_log2: 2,
+                zerofill: false,
+                common_name: None,
+                patches: Vec::new(),
+                fixup_slots: Vec::new(),
+                synth: Some(SynthPiece {
+                    kind: SynthKind::ObjcStubSlot { callsite: *id },
+                    bytes: objc_stub_template(),
+                }),
+            });
+        }
+    }
+    if let Some(bi) = buckets
+        .iter()
+        .position(|(seg, name, _, _)| seg == "__TEXT" && name == "__objc_methname")
+    {
+        for id in &needs.objc_stubs {
+            // The selector string is the callsite name's suffix past
+            // `_objc_msgSend$`; the NUL terminator is the cstring
+            // convention `__objc_methname` rides (the verifier's
+            // `objcstubs` check reads it).
+            let selector = crate::objc::objc_msgsend_selector(interner.bytes(*id))
+                .ok_or_else(|| LinkError::Internal {
+                    message: format!(
+                        "objc-stub callsite \"{}\" has no selector suffix",
+                        interner.name(*id)
+                    ),
+                })?;
+            let mut bytes = selector.to_vec();
+            bytes.push(0);
+            pieces_of_bucket[bi].push(Piece {
+                file: FileId(u32::MAX),
+                in_sect: usize::MAX,
+                in_range: 0..0,
+                offset: 0,
+                size: bytes.len() as u64,
+                align_log2: 0,
+                zerofill: false,
+                common_name: None,
+                patches: Vec::new(),
+                fixup_slots: Vec::new(),
+                synth: Some(SynthPiece {
+                    kind: SynthKind::ObjcMethname { callsite: *id },
+                    bytes,
                 }),
             });
         }
@@ -5070,6 +5292,8 @@ fn place(
     let mut def_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut got_slot_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut stub_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+    let mut objc_stub_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+    let mut objc_methname_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut veneer_addr_of: std::collections::HashMap<(u32, usize, u32), u64> =
         std::collections::HashMap::new();
     for (si, s) in sections.iter().enumerate() {
@@ -5131,6 +5355,16 @@ fn place(
                     SynthKind::StubSlot { name } => {
                         stub_addr.insert(name.0, addr);
                     }
+                    // M6/D-R3: record the objc-stub and methname piece
+                    // addresses so the Branch26 redirect (callsite →
+                    // stub) and the stub's `adrp x1`/`add x1` patch
+                    // (stub → methname) resolve in Pass B.
+                    SynthKind::ObjcStubSlot { callsite } => {
+                        objc_stub_addr.insert(callsite.0, addr);
+                    }
+                    SynthKind::ObjcMethname { callsite } => {
+                        objc_methname_addr.insert(callsite.0, addr);
+                    }
                     SynthKind::Veneer { site, .. } => {
                         veneer_addr_of.insert(site, addr);
                     }
@@ -5173,6 +5407,8 @@ fn place(
         def_addr,
         got_slot_addr,
         stub_addr,
+        objc_stub_addr,
+        objc_methname_addr,
         veneer_addr_of,
         order_matched,
         cstring_matched,
@@ -5375,6 +5611,10 @@ fn resolve_all(
                         .into(),
                 });
             }
+            // M6/D-R3: objc stubs resolve in Pass C (the methname + got
+            // addresses Pass A computes first); methname pieces carry
+            // their own bytes (the selector string) and no patches/slots.
+            Some(SynthKind::ObjcStubSlot { .. }) | Some(SynthKind::ObjcMethname { .. }) => {}
             Some(SynthKind::Veneer { target, .. }) => {
                 // M6: `adrp x16, target@page` + `add x16, x16,
                 // target@pageoff` — the `br x16` needs no patch. The target
@@ -5386,6 +5626,7 @@ fn resolve_all(
                 let space = AddrSpace {
                     got_slot_addr: &state.got_slot_addr,
                     stub_addr: &state.stub_addr,
+                    objc_stub_addr: &state.objc_stub_addr,
                     interner,
                     res,
                     cfg,
@@ -5458,6 +5699,7 @@ fn resolve_all(
                 let space = AddrSpace {
                     got_slot_addr: &state.got_slot_addr,
                     stub_addr: &state.stub_addr,
+                    objc_stub_addr: &state.objc_stub_addr,
                     interner,
                     res,
                     cfg,
@@ -5545,6 +5787,7 @@ fn resolve_all(
                 let space = AddrSpace {
                     got_slot_addr: &state.got_slot_addr,
                     stub_addr: &state.stub_addr,
+                    objc_stub_addr: &state.objc_stub_addr,
                     interner,
                     res,
                     cfg,
@@ -5604,6 +5847,76 @@ fn resolve_all(
         ];
     }
 
+    // Pass C: __objc_stubs pieces (adrp/add x1 → methname; adrp/ldr x16 →
+    // got; br x16). The methname bytes carry no patches (the selector
+    // string is content); the got slot's chained-fixup bind landed in
+    // Pass A (the `_objc_msgSend` GotSlot arm).
+    for fp_idx in 0..state.flat.len() {
+        let Some(SynthPiece {
+            kind: SynthKind::ObjcStubSlot { callsite },
+            ..
+        }) = state.flat[fp_idx].piece.synth.as_ref()
+        else {
+            continue;
+        };
+        let stub_vaddr = state.flat[fp_idx].addr;
+        // The methname address this stub's `adrp x1`/`add x1` reaches.
+        let methname_vaddr = state
+            .objc_methname_addr
+            .get(&callsite.0)
+            .copied()
+            .ok_or_else(|| LinkError::Internal {
+                message: format!(
+                    "objc stub for \"{}\" has no methname string (synthesis mismatch)",
+                    interner.name(*callsite)
+                ),
+            })?;
+        // The `_objc_msgSend` GOT slot this stub's `adrp x16`/`ldr x16`
+        // reaches — the bind dyld resolves against libobjc at load time.
+        let msgsend_id = interner
+            .lookup(pgr_format::consts::OBJC_MSGSEND_SYMBOL)
+            .ok_or_else(|| LinkError::Internal {
+                message: "an objc stub exists without an interned _objc_msgSend name".into()
+            })?;
+        let got_vaddr = state
+            .got_slot_addr
+            .get(&msgsend_id.0)
+            .copied()
+            .ok_or_else(|| LinkError::Internal {
+                message: format!(
+                    "objc stub for \"{}\" has no _objc_msgSend GOT slot (synthesis mismatch)",
+                    interner.name(*callsite)
+                ),
+            })?;
+        let methname_page = ((methname_vaddr as i64) >> 12) - ((stub_vaddr as i64) >> 12);
+        let methname_imm12 = (methname_vaddr & 0xFFF) as u32; // add x1: byte scale
+        let got_page = ((got_vaddr as i64) >> 12) - ((stub_vaddr as i64) >> 12);
+        let got_imm12 = ((got_vaddr & 0xFFF) >> 3) as u32; // ldr x16: /8 scale
+        state.flat[fp_idx].piece.patches = vec![
+            // adrp x1, <methname@page>
+            PatchOp::Adrp {
+                in_offset: 0,
+                page_delta: methname_page,
+            },
+            // add x1, x1, <methname@pageoff> (unsigned imm12, byte scale)
+            PatchOp::PageOff12 {
+                in_offset: 4,
+                imm12: methname_imm12,
+            },
+            // adrp x16, <got@page>
+            PatchOp::Adrp {
+                in_offset: 8,
+                page_delta: got_page,
+            },
+            // ldr x16, [x16, #<got@pageoff>] (/8 scale)
+            PatchOp::PageOff12 {
+                in_offset: 12,
+                imm12: got_imm12,
+            },
+            // br x16 (word 16) carries no immediate to patch.
+        ];
+    }
+
     // Sync the resolved state back into the section view (Pass 4 reads
     // `sections[*].pieces`).
     for fp in &state.flat {
@@ -5623,6 +5936,10 @@ struct AddrSpace<'a> {
     got_slot_addr: &'a std::collections::BTreeMap<u32, u64>,
     /// Interned name id → stub vaddr (M2).
     stub_addr: &'a std::collections::BTreeMap<u32, u64>,
+    /// M6/D-R3: interned callsite name id → `__objc_stubs` vaddr. The
+    /// Branch26 to an `_objc_msgSend$<selector>` undefined redirects
+    /// through this table (mirrors `stub_addr`'s dylib-call redirect).
+    objc_stub_addr: &'a std::collections::BTreeMap<u32, u64>,
     /// Name bytes for diagnostics.
     interner: &'a Interner,
     /// Resolution (dylib ordinals, dynamic lookups).
@@ -5866,16 +6183,24 @@ fn resolve_reloc(
                         message: "external branch without a name".into(),
                     });
                 };
-                space
-                    .stub_addr
-                    .get(&id.0)
-                    .copied()
-                    .ok_or(LinkError::Internal {
-                        message: format!(
-                            "branch to \"{}\" without a synthesized stub",
-                            space.interner.name(id)
-                        ),
-                    })?
+                // M6/D-R3: a `_objc_msgSend$<selector>` callsite branches
+                // through its synthesized `__objc_stubs` entry (not the
+                // generic `__stubs` — the objc family carries its own
+                // methname + got-pair stub). Check the objc table first.
+                if let Some(&v) = space.objc_stub_addr.get(&id.0) {
+                    v
+                } else {
+                    space
+                        .stub_addr
+                        .get(&id.0)
+                        .copied()
+                        .ok_or(LinkError::Internal {
+                            message: format!(
+                                "branch to \"{}\" without a synthesized stub",
+                                space.interner.name(id)
+                            ),
+                        })?
+                }
             };
             let delta = (target as i64) - (slot_v as i64);
             // Out-of-range deltas are legal *mid-fixpoint* only: the layout
