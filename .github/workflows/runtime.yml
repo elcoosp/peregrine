@@ -50,6 +50,17 @@ jobs:
           codesign -v hello
           codesign -dv hello
           vtool -show hello
+      # M129: dsymutil walks the linked binary's debug-map stabs (the
+      # N_SO/N_OSO/N_FUN rows the producer's debug-map plan re-addresses
+      # onto placed live atoms) to find the DWARF in the .o files. The
+      # step rides the macOS-hardware runtime job (dsymutil ships with
+      # Xcode/CLT) and the already-linked `hello` binary whose stabs M129
+      # emits — a stab-free binary produces no dSYM and exits 0, so the
+      # step is safe regardless of the fixture's debug info.
+      - name: Run dsymutil against the stab-carrying binary
+        run: |
+          dsymutil hello
+          dsymutil -verify hello
       - name: Link a dylib pair and validate both
         run: |
           target/release/pgr -dylib -install_name @rpath/libhello.dylib \
