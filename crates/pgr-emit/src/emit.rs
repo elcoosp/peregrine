@@ -277,6 +277,14 @@ fn write_linkedit(buf: &mut [u8], layout: &Layout) -> Result<(), EmitError> {
             "indirect symbol table",
         )?;
     }
+    // M119: under -single_module the dylib carries one LC_DYSYMTAB module
+    // table entry (the 56-byte `DylibModule64` the layout planned). The
+    // chunk rides the same __LINKEDIT tail the symtab and indirect table
+    // ride — the reference path and the fused tile path both write it so
+    // the M4 byte-identity contract holds.
+    if !layout.module_table.is_empty() {
+        put_chunk(buf, le.modtab_off, &layout.module_table, "module table")?;
+    }
     Ok(())
 }
 
