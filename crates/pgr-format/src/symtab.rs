@@ -74,6 +74,55 @@ pub struct DysymtabCommand {
 
 const _: () = assert!(core::mem::size_of::<DysymtabCommand>() == 80);
 
+/// The 56-byte `dylib_module_64` — one entry of the `LC_DYSYMTAB` module
+/// table (`modtaboff`/`nmodtab`), Apple `<mach-o/loader.h>`'s 64-bit
+/// dylib-module record. The module table is the legacy two-level-namespace
+/// shape ld64's `-single_module`/`-multi_module` names: under
+/// `-single_module` the dylib is one module (the whole image's locals and
+/// extdefs ride one entry whose subranges mirror the `LC_DYSYMTAB`'s), and
+/// the producer emits exactly one entry (M119). The field order matches the
+/// Apple header verbatim (the 32-bit `dylib_module` is 52 bytes — the
+/// 64-bit form widens the trailing `objc_module_info_addr` to `u64` and
+/// swaps it after `objc_module_info_size`, the one order change the
+/// 64-bit split carries).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DylibModule64 {
+    /// String-table offset of the module name (0 for a single-module
+    /// dylib — the image has no per-module name).
+    pub module_name: u32,
+    /// Index of the module's first external definition (mirrors
+    /// `LC_DYSYMTAB.iextdefsym` for a single-module dylib).
+    pub iextdefsym: u32,
+    /// Number of the module's external definitions (mirrors
+    /// `LC_DYSYMTAB.nextdefsym`).
+    pub nextdefsym: u32,
+    /// Index of the module's first reference (legacy, zero under fixups).
+    pub irefsym: u32,
+    /// Number of the module's references (legacy, zero under fixups).
+    pub nrefsym: u32,
+    /// Index of the module's first local symbol (mirrors
+    /// `LC_DYSYMTAB.ilocalsym`).
+    pub ilocalsym: u32,
+    /// Number of the module's local symbols (mirrors
+    /// `LC_DYSYMTAB.nlocalsym`).
+    pub nlocalsym: u32,
+    /// Index of the module's first external relocation (legacy, zero).
+    pub iextrel: u32,
+    /// Number of the module's external relocations (legacy, zero).
+    pub nextrel: u32,
+    /// Packed index/count of the module's init/term entries (legacy, zero).
+    pub iinit_iterm: u32,
+    /// Packed count of the module's init/term entries (legacy, zero).
+    pub ninit_nterm: u32,
+    /// Byte size of the module's `ObjC` module info (legacy, zero).
+    pub objc_module_info_size: u32,
+    /// Address of the module's `ObjC` module info (legacy, zero).
+    pub objc_module_info_addr: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<DylibModule64>() == 56);
+
 /// The 16-byte `nlist_64` entry (TDD §3.3).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -150,6 +199,58 @@ impl DysymtabCommand {
             _ => FormatError::Invalid {
                 offset: start,
                 what: "indirect symbol array cast failed",
+                value: total as u64,
+            },
+        })
+    }
+
+    /// Parses the `nmodtab` [`DylibModule64`] entries at `modtaboff` (M119):
+    /// the `LC_DYSYMTAB` module table ld64's `-single_module`/
+    /// `-multi_module` names — one 56-byte entry under `-single_module`
+    /// (the whole image as one module), zero entries under the default
+    /// `-multi_module` (the legacy table peregrine never carried). The
+    /// verifier's read-side backstop consults this on every output image
+    /// regardless of how the table was produced.
+    ///
+    /// # Errors
+    /// [`FormatError`] when the module table is truncated, misaligned, or
+    /// its byte length is not a whole multiple of [`DylibModule64`]'s
+    /// size.
+    pub fn modules<'a>(&self, bytes: &'a [u8]) -> Result<&'a [DylibModule64], FormatError> {
+        let total = self
+            .nmodtab
+            .checked_mul(core::mem::size_of::<DylibModule64>() as u32)
+            .ok_or(FormatError::Invalid {
+                offset: self.modtaboff as usize,
+                what: "module table size overflow",
+                value: u64::from(self.nmodtab),
+            })? as usize;
+        let start = self.modtaboff as usize;
+        let end = start.checked_add(total).ok_or(FormatError::Invalid {
+            offset: start,
+            what: "module table end overflow",
+            value: total as u64,
+        })?;
+        if end > bytes.len() {
+            return Err(FormatError::Overrun {
+                offset: start,
+                overrun: end - bytes.len(),
+            });
+        }
+        bytemuck::try_cast_slice(&bytes[start..end]).map_err(|e| match e {
+            bytemuck::PodCastError::TargetAlignmentGreaterAndInputNotAligned => {
+                FormatError::Unaligned {
+                    offset: start,
+                    align: core::mem::align_of::<DylibModule64>(),
+                }
+            }
+            bytemuck::PodCastError::SizeMismatch => FormatError::Overrun {
+                offset: start,
+                overrun: 0,
+            },
+            _ => FormatError::Invalid {
+                offset: start,
+                what: "module table cast failed",
                 value: total as u64,
             },
         })
