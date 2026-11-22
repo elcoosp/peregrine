@@ -1171,6 +1171,47 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-single_module`/`-multi_module` surface conflict (M119): the
+    /// dylib module contract is a final-image decision — the relocatable
+    /// output's symtab is the input's, verbatim (its tables ride the
+    /// inputs untouched; there is no `LC_DYSYMTAB` module table to shape,
+    /// no single-module escalation to apply). The verdict names the shape
+    /// conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ModulePolicyConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// An `-executable` surface conflict (M120): the explicit filetype
+    /// override forces an `MH_EXECUTE` output — `-r`'s `MH_OBJECT` is the
+    /// input's filetype verbatim (the object preserves the input's shape),
+    /// so the combination refuses whatever order the flags arrived in. The
+    /// verdict names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ExecutableConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-warn_duplicate` surface conflict (M121): the duplicate-symbol
+    /// advisory is a resolve-record decision — the relocatable output's
+    /// symtab is the input's, verbatim (its symbol table rides the inputs
+    /// untouched; there is no resolution landing to tally). The verdict
+    /// names the shape conflict; the help is the fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    WarnDuplicateConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// An `-init` surface conflict (M48): the dylib initializer is a
     /// dylib-only command (ld64: "-init can only be used with
     /// -dynamiclib") — an executable's initializer surface is
@@ -2077,7 +2118,13 @@ fn apply_flag(
             // happened).
             pgr_core::layout::OutputType::Dylib => {}
             pgr_core::layout::OutputType::Execute => {
-                opts.config.filetype = pgr_core::layout::OutputType::Dylib;
+                // M120: `-executable` wins over `-dylib` regardless of
+                // order (the override holds — ld64's "force MH_EXECUTE");
+                // a `-dylib` arriving after the override is advisory, never
+                // a silent switch back to a dylib.
+                if !opts.config.executable {
+                    opts.config.filetype = pgr_core::layout::OutputType::Dylib;
+                }
             }
             pgr_core::layout::OutputType::Relocatable => {
                 return Err(OptsError::Repeated {
@@ -2093,7 +2140,12 @@ fn apply_flag(
         "-bundle" => match opts.config.filetype {
             pgr_core::layout::OutputType::Bundle => {}
             pgr_core::layout::OutputType::Execute => {
-                opts.config.filetype = pgr_core::layout::OutputType::Bundle;
+                // M120: `-executable` wins over `-bundle` regardless of
+                // order (the override holds — ld64's "force MH_EXECUTE");
+                // a `-bundle` arriving after the override is advisory.
+                if !opts.config.executable {
+                    opts.config.filetype = pgr_core::layout::OutputType::Bundle;
+                }
             }
             pgr_core::layout::OutputType::Relocatable => {
                 return Err(OptsError::Repeated {
@@ -2106,6 +2158,20 @@ fn apply_flag(
                 });
             }
         },
+        // M120: ld64's `-executable` — the explicit filetype override.
+        // Forces `MH_EXECUTE` regardless of any `-dylib`/`-bundle`
+        // inference earlier on the command line (or sets the default,
+        // which is already `Execute` — every pre-M120 link byte-identical).
+        // `-r` keeps its refusal: when `-r` is in force the filetype stays
+        // `Relocatable` and `finish` refuses the combination (the
+        // M104/M105/M117 pattern, order-independent). The relocatable
+        // conflict is `finish`'s — it sees the whole surface.
+        "-executable" => {
+            opts.config.executable = true;
+            if opts.config.filetype != pgr_core::layout::OutputType::Relocatable {
+                opts.config.filetype = pgr_core::layout::OutputType::Execute;
+            }
+        }
         // M10 rung 1: `-r` relocatable output — an MH_OBJECT the next
         // link consumes as an input. The conflicting knobs (dead-strip,
         // ICF, the incremental record, the resident daemon) are refused
@@ -2769,6 +2835,31 @@ fn apply_flag(
         // conflict is `finish`'s — it sees the whole surface.
         "-dtrace" => {
             opts.config.dtrace = true;
+        }
+        // M119: ld64's dylib module contract — `-single_module` forces the
+        // dylib to be treated as a single module (the LC_DYSYMTAB module
+        // table has one entry, and all undefineds must resolve at link time
+        // or ride the flat/weak lookup — unresolved strong symbols refuse
+        // the link with the symbol named); `-multi_module` is the default
+        // (the legacy zero-module table peregrine always carried, every
+        // pre-knob link byte-identical). The relocatable conflict is
+        // `finish`'s — it sees the whole surface.
+        "-single_module" => {
+            opts.config.module_policy = pgr_core::resolve::ModulePolicy::SingleModule;
+        }
+        "-multi_module" => {
+            opts.config.module_policy = pgr_core::resolve::ModulePolicy::MultiModule;
+        }
+        // M121: ld64's `-warn_duplicate` — the duplicate-symbol advisory
+        // face. Distinct from `-multiply_defined warning` (which changes
+        // the resolution policy to first-wins), the advisory tallies the
+        // duplicate strong definitions found during Pass 2 resolve and the
+        // exit policy prints them as warnings, still exiting 0 — the
+        // resolution policy itself is unchanged (the default `error` still
+        // applies unless overridden). The relocatable conflict is
+        // `finish`'s — it sees the whole surface.
+        "-warn_duplicate" => {
+            opts.config.warn_duplicate = true;
         }
         // M99: the named output UUID — the other half of the M32
         // suppression. ld64's `-uuid <uuid>` names the image's identity:
@@ -3766,6 +3857,54 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                       output's sections are the input's, verbatim"
                 .into(),
             fix: "drop -dtrace or link an image (an executable, dylib or bundle)".into(),
+        });
+    }
+    // M119: the dylib module contract's surface conflict — the
+    // relocatable output's symtab is the input's, verbatim (there is no
+    // LC_DYSYMTAB module table to shape, no single-module escalation to
+    // apply). An explicitly named knob that cannot apply is a refusal,
+    // never a silently dropped one (the library's re-checks back this so
+    // no caller can plan the shape either).
+    if opts.config.module_policy.is_single()
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::ModulePolicyConflict {
+            verdict: "-single_module shapes the output's LC_DYSYMTAB module table \
+                      and escalates unresolved strong references, but the relocatable \
+                      output's symtab is the input's, verbatim"
+                .into(),
+            fix: "drop -single_module or link an image (an executable, dylib or bundle)".into(),
+        });
+    }
+    // M120: the explicit executable override's surface conflict — `-r`'s
+    // `MH_OBJECT` is the input's filetype verbatim (the object preserves
+    // the input's shape), so `-executable` beside `-r` refuses whatever
+    // order the flags arrived in. An explicitly named knob that cannot
+    // apply is a refusal, never a silently dropped one (the library's
+    // re-checks back this so no caller can plan the shape either).
+    if opts.config.executable && opts.config.filetype == pgr_core::layout::OutputType::Relocatable {
+        return Err(OptsError::ExecutableConflict {
+            verdict: "-executable forces an MH_EXECUTE output, but the relocatable \
+                      output's filetype is the input's, verbatim"
+                .into(),
+            fix: "drop -executable or drop -r (link an image)".into(),
+        });
+    }
+    // M121: the duplicate-symbol advisory's surface conflict — the
+    // relocatable output's symtab is the input's, verbatim (its symbol
+    // table rides the inputs untouched; there is no resolution landing to
+    // tally). An explicitly named knob that cannot apply is a refusal,
+    // never a silently dropped one (the library's re-checks back this so
+    // no caller can plan the shape either).
+    if opts.config.warn_duplicate
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::WarnDuplicateConflict {
+            verdict: "-warn_duplicate tallies the duplicate strong definitions found \
+                      during resolve, but the relocatable output's symtab is the \
+                      input's, verbatim"
+                .into(),
+            fix: "drop -warn_duplicate or link an image (an executable, dylib or bundle)".into(),
         });
     }
     // M40: the export-trie suppression is an executable decision — a
