@@ -598,6 +598,35 @@ harness = false
 name = "force_cpusubtype_all"
 harness = false
 
+# M126 — the output image's atomization decision
+# (`-allow_subsections_via_symbols`): the shape-parity gate over the
+# default flags word (no `MH_SUBSECTIONS_VIA_SYMBOLS` bit) and the named
+# override (the bit is one OR into the flags word the segmented path's
+# `build_header` already writes — the link cost never regresses when the
+# decision is named).
+[[bench]]
+name = "subsections_via_symbols"
+harness = false
+
+# M127 — the dylib's export-interposability decision (`-interposable`):
+# the shape-parity gate over the default flags word (no
+# `MH_WEAK_DEFINES | MH_BINDS_TO_WEAK` bits) and the named override (the
+# bits are one OR into the flags word the segmented path's `build_header`
+# already writes — the link cost never regresses when the decision is
+# named).
+[[bench]]
+name = "interposable"
+harness = false
+
+# M128 — the app-extension-safe decision (`-application_extension`): the
+# shape-parity gate over the default flags word (no
+# `MH_APP_EXTENSION_SAFE` bit) and the named override (the bit is one OR
+# into the flags word the segmented path's `build_header` already writes
+# — the link cost never regresses when the decision is named).
+[[bench]]
+name = "application_extension"
+harness = false
+
 # M112 — the link-statistics report (`-print_statistics`): the seam's
 # near-parity — the stats collector rides the M54 observation seam (two
 # count updates per phase event, seven per segmented link, regardless of
