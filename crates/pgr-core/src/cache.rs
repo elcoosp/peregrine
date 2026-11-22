@@ -47,8 +47,9 @@ const POI_MAGIC: &[u8; 8] = b"PGRPOI1\0";
 /// (M30) adds the parsed object's `LC_DATA_IN_CODE` entries to the
 /// payload; **v4** (M33) adds the input symbol's private-extern bit;
 /// **v5** (M34) adds the parsed object's `__LD,__compact_unwind`
-/// rows — v1–v4 entries decode to `None` and re-parse.
-pub const CACHE_FORMAT_VERSION: u32 = 5;
+/// rows; **v6** (M129) adds the parsed object's debug-map stabs —
+/// v1–v5 entries decode to `None` and re-parse.
+pub const CACHE_FORMAT_VERSION: u32 = 6;
 
 /// Parser revision: bumped when Pass 1's parse semantics change in a way
 /// that would make a stored POI stale even though the framing is unchanged.
@@ -510,6 +511,20 @@ pub fn encode_poi(obj: &InputObject, split_symbols: bool) -> Vec<u8> {
         put_u64(&mut p, e.personality);
         put_u64(&mut p, e.lsda);
     }
+    // M129 (v6 payload): the debug-map stabs ride the tail — one record
+    // per stab (kind byte, n_sect byte, n_desc u16, value u64, name
+    // bytes), in file order (the symtab's table order — the
+    // deterministic sequence `dsymutil` walks). The `StringId` is
+    // re-patched by `finish` after the interner rebuilds, so it is not
+    // stored.
+    put_u32(&mut p, obj.stabs.len() as u32);
+    for s in &obj.stabs {
+        put_u8(&mut p, s.kind.n_type());
+        put_u8(&mut p, s.n_sect);
+        put_u32(&mut p, u32::from(s.n_desc));
+        put_u64(&mut p, s.value);
+        put_bytes(&mut p, &s.name_bytes);
+    }
     frame(*POI_MAGIC, &p)
 }
 
@@ -633,6 +648,27 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
             lsda,
         });
     }
+    // M129 (v6 payload): the debug-map stabs ride the tail.
+    let n_stabs = r.u32()? as usize;
+    let mut stabs = Vec::with_capacity(n_stabs.min(1 << 20));
+    for _ in 0..n_stabs {
+        let n_type = r.u8()?;
+        let n_sect = r.u8()?;
+        let n_desc = r.u32()? as u16;
+        let value = r.u64()?;
+        let name_bytes = r.bytes()?.to_vec();
+        let Some(kind) = pgr_format::consts::stab_kind(n_type) else {
+            return None;
+        };
+        stabs.push(crate::object::InputStab {
+            kind,
+            name: crate::ids::StringId(0),
+            name_bytes,
+            n_sect,
+            n_desc,
+            value,
+        });
+    }
     if r.at != r.b.len() {
         return None;
     }
@@ -645,6 +681,7 @@ pub fn decode_poi(bytes: &[u8], file: FileId, name: &str, want_split: bool) -> O
         atoms,
         data_in_code,
         compact_unwind,
+        stabs,
         subsections_via_symbols,
         from_archive,
         archive_name,
@@ -992,7 +1029,7 @@ mod m7_versioned {
             PARSER_REVISION,
             "frame field 2 is the parser revision"
         );
-        assert_eq!(CACHE_FORMAT_VERSION, 5, "M34 bumps the format to v5");
+        assert_eq!(CACHE_FORMAT_VERSION, 6, "M129 bumps the format to v6");
         let tenc = encode_frozen_dylib(&tiny_dylib());
         assert_eq!(
             u32::from_le_bytes(tenc[8..12].try_into().unwrap()),
