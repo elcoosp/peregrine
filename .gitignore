@@ -18,3 +18,8 @@ docs/launch.md
 /core
 # the link cache's default directory name when a test runs from a crate root
 .pgr-cache/
+# stray linker-output object binaries dropped at a crate root by an
+# ad-hoc `pgr -o out.o ...` (the M65 wire-bytes commit checked one in by
+# mistake; the pattern keeps it from re-landing — fixture `.o` bytes
+# ride `std::env::temp_dir()`, never the repo tree)
+/crates/pgr-driver/out.o
