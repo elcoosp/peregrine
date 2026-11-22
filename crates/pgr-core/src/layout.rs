@@ -437,6 +437,22 @@ pub struct LinkConfig {
     /// outputs refuse the knob — the layout's re-check backs the
     /// driver surface's earlier refusal.
     pub no_pie: bool,
+    /// M122 — the PIE positive-form twin: `-pie` is the explicit-decision
+    /// mirror of the M27 `-no_pie` knob (ld64's flag "Force the creation
+    /// of an MH_PIE file" — the M120 `-executable` pattern over the PIE
+    /// bit). The default (`false`) keeps every pre-M122 link
+    /// byte-identical — the bit the executable already carries rides
+    /// unchanged — and the named decision holds the bit ON even when a
+    /// `-no_pie` arrived earlier on the command line (last-wins, the M102
+    /// `-bind_at_load`/`-no_bind_at_load` pair shape: the emit reads
+    /// `cfg.pie || !cfg.no_pie`). The bit is loader-level, not
+    /// fixup-level, so the classic opcode path plans the same flag word —
+    /// and only an executable carries the flag (a dylib or a bundle is
+    /// loaded by the kernel itself, the relocatable output carries no
+    /// loader semantics at all): the non-executable outputs refuse the
+    /// knob — the layout's re-check backs the driver surface's earlier
+    /// refusal (the M27 refusal shape, mirrored exactly).
+    pub pie: bool,
     /// M28 — the section-alignment floors: the `-sectalign <seg> <sect>
     /// <align>` decisions the packing engine reads when it aligns each
     /// output section (see [`crate::sect_align`]). The decision is a
@@ -1005,6 +1021,23 @@ pub struct LinkConfig {
     /// unchanged (the read-side backstop — the image's own W^X walk —
     /// is the producer's mirror, never a policy reader).
     pub read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy,
+    /// M123 — the weak-reference-mismatches policy:
+    /// `-weak_reference_mismatches <policy>` — ld64's policy for a
+    /// symbol referenced both weakly and strongly across the input set
+    /// (the `N_WEAK_REF` bit on a symbol's `n_desc` — the weak-import
+    /// contract's resolve-side cousin). A typed three-value alphabet:
+    /// `error` (the peregrine default — the link refuses when a name's
+    /// reference sites mix weak and strong, the M108 refusal shape),
+    /// `weak` (the advisory face records the mismatch, the resolution
+    /// policy itself unchanged — the bytes never move, the M109/M116
+    /// pattern), `non-weak` (the advisory face records the mismatch the
+    /// other way — the M103/M108 pattern's twin). The decision is a
+    /// measurement, never a layout product; the relocatable output
+    /// refuses the non-default faces (the object's symtab is the
+    /// input's, verbatim — the M104/M105/M111 pattern); the verifier's
+    /// structural contract stays unchanged (the M109 producer-side-only
+    /// pattern).
+    pub weak_reference_mismatches: crate::resolve::WeakReferenceMismatchesPolicy,
     /// M112 — the link-statistics report: `-print_statistics` — ld64's
     /// flag ("Print statistics about the linker's performance") is the
     /// report decision the driver's exit face reads: the counts the
@@ -1132,6 +1165,7 @@ impl Default for LinkConfig {
             bundle_loader: None,
             dylinker: None,
             no_pie: false,
+            pie: false,
             allow_stack_execute: false,
             bind_at_load: false,
             keep_local_symbols: true,
@@ -1146,6 +1180,7 @@ impl Default for LinkConfig {
             executable: false,
             warn_duplicate: false,
             read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy::default(),
+            weak_reference_mismatches: crate::resolve::WeakReferenceMismatchesPolicy::default(),
             print_statistics: false,
             trace_refs: false,
             no_dead_strip_inits_and_terms: false,
@@ -2560,6 +2595,39 @@ pub fn layout(
             message: format!("{verdict} — {fix}"),
         });
     }
+    // M122: the PIE positive-form twin — the `-pie` knob is the
+    // explicit-decision mirror of the M27 `-no_pie` pair, and the same
+    // executable-only contract holds (the kernel loads a dylib or a
+    // bundle itself, the relocatable output carries no loader
+    // semantics), so a named `-pie` has no bit to set elsewhere. The
+    // refusal rides here (not only on the driver surface) so every
+    // caller pays it: a silently dropped knob would claim a slid base
+    // the caller did not ask for (the M27 refusal shape, mirrored
+    // exactly).
+    if cfg.pie && cfg.filetype != OutputType::Execute {
+        let (verdict, fix) = match cfg.filetype {
+            OutputType::Dylib => (
+                "-pie sets the executable's MH_PIE flag, but this output \
+                 is a dylib",
+                "the kernel loads a dylib itself — MH_PIE is an executable-only \
+                 bit: link an executable or drop the flag",
+            ),
+            OutputType::Bundle => (
+                "-pie sets the executable's MH_PIE flag, but this output \
+                 is a bundle",
+                "the kernel loads a bundle itself — MH_PIE is an executable-only \
+                 bit: link an executable or drop the flag",
+            ),
+            _ => (
+                "-pie sets the executable's MH_PIE flag, but the relocatable \
+                 output carries no loader semantics",
+                "drop the flag or link an executable",
+            ),
+        };
+        return Err(LinkError::Layout {
+            message: format!("{verdict} — {fix}"),
+        });
+    }
     // M51: the stack-execution decision is an executable decision —
     // `MH_ALLOW_STACK_EXECUTION` is the executable-only bit (a dylib or
     // a bundle is loaded by the kernel itself, the relocatable output
@@ -2677,6 +2745,27 @@ pub fn layout(
                  verbatim — nothing to decide: drop -read_only_relocs or link an image \
                  (an executable, dylib or bundle)",
                 cfg.read_only_relocs.flag_word()
+            ),
+        });
+    }
+    // M123: the weak-reference-mismatches policy is a final-image
+    // decision — the relocatable output's references ride untouched (no
+    // resolve walk prices them), so the advisory faces have no record to
+    // derive and the default `error` is a no-op there (the M103/M111
+    // pattern — the non-default faces are the refused ones). The
+    // non-default faces refuse here (not only on the driver surface) so
+    // every caller pays it: a silently inert policy would claim a record
+    // the object cannot carry.
+    if cfg.weak_reference_mismatches != crate::resolve::WeakReferenceMismatchesPolicy::Error
+        && cfg.filetype == OutputType::Relocatable
+    {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-weak_reference_mismatches {} records the weak/strong reference \
+                 mismatch, but the relocatable output's references ride untouched — \
+                 nothing to record: drop -weak_reference_mismatches or link an image \
+                 (an executable, dylib or bundle)",
+                cfg.weak_reference_mismatches.flag_word()
             ),
         });
     }
@@ -6658,7 +6747,7 @@ fn build_header(
     if hi.n_undef == 0 {
         flags |= pgr_format::consts::MH_NOUNDEFS;
     }
-    if is_exec && !cfg.no_pie {
+    if is_exec && (cfg.pie || !cfg.no_pie) {
         flags |= pgr_format::consts::MH_PIE;
     }
     // M51: the stack-execution decision — the named flag ORs
