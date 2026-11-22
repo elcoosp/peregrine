@@ -925,6 +925,69 @@ pub struct LinkConfig {
     /// M104/M105 pattern — the layout's re-check and `link_reloc` back
     /// the driver refusal).
     pub dtrace: bool,
+    /// M119 — the dylib module contract policy:
+    /// `-single_module`/`-multi_module` — ld64's dylib module-table shape
+    /// (the `LC_DYSYMTAB` module table `modtaboff`/`nmodtab` the
+    /// two-level-namespace machinery rides; see
+    /// [`crate::resolve::ModulePolicy`]). The decision touches Pass 2
+    /// (the resolver's undefined walk — under [`ModulePolicy::SingleModule`]
+    /// unresolved strong, two-level, non-weak references escalate to error
+    /// regardless of the configured `-undefined` face; weak refs and
+    /// flat-namespace refs ride the dynamic-lookup slot, the M103 pattern)
+    /// and Pass 4 (the `LC_DYSYMTAB` emit shape — one
+    /// [`pgr_format::DylibModule64`] entry whose subranges mirror the
+    /// `LC_DYSYMTAB`'s locals/extdefs, the whole image as one module; the
+    /// module table is dylib-only — executables and bundles keep the
+    /// legacy `nmodtab = 0` shape either way). The default
+    /// ([`ModulePolicy::MultiModule`]) keeps every pre-knob link
+    /// byte-identical (the legacy table peregrine never carried); the
+    /// relocatable output refuses the knob (the object's symtab is the
+    /// input's, verbatim — the surface's knob refusal mirrored exactly,
+    /// the M104/M105/M117 pattern — the layout's re-check and `link_reloc`
+    /// back the driver refusal).
+    pub module_policy: crate::resolve::ModulePolicy,
+    /// M120 — the explicit filetype override: `-executable` — ld64's flag
+    /// ("Force the creation of an `MH_EXECUTE` file") is the Pass-0 decision
+    /// that forces [`OutputType::Execute`] regardless of any `-dylib`/
+    /// `-bundle` inference earlier on the command line (or sets the default,
+    /// which is already `Execute` — every pre-M120 link byte-identical).
+    /// The decision rides the filetype the layout and emit already key on
+    /// (`__PAGEZERO`, `LC_MAIN`, `LC_LOAD_DYLINKER` and the
+    /// no-`LC_ID_DYLIB` contract all gate on
+    /// [`OutputType::is_executable`], so forcing `Execute` makes the
+    /// executable shape fire unchanged), and a separate one-byte advisory
+    /// carries the *explicit* decision over the wire (the resident lane
+    /// plans the same executable shape — the parity gate is byte-identical,
+    /// the M81 pattern). The layout re-check refuses an `LC_ID_DYLIB`
+    /// install name beside the override (an executable's identity is
+    /// `LC_MAIN`, never `LC_ID_DYLIB` — the contract the verifier's
+    /// read-side executable gate mirrors) and the relocatable output refuses
+    /// the knob (`-r` keeps its refusal — the object's filetype is the
+    /// input's, verbatim — the surface's knob refusal mirrored exactly, the
+    /// M104/M105/M117 pattern — the layout's re-check and `link_reloc` back
+    /// the driver refusal).
+    pub executable: bool,
+    /// M121 — the duplicate-symbol advisory: `-warn_duplicate` — ld64's
+    /// flag ("Cause ld to print a warning when a duplicate symbol
+    /// definition is found") is the advisory decision the Pass-2 resolver's
+    /// duplicate-strong tally reads. Distinct from `-multiply_defined
+    /// warning` (which changes the resolution policy to first-wins),
+    /// `-warn_duplicate` is purely advisory: it tallies the duplicate
+    /// strong definitions found during Pass 2 resolve (the
+    /// [`crate::resolve::Resolution::warn_duplicate_open`] walk, the same
+    /// collision the `multiply_defined` policy prices) and the driver's
+    /// advisory face emits a warning to stderr, but the resolution policy
+    /// itself is unchanged (the default `error` still applies unless
+    /// overridden — under the default a duplicate strong definition still
+    /// refuses the link; the advisory rides the non-default faces the way
+    /// the M108/M116 warning faces do). The default (`false`) records
+    /// nothing and keeps every pre-M121 link byte-identical: the advisory
+    /// is a measurement, never a layout product — the bytes never move.
+    /// The relocatable output refuses the knob: the object's symtab is the
+    /// input's, verbatim (the surface's knob refusal mirrored exactly, the
+    /// M104/M105/M116 pattern — the layout's re-check and `link_reloc` back
+    /// the driver refusal).
+    pub warn_duplicate: bool,
     /// M111 — the read-only-relocations policy:
     /// `-read_only_relocs <policy>` — ld64's policy for relocations in
     /// read-only segments (the W^X contract's other half; see
@@ -1005,7 +1068,7 @@ pub struct LinkConfig {
     /// output never reads the table (its section table is the input's,
     /// verbatim — the M41/M43/M47 inert-for-relocatable shape).
     pub renames: crate::rename::SectionRenames,
-    /// M91 — the cstring literal ranks: `-sectorder __TEXT __cstring
+    /// M91 — the cstring literal ranks: `-sectorder `__TEXT` __cstring
     /// <file>` — ld64's cstring mode (`parseOrderFile` with
     /// `cstring = true`, the face [`crate::order::classify_section_order`]
     /// names) — ranks the `S_CSTRING_LITERALS` sections' literals by
@@ -1079,6 +1142,9 @@ impl Default for LinkConfig {
             warn_commons: false,
             no_inits: false,
             dtrace: false,
+            module_policy: crate::resolve::ModulePolicy::default(),
+            executable: false,
+            warn_duplicate: false,
             read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy::default(),
             print_statistics: false,
             trace_refs: false,
@@ -1293,6 +1359,12 @@ pub struct LinkeditPlan {
     pub indirect_off: u64,
     /// Indirect symbol table size in bytes (0 when empty).
     pub indirect_size: usize,
+    /// M119: `LC_DYSYMTAB` module table file offset (0 when the table is
+    /// absent — the `-multi_module` default and every non-dylib output;
+    /// one 56-byte [`pgr_format::DylibModule64`] entry under
+    /// `-single_module` dylib). The emit writes the entry's bytes at this
+    /// offset; the `LC_DYSYMTAB` carries it in `modtaboff`.
+    pub modtab_off: u64,
     /// Byte offset of the `LC_UUID` uuid field inside the header bytes
     /// (`0` when the M32 suppression names the command off — the
     /// absent sentinel every `__LINKEDIT` offset field shares).
@@ -1351,6 +1423,24 @@ pub struct Layout {
     /// verifier's read-side backstop gating either way). The emit reads
     /// the echo — one source, no re-derivation.
     pub dtrace: bool,
+    /// M119: echo of the config's `-single_module`/`-multi_module`
+    /// decision (the face the resolver and the emit serve — under
+    /// [`crate::resolve::ModulePolicy::SingleModule`] the resolver's
+    /// undefined walk escalates strong, two-level, non-weak references
+    /// to error, and the emit writes one `LC_DYSYMTAB` module-table entry
+    /// whose subranges mirror the `LC_DYSYMTAB`'s locals/extdefs; the
+    /// default face keeps every pre-knob link byte-identical). The
+    /// resolver reads the echo through the config; the emit reads the
+    /// `module_table` bytes — one source, no re-derivation.
+    pub module_policy: crate::resolve::ModulePolicy,
+    /// M119: the assembled `LC_DYSYMTAB` module-table bytes (one
+    /// 56-byte [`pgr_format::DylibModule64`] entry under
+    /// `-single_module` dylib, empty otherwise). The emit writes the
+    /// bytes at [`LinkeditPlan::modtab_off`]; the `LC_DYSYMTAB` carries
+    /// the offset and the count in `modtaboff`/`nmodtab`. Empty under the
+    /// default (the legacy table peregrine never carried — every pre-knob
+    /// link byte-identical).
+    pub module_table: Vec<u8>,
     /// The Mach-O file type (`MH_EXECUTE`/`MH_DYLIB`/`MH_BUNDLE`).
     pub filetype: u32,
     /// M11 rung 1: the order-file entries that matched **no** placed
@@ -1361,7 +1451,7 @@ pub struct Layout {
     pub order_unmatched: Vec<Vec<u8>>,
     /// M91: the cstring rank entries that matched **no** placed
     /// literal, in rank order (the decoded content bytes). Empty without
-    /// a `-sectorder __TEXT __cstring` table and whenever every entry
+    /// a `-sectorder `__TEXT` __cstring` table and whenever every entry
     /// ranked something — the same advisory face, the literal's wording.
     pub cstring_order_unmatched: Vec<Vec<u8>>,
     /// M111: the read-only-relocation advisory entries the `warning`
@@ -2683,6 +2773,73 @@ pub fn layout(
                 .into(),
         });
     }
+    // M119: the dylib module contract is a final-image decision — the
+    // relocatable output's symtab is the input's, verbatim (an object
+    // carries its inputs' tables untouched; there is no LC_DYSYMTAB
+    // module table to shape, no single-module escalation to apply — the
+    // resolver's undefined walk rides the input's references verbatim).
+    // The refusal rides here (not only on the driver surface and
+    // `link_reloc`) so every caller pays it: a silently inert knob would
+    // claim a single-module shape the object cannot carry (the
+    // M104/M105/M117 pattern).
+    if cfg.module_policy.is_single() && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-single_module shapes the output's LC_DYSYMTAB module table \
+                      and escalates unresolved strong references, but the relocatable \
+                      output's symtab is the input's, verbatim — nothing to shape or \
+                      escalate: drop -single_module or link an image (an executable, \
+                      dylib or bundle)"
+                .into(),
+        });
+    }
+    // M120: the explicit executable override is a final-image decision —
+    // `-r`'s `MH_OBJECT` is the input's filetype verbatim (the object
+    // preserves the input's shape; the driver's `-executable` arm leaves
+    // `Relocatable` in place for this re-check to refuse). The refusal
+    // rides here (not only on the driver surface and `link_reloc`) so every
+    // caller pays it: a silently inert knob would claim an `MH_EXECUTE`
+    // shape the object cannot carry (the M104/M105/M117 pattern).
+    if cfg.executable && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-executable forces an MH_EXECUTE output, but the relocatable \
+                      output's filetype is the input's, verbatim — the object preserves \
+                      the input's shape: drop -executable or drop -r (link an image)"
+                .into(),
+        });
+    }
+    // M120: an executable's identity is `LC_MAIN`, never `LC_ID_DYLIB` —
+    // the emit never writes the command for a non-dylib, so the contract
+    // holds in the output either way; the re-check refuses an explicit
+    // `-install_name` beside the override so the conflict names itself
+    // rather than silently dropping the install name (the M48 dylib-only
+    // re-check shape, one filetype over — the verifier's read-side
+    // executable gate mirrors the contract on every `MH_EXECUTE`).
+    if cfg.executable && cfg.install_name.is_some() {
+        return Err(LinkError::Layout {
+            message: "-executable forces an MH_EXECUTE output, but -install_name is a \
+                      dylib contract (an executable's identity is LC_MAIN, never \
+                      LC_ID_DYLIB) — drop -install_name or drop -executable (link a \
+                      dylib for an install name)"
+                .into(),
+        });
+    }
+    // M121: the duplicate-symbol advisory is a final-image decision — the
+    // relocatable output's symtab is the input's, verbatim (an object
+    // carries its inputs' tables untouched; there is no resolution landing
+    // to tally — the duplicate walk the advisory reads never runs on the
+    // object path). The refusal rides here (not only on the driver surface
+    // and `link_reloc`) so every caller pays it: a silently inert knob
+    // would claim an advisory the object cannot carry (the M104/M105/M116
+    // pattern).
+    if cfg.warn_duplicate && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-warn_duplicate tallies the duplicate strong definitions found \
+                      during resolve, but the relocatable output's symtab is the \
+                      input's, verbatim — nothing to tally: drop -warn_duplicate or \
+                      link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
     // M107: the non-default commons policies are final-image decisions —
     // the relocatable output's symtab is the input's, verbatim (an
     // object carries its inputs' tables untouched; there is no tentative
@@ -3581,6 +3738,30 @@ pub fn layout(
     let sym_off = take(symbols.len() * 16, 8, &mut cur);
     let str_off = take(strtab.len(), 8, &mut cur);
     let indirect_off = take(indirect_syms.len() * 4, 4, &mut cur);
+    // M119: under -single_module the dylib carries one LC_DYSYMTAB module
+    // table entry (the whole image as one module — the 56-byte
+    // `DylibModule64` whose `ilocalsym`/`nlocalsym`/`iextdefsym`/
+    // `nextdefsym` subranges mirror the LC_DYSYMTAB's locals/extdefs).
+    // The module table is dylib-only (executables and bundles keep the
+    // legacy `nmodtab = 0` shape — ld64's module table is a dylib
+    // contract); the default -multi_module plans no table (the pre-M119
+    // bytes, `modtab_off = 0`). The absent sentinel rides the `0`
+    // convention every __LINKEDIT offset field shares — no `take` call,
+    // no cursor advance on the empty face.
+    let (modtab_off, module_table, nmodtab) =
+        if cfg.module_policy.is_single() && cfg.filetype == OutputType::Dylib {
+            // 8-aligned: `DylibModule64` carries a trailing `u64`
+            // (`objc_module_info_addr`), so the verifier's `bytemuck`
+            // cast requires 8-byte alignment — the producer's own gate.
+            let off = take(
+                core::mem::size_of::<pgr_format::DylibModule64>(),
+                8,
+                &mut cur,
+            );
+            (off, module_table_entry(n_locals, n_defs), 1)
+        } else {
+            (0, Vec::new(), 0)
+        };
     let (sig_off, sig_size, file_size) = if cfg.adhoc {
         // M9 tier-2a (§7.3 "Rebuild LINKEDIT pieces that changed — each is
         // a local edit when slack exists"): with slack active, the chunk
@@ -3629,6 +3810,8 @@ pub fn layout(
         n_undef,
         indirect_off,
         indirect_count: indirect_syms.len(),
+        modtab_off,
+        nmodtab,
         fixup_off: fixup_payload_off,
         fixup_size: fixup_payload_size,
         dyld_rebase_off,
@@ -3704,6 +3887,8 @@ pub fn layout(
         uuid_source: cfg.uuid_source,
         named_uuid: cfg.named_uuid,
         dtrace: cfg.dtrace,
+        module_policy: cfg.module_policy,
+        module_table,
         filetype: cfg.filetype.filetype(),
         image_base,
         order_unmatched,
@@ -3726,6 +3911,7 @@ pub fn layout(
             str_size: strtab.len(),
             indirect_off,
             indirect_size: indirect_syms.len() * 4,
+            modtab_off,
             uuid_at,
             sig_off,
             sig_size,
@@ -4181,6 +4367,33 @@ fn stub_template() -> Vec<u8> {
     b.extend_from_slice(&0xF940_0210u32.to_le_bytes()); // ldr x16, [x16, #imm12]
     b.extend_from_slice(&0xD61F_0200u32.to_le_bytes()); // br x16
     b
+}
+
+/// M119: builds the one `LC_DYSYMTAB` module-table entry a `-single_module`
+/// dylib carries — a 56-byte `dylib_module_64` whose `ilocalsym`/
+/// `nlocalsym`/`iextdefsym`/`nextdefsym` subranges mirror the
+/// `LC_DYSYMTAB`'s (the whole image is one module), every legacy field
+/// zero (the references, ext relocs, init/term and ObjC-info slots the
+/// modern chained-fixups pipeline never carries). Apple `<mach-o/loader.h>`'s
+/// field order — the 64-bit form widens the trailing
+/// `objc_module_info_addr` to `u64` and swaps it after
+/// `objc_module_info_size` (the one order change the 64-bit split carries).
+fn module_table_entry(n_locals: usize, n_defs: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; core::mem::size_of::<pgr_format::DylibModule64>()];
+    let w32 = |buf: &mut [u8], at: usize, v: u32| {
+        buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    };
+    // iextdefsym (offset 4) and nextdefsym (offset 8) mirror the
+    // LC_DYSYMTAB's extdef subrange; nlocalsym (offset 24) mirrors its
+    // local count (ilocalsym stays 0, the LC_DYSYMTAB's own ilocalsym).
+    w32(&mut buf, 4, n_locals as u32);
+    w32(&mut buf, 8, n_defs as u32);
+    w32(&mut buf, 24, n_locals as u32);
+    // module_name, irefsym, nrefsym, ilocalsym, iextrel, nextrel,
+    // iinit_iterm, ninit_nterm, objc_module_info_size and the trailing
+    // objc_module_info_addr all stay zero (the legacy fields the modern
+    // pipeline never carries).
+    buf
 }
 
 /// Places every output section and packs segments (§8).
@@ -6214,6 +6427,12 @@ struct HeaderInputs {
     /// `LC_DYSYMTAB` indirect symbol table.
     indirect_off: u64,
     indirect_count: usize,
+    /// M119: `LC_DYSYMTAB` module table — the `modtaboff`/`nmodtab` the
+    /// command carries (one entry under `-single_module` dylib, zero
+    /// otherwise; the legacy table peregrine never carried under the
+    /// default).
+    modtab_off: u64,
+    nmodtab: u32,
     /// `LC_MAIN` entry offset within `__TEXT` (executables only).
     entryoff: u64,
     /// M3 `LC_ID_DYLIB` inputs (dylibs only).
@@ -6719,8 +6938,17 @@ fn build_header(
     w32(&mut buf, lc + 20, hi.n_defs as u32);
     w32(&mut buf, lc + 24, (hi.n_locals + hi.n_defs) as u32); // iundefsym
     w32(&mut buf, lc + 28, hi.n_undef as u32);
-    // toc/modtoc/extref... legacy zeros; the indirect symbol table lives in
-    // the tail fields (off 56: indirectsymoff, off 60: nindirectsyms).
+    // M119: under -single_module the dylib carries one LC_DYSYMTAB module
+    // table entry (modtaboff/nmodtab at off 40/44 — the 56-byte
+    // `DylibModule64` whose subranges mirror the LC_DYSYMTAB's
+    // locals/extdefs, the whole image as one module). The default
+    // -multi_module and every non-dylib output keep the legacy zero face
+    // (nmodtab = 0, the pre-M119 shape); toc/extref/extrel/locrel stay
+    // zero either way (the modern chained-fixups pipeline carries none).
+    w32(&mut buf, lc + 40, hi.modtab_off as u32);
+    w32(&mut buf, lc + 44, hi.nmodtab);
+    // The indirect symbol table lives in the tail fields (off 56:
+    // indirectsymoff, off 60: nindirectsyms).
     w32(&mut buf, lc + 56, hi.indirect_off as u32);
     w32(&mut buf, lc + 60, hi.indirect_count as u32);
     lc += 80;
