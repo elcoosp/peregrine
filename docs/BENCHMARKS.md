@@ -1069,3 +1069,19 @@ The `executable` bench: a shape-parity gate over a 32-object executable corpus (
 
 The `warn_duplicate` bench: a shape-parity gate over a 32-object corpus whose second half redefines the first half's symbols (the duplicate strong-strong collisions the advisory tallies) — under the `warning` policy the first definition wins; `-warn_duplicate` tallies the collisions (one per pair) without changing the resolution policy, and the bytes never move under either face (the advisory is a measurement, never a layout product); recorded on the dev sandbox (bounded `--measurement-time 1`).
 
+### M122 — the PIE positive-form decision
+
+The `pie` bench: a shape-parity gate over a 64-object executable corpus — the default carries `MH_PIE` (every executable already does), and `-pie` names the same bit explicitly (last-wins a preceding `-no_pie`); the bytes never move (the bit is the default's own — `-pie` is the explicit-decision mirror, never a layout product); recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M123 — the weak-reference-mismatches decision
+
+The `weak_reference_mismatches` bench: a shape-parity gate over a 32-object corpus whose references mix weak and strong against the same name — under `error` the mix refuses, under `weak`/`non-weak` the mismatch is recorded and the link exits 0; the bytes never move under either advisory face (the advisory is a Pass-2 walk, never a layout product); recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M124 — the first-segment-base decision
+
+The `seg1addr` bench: a shape-parity gate over a 64-object executable corpus — the default 4 GiB constant-delta floor and a named 1 GiB `-seg1addr` override; the base is one resolver read at the head of the segment planner (the constant-delta contract `vmaddr = fileoff + base` holds either way), so the link cost never regresses when the floor shifts (the shifted vmaddrs are the only diff, every byte the planner does not touch is identical); recorded on the dev sandbox (bounded `--measurement-time 1`).
+
+### M125 — the CPU-subtype-override decision
+
+The `force_cpusubtype_all` bench: a shape-parity gate over a 64-object executable corpus — the default cpusubtype word and a named `-force_cpusubtype_ALL` override; the word is `CPU_SUBTYPE_ARM64_ALL` either way (the default already carries it — the knob is byte-identity, the M122 `-pie` pattern over the cpusubtype word), so the two images are byte-identical and the link cost never regresses when the decision is named; recorded on the dev sandbox (bounded `--measurement-time 1`).
+
