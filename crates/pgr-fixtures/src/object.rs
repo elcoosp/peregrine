@@ -674,6 +674,42 @@ impl ObjectBuilder {
         self
     }
 
+    /// M6/D-R3: appends an `_objc_msgSend$<selector>` undefined external
+    /// and a `BL` call site targeting it on `text_section`, returning the
+    /// new symbol's declaration index (feed it to [`Self::sym_index`] for
+    /// the symtab-order index the relocation carries). This is the shared
+    /// corpus seam every objc-stubs test, bench and example builds on:
+    /// modern clang emits one such undefined per `objc_msgSend` callsite,
+    /// and the linker synthesizes a `__TEXT,__objc_stubs` entry per
+    /// distinct selector (the call site is a real `BL` whose relocation
+    /// resolves through the stub, the selector string dedups into
+    /// `__objc_methname`). The `BL` immediate is the zero placeholder
+    /// the linker patches at layout time (the same convention the
+    /// `branch26` reloc constructor pins); the call lands at
+    /// `__text`'s current tail — callers reserve the four bytes first.
+    pub fn add_objc_msgsend_call(
+        &mut self,
+        text_section: usize,
+        call_offset: u32,
+        selector: &str,
+    ) -> usize {
+        let name = format!("_objc_msgSend${selector}");
+        let sym = self.add_symbol(ObjectSymbol::Undefined {
+            name,
+            weak_ref: false,
+        });
+        let reloc = ObjectReloc::branch26(self.sym_index(sym)).at(call_offset);
+        self.section_mut(text_section).relocs.push(reloc);
+        sym
+    }
+
+    /// M6/D-R3: the bytes a `BL` placeholder occupies at a callsite (the
+    /// zero-immediate `BL` the linker patches — `0x9400_0000`, the arm64
+    /// `BL` base the reloc applies the 26-bit delta into). The fixture's
+    /// `__text` carries one such word per `objc_msgSend` callsite so the
+    /// relocation has a real instruction to patch.
+    pub const OBJC_MSGSEND_CALL_BYTES: [u8; 4] = 0x9400_0000u32.to_le_bytes();
+
     /// The builder's object name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -1659,5 +1695,56 @@ mod tests {
         let bytes = b.build().unwrap();
         let sym = read_sym(&bytes, 0).unwrap();
         assert!(!sym.is_stab(), "the plain object's first row is the def, not a stab");
+    }
+
+    #[test]
+    fn objc_msgsend_call_emits_the_undefined_and_branch_reloc() {
+        // The shared corpus seam: one `_objc_msgSend$<sel>` undefined plus
+        // a `BL` call site whose branch26 reloc targets it. The linker's
+        // objc-stub synthesizer reads exactly this shape (the modern clang
+        // per-callsite symbol ld64 resolves by stub synthesis).
+        let mut b = ObjectBuilder::new("objc.o").set_subsections_via_symbols(true);
+        let text = b.add_section(ObjectSection::text(
+            "__text",
+            [0xC0u8, 0x03, 0x5F, 0xD6]
+                .iter()
+                .chain(&ObjectBuilder::OBJC_MSGSEND_CALL_BYTES)
+                .copied()
+                .collect(),
+            Vec::new(),
+        ));
+        b.add_symbol(ObjectSymbol::Defined {
+            name: "_main".into(),
+            section_index: text,
+            value: 0,
+            weak: false,
+        });
+        let sym = b.add_objc_msgsend_call(text, 4, "count");
+        let bytes = b.build().unwrap();
+        // The undefined lands in the symtab's undefined group; its name
+        // carries the selector suffix the synthesizer splits off.
+        let idx = b.sym_index(sym) as usize;
+        let s = read_sym(&bytes, idx).unwrap();
+        assert_eq!(s.n_type & N_TYPE, N_UNDF, "the msgSend reference is undefined");
+        assert_eq!(s.n_type & N_EXT, N_EXT);
+        assert_eq!(s.n_value, 0);
+        let _ = s;
+        // The branch26 reloc rides the text section, at the call offset.
+        let (text_sect, _) = read_section(&bytes, 0).unwrap();
+        let relocs = read_relocs(&bytes, 0).unwrap();
+        let bl = relocs
+            .iter()
+            .find(|r| r.r_address == 4)
+            .expect("the call site carries a reloc at offset 4");
+        assert_eq!(bl.rtype(), ARM64_RELOC_BRANCH26);
+        assert!(bl.is_extern());
+        assert_eq!(bl.symbolnum(), idx as u32);
+        // The placeholder word is the arm64 BL base the linker patches.
+        let data_off = text_sect.offset as usize;
+        assert_eq!(
+            &bytes[data_off + 4..data_off + 8],
+            ObjectBuilder::OBJC_MSGSEND_CALL_BYTES,
+            "the call site carries the BL placeholder"
+        );
     }
 }
