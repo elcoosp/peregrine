@@ -136,8 +136,14 @@ pub(crate) const MAGIC: &[u8; 8] = b"PGRINC1\0";
 /// M114): the alphabet rides beside the named value the same way — a
 /// config whose source flipped (content ↔ random ↔ none) is the full
 /// link's job, never an in-place identity renegotiation; v1–v8 records
-/// decode to the content source and re-record.
-pub const FORMAT_VERSION: u32 = 9;
+/// decode to the content source and re-record. **v10** adds the
+/// `LC_DYSYMTAB` module-table offset ([`LinkeditPlan::modtab_off`],
+/// M119): a `-single_module` dylib's module table rides the same
+/// `__LINKEDIT` plan the other chunks ride — a config whose module
+/// policy flipped (multi ↔ single) is the full link's job, never an
+/// in-place emit-shape renegotiation; v1–v9 records decode to
+/// `modtab_off = 0` (the multi-module default) and re-record.
+pub const FORMAT_VERSION: u32 = 10;
 
 const HEADER_LEN: usize = 8 + 4 + 8 + 32;
 
@@ -1010,6 +1016,10 @@ impl LinkRecord {
         e(&mut p, self.linkedit.dyld_rebase_size as u64);
         e(&mut p, self.linkedit.dyld_bind_off);
         e(&mut p, self.linkedit.dyld_bind_size as u64);
+        // M119 (v10 record): the LC_DYSYMTAB module-table offset rides
+        // the plan tail — a -single_module dylib's module table patches
+        // in place the way every other __LINKEDIT chunk does.
+        e(&mut p, self.linkedit.modtab_off);
         p.extend_from_slice(&self.header_sha);
         e(&mut p, self.segments.len() as u64);
         for s in &self.segments {
@@ -1174,6 +1184,10 @@ impl LinkRecord {
             dyld_rebase_size: usize::try_from(d.u64()?).ok()?,
             dyld_bind_off: d.u64()?,
             dyld_bind_size: usize::try_from(d.u64()?).ok()?,
+            // M119 (v10 record): the LC_DYSYMTAB module-table offset —
+            // 0 under the multi-module default (and every pre-v10
+            // record the re-record path heals).
+            modtab_off: d.u64()?,
         };
         let mut header_sha = [0u8; 32];
         d.bytes(&mut header_sha)?;
