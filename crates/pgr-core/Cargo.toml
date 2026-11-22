@@ -575,6 +575,13 @@ harness = false
 name = "read_only_relocs"
 harness = false
 
+# M123 — the weak-reference-mismatches policy (`-weak_reference_mismatches`):
+# the three-face shape gate (the error face's refusal walk, the weak /
+# non-weak advisory faces' identical images — the bytes never move).
+[[bench]]
+name = "weak_reference_mismatches"
+harness = false
+
 # M112 — the link-statistics report (`-print_statistics`): the seam's
 # near-parity — the stats collector rides the M54 observation seam (two
 # count updates per phase event, seven per segmented link, regardless of
