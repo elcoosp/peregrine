@@ -1473,6 +1473,11 @@ fn link_to_image_recorded(
     // strong definitions found during resolve without changing the
     // resolution policy), the exit still tallies the face's product.
     warnings += print_duplicate_warnings(opts, &result);
+    // M123: the weak-reference-mismatches advisory face tallies its
+    // product the same way (the `weak` / `non-weak` faces; under the
+    // default `error` the link refused before this runs — the
+    // printer records nothing).
+    warnings += print_weak_reference_mismatches_warnings(opts, &result);
     // M109: the exit policy reads the tally — under `-fatal_warnings`
     // every advisory face's product is a hard failure (the image is
     // never built, never written); the default keeps the advisory exit.
@@ -1726,6 +1731,34 @@ fn print_duplicate_warnings(opts: &opts::Options, result: &pgr_core::LinkResult)
             "the link exits 0 with a duplicated strong definition (the first one wins)"
         );
         eprintln!("pgr: warning: duplicate symbol {entry}");
+        warnings += 1;
+    }
+    warnings
+}
+
+/// M123: the weak-reference-mismatches advisory face — the driver
+/// prints the entries the resolve walk recorded (the `weak` / `non-weak`
+/// faces; under the default `error` the link refused before this runs).
+/// The advisory is a measurement, never a layout product — the bytes
+/// never move (the M109/M116 pattern).
+fn print_weak_reference_mismatches_warnings(
+    opts: &opts::Options,
+    result: &pgr_core::LinkResult,
+) -> usize {
+    if matches!(
+        opts.config.weak_reference_mismatches,
+        pgr_core::resolve::WeakReferenceMismatchesPolicy::Error
+    ) {
+        return 0;
+    }
+    let mut warnings = 0usize;
+    for entry in result.resolution.weak_reference_mismatches_open() {
+        tracing::warn!(
+            weak_reference_mismatch = %entry,
+            "the link exits 0 with a weak/strong reference mix (the resolution policy \
+             itself unchanged — the bytes never move)"
+        );
+        eprintln!("pgr: warning: weak reference mismatch {entry}");
         warnings += 1;
     }
     warnings
@@ -3748,6 +3781,12 @@ pub fn usage() -> String {
     s.push_str("  -read_only_relocs <policy>   the policy for relocations in read-only\n");
     s.push_str("                               segments (M111): error (default) |\n");
     s.push_str("                               warning | suppress\n");
+    s.push_str("  -weak_reference_mismatches <p> the policy for a symbol referenced\n");
+    s.push_str("                               both weakly and strongly (M123):\n");
+    s.push_str("                               error (default) refuses the mix, weak |\n");
+    s.push_str("                               non-weak record it and exit 0 (refused\n");
+    s.push_str("                               with -r — the object's refs are the\n");
+    s.push_str("                               input's, verbatim)\n");
     s.push_str("  -exported_symbols_list <f>   export only the listed symbols\n");
     s.push_str("  -unexported_symbols_list <f> hide the listed symbols (N_PEXT)\n");
     s.push_str("  -exported_symbol <name>      export only this symbol (repeatable,\n");
@@ -3812,6 +3851,10 @@ pub fn usage() -> String {
     s.push_str("                               executable (M51): MH_ALLOW_STACK_EXECUTION\n");
     s.push_str("                               rides the header word (refused with\n");
     s.push_str("                               -dylib, -bundle and -r)\n");
+    s.push_str("  -pie                          force the MH_PIE flag on (M122): the\n");
+    s.push_str("                               explicit-decision mirror of -no_pie (M27)\n");
+    s.push_str("                               — last wins the pair (the M102 shape);\n");
+    s.push_str("                               refused with -dylib, -bundle and -r\n");
     s.push_str("  -bind_at_load                 bind all undefined symbols at load\n");
     s.push_str("                               time, before main runs (M102): the\n");
     s.push_str("                               dlopen(RTLD_NOW) contract —\n");
