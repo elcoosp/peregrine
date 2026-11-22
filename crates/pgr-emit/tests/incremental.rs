@@ -1385,11 +1385,11 @@ fn record_v5_round_trips_the_resolution_snapshot() {
     // The resolution snapshot rides the record since v5 (the M9
     // resolve wiring); M30's `__LINKEDIT` plan bump moved the format
     // to v6, M82's family byte to v7, M99's named-UUID byte to v8,
-    // M114's source byte to v9 — the snapshot contract crosses them
-    // unchanged.
+    // M114's source byte to v9, M119's module-table offset byte to v10 —
+    // the snapshot contract crosses them unchanged.
     assert_eq!(
-        record.format_version, 9,
-        "the record format is v9 (the M114 bump)"
+        record.format_version, 10,
+        "the record format is v10 (the M119 bump)"
     );
     let snap = record
         .resolution
