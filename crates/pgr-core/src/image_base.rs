@@ -73,8 +73,23 @@ impl ImageBase {
     /// the named override for dylibs and bundles (`0` when none — the
     /// M3 default), `0` for the relocatable output. One resolver, one
     /// kind table — the layout's single reader.
+    ///
+    /// M124: a named `-seg1addr` override sits ahead of the kind table
+    /// for the outputs that carry a first segment (executables and
+    /// dylibs) — the override shifts the `__TEXT` vmaddr (and, for an
+    /// executable, the `__PAGEZERO` vmsize at once, since
+    /// `__PAGEZERO.vmsize == base`). Bundles and the relocatable output
+    /// refuse the knob (the layout re-check), so the kind guard keeps
+    /// the resolver honest for a library caller that constructs the
+    /// config directly — the override never silently widens to a kind
+    /// the surface refused.
     #[must_use]
     pub fn constant_delta(cfg: &crate::layout::LinkConfig) -> u64 {
+        if let Some(seg1) = cfg.seg1addr
+            && crate::seg1addr::Seg1Addr::admits(cfg.filetype)
+        {
+            return seg1.vmaddr();
+        }
         cfg.pagezero.base_for(cfg.filetype, cfg.image_base.as_ref())
     }
 }
