@@ -415,8 +415,24 @@ use std::time::Duration;
 /// `duplicate_warnings` tail carries the session's own collision entries
 /// verbatim (the M62 convention — the client prints the cold lane's
 /// face); the ladder's replay rides the decision (the M81 pattern — the
-/// decision is config, not a product).
-pub const PROTO_VERSION: u32 = 72;
+/// decision is config, not a product). **v73** names the M122 round: the
+/// PIE positive-form twin (`-pie`) rides the tail after the warn_duplicate
+/// byte — one byte; the session's warm pipeline plans the same `MH_PIE`
+/// shape the cold link plans (the parity gate is byte-identical — the
+/// decision is the header flag word, the M27 `-no_pie` pair's
+/// explicit-decision mirror, the M120 `-executable` pattern over the PIE
+/// bit, last-wins the `-no_pie` pair the M102 shape names), and the
+/// ladder's replay rides the decision (the M81 pattern — the decision is
+/// config, not a product). **v74** names the M123 round: the
+/// weak-reference-mismatches policy (`-weak_reference_mismatches
+/// <policy>`) rides the tail after the pie byte — one byte off the
+/// three-value alphabet; the session's warm pipeline plans the same
+/// resolve shape the cold link plans (the parity gate is byte-identical
+/// — the advisory is a Pass-2 walk, the resolution policy itself
+/// unchanged, the M109/M116 pattern), and the ladder's replay rides
+/// the decision (the M81 pattern — the decision is config, not a
+/// product).
+pub const PROTO_VERSION: u32 = 74;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -2069,6 +2085,20 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // unchanged, the default `error` still applies unless overridden),
     // never the pre-M121 silent default.
     put_u8(out, u8::from(cfg.warn_duplicate));
+    // M122 (v73 wire): the PIE positive-form twin rides the tail after
+    // the warn_duplicate byte — one byte; a resident relink plans the
+    // same `MH_PIE` shape the client asked for (the decision is the
+    // header flag word, the M27 `-no_pie` pair's explicit-decision
+    // mirror, last-wins the pair the M102 shape names — the M81 replay
+    // rides the config), never the pre-M122 carrying default.
+    put_u8(out, u8::from(cfg.pie));
+    // M123 (v74 wire): the weak-reference-mismatches policy rides the
+    // tail after the pie byte — one byte off the three-value alphabet;
+    // a resident relink plans the same resolve shape the client asked
+    // for (the advisory is a Pass-2 walk, the resolution policy itself
+    // unchanged, the M81 replay rides the config), never the pre-M123
+    // carrying default.
+    put_u8(out, cfg.weak_reference_mismatches.wire());
     // M33 (v24 wire): the private-extern keep rides the tail after the
     // UUID suppression — one byte; a resident relink carries the
     // private-extern decision the client asked for, never the pre-M33
@@ -2563,6 +2593,19 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // applies unless overridden; the `-r` conflict the core re-checks
     // refuse).
     let warn_duplicate = r.u8()? != 0;
+    // M122 (v73 wire): the PIE positive-form twin — one byte, no
+    // validation beyond the bool (the decision is the header flag word,
+    // the M27 `-no_pie` pair's explicit-decision mirror, last-wins the
+    // pair the M102 shape names; the `-r` conflict the core re-checks
+    // refuse).
+    let pie = r.u8()? != 0;
+    // M123 (v74 wire): the weak-reference-mismatches policy — an
+    // unknown byte is malformed (a refusal, never a silently defaulted
+    // policy; an old server reading a new client's alphabet refuses the
+    // request, the M103 reversed-admits shape).
+    let weak_reference_mismatches =
+        pgr_core::resolve::WeakReferenceMismatchesPolicy::from_wire(r.u8()?)
+            .ok_or_else(malformed)?;
     // M33 (v24 wire): the private-extern keep — one byte, no
     // validation beyond the bool (the conversion is the default; the
     // input `N_PEXT` bit names where the decision fires).
@@ -2833,6 +2876,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         module_policy,
         executable,
         warn_duplicate,
+        pie,
+        weak_reference_mismatches,
         keep_private_externs,
         compact_unwind: !no_compact_unwind,
         header_pad_max_install_names: header_pad_max,
@@ -3213,6 +3258,18 @@ mod tests {
             // is unchanged, the default `error` still applies unless
             // overridden).
             warn_duplicate: true,
+            // The v73 tail: a non-default `-pie` must survive the round
+            // trip verbatim (a resident relink plans the same `MH_PIE`
+            // shape the client asked for — the decision is the header
+            // flag word, the M27 `-no_pie` pair's explicit-decision
+            // mirror, last-wins the pair the M102 shape names).
+            pie: true,
+            // The v74 tail: a non-default weak-reference-mismatches
+            // policy must survive the round trip verbatim (a resident
+            // relink plans the same resolve shape the client asked for
+            // — the advisory is a Pass-2 walk, the resolution policy
+            // itself unchanged, the M109/M116 pattern).
+            weak_reference_mismatches: pgr_core::resolve::WeakReferenceMismatchesPolicy::Weak,
             // The v24 tail: a non-default private-extern keep must
             // survive the round trip verbatim (a resident relink
             // carries the private-extern decision the client asked
@@ -6536,6 +6593,145 @@ mod tests {
         assert!(
             !back.config.warn_duplicate,
             "the off decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_pie_positive_form_decision_round_trips() {
+        // v73: the PIE positive-form twin's decision must survive the
+        // round trip verbatim (a resident relink plans the same `MH_PIE`
+        // shape the client asked for — the decision is the header flag
+        // word, the M27 `-no_pie` pair's explicit-decision mirror,
+        // last-wins the pair the M102 shape names, the M81 replay rides
+        // the config).
+        let cfg = rich_config();
+        assert!(cfg.pie, "rich_config carries the v73 knob");
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(back.config.pie, "the pie decision crosses byte-for-byte");
+        // The default crosses too (the pre-M122 carrying shape — the bit
+        // rides the executable's header unchanged, every pre-knob link
+        // byte-identical).
+        let mut cfg = rich_config();
+        cfg.pie = false;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(!back.config.pie, "the off decision crosses byte-for-byte");
+    }
+
+    #[test]
+    fn the_weak_reference_mismatches_policy_round_trips() {
+        // v74: the weak-reference-mismatches policy must survive the
+        // round trip verbatim (a resident relink plans the same resolve
+        // shape the client asked for — the advisory is a Pass-2 walk,
+        // the resolution policy itself unchanged, the M81 replay rides
+        // the config).
+        let cfg = rich_config();
+        assert_eq!(
+            cfg.weak_reference_mismatches,
+            pgr_core::resolve::WeakReferenceMismatchesPolicy::Weak,
+            "rich_config carries the v74 knob"
+        );
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.weak_reference_mismatches,
+            pgr_core::resolve::WeakReferenceMismatchesPolicy::Weak,
+            "the policy crosses byte-for-byte"
+        );
+        // The default crosses too (the pre-M123 carrying shape).
+        let mut cfg = rich_config();
+        cfg.weak_reference_mismatches = pgr_core::resolve::WeakReferenceMismatchesPolicy::Error;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert_eq!(
+            back.config.weak_reference_mismatches,
+            pgr_core::resolve::WeakReferenceMismatchesPolicy::Error,
+            "the default face crosses byte-for-byte"
         );
     }
 
