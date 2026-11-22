@@ -466,6 +466,30 @@ pub fn link_from_objects_observed(
     // riding the same way. The relocatable path refuses the knob before
     // the resolve runs (the object's symtab is the input's, verbatim).
     res.apply_warn_duplicate(cfg.warn_duplicate, &interner, &objects);
+    // M123: the weak-reference-mismatches advisory rides the same
+    // post-resolve walk (the M107/M116/M121 config pattern) — the walk
+    // derives the record from the resolved `references` map, the policy
+    // decides the exit. Under the default `error` a mix refuses the link
+    // (the M108 refusal shape); the advisory `weak` / `non-weak` faces
+    // leave the record for the driver to print (the bytes never move —
+    // the M109/M116 pattern). The relocatable path refuses the knob
+    // before the resolve runs (the object's symtab is the input's).
+    res.apply_weak_reference_mismatches(cfg.weak_reference_mismatches, &interner, &objects);
+    if matches!(
+        cfg.weak_reference_mismatches,
+        crate::resolve::WeakReferenceMismatchesPolicy::Error
+    ) {
+        if let Some(entry) = res.weak_reference_mismatches_open().next() {
+            return Err(LinkError::Layout {
+                message: format!(
+                    "-weak_reference_mismatches error: a symbol is referenced both \
+                     weakly and strongly — {entry} — drop the weak reference or pass \
+                     -weak_reference_mismatches weak|non-weak to record the mismatch \
+                     and exit 0"
+                ),
+            });
+        }
+    }
     // The record side: capture the finished Pass-2 state when the caller
     // asked for it (the `-incremental` record), so the v5 record section
     // carries it to the next relink.
@@ -843,6 +867,23 @@ fn link_reloc_inner(
             ),
         });
     }
+    // M123: the weak-reference-mismatches policy is a final-image
+    // decision — the relocatable output's references ride untouched (no
+    // resolve walk prices them), so the advisory faces have no record to
+    // derive and the default `error` is a no-op there (the M103/M111
+    // pattern — the non-default faces are the refused ones). The
+    // re-check backs the driver surface's earlier refusal.
+    if cfg.weak_reference_mismatches != crate::resolve::WeakReferenceMismatchesPolicy::Error {
+        return Err(LinkError::Layout {
+            message: format!(
+                "-weak_reference_mismatches {} records the weak/strong reference \
+                 mismatch, but the relocatable output's references ride untouched — \
+                 nothing to record: drop -weak_reference_mismatches or link an image \
+                 (an executable, dylib or bundle)",
+                cfg.weak_reference_mismatches.flag_word()
+            ),
+        });
+    }
     if cfg.dylibs.iter().any(|d| d.hidden) {
         return Err(LinkError::Layout {
             message: "-hidden_library/-hidden_framework/-hidden-l marks a dylib to ride \
@@ -1026,6 +1067,17 @@ fn link_reloc_inner(
             message: "-no_pie clears the executable's MH_PIE flag, but the relocatable \
                       output carries no loader semantics and plans no header word — drop \
                       -no_pie or link an executable"
+                .into(),
+        });
+    }
+    // M122: the PIE positive-form twin — the relocatable output carries
+    // no header word and no loader semantics, so a named `-pie` has no
+    // bit to set (the M27 refusal shape, mirrored exactly).
+    if cfg.pie {
+        return Err(LinkError::Layout {
+            message: "-pie sets the executable's MH_PIE flag, but the relocatable \
+                      output carries no loader semantics and plans no header word — drop \
+                      -pie or link an executable"
                 .into(),
         });
     }
@@ -1225,6 +1277,13 @@ fn link_reloc_inner(
     // default the call records nothing; the symmetry holds for any caller
     // the re-check admits.
     res.apply_warn_duplicate(cfg.warn_duplicate, &interner, &objects);
+    // M123: the advisory walk keeps the relocatable path's contract
+    // symmetric with the image path's — the re-check above refused the
+    // non-default faces (the object's symtab is the input's, verbatim),
+    // so under the default the call records the same mismatches the
+    // image path would; the symmetry holds for any caller the re-check
+    // admits.
+    res.apply_weak_reference_mismatches(cfg.weak_reference_mismatches, &interner, &objects);
     emit_phase(
         &mut observer,
         Phase::Resolve,
