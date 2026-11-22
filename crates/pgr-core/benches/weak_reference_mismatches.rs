@@ -87,7 +87,7 @@ fn bench_weak_reference_mismatches(c: &mut Criterion) {
                         ..LinkConfig::default()
                     };
                     let result = link(black_box(&inputs), &[], &cfg);
-                    black_box(result.map(|r| r.layout.header_bytes.len()).unwrap_or(0));
+                    black_box(result.map_or(0, |r| r.layout.header_bytes.len()));
                 });
             },
         );
