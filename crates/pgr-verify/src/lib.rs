@@ -64,6 +64,7 @@ pub mod dyld_info;
 pub mod dynamic;
 pub mod export_trie;
 pub mod init_offsets;
+pub mod literal;
 pub mod misc;
 pub mod module_table;
 pub mod objc;
@@ -215,6 +216,19 @@ pub enum Code {
     /// the producer's debug-map emit-side gate mirrors, regardless of
     /// how the stabs were produced.
     DebugMap,
+    /// A mergeable literal section is malformed (M131, the D4 completion):
+    /// an `S_4BYTE_LITERALS`/`S_8BYTE_LITERALS`/`S_16BYTE_LITERALS`
+    /// section whose size is not a whole multiple of its atom width, or
+    /// whose alignment sits below the width's own power of two (4→2,
+    /// 8→3, 16→4) — the stride dyld's literal-pool consumer walks and
+    /// the alignment the dedup's width atoms assume. The read-side
+    /// backstop the producer's D4 dedup emit-side gate mirrors,
+    /// regardless of how the section was produced (a malformed literal
+    /// pool the producer never wrote still reports); the dedup
+    /// correctness itself (one canonical copy per unique value) is
+    /// pinned byte-identity by the `m131_literal_merge` gate, the M5
+    /// cstring precedent (cstrings carry no verify family).
+    Literal,
     /// Suspicious but non-fatal condition.
     Suspicious,
     /// A consumer-side check's own code (M67): the token a
@@ -258,6 +272,7 @@ impl Code {
         Code::DtraceDof,
         Code::ModuleTable,
         Code::DebugMap,
+        Code::Literal,
         Code::Suspicious,
     ];
 
@@ -291,6 +306,7 @@ impl Code {
             Code::DtraceDof => "dtrace_dof",
             Code::ModuleTable => "module_table",
             Code::DebugMap => "debug_map",
+            Code::Literal => "literal",
             Code::Suspicious => "suspicious",
             Code::Custom(token) => token,
         }
