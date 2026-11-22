@@ -206,7 +206,14 @@ fn the_resolve_reuse_replay_rides_the_policy() {
         )
         .expect("the names install");
     resolution
-        .require_all_resolved(&interner, &objects, UndefinedPolicy::Warning, false)
+        .require_all_resolved(
+            &interner,
+            &objects,
+            UndefinedPolicy::Warning,
+            false,
+            pgr_core::resolve::ModulePolicy::default(),
+            false,
+        )
         .expect("the warning face resolves");
     assert!(
         resolution.unresolved_open().count() > 0,
