@@ -50,7 +50,8 @@ use crate::interner::Interner;
 use crate::object::InputObject;
 use crate::propagate::seeds;
 use crate::resolve::{
-    DefLite, Dylib, MultiplyDefinedPolicy, Resolution, ResolutionSnapshot, UndefinedPolicy,
+    DefLite, Dylib, ModulePolicy, MultiplyDefinedPolicy, Resolution, ResolutionSnapshot,
+    UndefinedPolicy,
 };
 use std::collections::BTreeSet;
 
@@ -266,6 +267,14 @@ pub fn install_reused(
     make_undefined: &[StringId],
     policy: UndefinedPolicy,
     no_weak_imports: bool,
+    // M119: the dylib module contract rides the replay — under
+    // `-single_module` the replay's undefined walk escalates strong,
+    // two-level, non-weak references exactly as the full path's does
+    // (the policy is config, not a lane product, the M107/M108 pattern);
+    // `flat_namespace` gates the escalation (the whole image is flat — no
+    // two-level strong references exist).
+    module_policy: ModulePolicy,
+    flat_namespace: bool,
     // M108: the multiply-defined resolution policy rides the replay —
     // the collision site decides exactly as the full walk's does (the
     // policy is config, not a lane product, the M107 pattern).
@@ -414,6 +423,13 @@ pub fn install_reused(
         .filter_map(|name| interner.lookup(name))
         .collect();
     res.install_loader_exports(&loader_ids);
-    res.require_all_resolved(interner, objects, policy, no_weak_imports)?;
+    res.require_all_resolved(
+        interner,
+        objects,
+        policy,
+        no_weak_imports,
+        module_policy,
+        flat_namespace,
+    )?;
     Ok(res)
 }
