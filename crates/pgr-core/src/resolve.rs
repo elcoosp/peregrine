@@ -392,6 +392,91 @@ impl ReadOnlyRelocsPolicy {
     }
 }
 
+/// M119 — the dylib module contract policy (`-single_module`/
+/// `-multi_module`): ld64's dylib module-table shape ("The `-single_module`
+/// option forces the resulting executable to be treated as a single
+/// module", the `ld` man page — the Mach-O `LC_DYSYMTAB` module table
+/// `modtaboff`/`nmodtab` the two-level-namespace machinery rides). The
+/// decision is a typed contract every face of the pipeline reads: Pass 2
+/// (the resolver's undefined walk — under [`ModulePolicy::SingleModule`]
+/// unresolved non-weak/non-flat symbols escalate to error, the M103
+/// [`UndefinedPolicy::Error`] pattern forced regardless of the configured
+/// `-undefined` face; weak refs and flat-namespace refs ride the
+/// dynamic-lookup slot, the M103 pattern), Pass 4 (the `LC_DYSYMTAB` emit
+/// shape — one [`pgr_format::DylibModule64`] entry whose subranges mirror
+/// the `LC_DYSYMTAB`'s locals/extdefs, the whole image as one module),
+/// the wire v70 (the enum value, one byte, round-trip gated), the resident
+/// lane (the session's warm pipeline plans the same resolve shape, the
+/// parity gate byte-identical), and the ladder's replay rides the
+/// decision (the M81 pattern — the decision is config, not a product).
+/// The relocatable output refuses the knob: the object's symtab is the
+/// input's, verbatim (the surface's knob refusal mirrored exactly, the
+/// M104/M105/M117 pattern).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModulePolicy {
+    /// `-multi_module` (the default): the dylib's module table reflects
+    /// the modules the inputs carry — the house shape. Peregrine's
+    /// pre-M119 link planned zero modules (the legacy table it never
+    /// carried, `nmodtab = 0`), and the default keeps every pre-knob
+    /// link byte-identical; the resolver's undefined walk rides the
+    /// configured `-undefined` policy unchanged (the M103 shape).
+    #[default]
+    MultiModule,
+    /// `-single_module`: forces the dylib to be treated as a single
+    /// module — the `LC_DYSYMTAB` module table has one entry (one
+    /// [`pgr_format::DylibModule64`] whose subranges mirror the
+    /// `LC_DYSYMTAB`'s locals/extdefs), and all undefineds must resolve
+    /// at link time (or they ride the flat/weak lookup, the M103 pattern;
+    /// unresolved strong symbols refuse the link with the symbol named).
+    /// Under the decision the resolver's undefined walk escalates strong,
+    /// two-level, non-weak references to error regardless of the
+    /// configured `-undefined` face — weak refs ride the dynamic-lookup
+    /// slot (the `is_weak_ref` gate), and flat-namespace refs ride too
+    /// (the whole image is flat — no two-level strong references exist).
+    SingleModule,
+}
+
+impl ModulePolicy {
+    /// The wire byte (the v70 alphabet; an unknown byte is a malformed
+    /// frame — the M103 reversed-admits shape).
+    #[must_use]
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::MultiModule => 0,
+            Self::SingleModule => 1,
+        }
+    }
+
+    /// The wire byte's face (`None` off the alphabet — the decoder
+    /// refuses, never silently defaults).
+    #[must_use]
+    pub const fn from_wire(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::MultiModule),
+            1 => Some(Self::SingleModule),
+            _ => None,
+        }
+    }
+
+    /// The `ld`-man-page spelling the surface errors name.
+    #[must_use]
+    pub const fn flag_word(self) -> &'static str {
+        match self {
+            Self::MultiModule => "multi_module",
+            Self::SingleModule => "single_module",
+        }
+    }
+
+    /// True when the policy forces the single-module shape (the resolver
+    /// escalation gate and the `LC_DYSYMTAB` module-table emit gate both
+    /// consult this — one predicate, two readers, the M117
+    /// `is_init_term_section` shape).
+    #[must_use]
+    pub const fn is_single(self) -> bool {
+        matches!(self, Self::SingleModule)
+    }
+}
+
 /// The global resolution state (Pass 2 output).
 #[derive(Debug, Default)]
 pub struct Resolution {
@@ -1238,7 +1323,26 @@ impl Resolution {
         objects: &[crate::object::InputObject],
         policy: UndefinedPolicy,
         no_weak_imports: bool,
+        module_policy: ModulePolicy,
+        flat_namespace: bool,
     ) -> Result<(), LinkError> {
+        // M119: under -single_module the dylib is one module — unresolved
+        // strong, two-level references escalate to error regardless of the
+        // configured -undefined face (weak refs ride the dynamic-lookup
+        // slot through the `is_weak_ref` gate below, flat-namespace refs
+        // ride too — the whole image is flat, no two-level strong
+        // references exist — the M103 pattern). The escalation is the M103
+        // `UndefinedPolicy::Error` shape forced: rebinding the policy the
+        // four match sites read carries the single decision to every arm
+        // (the reloc walk, the symtab walk, the hidden-dylib arms) without
+        // restating the gate per site. Under `-multi_module` (the default)
+        // or a flat namespace the configured policy rides unchanged —
+        // every pre-knob link byte-identical.
+        let policy = if module_policy.is_single() && !flat_namespace {
+            UndefinedPolicy::Error
+        } else {
+            policy
+        };
         self.dynamic_lookups.clear();
         self.unresolved_open.clear();
         let mut missing: Vec<String> = Vec::new();
@@ -1898,7 +2002,7 @@ impl ResolutionSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{MultiplyDefinedPolicy, Rank, Resolution, UndefinedPolicy};
+    use super::{ModulePolicy, MultiplyDefinedPolicy, Rank, Resolution, UndefinedPolicy};
     use crate::ids::FileId;
     use crate::interner::Interner;
     use crate::object::InputObject;
@@ -2117,7 +2221,14 @@ mod tests {
 
         let (interner, _objects, mut res) = run(vec![a]);
         let err = res
-            .require_all_resolved(&interner, &[], UndefinedPolicy::Error, false)
+            .require_all_resolved(
+                &interner,
+                &[],
+                UndefinedPolicy::Error,
+                false,
+                ModulePolicy::default(),
+                false,
+            )
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("_nowhere"), "{msg}");
@@ -2156,7 +2267,14 @@ mod tests {
         });
 
         let (interner, _objects, mut res) = run(vec![a, b]);
-        res.require_all_resolved(&interner, &[], UndefinedPolicy::Error, false)
-            .unwrap();
+        res.require_all_resolved(
+            &interner,
+            &[],
+            UndefinedPolicy::Error,
+            false,
+            ModulePolicy::default(),
+            false,
+        )
+        .unwrap();
     }
 }
