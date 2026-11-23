@@ -1818,17 +1818,19 @@ fn scan_needs(
                     let Some(sel) = crate::objc::objc_msgsend_selector(name.as_bytes()) else {
                         return Err(LinkError::Internal {
                             message: format!(
-                                "callsite \"{}\" classified as msgSend but the selector \
-                                 split failed",
-                                name
+                                "callsite \"{name}\" classified as msgSend but the selector \
+                                 split failed"
                             ),
                         });
                     };
-                    let msgsend = interner.lookup(pgr_format::consts::OBJC_MSGSEND_SYMBOL).ok_or_else(|| LinkError::Internal {
-                        message: "_objc_msgSend was not interned (the link.rs batch should have \
+                    let msgsend = interner
+                        .lookup(pgr_format::consts::OBJC_MSGSEND_SYMBOL)
+                        .ok_or_else(|| LinkError::Internal {
+                            message:
+                                "_objc_msgSend was not interned (the link.rs batch should have \
                                   added it when a callsite rode the corpus)"
-                            .into(),
-                    })?;
+                                    .into(),
+                        })?;
                     let _ = sel; // the selector string dedups at methname placement
                     needs.push_objc_stub(id, msgsend);
                     continue;
@@ -2291,8 +2293,9 @@ fn canonical_rank(segment: &str, name: &str) -> u64 {
     };
     let name: u64 = match (segment, name) {
         ("__TEXT", "__text") | ("__DATA_CONST", "__const") | ("__DATA", "__data") => 0,
-        ("__TEXT", "__stubs") | ("__DATA_CONST", "__got") | ("__DATA", "__bss") => 1,
-        ("__TEXT", "__objc_stubs") | ("__TEXT", "__objc_methname") => 1,
+        ("__TEXT", "__stubs" | "__objc_stubs" | "__objc_methname")
+        | ("__DATA_CONST", "__got")
+        | ("__DATA", "__bss") => 1,
         ("__TEXT", "__const") | ("__DATA", "__common") => 2,
         ("__TEXT", "__cstring") => 3,
         ("__TEXT", "__chain_starts") => 4,
@@ -5003,12 +5006,14 @@ fn place(
             // `_objc_msgSend$`; the NUL terminator is the cstring
             // convention `__objc_methname` rides (the verifier's
             // `objcstubs` check reads it).
-            let selector = crate::objc::objc_msgsend_selector(interner.bytes(*id))
-                .ok_or_else(|| LinkError::Internal {
-                    message: format!(
-                        "objc-stub callsite \"{}\" has no selector suffix",
-                        interner.name(*id)
-                    ),
+            let selector =
+                crate::objc::objc_msgsend_selector(interner.bytes(*id)).ok_or_else(|| {
+                    LinkError::Internal {
+                        message: format!(
+                            "objc-stub callsite \"{}\" has no selector suffix",
+                            interner.name(*id)
+                        ),
+                    }
                 })?;
             let mut bytes = selector.to_vec();
             bytes.push(0);
@@ -5301,8 +5306,10 @@ fn place(
     let mut def_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut got_slot_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut stub_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
-    let mut objc_stub_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
-    let mut objc_methname_addr: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+    let mut objc_stub_addr: std::collections::BTreeMap<u32, u64> =
+        std::collections::BTreeMap::new();
+    let mut objc_methname_addr: std::collections::BTreeMap<u32, u64> =
+        std::collections::BTreeMap::new();
     let mut veneer_addr_of: std::collections::HashMap<(u32, usize, u32), u64> =
         std::collections::HashMap::new();
     for (si, s) in sections.iter().enumerate() {
@@ -5630,7 +5637,7 @@ fn resolve_all(
             // M6/D-R3: objc stubs resolve in Pass C (the methname + got
             // addresses Pass A computes first); methname pieces carry
             // their own bytes (the selector string) and no patches/slots.
-            Some(SynthKind::ObjcStubSlot { .. }) | Some(SynthKind::ObjcMethname { .. }) => {}
+            Some(SynthKind::ObjcStubSlot { .. } | SynthKind::ObjcMethname { .. }) => {}
             Some(SynthKind::Veneer { target, .. }) => {
                 // M6: `adrp x16, target@page` + `add x16, x16,
                 // target@pageoff` — the `br x16` needs no patch. The target
@@ -5892,7 +5899,7 @@ fn resolve_all(
         let msgsend_id = interner
             .lookup(pgr_format::consts::OBJC_MSGSEND_SYMBOL)
             .ok_or_else(|| LinkError::Internal {
-                message: "an objc stub exists without an interned _objc_msgSend name".into()
+                message: "an objc stub exists without an interned _objc_msgSend name".into(),
             })?;
         let got_vaddr = state
             .got_slot_addr
