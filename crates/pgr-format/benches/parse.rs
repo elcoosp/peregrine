@@ -10,8 +10,8 @@
 
 use criterion::{Criterion, Throughput};
 use pgr_fixtures::{
-    ImageBuilder, ImportsFormat, ObjectBuilder, ObjectSection, ObjectSymbol, SectionSpec,
-    SegmentSpec, SlotKind, SymbolSpec, filler,
+    ImageBuilder, ImportsFormat, ObjectBuilder, ObjectSection, ObjectSymbol, PointerFormatKind,
+    SectionSpec, SegmentSpec, SlotKind, SymbolSpec, filler,
 };
 use pgr_format::consts::{
     S_ATTR_PURE_INSTRUCTIONS, S_REGULAR, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
@@ -19,6 +19,19 @@ use pgr_format::consts::{
 
 /// One synthetic object in the corpus.
 fn bench_image(seed: u64, symbols: usize, relocs: usize, text_kib: usize) -> Vec<u8> {
+    bench_image_family(seed, symbols, relocs, text_kib, PointerFormatKind::Offset64)
+}
+
+/// The corpus image under a named chain-word family: the slot corpus is
+/// family-blind (the same binds and rebases), only the payload's
+/// declared `pointer_format` and its words' encoding change.
+fn bench_image_family(
+    seed: u64,
+    symbols: usize,
+    relocs: usize,
+    text_kib: usize,
+    fmt: PointerFormatKind,
+) -> Vec<u8> {
     let mut b = ImageBuilder::executable("peregrine-bench");
     b.add_segment(SegmentSpec {
         name: "__TEXT".into(),
@@ -72,6 +85,7 @@ fn bench_image(seed: u64, symbols: usize, relocs: usize, text_kib: usize) -> Vec
     b.set_got(got);
     b.set_imports_format(ImportsFormat::Addend64);
     b.set_keep_relocs(true);
+    b.set_pointer_format(fmt);
     b.build().expect("bench corpus image must build").bytes
 }
 
@@ -107,6 +121,42 @@ fn bench_parse(c: &mut Criterion) {
     });
 
     group.finish();
+
+    // The chain-family parity group: the same slot corpus summarized
+    // under both families the summary walk reads — the 64_OFFSET control
+    // and the arm64e family, whose word reader and stride units come
+    // from the payload's declared `pointer_format`. Honest expectation:
+    // the curves track — one extra reader branch over identical slot
+    // work.
+    let arm64e_corpus: Vec<Vec<u8>> = (0u64..24)
+        .map(|i| bench_image_family(0x1000 + i, 4_096, 8_192, 64, PointerFormatKind::Arm64e))
+        .collect();
+    let arm64e_total: u64 = arm64e_corpus.iter().map(|v| v.len() as u64).sum();
+
+    let mut family = c.benchmark_group("pgr-format/summarize_family");
+    family.sample_size(20);
+    family.measurement_time(core::time::Duration::from_secs(4));
+
+    family.throughput(Throughput::Bytes(corpus_total));
+    family.bench_function("offset64_control", |b| {
+        b.iter(|| {
+            for img in std::hint::black_box(&corpus) {
+                let s = pgr_format::summarize(std::hint::black_box(img)).unwrap();
+                std::hint::black_box(s.fixup_slots);
+            }
+        });
+    });
+    family.throughput(Throughput::Bytes(arm64e_total));
+    family.bench_function("arm64e", |b| {
+        b.iter(|| {
+            for img in std::hint::black_box(&arm64e_corpus) {
+                let s = pgr_format::summarize(std::hint::black_box(img)).unwrap();
+                std::hint::black_box(s.fixup_slots);
+            }
+        });
+    });
+
+    family.finish();
 }
 
 /// Builds a deterministic archive of `members` object files (each a small
