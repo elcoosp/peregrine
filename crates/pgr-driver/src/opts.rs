@@ -1208,6 +1208,18 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-w` surface conflict (M133): the advisory faces' print
+    /// suppression cannot apply where it was requested. The verdict
+    /// names the shape conflict; the help is the fix — the house
+    /// convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    WarnSuppressConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// A `-print_statistics` surface conflict (M112): the
     /// link-statistics report is a final-image decision — the relocatable
     /// output has no full-emit layout or fixup planning to report in the
@@ -2117,6 +2129,24 @@ fn apply_flag(
         }
         "-no_fatal_warnings" => {
             opts.config.fatal_warnings = false;
+        }
+        // M133: the advisory faces' print suppression — ld64's `-w`
+        // ("Suppress warnings"). The bool rides the config (the bytes
+        // never move — the decision is the print face's, not the
+        // image's); the relocatable conflict is `finish`'s. ld64's `-w`
+        // carries no mirror: the flag is idempotent, a second occurrence
+        // is the same decision.
+        "-w" => {
+            opts.config.suppress_warnings = true;
+        }
+        // M134: the loaded-object inventory — ld64's `-whatsloaded`
+        // ("Print the names of all object files loaded"). The bool rides
+        // the config (the bytes never move — the face is a measurement,
+        // not a layout product); the face applies to every output kind
+        // (an `-r` object's inventory is its own inputs), so no
+        // relocatable conflict exists.
+        "-whatsloaded" => {
+            opts.config.whats_loaded = true;
         }
         // M112: the link-statistics report — ld64's "Print statistics
         // about the linker's performance". The counts ride the run's own
@@ -4175,6 +4205,27 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
             fix: "every advisory face is already refused beside -r — there is nothing \
                   left to elevate: drop -fatal_warnings or link an image (an executable, \
                   dylib or bundle)"
+                .into(),
+        });
+    }
+    // M133: the advisory faces' print-suppression surface conflict. The
+    // knob is a print-face decision — the relocatable output's shape is
+    // the input's, verbatim (every advisory face that would warn beside
+    // -r is already refused there), so there is nothing left to
+    // suppress. The default never refuses (the pre-M133 shape). An
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one (the library's re-checks back this so no
+    // caller can plan the shape either).
+    if opts.config.suppress_warnings
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::WarnSuppressConflict {
+            verdict: "-w suppresses the advisory faces' warnings, but the relocatable \
+                      output's shape is the input's, verbatim"
+                .into(),
+            fix: "every advisory face is already refused beside -r — there is nothing \
+                  left to suppress: drop -w or link an image (an executable, dylib or \
+                  bundle)"
                 .into(),
         });
     }
