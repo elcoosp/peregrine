@@ -72,7 +72,7 @@ fn chained_exec(pf: PointerFormatKind) -> Vec<u8> {
                 key: 0,
             },
         ],
-        PointerFormatKind::Offset64 => vec![
+        PointerFormatKind::Offset64 | PointerFormatKind::Format64 => vec![
             SlotKind::Bind {
                 sym_index: sym,
                 addend: 0,
@@ -145,7 +145,7 @@ fn pair_images(pf: PointerFormatKind) -> (Vec<u8>, Vec<u8>) {
             addr_div: false,
             key: 2,
         },
-        PointerFormatKind::Offset64 => SlotKind::Bind {
+        PointerFormatKind::Offset64 | PointerFormatKind::Format64 => SlotKind::Bind {
             sym_index: sym,
             addend: 0,
         },
