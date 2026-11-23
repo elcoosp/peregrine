@@ -620,6 +620,40 @@ pub const ARM64_RELOC_AUTHENTICATED_POINTER: u32 = 11;
 /// Generic 32-bit absolute.
 pub const GENERIC_RELOC_VANILLA: u32 = 0;
 
+// ---------------------------------------------------------------------------
+// Relocation types (x86_64 — the second CPU family's alphabet, M10 rung 5
+// slice 3; the values and the pairing order follow Apple's
+// `<mach-o/x86_64/reloc.h>` and LLVM's Mach-O writer)
+// ---------------------------------------------------------------------------
+
+/// 64-bit absolute pointer in data (becomes a chained fixup, the arm64
+/// `UNSIGNED` shape one family over).
+pub const X86_64_RELOC_UNSIGNED: u32 = 0;
+/// Signed 32-bit rip-relative displacement (`lea _sym(%rip)`, `movq
+/// _sym(%rip)`); the addend rides the field bytes in situ.
+pub const X86_64_RELOC_SIGNED: u32 = 1;
+/// Direct `call`/`jmp` 32-bit displacement.
+pub const X86_64_RELOC_BRANCH: u32 = 2;
+/// A GOT load with a 32-bit rip-relative displacement (`movq
+/// _sym@GOTPCREL(%rip)` — the GOT-indirect call shape the slice-2
+/// record named).
+pub const X86_64_RELOC_GOT_LOAD: u32 = 3;
+/// Other GOT references (32-bit rip-relative displacement to the slot).
+pub const X86_64_RELOC_GOT: u32 = 4;
+/// Paired subtraction relocation — names the **subtrahend**; the paired
+/// `X86_64_RELOC_UNSIGNED` that follows names the **minuend** (LLVM's
+/// Mach-O writer order; the arm64 `SUBTRACTOR` decode names the minuend
+/// first — the two families' pairing orders differ by convention).
+pub const X86_64_RELOC_SUBTRACTOR: u32 = 5;
+/// Signed 32-bit displacement with the addend corrected by 1.
+pub const X86_64_RELOC_SIGNED_1: u32 = 6;
+/// Signed 32-bit displacement with the addend corrected by 2.
+pub const X86_64_RELOC_SIGNED_2: u32 = 7;
+/// Signed 32-bit displacement with the addend corrected by 4.
+pub const X86_64_RELOC_SIGNED_4: u32 = 8;
+/// TLV descriptor access with a 32-bit rip-relative displacement.
+pub const X86_64_RELOC_TLV: u32 = 9;
+
 /// `r_length` encoding: 1 byte.
 pub const RELOC_LENGTH_1: u32 = 0;
 /// `r_length` encoding: 2 bytes.
