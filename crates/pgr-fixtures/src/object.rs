@@ -1315,9 +1315,7 @@ mod tests {
         ARM64_RELOC_BRANCH26, ARM64_RELOC_PAGE21, ARM64_RELOC_UNSIGNED, N_EXT, N_SECT, N_TYPE,
         N_UNDF, N_WEAK_DEF, N_WEAK_REF, S_ZEROFILL, get_comm_align, get_library_ordinal,
     };
-    use pgr_format::consts::{
-        N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STSYM,
-    };
+    use pgr_format::consts::{N_BNSYM, N_ENSYM, N_FUN, N_GSYM, N_LSYM, N_OSO, N_SO, N_STSYM};
     use pgr_format::summarize;
 
     /// A minimal valid object: one code section, one def.
@@ -1739,7 +1737,11 @@ mod tests {
         // carries the selector suffix the synthesizer splits off.
         let idx = b.sym_index(sym) as usize;
         let s = read_sym(&bytes, idx).unwrap();
-        assert_eq!(s.n_type & N_TYPE, N_UNDF, "the msgSend reference is undefined");
+        assert_eq!(
+            s.n_type & N_TYPE,
+            N_UNDF,
+            "the msgSend reference is undefined"
+        );
         assert_eq!(s.n_type & N_EXT, N_EXT);
         assert_eq!(s.n_value, 0);
         let _ = s;
