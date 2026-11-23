@@ -180,11 +180,41 @@ pub enum Check {
     /// byte-identity by the `m131_literal_merge` gate, the M5 cstring
     /// precedent (cstrings carry no verify family).
     Literal,
+    /// The `__objc_stubs` synthesis contract (M6/D-R3, M130 — the family
+    /// the `Code::ObjcStubs` read-side backstop was reserved for, wired
+    /// once the M130 constants the synthesis lane references ride the
+    /// format table again): the `__TEXT,__objc_stubs` section ld64's
+    /// `objc_msgSend` dispatch consumes rides `S_SYMBOL_STUBS` (the same
+    /// type `__stubs` carries — the name distinguishes the objc family)
+    /// and a whole `OBJC_STUB_SIZE_ARM64` stride (every stub is five
+    /// arm64 words), and the paired `__TEXT,__objc_methname` section rides
+    /// `S_CSTRING_LITERALS`. The read-side backstop the producer's
+    /// stub-synthesis emit-side gate mirrors, regardless of how the
+    /// section was produced (a malformed stub section the producer never
+    /// wrote still reports); the producer's own synthesis lane is a
+    /// follow-up, so the family is a no-op on peregrine-linked images
+    /// until it lands and backstops third-party (`ld64`-linked) images
+    /// carrying the section in the meantime.
+    ObjcStubs,
+    /// The exit-time terminator-surface contract (M132): the
+    /// `S_MOD_TERM_FUNC_POINTERS` section dyld's exit walk consumes
+    /// (`MachOAnalyzer::forEachTerminator`, the mirror of the initializer
+    /// walk the [`InitOffsets`] family gates) rides a whole 8-byte pointer
+    /// stride — the walk reads whole slots, and the slots are fixup words
+    /// (chained rebase encodings under `LC_DYLD_CHAINED_FIXUPS`,
+    /// opcode-driven rebases under the legacy streams), so the raw bytes
+    /// stay unread and the stride is the shape the gate can honestly
+    /// check (the M94 pointer-form precedent, one section type over —
+    /// `S_MOD_TERM_FUNC_POINTERS` 0xa beside `S_MOD_INIT_FUNC_POINTERS`
+    /// 0x9). The read-side backstop the producer's `__mod_term_func`
+    /// emit-side stride assumes, regardless of how the section was
+    /// produced (the M115/M131 read-side-backstop shape).
+    ModTerm,
 }
 
 impl Check {
     /// Every family, in canonical verify order (the registry order).
-    pub const ALL: [Check; 17] = [
+    pub const ALL: [Check; 19] = [
         Check::Structure,
         Check::Segments,
         Check::Symbols,
@@ -202,6 +232,8 @@ impl Check {
         Check::DyldInfo,
         Check::Signature,
         Check::Literal,
+        Check::ObjcStubs,
+        Check::ModTerm,
     ];
 
     /// Stable string identifier (the `--checks` token).
@@ -225,6 +257,8 @@ impl Check {
             Check::DyldInfo => "dyld_info",
             Check::Signature => "signature",
             Check::Literal => "literal",
+            Check::ObjcStubs => "objc_stubs",
+            Check::ModTerm => "mod_term",
         }
     }
 
@@ -248,6 +282,8 @@ impl Check {
             Check::DyldInfo => 14,
             Check::Signature => 15,
             Check::Literal => 16,
+            Check::ObjcStubs => 17,
+            Check::ModTerm => 18,
         }
     }
 }
@@ -618,6 +654,53 @@ impl ImageCheck for LiteralCheck {
     }
 }
 
+/// The M6/D-R3 (M130) `__objc_stubs` synthesis contract — the family the
+/// `Code::ObjcStubs` read-side backstop was reserved for, wired once the
+/// M130 constants the synthesis lane references ride the format table
+/// again (the family was implemented but never registered, leaving
+/// `check_objc_stubs` dead code the M131 compile breakage had masked).
+struct ObjcStubsCheck;
+
+impl ImageCheck for ObjcStubsCheck {
+    fn check(&self) -> Check {
+        Check::ObjcStubs
+    }
+    fn summary(&self) -> &'static str {
+        "objc stubs: __objc_stubs rides S_SYMBOL_STUBS and the \
+         OBJC_STUB_SIZE_ARM64 stride, __objc_methname rides S_CSTRING_LITERALS"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::ObjcStubs]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        crate::objcstubs::check_objc_stubs(ctx.bytes, ctx.report);
+    }
+}
+
+/// The M132 exit-time terminator-surface contract.
+struct ModTermCheck;
+
+impl ImageCheck for ModTermCheck {
+    fn check(&self) -> Check {
+        Check::ModTerm
+    }
+    fn summary(&self) -> &'static str {
+        "terminator surface: __mod_term_func (S_MOD_TERM_FUNC_POINTERS) rides \
+         the whole 8-byte pointer stride dyld's exit walk consumes"
+    }
+    fn codes(&self) -> &'static [Code] {
+        &[Code::ModTerm]
+    }
+    fn run(&self, ctx: &mut CheckContext<'_>) {
+        if matches!(
+            ctx.parsed.header.filetype,
+            MH_EXECUTE | MH_DYLIB | MH_BUNDLE
+        ) {
+            crate::mod_term::check_mod_term(ctx.bytes, ctx.parsed, ctx.report);
+        }
+    }
+}
+
 impl ImageCheck for TlvCheck {
     fn check(&self) -> Check {
         Check::Tlv
@@ -761,7 +844,7 @@ pub trait CustomCheck: Sync {
 
 /// The built-in check registry, in canonical verify order (one unit per
 /// [`Check::ALL`] entry, same sequence as the whole-image pass).
-static IMAGE_CHECKS: [&'static dyn ImageCheck; 17] = [
+static IMAGE_CHECKS: [&'static dyn ImageCheck; 19] = [
     &StructureCheck,
     &SegmentsCheck,
     &SymbolsCheck,
@@ -779,6 +862,8 @@ static IMAGE_CHECKS: [&'static dyn ImageCheck; 17] = [
     &DyldInfoCheck,
     &SignatureCheck,
     &LiteralCheck,
+    &ObjcStubsCheck,
+    &ModTermCheck,
 ];
 
 /// The built-in check registry, in canonical verify order.
