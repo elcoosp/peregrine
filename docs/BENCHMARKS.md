@@ -795,6 +795,7 @@ same sandbox). Expectations are stated so any divergence is a finding:
 | `pgr-core/plan_fixups_word_family/<offset64\|arm64e>/<1k\|10k\|100k>` (r4 s2)  | both encoders, same slot corpus                                   | curves track — one extra encoder branch                             |
 | `…/arm64e_auth/<1k\|10k\|100k>` (r4 s3)                                        | every slot signed (PAC triple; auth-bind addend split)            | inside the `arm64e` band                                            |
 | `pgr-verify/verify_arm64e/pair_replay/<arm64e_auth\|offset64_control>` (r4 s4) | the family-blind M3 pair gate                                     | inside the control's band — different word reader, doubled stride   |
+| `pgr-verify/verify_x86_64/verify/<x86e_format64\|offset64_control>` (r5 s1)   | the strict pass over the 64 family at 4 KiB pages                  | parity — one branch for the VM-address target translation           |
 
 ## Findings & corrections
 
@@ -1133,4 +1134,8 @@ The `search_paths` bench: the driver's run cost across the `-search_paths_first`
 ### M136 — the unused-dylib advisory face
 
 The `warn_unused` bench: the driver's run cost across the `-warn_unused_dylibs` faces over the same 32-object corpus with one unbound-rider stub — `run_32_objects/silent_default` beside `run_32_objects/advisory`, the honest expectation is parity (the face reads the M42 predicate read-side and never moves the bytes; the delta is the one stderr line). Recorded on the dev sandbox; the hardware gates own the comparable numbers.
+
+### M10 rung 5, slice 1 — the x86_64 read side
+
+The `verify_x86_64` bench: the whole-image strict pass over a `DYLD_CHAINED_PTR_64` chained executable born at the family's 4 KiB page (one VM-address rebase plus one bind) beside the `64_OFFSET` control — `verify_x86_64/verify/<x86e_format64|offset64_control>`, the honest expectation parity (the walk strides both families in 4-byte units; the format-2 face adds one branch for the VM-address target translation). No numbers claimed yet — the bench lands with the slice and the next gate run fills the row the way the rung-3 floor bench was filled.
 
