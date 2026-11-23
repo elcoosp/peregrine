@@ -8,10 +8,11 @@ use pgr_format::LinkeditDataCommand;
 use pgr_format::consts::{
     ARM64_RELOC_ADDEND, ARM64_RELOC_GOT_LOAD_PAGE21, ARM64_RELOC_GOT_LOAD_PAGEOFF12,
     ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12, ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_UNSIGNED,
-    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_CODE_SIGNATURE, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_INFO,
-    LC_DYLD_INFO_ONLY, MH_BUNDLE, MH_DYLIB, MH_DYLINKER, MH_EXECUTE, MH_FILESET, MH_KEXT_BUNDLE,
-    MH_OBJECT, MH_PRELOAD, PAGE_SIZE_16K, PAGEZERO_SIZE_64, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL,
-    S_ZEROFILL, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_WRITE,
+    CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_X86_64_ALL, CPU_TYPE_ARM64, CPU_TYPE_X86_64,
+    LC_CODE_SIGNATURE, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_INFO, LC_DYLD_INFO_ONLY, MH_BUNDLE,
+    MH_DYLIB, MH_DYLINKER, MH_EXECUTE, MH_FILESET, MH_KEXT_BUNDLE, MH_OBJECT, MH_PRELOAD,
+    PAGEZERO_SIZE_64, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL, VM_PROT_EXECUTE,
+    VM_PROT_NONE, VM_PROT_WRITE, page_size,
 };
 use pgr_format::header::MachHeader64;
 use pgr_format::load_command::{LoadCommandIter, LoadCommandKind, ParsedCommand};
@@ -280,17 +281,38 @@ fn count_fixup_slots(bytes: &[u8], lc: &LinkeditDataCommand, nsegments: usize) -
     total
 }
 
+/// The page-contract label a CPU family's messages read: the arm64 face
+/// keeps the historical wording, the `x86_64` face names its own page (M10
+/// rung 5, slice 1 — the gates read `page_size(cputype)`, one table).
+fn page_label(cputype: u32) -> &'static str {
+    if cputype == CPU_TYPE_X86_64 {
+        "4 KiB x86_64"
+    } else {
+        "16 KiB arm64"
+    }
+}
+
 /// Header-level checks.
 pub(crate) fn check_header(img: &ParsedImage<'_>, report: &mut Report) {
     let h = img.header;
-    if h.cputype != CPU_TYPE_ARM64 {
+    // M10 rung 5, slice 1: two admitted families — the read side names
+    // what it walks, everything else refuses with the set named.
+    if h.cputype != CPU_TYPE_ARM64 && h.cputype != CPU_TYPE_X86_64 {
         report.issues.push(Issue::error(
             Code::HeaderInvalid,
-            format!("cputype {:#x} is not CPU_TYPE_ARM64", h.cputype),
+            format!(
+                "cputype {:#x} is neither CPU_TYPE_ARM64 nor CPU_TYPE_X86_64",
+                h.cputype
+            ),
             Some(4),
         ));
     }
-    if h.cpusubtype & 0x00ff_ffff != CPU_SUBTYPE_ARM64_ALL {
+    let subtype_all = if h.cputype == CPU_TYPE_X86_64 {
+        CPU_SUBTYPE_X86_64_ALL
+    } else {
+        CPU_SUBTYPE_ARM64_ALL
+    };
+    if h.cpusubtype & 0x00ff_ffff != subtype_all {
         report.issues.push(Issue::warning(
             Code::HeaderInvalid,
             format!("unexpected cpusubtype {:#x}", h.cpusubtype),
@@ -311,10 +333,13 @@ pub(crate) fn check_header(img: &ParsedImage<'_>, report: &mut Report) {
             Some(20),
         ));
     }
-    if MachHeader64::SIZE + h.sizeofcmds as usize > PAGE_SIZE_16K as usize {
+    if MachHeader64::SIZE + h.sizeofcmds as usize > page_size(h.cputype) as usize {
         report.issues.push(Issue::error(
             Code::HeaderInvalid,
-            "header and load commands must fit the first 16 KiB page",
+            format!(
+                "header and load commands must fit the first {} page",
+                page_label(h.cputype)
+            ),
             Some(20),
         ));
     }
@@ -1051,6 +1076,10 @@ pub(crate) fn check_dylib_contract(img: &ParsedImage<'_>, report: &mut Report) {
 /// 16 KiB congruence, `vmaddr = fileoff + delta`, canonical ordering,
 /// protections and file-coverage invariants.
 pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut Report) {
+    // M10 rung 5, slice 1: the family's page contract — the gates read
+    // the one page table instead of a hard-wired 16 KiB constant.
+    let seg_page = page_size(img.header.cputype);
+    let page_label = page_label(img.header.cputype);
     let exec = img.header.filetype == MH_EXECUTE;
     // Relocatable objects carry the LLVM single-segment convention: one
     // anonymous segment, blob-relative addresses, zero `filesize` — the
@@ -1125,13 +1154,13 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
                         None,
                     ));
                 }
-                if pz.vmsize == 0 || pz.vmsize % PAGE_SIZE_16K != 0 {
+                if pz.vmsize == 0 || pz.vmsize % seg_page != 0 {
                     report.issues.push(Issue::error(
                         Code::ImageBase,
                         format!(
                             "__PAGEZERO vmsize {:#x} must be a non-zero multiple of the \
-                             16 KiB arm64 page (the constant-delta base moves with it)",
-                            pz.vmsize
+                             {} page (the constant-delta base moves with it)",
+                            pz.vmsize, page_label
                         ),
                         None,
                     ));
@@ -1167,14 +1196,14 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
         // to it). The old constant check (`vmaddr == fileoff`) would
         // refuse exactly the shape the M19 knob exists to plan.
         let base = text.vmaddr.wrapping_sub(text.fileoff);
-        if base % PAGE_SIZE_16K != 0 {
+        if base % seg_page != 0 {
             report.issues.push(Issue::error(
                 Code::ImageBase,
                 format!(
                     "dylib __TEXT vmaddr {:#x} - fileoff {:#x} must differ by a \
-                     multiple of the 16 KiB arm64 page (the constant-delta base \
+                     multiple of the {} page (the constant-delta base \
                      moves with it)",
-                    text.vmaddr, text.fileoff
+                    text.vmaddr, text.fileoff, page_label
                 ),
                 None,
             ));
@@ -1203,14 +1232,15 @@ pub(crate) fn check_segments(bytes: &[u8], img: &ParsedImage<'_>, report: &mut R
             }
             continue;
         }
-        // Congruence: vmaddr ≡ fileoff (mod 16 KiB). Mutated inputs can
-        // carry vmaddr < fileoff, so the subtraction must be total.
-        if seg.filesize > 0 && seg.vmaddr.wrapping_sub(seg.fileoff) % PAGE_SIZE_16K != 0 {
+        // Congruence: vmaddr ≡ fileoff (mod the family's page). Mutated
+        // inputs can carry vmaddr < fileoff, so the subtraction must be
+        // total.
+        if seg.filesize > 0 && seg.vmaddr.wrapping_sub(seg.fileoff) % seg_page != 0 {
             report.issues.push(Issue::error(
                 Code::SegmentContract,
                 format!(
-                    "segment {name}: vmaddr {:#x} and fileoff {:#x} differ by a non-multiple of 16 KiB",
-                    seg.vmaddr, seg.fileoff
+                    "segment {name}: vmaddr {:#x} and fileoff {:#x} differ by a non-multiple of the {} page",
+                    seg.vmaddr, seg.fileoff, page_label
                 ),
                 None,
             ));
