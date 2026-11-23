@@ -224,6 +224,9 @@ fn layout_fingerprint(l: &pgr_core::Layout) -> u64 {
                     pgr_core::PatchOp::Write64 { in_offset, value } => {
                         (in_offset, value).hash(&mut h);
                     }
+                    pgr_core::PatchOp::Disp32 { in_offset, value } => {
+                        (in_offset, value).hash(&mut h);
+                    }
                 }
             }
             for (off, kind) in &p.fixup_slots {
