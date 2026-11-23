@@ -209,7 +209,14 @@ fn link_cached_inner(
     // way dead-strip does (and rides the same cache-key flag).
     let split_symbols = split_symbols_for(cfg);
     let parse_started = Instant::now();
-    let objects = parse_inputs(inputs, parallel, split_symbols, cache, &mut observer)?;
+    let objects = parse_inputs(
+        inputs,
+        cfg.cpu,
+        parallel,
+        split_symbols,
+        cache,
+        &mut observer,
+    )?;
     emit_phase(
         &mut observer,
         Phase::Parse,
@@ -1399,7 +1406,14 @@ fn link_reloc_inner(
         });
     }
     let parse_started = Instant::now();
-    let objects = parse_inputs(inputs, parallel, cfg.dead_strip, None, &mut observer)?;
+    let objects = parse_inputs(
+        inputs,
+        cfg.cpu,
+        parallel,
+        cfg.dead_strip,
+        None,
+        &mut observer,
+    )?;
     emit_phase(
         &mut observer,
         Phase::Parse,
@@ -1512,11 +1526,20 @@ fn emit_task(observer: &mut Option<&mut dyn LinkObserver>, task: TaskEvent) {
 /// span at the drain).
 fn parse_inputs(
     inputs: &[LinkInput],
+    cpu: crate::cpu::CpuFamily,
     parallel: Parallelism,
     split_symbols: bool,
     cache: Option<&crate::cache::PoiCache>,
     observer: &mut Option<&mut dyn LinkObserver>,
 ) -> Result<Vec<InputObject>, LinkError> {
+    // M10 rung 5 slice 3: the input surface rides the link's CPU family —
+    // every object input carries the family `cfg.cpu` plans, the gate
+    // run before any parse work (the POI-cache lookup included, so a
+    // family flip can never ride a cross-family entry). The refusal
+    // names both families and the `-arch` fix.
+    for input in inputs {
+        check_input_family(&input.name, &input.bytes, cpu)?;
+    }
     // M6 Stage A: the cache key is per-input content + the parse flag.
     let keys: Vec<[u8; 32]> = inputs
         .iter()
@@ -1628,6 +1651,58 @@ fn parse_inputs(
     Ok(objects.into_iter().map(Option::unwrap).collect())
 }
 
+/// M10 rung 5 slice 3: the input-family gate — every object input (a
+/// direct `.o` or an archive member) carries the CPU family the link
+/// plans. The relocation alphabets are per-family namespaces (the `r_type`
+/// words collide), so a cross-family object would decode its relocs with
+/// the wrong reader and mis-link; the refusal names both families and
+/// the `-arch` fix. A cputype outside the carried families refuses too —
+/// the gate never guesses.
+///
+/// # Errors
+/// [`LinkError::Parse`] on a malformed header; [`LinkError::Unsupported`]
+/// naming the family mismatch and the fix.
+fn check_input_family(
+    name: &str,
+    bytes: &[u8],
+    cpu: crate::cpu::CpuFamily,
+) -> Result<(), LinkError> {
+    let header = pgr_format::header::MachHeader64::parse(bytes).map_err(|e| LinkError::Parse {
+        file: name.to_string(),
+        message: format!("not a valid Mach-O image: {e}"),
+    })?;
+    let input_family = crate::cpu::CpuFamily::of_cputype(header.cputype);
+    if input_family == Some(cpu) {
+        return Ok(());
+    }
+    let link_name = match cpu {
+        crate::cpu::CpuFamily::Arm64 => "arm64",
+        crate::cpu::CpuFamily::X86_64 => "x86_64",
+    };
+    let (input_name, fix) = match input_family {
+        Some(crate::cpu::CpuFamily::Arm64) => (
+            "arm64",
+            "drop -arch x86_64 (the arm64 inputs link under the arm64 default)",
+        ),
+        Some(crate::cpu::CpuFamily::X86_64) => (
+            "x86_64",
+            "-arch x86_64 shapes the x86_64 family's link — name it beside x86_64 inputs",
+        ),
+        None => (
+            "outside the carried families",
+            "link arm64 or x86_64 objects (the alphabets the decode carries)",
+        ),
+    };
+    Err(LinkError::Unsupported {
+        file: name.to_string(),
+        message: format!(
+            "the input is {input_name}, but the link plans {link_name} — the input surface \
+             rides the link's CPU family (the relocation alphabets are per-family \
+             namespaces): {fix}"
+        ),
+    })
+}
+
 /// The S7 archive pull fixpoint (M5). Seeds the unresolved-name set from the
 /// direct objects (weak references do not pull — ld64 semantics), then walks
 /// the archive indexes in command-line order until nothing new pulls. Only
@@ -1687,6 +1762,7 @@ fn pull_archive_members(
                 arch,
                 member,
                 base_file + pulled.len() as u32,
+                cfg.cpu,
                 cfg.dead_strip,
                 cache,
             )?;
@@ -1746,6 +1822,7 @@ fn pull_archive_members(
                     arch,
                     member,
                     base_file + pulled.len() as u32,
+                    cfg.cpu,
                     cfg.dead_strip,
                     cache,
                 )?;
@@ -1789,6 +1866,7 @@ fn pull_archive_members(
                     arch,
                     member,
                     base_file + pulled.len() as u32,
+                    cfg.cpu,
                     cfg.dead_strip,
                     cache,
                 )?;
@@ -1853,6 +1931,7 @@ fn parse_member(
     arch: &LinkArchive,
     member: &LinkArchiveMember,
     file: u32,
+    cpu: crate::cpu::CpuFamily,
     split_symbols: bool,
     cache: Option<&crate::cache::PoiCache>,
 ) -> Result<InputObject, LinkError> {
@@ -1873,6 +1952,7 @@ fn parse_member(
         })?
         .to_vec();
     let name = format!("{}({})", arch.name, member.name);
+    check_input_family(&name, &bytes, cpu)?;
     if let Some(cache) = cache {
         let key = crate::cache::PoiCache::content_key(&bytes, split_symbols);
         if let Some(mut hit) = cache.load(&key, FileId(file), &name, bytes.clone(), split_symbols) {
