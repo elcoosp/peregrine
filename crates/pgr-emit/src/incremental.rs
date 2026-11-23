@@ -600,12 +600,16 @@ fn patch_span(at: u64, op: &PatchOp) -> RecordedSpan {
             delta,
         } => (*in_offset, *pc, *delta as u64),
         PatchOp::Write64 { in_offset, value } => (*in_offset, *value, 0),
+        PatchOp::Disp32 { in_offset, value } => (*in_offset, *value as u64, 0),
     };
     let kind: u8 = match op {
         PatchOp::Adrp { .. } => 1,
         PatchOp::PageOff12 { .. } => 2,
         PatchOp::Branch26 { .. } => 3,
         PatchOp::Write64 { .. } => 4,
+        // M10 rung 5 slice 3: the x86_64 rel32 forms ride the same
+        // span encoding (one kind tag over).
+        PatchOp::Disp32 { .. } => 5,
     };
     h.update([kind]);
     h.update(in_offset.to_le_bytes());
