@@ -149,6 +149,14 @@ pub struct ResidentImage {
     /// the link before the walk runs, so the off decision carries the
     /// empty list).
     pub duplicate_warnings: Vec<String>,
+    /// The unused-dylib advisory entries (v82, M136): the session's own
+    /// resolved state when the request's config carries
+    /// `-warn_unused_dylibs` — each riding-but-unbound dylib
+    /// (`Resolution::unused_dylibs`, the M42 drop's own predicate) prints
+    /// as the cold lane's `pgr: warning:` face (the M62 convention; the
+    /// daemon never writes the client's stderr). The off decision carries
+    /// the empty list.
+    pub unused_dylibs: Vec<String>,
     /// The loaded-object inventory (v81, M134): the names of the objects
     /// the session's own Pass 1 actually loaded — the client prints each
     /// as the cold lane's bare `-whatsloaded` line under the request's
@@ -514,6 +522,10 @@ impl DaemonClient {
                     // (M121, `-warn_duplicate`) — the client prints each
                     // as the cold lane's `pgr: warning:` face.
                     let duplicate_warnings = crate::protocol::decode_duplicate_warnings(&mut r)?;
+                    // The v82 tail: the unused-dylib advisory entries
+                    // (M136, `-warn_unused_dylibs`) — the client prints
+                    // each as the cold lane's `pgr: warning:` face.
+                    let unused_dylibs = crate::protocol::decode_unused_dylibs(&mut r)?;
                     // The v81 tail: the loaded-object inventory (M134,
                     // `-whatsloaded`) — the client prints each name as
                     // the cold lane's bare face under the request's
@@ -549,6 +561,7 @@ impl DaemonClient {
                         multiply_warnings,
                         commons_warnings,
                         duplicate_warnings,
+                        unused_dylibs,
                         loaded_objects,
                         statistics,
                         references,
