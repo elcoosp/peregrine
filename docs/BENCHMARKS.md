@@ -796,6 +796,7 @@ same sandbox). Expectations are stated so any divergence is a finding:
 | `…/arm64e_auth/<1k\|10k\|100k>` (r4 s3)                                        | every slot signed (PAC triple; auth-bind addend split)            | inside the `arm64e` band                                            |
 | `pgr-verify/verify_arm64e/pair_replay/<arm64e_auth\|offset64_control>` (r4 s4) | the family-blind M3 pair gate                                     | inside the control's band — different word reader, doubled stride   |
 | `pgr-verify/verify_x86_64/verify/<x86e_format64\|offset64_control>` (r5 s1)   | the strict pass over the 64 family at 4 KiB pages                  | parity — one branch for the VM-address target translation           |
+| `pgr-core/x86_64/<format64\|offset64>/<n>` (r5 s2)                    | the planner over the same slot corpus, the two 4-byte-stride families | parity — only the rebase composition differs                        |
 
 ## Findings & corrections
 
@@ -1139,3 +1140,15 @@ The `warn_unused` bench: the driver's run cost across the `-warn_unused_dylibs` 
 
 The `verify_x86_64` bench: the whole-image strict pass over a `DYLD_CHAINED_PTR_64` chained executable born at the family's 4 KiB page (one VM-address rebase plus one bind) beside the `64_OFFSET` control — `verify_x86_64/verify/<x86e_format64|offset64_control>`, the honest expectation parity (the walk strides both families in 4-byte units; the format-2 face adds one branch for the VM-address target translation). No numbers claimed yet — the bench lands with the slice and the next gate run fills the row the way the rung-3 floor bench was filled.
 
+
+### M10 rung 5, slice 2 — the x86_64 producer half
+
+The `x86_64` bench: the fixup planner over the same slot corpus in both
+4-byte-stride families — `DYLD_CHAINED_PTR_64_OFFSET` (the M2 default,
+image-offset rebases) beside `DYLD_CHAINED_PTR_64` (the x86_64 family,
+VM-address rebases) — `x86_64/<format64|offset64>/<1k|10k|100k>`, the
+honest expectation parity (the families share the word layout, the packer
+and the import table; only the rebase encoder's composition differs, one
+branch — the same shape gate the rung-4 family bench pinned one family
+over). No numbers claimed yet — the bench lands with the slice and the
+next gate run fills the row the way the rung-3 floor bench was filled.
