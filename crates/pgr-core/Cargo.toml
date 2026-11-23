@@ -60,6 +60,14 @@ harness = false
 name = "x86_64"
 harness = false
 
+# The rung-5 slice-3 input-surface parity bench (M10 rung 5, slice 3):
+# the same pointer-shaped corpus built as arm64-typed and x86_64-typed
+# objects, linked under their own families — the two relocation
+# alphabets price the same per-slot decode+plan work, one family branch.
+[[bench]]
+name = "x86_64_inputs"
+harness = false
+
 # The M11 order-file bench: the same corpus laid out with and without a
 # rank table (the atom split plus one stable sort per bucket).
 [[bench]]
