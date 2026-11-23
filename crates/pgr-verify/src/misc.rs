@@ -6,8 +6,8 @@
 use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report};
 use pgr_format::consts::{
-    LC_DATA_IN_CODE, LC_FUNCTION_STARTS, PAGE_SIZE_16K, PLATFORM_IOS, PLATFORM_MACOS,
-    PLATFORM_TVOS, PLATFORM_VISIONOS, PLATFORM_WATCHOS, chained_fixups_floor,
+    CPU_TYPE_X86_64, LC_DATA_IN_CODE, LC_FUNCTION_STARTS, PLATFORM_IOS, PLATFORM_MACOS,
+    PLATFORM_TVOS, PLATFORM_VISIONOS, PLATFORM_WATCHOS, chained_fixups_floor, page_size,
 };
 use pgr_format::load_command::LoadCommandKind;
 
@@ -42,16 +42,22 @@ pub(crate) fn check_entry_and_version(img: &ParsedImage<'_>, report: &mut Report
                 }
                 // The stack-reserve invariant (M18): the kernel maps the
                 // stack in pages, so a named reserve is a multiple of the
-                // 16 KiB arm64 page; the zero default means "dyld's own
-                // default" (every pre-M18 image carries it).
-                if ep.stacksize % PAGE_SIZE_16K != 0 {
+                // family's page (M10 rung 5, slice 1: 16 KiB arm64, 4 KiB
+                // x86_64); the zero default means "dyld's own default"
+                // (every pre-M18 image carries it).
+                if ep.stacksize % page_size(img.header.cputype) != 0 {
                     report.issues.push(Issue::error(
                         Code::LinkeditPayload,
                         format!(
-                            "LC_MAIN stacksize {:#x} must be a multiple of the 16 KiB arm64 \
+                            "LC_MAIN stacksize {:#x} must be a multiple of the {} \
                              page (the kernel maps the stack in pages; 0 keeps dyld's own \
                              default)",
-                            ep.stacksize
+                            ep.stacksize,
+                            if img.header.cputype == CPU_TYPE_X86_64 {
+                                "4 KiB x86_64"
+                            } else {
+                                "16 KiB arm64"
+                            }
                         ),
                         Some(ep.stacksize),
                     ));
