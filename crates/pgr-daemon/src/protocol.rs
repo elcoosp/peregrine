@@ -78,6 +78,7 @@
 //! for; an unknown byte is malformed (a refusal, never a silently
 //! dropped knob).
 
+use pgr_core::cpu::CpuFamily;
 use pgr_core::export_filter::SymbolPattern;
 use pgr_core::fixups::FixupPointerFormat;
 use pgr_core::icf::IcfMode;
@@ -473,7 +474,9 @@ use std::time::Duration;
 /// the session's own resolution renders the reply's `unused_dylibs`
 /// tail), and the ladder's replay rides the decision (the M81
 /// pattern).
-pub const PROTO_VERSION: u32 = 82;
+/// M10 rung 5, slice 2 (v83 wire): the CPU family byte rides the config
+/// tail — a resident relink produces the family the client named.
+pub const PROTO_VERSION: u32 = 83;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1980,6 +1983,7 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
         out,
         match cfg.chain_word_format {
             FixupPointerFormat::Offset64 => 0,
+            FixupPointerFormat::Format64 => 2,
             FixupPointerFormat::Arm64e => 1,
         },
     );
@@ -2450,6 +2454,19 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // the references its own Pass 2 visited and the reply tail carries
     // them verbatim (the M62 convention), never a silently dropped one.
     put_u8(out, u8::from(cfg.trace_refs));
+    // M10 rung 5, slice 2 (v83 wire): the CPU family rides the tail
+    // after the reference-trace byte — one byte off the two-family
+    // alphabet (0 = arm64 the default, 1 = x86_64); a resident relink
+    // produces the family the client named (the header words, the 4 KiB
+    // packing and the format-2 chains are the family's), never the
+    // silently arm64 default.
+    put_u8(
+        out,
+        match cfg.cpu {
+            CpuFamily::Arm64 => 0,
+            CpuFamily::X86_64 => 1,
+        },
+    );
 }
 
 /// Decodes a `LinkConfig` body (the mirror of [`encode_config`]; field
@@ -2569,6 +2586,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     let chain_word_format = match r.u8()? {
         0 => FixupPointerFormat::Offset64,
         1 => FixupPointerFormat::Arm64e,
+        2 => FixupPointerFormat::Format64,
         _ => return Err(malformed()),
     };
     // M15 (v8 wire): the image base — the same validation the flag
@@ -3016,6 +3034,14 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // product; the session's served walk records the references when
     // the decision rides).
     let trace_refs = r.u8()? != 0;
+    // M10 rung 5, slice 2 (v83 wire; see encode_config): the CPU family
+    // byte — an unknown value is a malformed frame, never a silently
+    // arm64 relink.
+    let cpu = match r.u8()? {
+        0 => CpuFamily::Arm64,
+        1 => CpuFamily::X86_64,
+        _ => return Err(malformed()),
+    };
     Ok(LinkConfig {
         ident,
         filetype,
@@ -3054,6 +3080,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         layout_slack,
         slack_anchor,
         chain_word_format,
+        cpu,
         // M11: the order-file rank table rides the v47 tail now (M81) —
         // a resident ordered link ranks the entries the client named;
         // a table the constructor refuses refuses the request (never a
@@ -3156,6 +3183,7 @@ mod tests {
     fn rich_config() -> LinkConfig {
         LinkConfig {
             read_only_relocs: pgr_core::resolve::ReadOnlyRelocsPolicy::default(),
+            cpu: pgr_core::cpu::CpuFamily::Arm64,
             ident: "build/app".into(),
             filetype: pgr_core::layout::OutputType::Dylib,
             entry_symbol: "_start".into(),
@@ -5782,6 +5810,70 @@ mod tests {
         put_u8(out, 0); // adhoc
         put_u8(out, 0); // flat_namespace
         put_u8(out, policy);
+    }
+
+    /// One `LinkRequest` frame over `cfg`, everything else default.
+    fn frame(cfg: LinkConfig) -> Vec<u8> {
+        LinkRequest {
+            config: cfg,
+            force_load: Vec::new(),
+            inputs: Vec::new(),
+            archives: Vec::new(),
+            record: None,
+            record_resolution: false,
+            prev_output: None,
+            audit: false,
+            tiles: false,
+            time: false,
+            trace: false,
+            verify: false,
+            verify_checks: None,
+            why_export: Vec::new(),
+            why_load: false,
+            map: false,
+            why_live: Vec::new(),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn the_cpu_family_round_trips() {
+        // v83: a non-default CPU family must survive the round trip
+        // verbatim (a resident relink produces the family the client
+        // named — the header words, the 4 KiB packing and the format-2
+        // chains are the family's; never the silently arm64 default).
+        let mut cfg = rich_config();
+        cfg.cpu = pgr_core::cpu::CpuFamily::X86_64;
+        let back = LinkRequest::decode(&frame(cfg)).expect("the frame decodes");
+        assert_eq!(
+            back.config.cpu,
+            pgr_core::cpu::CpuFamily::X86_64,
+            "the family rides the wire verbatim"
+        );
+        // The default arm64 face rides too (the flag-less request).
+        let back = LinkRequest::decode(&frame(rich_config())).expect("the frame decodes");
+        assert_eq!(
+            back.config.cpu,
+            pgr_core::cpu::CpuFamily::Arm64,
+            "the default family is the pre-slice shape"
+        );
+    }
+
+    #[test]
+    fn the_cpu_family_byte_refuses_unknown_values() {
+        // An unknown family byte is a malformed frame, never a silently
+        // arm64 relink (the wire never invents a decision).
+        let mut cfg = rich_config();
+        cfg.cpu = pgr_core::cpu::CpuFamily::X86_64;
+        let mut bytes = frame(cfg);
+        // The family byte is the config body's last field; flipping it
+        // to an unknown value names the frame malformed.
+        *bytes.last_mut().expect("a request carries bytes") = 0x7F;
+        let err = LinkRequest::decode(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("malformed"),
+            "the refusal names the malformed frame: {err}"
+        );
     }
 
     #[test]
@@ -8837,7 +8929,7 @@ mod tests {
         // the M105 strip-debug byte, then the M107 commons-policy byte),
         // the hand-spliced rank table takes the first place and the
         // cstring absence follows.
-        body.truncate(body.len() - 14);
+        body.truncate(body.len() - 15);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -8862,6 +8954,7 @@ mod tests {
         put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
         put_u8(&mut body, 0); // the M112 print-statistics absence
         put_u8(&mut body, 0); // the M113 reference-trace absence
+        put_u8(&mut body, 0); // the v83 arm64 cpu-family absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
@@ -8938,7 +9031,7 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        body.truncate(body.len() - 14);
+        body.truncate(body.len() - 15);
         put_u8(&mut body, 0); // the rank table's absence
         // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
@@ -8960,6 +9053,7 @@ mod tests {
         put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
         put_u8(&mut body, 0); // the M112 print-statistics absence
         put_u8(&mut body, 0); // the M113 reference-trace absence
+        put_u8(&mut body, 0); // the v83 arm64 cpu-family absence
         // The plain request fields behind the config.
         put_u32(&mut body, 0); // force_load
         put_u32(&mut body, 0); // inputs
