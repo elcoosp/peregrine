@@ -361,7 +361,8 @@ impl<'a> TileCtx<'a> {
                             PatchOp::Adrp { in_offset, .. }
                             | PatchOp::PageOff12 { in_offset, .. }
                             | PatchOp::Branch26 { in_offset, .. }
-                            | PatchOp::Write64 { in_offset, .. } => *in_offset,
+                            | PatchOp::Write64 { in_offset, .. }
+                            | PatchOp::Disp32 { in_offset, .. } => *in_offset,
                         });
                     patches.push((at, *op));
                 }
