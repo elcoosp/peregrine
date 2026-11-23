@@ -4,7 +4,7 @@
 
 use crate::structural::ParsedImage;
 use crate::{Code, Issue, Report, issue_from};
-use pgr_format::consts::{DYLD_CHAINED_PTR_START_NONE, PAGE_SIZE_16K};
+use pgr_format::consts::{DYLD_CHAINED_PTR_64, DYLD_CHAINED_PTR_START_NONE, PAGE_SIZE_16K};
 use pgr_format::fixups::{
     ChainWord64, parse_header, parse_imports, parse_starts_in_image, parse_starts_in_segment,
 };
@@ -328,9 +328,32 @@ pub(crate) fn check_fixups(
                                 break;
                             }
                         } else {
-                            // Rebase: final image offset = high8 << 56 | target.
-                            let target_offset =
+                            // Rebase: the translation dispatches on the
+                            // segment's own pointer_format (M10 rung 5,
+                            // slice 1). `64_OFFSET` composes an image
+                            // offset — high8 << 56 | target, the M2
+                            // semantics, unchanged; the 64 family composes
+                            // a VM address and refuses one below the image
+                            // base (the arm64e unauth shape's translation,
+                            // §15.4 — the same dyld read, one family over).
+                            let composed =
                                 (u64::from(word.rebase_high8()) << 56) | word.rebase_target();
+                            let target_offset = if seg.pointer_format == DYLD_CHAINED_PTR_64 {
+                                let base = mach_seg.vmaddr.saturating_sub(mach_seg.fileoff);
+                                if composed < base {
+                                    report.issues.push(Issue::error(
+                                            Code::FixupsChain,
+                                            format!(
+                                                "segment {seg_index} page {page}: rebase vmaddr {composed:#x} sits below the image base {base:#x}",
+                                            ),
+                                            Some(slot_file),
+                                        ));
+                                    break;
+                                }
+                                composed - base
+                            } else {
+                                composed
+                            };
                             if target_offset >= img.total_vmsize {
                                 report.issues.push(Issue::error(
                                     Code::FixupsChain,
