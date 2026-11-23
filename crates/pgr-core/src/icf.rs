@@ -282,6 +282,14 @@ fn kind_fp(kind: &RelocKind) -> u8 {
         // kinds share a discriminant over (the offset distinguishes the
         // two halves of a pair).
         RelocKind::TlvpLoadPage21 | RelocKind::TlvpLoadPageOff12 => 7,
+        // M10 rung 5 slice 3: the x86_64 disp32 forms — the in-situ
+        // addend rides the atom's own bytes (the byte equality the
+        // refinement compares covers it), so the discriminant is the
+        // kind alone.
+        RelocKind::Branch32 => 8,
+        RelocKind::RipRel32 { .. } => 9,
+        RelocKind::GotRipRel32 { .. } => 10,
+        RelocKind::TlvRipRel32 { .. } => 11,
     }
 }
 
