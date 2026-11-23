@@ -1216,19 +1216,36 @@ fn link_to_image_recorded(
                         print!("{}", live.render);
                     }
                 }
+                // M134: the loaded-object inventory — the session's own
+                // Pass 1 list prints as the cold lane's bare
+                // `-whatsloaded` face (the v81 tail carried them
+                // verbatim), under the request's decision (the face is
+                // the client's print, the tail is the measurement's
+                // record).
+                if opts.config.whats_loaded {
+                    for name in &img.loaded_objects {
+                        eprintln!("{name}");
+                    }
+                }
                 // M103: the exit policy's warning face — the session's
                 // own unresolved-open entries print as the cold lane's
                 // `pgr: warning:` face (the v54 tail carried them
                 // verbatim; the suppress face rides empty by policy).
                 // M109: the tally rides — the served faces' products are
                 // the same tally the exit policy reads.
+                // M133: the print face is the `-w` decision's — the
+                // served lists tally either way, the `pgr: warning:`
+                // lines silence under the suppression (the same faces
+                // the cold lane runs, the client's own stderr).
                 let mut warnings = img.policy_warnings.len();
                 for entry in &img.policy_warnings {
                     tracing::warn!(
                         undefined = %entry,
                         "the link exits 0 with an unresolved reference"
                     );
-                    eprintln!("pgr: warning: undefined symbol {entry}");
+                    if !opts.config.suppress_warnings {
+                        eprintln!("pgr: warning: undefined symbol {entry}");
+                    }
                 }
                 // M108: the exit policy's collision face — the session's
                 // own resolved state prints as the cold lane's
@@ -1240,7 +1257,9 @@ fn link_to_image_recorded(
                         multiply_defined = %entry,
                         "the link exits 0 with a duplicated definition (the first one wins)"
                     );
-                    eprintln!("pgr: warning: multiply defined symbol {entry}");
+                    if !opts.config.suppress_warnings {
+                        eprintln!("pgr: warning: multiply defined symbol {entry}");
+                    }
                 }
                 // M116: the exit policy's common-symbol advisory face —
                 // the session's own resolved state prints as the cold
@@ -1252,7 +1271,9 @@ fn link_to_image_recorded(
                         warn_commons = %entry,
                         "the link exits 0 with a common symbol resolved to a definition"
                     );
-                    eprintln!("pgr: warning: common symbol {entry}");
+                    if !opts.config.suppress_warnings {
+                        eprintln!("pgr: warning: common symbol {entry}");
+                    }
                 }
                 // M121: the exit policy's duplicate-symbol advisory face —
                 // the session's own resolved state prints as the cold
@@ -1266,7 +1287,9 @@ fn link_to_image_recorded(
                         warn_duplicate = %entry,
                         "the link exits 0 with a duplicated strong definition (the first one wins)"
                     );
-                    eprintln!("pgr: warning: duplicate symbol {entry}");
+                    if !opts.config.suppress_warnings {
+                        eprintln!("pgr: warning: duplicate symbol {entry}");
+                    }
                 }
                 // M109: the exit policy reads the tally — under
                 // `-fatal_warnings` the served faces' products are a hard
@@ -1395,8 +1418,25 @@ fn link_to_image_recorded(
         )?
     };
     check_force_load(&result, &prepared.force_load)?;
+    // M134: the loaded-object inventory — ld64's `-whatsloaded` ("Print
+    // the names of all object files loaded"): one name per object Pass 1
+    // actually loaded (the explicit objects beside the archive members
+    // the S7 pull admitted), in the walk's own order. The face is a
+    // measurement, never a layout product — the bytes never move (the
+    // `whatsloaded` gate pins the byte-identity), and it composes with
+    // `-w` (the suppression is the advisory faces' decision, never the
+    // inventory's).
+    if opts.config.whats_loaded {
+        for object in &result.objects {
+            eprintln!("{}", object.name);
+        }
+    }
     // M109: the advisory tally — every warning face's product counted as
-    // it prints; the exit policy reads the count under `-fatal_warnings`.
+    // it renders; the exit policy reads the count under `-fatal_warnings`.
+    // M133: the count is the faces' record, never the stderr product —
+    // under `-w` the `pgr: warning:` lines silence while the tally keeps
+    // counting (the escalation reads the count, not the print; the spans
+    // still record).
     let mut warnings = 0usize;
     // M11: the ld64-style advisory — an order-file entry that ranked no
     // placed piece is a typo, not an error (the layout plans what the
@@ -1406,10 +1446,14 @@ fn link_to_image_recorded(
             symbol = %String::from_utf8_lossy(name),
             "the order-file entry ranked no placed piece"
         );
-        eprintln!(
-            "pgr: warning: order file symbol {} not matched by any input",
-            String::from_utf8_lossy(name)
-        );
+        // M133: the print face is the `-w` decision's (the span records,
+        // the tally counts).
+        if !opts.config.suppress_warnings {
+            eprintln!(
+                "pgr: warning: order file symbol {} not matched by any input",
+                String::from_utf8_lossy(name)
+            );
+        }
         warnings += 1;
     }
     // M91: the same advisory face for the cstring ranks — an entry whose
@@ -1420,10 +1464,14 @@ fn link_to_image_recorded(
             literal = %String::from_utf8_lossy(content),
             "the cstring rank entry matched no placed literal"
         );
-        eprintln!(
-            "pgr: warning: order file literal {:?} not matched by any input",
-            String::from_utf8_lossy(content)
-        );
+        // M133: the print face is the `-w` decision's (the span records,
+        // the tally counts).
+        if !opts.config.suppress_warnings {
+            eprintln!(
+                "pgr: warning: order file literal {:?} not matched by any input",
+                String::from_utf8_lossy(content)
+            );
+        }
         warnings += 1;
     }
     // M14: the filter's advisory — a list pattern that matched no
@@ -1448,10 +1496,14 @@ fn link_to_image_recorded(
                     pattern = %String::from_utf8_lossy(pattern.source()),
                     "the export-filter pattern matched no symbol"
                 );
-                eprintln!(
-                    "pgr: warning: symbol list pattern {} matched no symbol",
-                    String::from_utf8_lossy(pattern.source())
-                );
+                // M133: the print face is the `-w` decision's (the span
+                // records, the tally counts).
+                if !opts.config.suppress_warnings {
+                    eprintln!(
+                        "pgr: warning: symbol list pattern {} matched no symbol",
+                        String::from_utf8_lossy(pattern.source())
+                    );
+                }
                 warnings += 1;
             }
         }
@@ -1655,7 +1707,13 @@ fn print_undefined_warnings(opts: &opts::Options, result: &pgr_core::LinkResult)
     let mut warnings = 0usize;
     for entry in result.resolution.unresolved_open() {
         tracing::warn!(undefined = %entry, "the link exits 0 with an unresolved reference");
-        eprintln!("pgr: warning: undefined symbol {entry}");
+        // M133: the print face is the `-w` decision's — the span records
+        // (the observability seam is not the stderr product), the tally
+        // counts, the `pgr: warning:` line is what the suppression
+        // silences.
+        if !opts.config.suppress_warnings {
+            eprintln!("pgr: warning: undefined symbol {entry}");
+        }
         warnings += 1;
     }
     warnings
@@ -1680,7 +1738,11 @@ fn print_multiply_defined_warnings(opts: &opts::Options, result: &pgr_core::Link
             multiply_defined = %entry,
             "the link exits 0 with a duplicated definition (the first one wins)"
         );
-        eprintln!("pgr: warning: multiply defined symbol {entry}");
+        // M133: the print face is the `-w` decision's (the span records,
+        // the tally counts).
+        if !opts.config.suppress_warnings {
+            eprintln!("pgr: warning: multiply defined symbol {entry}");
+        }
         warnings += 1;
     }
     warnings
@@ -1704,7 +1766,11 @@ fn print_commons_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) -
             warn_commons = %entry,
             "the link exits 0 with a common symbol resolved to a definition"
         );
-        eprintln!("pgr: warning: common symbol {entry}");
+        // M133: the print face is the `-w` decision's (the span records,
+        // the tally counts).
+        if !opts.config.suppress_warnings {
+            eprintln!("pgr: warning: common symbol {entry}");
+        }
         warnings += 1;
     }
     warnings
@@ -1730,7 +1796,11 @@ fn print_duplicate_warnings(opts: &opts::Options, result: &pgr_core::LinkResult)
             warn_duplicate = %entry,
             "the link exits 0 with a duplicated strong definition (the first one wins)"
         );
-        eprintln!("pgr: warning: duplicate symbol {entry}");
+        // M133: the print face is the `-w` decision's (the span records,
+        // the tally counts).
+        if !opts.config.suppress_warnings {
+            eprintln!("pgr: warning: duplicate symbol {entry}");
+        }
         warnings += 1;
     }
     warnings
@@ -1758,7 +1828,11 @@ fn print_weak_reference_mismatches_warnings(
             "the link exits 0 with a weak/strong reference mix (the resolution policy \
              itself unchanged — the bytes never move)"
         );
-        eprintln!("pgr: warning: weak reference mismatch {entry}");
+        // M133: the print face is the `-w` decision's (the span records,
+        // the tally counts).
+        if !opts.config.suppress_warnings {
+            eprintln!("pgr: warning: weak reference mismatch {entry}");
+        }
         warnings += 1;
     }
     warnings
@@ -2912,6 +2986,15 @@ fn run_relocatable(opts: &opts::Options) -> Result<LinkOutcome, DriverError> {
         )?
     };
     let image = pgr_emit::build_object_image(&linked, &prepared.config)?;
+    // M134: the loaded-object inventory rides the relocatable shape too
+    // — the object's loaded list is its own inputs (ld64's face accepts
+    // the flag on every link); the same bare lines the image pipeline's
+    // face prints, the walk's own order.
+    if opts.config.whats_loaded {
+        for object in &linked.objects {
+            eprintln!("{}", object.name);
+        }
+    }
     let total = started.elapsed();
     write_image(&image, Path::new(&opts.output))?;
     // M60: the relocatable link reads its inputs exactly as the image
@@ -3820,6 +3903,20 @@ pub fn usage() -> String {
     s.push_str("                               warnings to a hard exit 1 (M109);\n");
     s.push_str("                               the default exits 0 with the\n");
     s.push_str("                               warnings printed (refused with -r)\n");
+    s.push_str("  -w                           suppress the advisory faces' warnings\n");
+    s.push_str("                               (M133): the `pgr: warning:` lines silence\n");
+    s.push_str("                               while the tally keeps counting — the\n");
+    s.push_str("                               bytes never move, the exit stays the\n");
+    s.push_str("                               exit (-fatal_warnings still elevates\n");
+    s.push_str("                               the suppressed warnings; refused\n");
+    s.push_str("                               with -r)\n");
+    s.push_str("  -whatsloaded                 print the names of all object files\n");
+    s.push_str("                               loaded (M134): one name per object\n");
+    s.push_str("                               Pass 1 actually loaded (the explicit\n");
+    s.push_str("                               objects beside the archive members\n");
+    s.push_str("                               the pull admitted) — a measurement,\n");
+    s.push_str("                               never a layout product (the bytes\n");
+    s.push_str("                               never move)\n");
     s.push_str("  -t                           print a trace of all symbol references\n");
     s.push_str("                               to stderr (M113): each symbol Pass 2's\n");
     s.push_str("                               resolve visits, once per visit in the\n");
