@@ -8,7 +8,9 @@
 //! `S_CSTRING_LITERALS`.
 
 use crate::{Code, Issue, Report};
-use pgr_format::consts::{OBJC_STUB_SIZE_ARM64, SECTION_TYPE_MASK, S_CSTRING_LITERALS, S_SYMBOL_STUBS};
+use pgr_format::consts::{
+    OBJC_STUB_SIZE_ARM64, S_CSTRING_LITERALS, S_SYMBOL_STUBS, SECTION_TYPE_MASK,
+};
 
 /// Walks every declared section (the raw load-command walk); an
 /// `__objc_stubs` section off the stride or with the wrong type, or an
@@ -66,18 +68,16 @@ pub(crate) fn check_objc_stubs(bytes: &[u8], report: &mut Report) {
                         Some(anchor),
                     ));
                 }
-            } else if name == "__objc_methname" {
-                if flags & SECTION_TYPE_MASK != S_CSTRING_LITERALS {
-                    report.issues.push(Issue::error(
-                        Code::ObjcStubs,
-                        format!(
-                            "`__objc_methname` carries the wrong section type (0x{:x}, expected \
-                             S_CSTRING_LITERALS 0x2) — the selector strings dedup like cstrings",
-                            flags & SECTION_TYPE_MASK
-                        ),
-                        Some(anchor),
-                    ));
-                }
+            } else if name == "__objc_methname" && flags & SECTION_TYPE_MASK != S_CSTRING_LITERALS {
+                report.issues.push(Issue::error(
+                    Code::ObjcStubs,
+                    format!(
+                        "`__objc_methname` carries the wrong section type (0x{:x}, expected \
+                         S_CSTRING_LITERALS 0x2) — the selector strings dedup like cstrings",
+                        flags & SECTION_TYPE_MASK
+                    ),
+                    Some(anchor),
+                ));
             }
         }
     }
