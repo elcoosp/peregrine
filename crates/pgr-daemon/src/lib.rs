@@ -299,7 +299,19 @@ mod tests {
         // prints the cold lane's face); the ladder's replay rides the
         // decision (the M81 pattern — the decision is config, not a
         // product).
-        assert_eq!(crate::PROTO_VERSION, 79);
+        // and v80 carries the advisory faces' print-suppression decision
+        // (M133, the tail byte after the fatal-warnings byte): the
+        // session's warm pipeline plans the same tally the cold link
+        // plans (the parity gate is byte-identical — the decision is the
+        // client's print face, the bytes never move), and the served
+        // warning tails tally either way (the suppression silences the
+        // client's `pgr: warning:` lines, never the reply's records).
+        // and v81 carries the loaded-object inventory's decision (M134,
+        // the tail byte after the warn-suppression byte) beside its
+        // inventory tail (the session's own Pass 1 list rides verbatim —
+        // the M62 convention): a served relink renders the inventory the
+        // client asked for, the bytes never moving either way.
+        assert_eq!(crate::PROTO_VERSION, 81);
     }
 
     #[test]
