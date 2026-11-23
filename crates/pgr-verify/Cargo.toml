@@ -94,5 +94,12 @@ harness = false
 name = "mod_term"
 harness = false
 
+# The x86_64 strict-pass bench (M10 rung 5, slice 1): the whole-image
+# pass over a `DYLD_CHAINED_PTR_64` executable born at the family's
+# 4 KiB page, beside the `64_OFFSET` control.
+[[bench]]
+name = "x86_64"
+harness = false
+
 [lints]
 workspace = true
