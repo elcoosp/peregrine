@@ -1089,6 +1089,49 @@ impl Resolution {
         kept
     }
 
+    /// M136 — the unused-dylib advisory's read (`-warn_unused_dylibs`):
+    /// the input dylibs that ride the image's header (the kept command
+    /// list — re-exports exempt as identity obligations, hidden dylibs
+    /// exempt because no command rides) with zero binding references, in
+    /// command order. ld64's face ("Warn about dylibs that are linked by
+    /// no symbols are used from them", the `ld` man page) reads this as a
+    /// measurement over data the resolution already had — the same
+    /// used-marks walk [`Self::dead_strip_dylibs`] prices, never a layout
+    /// product: the query is decision-free (the bytes never move), the
+    /// driver's print face gates on `LinkConfig::warn_unused_dylibs`.
+    ///
+    /// The use rule is the M42 drop's own (the two halves cannot
+    /// disagree): a dylib is used when a referenced name resolves to its
+    /// export, or when the reference was left to dyld (a dynamic lookup
+    /// binds flat and may reach any loaded image's exports — the provider
+    /// cannot be proven unreachable). Under `-dead_strip_dylibs` the
+    /// unbound dylibs drop before the query runs (the drop is the fix, so
+    /// the query reports only what survives — a needed mark keeps its
+    /// dylib riding, and the kept-but-unbound rider names: the mark's own
+    /// man-page text concedes "even if no symbols are used from it").
+    #[must_use]
+    pub fn unused_dylibs(&self) -> Vec<String> {
+        let mut used = vec![false; self.dylibs.len()];
+        for name in self.references.keys() {
+            let Some(&ordinal) = self.dylib_exports.get(name) else {
+                continue;
+            };
+            let idx = ordinal as usize - 1;
+            if idx >= used.len() {
+                continue;
+            }
+            if self.dynamic_lookups.contains(name) || !self.defs.contains_key(name) {
+                used[idx] = true;
+            }
+        }
+        self.dylibs
+            .iter()
+            .enumerate()
+            .filter(|(i, d)| !used[*i] && !d.reexport && !d.hidden)
+            .map(|(_, d)| d.install_name.clone())
+            .collect()
+    }
+
     /// M107 — the commons resolution policy (`-commons <policy>`): the
     /// tentative symbol's fate is the policy's decision. The walk runs
     /// after the dylib list installs (the two-level export map is the
