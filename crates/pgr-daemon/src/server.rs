@@ -26,7 +26,8 @@ use crate::protocol::{
     TAG_LINK, TAG_NEED, TAG_SHUTDOWN, encode_commons_warnings, encode_duplicate_warnings,
     encode_loaded_objects, encode_map, encode_multiply_warnings, encode_policy_warnings,
     encode_provenance, encode_references, encode_statistics, encode_time_report, encode_trace,
-    encode_verify_report, put_bytes, put_hash, put_str, put_u8, put_u32, put_u64,
+    encode_unused_dylibs, encode_verify_report, put_bytes, put_hash, put_str, put_u8, put_u32,
+    put_u64,
 };
 use crate::session::ResidentSession;
 use std::io::{Read, Write};
@@ -360,6 +361,10 @@ fn serve_link(
             // verbatim, the client prints the cold lane's face under the
             // request's decision.
             encode_loaded_objects(&mut b, &served.loaded_objects);
+            // The v82 tail: the unused-dylib advisory entries (M136,
+            // `-warn_unused_dylibs`) — the session's own resolved state
+            // renders, the client prints the cold lane's face.
+            encode_unused_dylibs(&mut b, &served.unused_dylibs);
             // The v63 tail: the link-statistics report when the request
             // asked (the session's own run's counts, the M62 convention
             // — the client prints the cold lane's face), absent otherwise.
