@@ -7,7 +7,7 @@
 | **Codename** | Peregrine (binary: `pgr`) |
 | **Target** | arm64-apple-darwin executables, dylibs, bundles (macOS 12+ default path) |
 | **Host** | Linux (primary development sandbox); macOS (deployment as an `ld` replacement) |
-| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay); M10 rides the same seams at both ends — rung 1 stops Passes 1–2 short for the `-r` relocatable output (`pgr_core::link_reloc`, `pgr_emit::build_object_image`, the object contract in the verifier), rung 2 makes the fixup-encoding gate per-platform (`chained_fixups_min_minos`, the `-platform_version` surface, the verifier's declared-platform gate) — and rung 3 lands the consumer seam: `pgr_core::platform::FixupEncoding` names the encoding decision before the link runs (slice 1), `pgr --print-fixup-encoding` / `pgr_driver::fixup_encoding_report` put it on the driver surface and the verifier's `fixups_floor` gate reads the same canonical table (`pgr_format::consts::chained_fixups_floor` — one table, four readers since M16 — the layout, the seam, the verifier gate and the `pgr_core::init_offsets` decision; slice 2) — rung 4 opens the arm64e word family on both sides of the image: slice 1 the read side (`ChainWordArm64e`, the fixtures' pointer-format knob, the verifier's walk), slice 2 the unauth producer (`plan_fixups_with_format`, the `-fixup_chains_format` surface, the v6 wire tail byte), slice 3 the authenticated producer (`FixupAuth` policies, the 32-bit runtime offset, the auth bind's addend-split exception with the anchor appending) — §15 is the M10 design record; README "Status" and docs/BENCHMARKS.md carry the shipped state |
+| **Status** | Implemented through M9 GA: tiers 2a/2b (import anchors, propagation), tier 2 (segment relayout), the GA hardening pass (shrink rung, randomized edit gate), tier 2c + the resolve's record-side wiring (v5), the resident fusion wire rung, the audited fusion rung (wire v4 — the daemon serves `-incremental-verify`), and the §7.2 output-residency rung (wire v5 — the session-resident output buffer: served images become resident state, a patched relink's reply is the changed-tile stream, the client hash-gates its replay); M10 rides the same seams at both ends — rung 1 stops Passes 1–2 short for the `-r` relocatable output (`pgr_core::link_reloc`, `pgr_emit::build_object_image`, the object contract in the verifier), rung 2 makes the fixup-encoding gate per-platform (`chained_fixups_min_minos`, the `-platform_version` surface, the verifier's declared-platform gate) — and rung 3 lands the consumer seam: `pgr_core::platform::FixupEncoding` names the encoding decision before the link runs (slice 1), `pgr --print-fixup-encoding` / `pgr_driver::fixup_encoding_report` put it on the driver surface and the verifier's `fixups_floor` gate reads the same canonical table (`pgr_format::consts::chained_fixups_floor` — one table, four readers since M16 — the layout, the seam, the verifier gate and the `pgr_core::init_offsets` decision; slice 2) — rung 4 opens the arm64e word family on both sides of the image: slice 1 the read side (`ChainWordArm64e`, the fixtures' pointer-format knob, the verifier's walk), slice 2 the unauth producer (`plan_fixups_with_format`, the `-fixup_chains_format` surface, the v6 wire tail byte), slice 3 the authenticated producer (`FixupAuth` policies, the 32-bit runtime offset, the auth bind's addend-split exception with the anchor appending) — §15 is the M10 design record; and slice 3 rides the family on the input side (the decode keys on the object's own header — the alphabets' r_type namespaces collide — the pointer-shaped x86_64 alphabet, the `Disp32` patch op, the pre-parse family gate; §15.10 is the design record) — README "Status" and docs/BENCHMARKS.md carry the shipped state |
 | **Date** | 2026-11-09 |
 | **Companion diagrams** | `assets/pipeline.png`, `assets/output-map.png`, `assets/alignment.png`, `assets/fixup-chain.png` |
 
@@ -1328,6 +1328,82 @@ wire round-trip gates, the `x86_64` planner parity bench (both
 4-byte-stride families over the same slot corpus), and the
 `x86_64_producer` consumer example (the same slots planned twice,
 decoded side by side).
+
+### 15.10 Rung 5, slice 3 — the input surface rides the family
+
+Slice 2's honesty note ("The input surface stays arm64 this rung —
+slice 1's honesty, unchanged") named the rung's remaining half: the
+Pass-1 read side. The family has shaped the image contract since slice
+2; this slice makes the input half ride it too, and the shape decision
+is the header's — the relocation alphabets are **per-family
+namespaces** (the r_type words collide: `0` is arm64 `UNSIGNED` and
+x86_64 `UNSIGNED` alike, `2` arm64 `BRANCH26` and x86_64 `BRANCH`), so
+the decode keys on the object's own header and never guesses.
+
+1. **The decode** (`pgr_core::object`): `InputObject::finish` reads the
+   family (`CpuFamily::of_cputype` — a word outside the carried
+   families refuses, the fix naming the linked alphabets) and
+   dispatches to `decode_arm64_reloc` (the pre-slice arms verbatim —
+   every pre-slice link byte-identical) or `decode_x86_64_reloc` (the
+   pointer-shaped alphabet): `UNSIGNED` (8-byte pointer slots — the
+   chained-fixup food; a narrower slot refuses with the width named),
+   `SUBTRACTOR` pairs (LLVM's writer order — the `SUBTRACTOR` names
+   the **subtrahend**, the paired `UNSIGNED` the **minuend**; the arm64
+   decode names the minuend first, the two conventions differ and both
+   doc comments say so), `BRANCH`/`SIGNED` disp32 (the in-situ field
+   reconstructs the addend — `final = S + embedded − site`, the
+   addend-4-against-site+4 algebra Mach-O x86_64 carries),
+   `GOT_LOAD`/`GOT` (the disp32 names the synthesized
+   `__DATA_CONST,__got` slot; the bind rides the slot's chained word —
+   the GOT-indirect call shape the slice-2 record named) and `TLV`
+   (M37's descriptor load, one family over). The `SIGNED_1/2/4`
+   addend-correction family refuses with the type named — the
+   pointer-shaped honesty line (slice 1's premise) is the input side's
+   too, and a silent mis-decode is the alternative.
+2. **The planner** (`pgr_core::layout`): the scan classifies the new
+   kinds — locally-defined GOT references demand the slot, external
+   branches and rip-relative references refuse with the GOT-indirect
+   fix (ld64 synthesizes an x86_64 stub lane Peregrine does not carry;
+   the slice-2 refusal's premise now priced over genuinely x86_64
+   inputs), external subtractor members refuse on either side (the
+   x86_64 pairing puts the minuend inside the kind — the scan checks
+   both), external TLV loads keep the M37 contract. `resolve_reloc`
+   plans the `Disp32` patch op (`value = S + embedded − site`, the
+   ±2 GiB rel32 range checked at plan time), the Subtractor arm reads
+   the pair member's width (8-byte → `Write64` as before, 4-byte →
+   `Disp32`), and ICF's fingerprint partitions the new kinds (the
+   in-situ addend rides the atom's own bytes, the byte equality the
+   refinement compares covers it).
+3. **The emit** (`pgr-emit`): `PatchOp::Disp32` applies a plain LE i32
+   write (the displacement is the whole field — no opcode bits to
+   preserve; the Contract backstop re-checks the range), and the op
+   rides both emit paths (the reference path and the fused tile path —
+   the M4 byte-identity contract holds), the incremental record's span
+   tags (kind 5) and the driver's `-r` exhaustiveness backstop (the
+   x86_64 forms cannot reach the relocatable output — the family
+   refusal precedes Pass 3).
+4. **The gate** (`pgr_core::link::check_input_family`): every object
+   input — direct or archive member — carries the family `cfg.cpu`
+   plans, read from the header **before any parse work** (the
+   POI-cache lookup included, so a family flip can never ride a
+   cross-family entry); the refusal names both families and the `-arch`
+   fix, and the resident lane inherits it (the inputs ride the
+   request's own bytes, the family rides wire v83's config tail — no
+   bump; the parity gate is byte-identical).
+
+Supporting pieces: the input gate matrices
+(`crates/pgr-core/tests/m10_x86_64_inputs.rs` — the pointer-shaped
+corpus linking end to end under `-arch x86_64`, the strict verify, the
+double-link byte-identity, the crossed-family refusals, the
+GOT-indirect slot disp32, the subtractor difference, the TLV descriptor
+disp32; `crates/pgr-driver/tests/m10_x86_64_inputs.rs` — the driver
+face, the resident parity, the arm64 default's refusal naming the fix),
+the producer test file's corpora flipped to genuinely x86_64-typed
+fixtures (the slice-2 refusals now priced over the inputs they name —
+assertions unchanged), the `x86_64_inputs` parity bench (both input
+alphabets over the same pointer-shaped corpus), and the
+`x86_64_inputs_link` consumer example (the same content, two alphabets,
+the crossed links refusing).
 
 ### 15.x The reporting seams — the pipeline observed, the map interchanged (M54–M55)
 
