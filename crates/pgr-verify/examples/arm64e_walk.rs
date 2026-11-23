@@ -89,7 +89,7 @@ fn got_fileoff(bytes: &[u8]) -> usize {
             continue;
         }
         let sects = seg
-            .sections(bytes, SegmentCommand64::SIZE)
+            .sections(cmd.bytes, SegmentCommand64::SIZE)
             .expect("the sections parse");
         for s in sects {
             if s.name() == Ok("__got") {
