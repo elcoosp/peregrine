@@ -968,6 +968,38 @@ pub struct LinkConfig {
     /// nothing left to elevate; the layout's re-check and `link_reloc`
     /// back the driver refusal).
     pub fatal_warnings: bool,
+    /// M133 — the advisory faces' print suppression: `-w` — ld64's flag
+    /// ("Suppress warnings", the `ld` man page) is the driver's print
+    /// decision the config carries so every lane (the cold link, the
+    /// resident session, the ladder's replay) prints the same shape. The
+    /// bytes never move — the decision is the print face's, never the
+    /// image's and never the exit's: the default (`false`) keeps every
+    /// pre-knob link byte-identical (the faces print, the tally counts),
+    /// the suppression silences the `pgr: warning:` lines while the
+    /// tally keeps counting (the M109 escalation reads the count, not
+    /// the stderr — `-w` composes with `-fatal_warnings`, ld64's own
+    /// composition: the suppressed warnings still elevate). The
+    /// relocatable output refuses the knob (the object's shape is the
+    /// input's, verbatim — every advisory face that would warn beside
+    /// `-r` is already refused there, the M104/M105/M107/M108/M109
+    /// pattern — so there is nothing left to suppress; the layout's
+    /// re-check and `link_reloc` back the driver refusal).
+    pub suppress_warnings: bool,
+    /// M134 — the loaded-object inventory face: `-whatsloaded` — ld64's
+    /// flag ("Print the names of all object files loaded", the `ld` man
+    /// page) is the driver's inventory decision the config carries so
+    /// every lane (the cold link, the resident session, the ladder's
+    /// replay) renders the same face. The bytes never move — the face is
+    /// a measurement over the objects Pass 1 actually loaded (the
+    /// explicit objects beside the archive members the S7 pull
+    /// admitted), never a layout product: the default (`false`) keeps
+    /// every pre-knob link byte-identical (nothing prints), the named
+    /// decision prints one name per loaded object in the walk's own
+    /// order. The face applies to every output kind (an `-r` object's
+    /// inventory is its own inputs — the knob carries no relocatable
+    /// refusal), and it composes with `-w` (the suppression is the
+    /// advisory faces' decision, never the inventory's).
+    pub whats_loaded: bool,
     /// M116 — the common-symbol advisory: `-warn_commons` — ld64's
     /// face ("Print a warning whenever a tentative definition in an
     /// object file is found [and an external symbol by the same name is
@@ -1268,6 +1300,8 @@ impl Default for LinkConfig {
             commons: crate::resolve::CommonsPolicy::default(),
             multiply_defined: crate::resolve::MultiplyDefinedPolicy::default(),
             fatal_warnings: false,
+            suppress_warnings: false,
+            whats_loaded: false,
             warn_commons: false,
             no_inits: false,
             dtrace: false,
@@ -3335,6 +3369,22 @@ pub fn layout(
                       and every advisory face is already refused beside -r — nothing to \
                       elevate: drop -fatal_warnings or link an image (an executable, \
                       dylib or bundle)"
+                .into(),
+        });
+    }
+    // M133: the advisory faces' print-suppression decision is a
+    // final-image decision — the relocatable output's shape is the
+    // input's, verbatim, and every advisory face that would warn beside
+    // `-r` is already refused there (the M103/M108 `-r` refusals), so
+    // there is nothing left to suppress. The default never refuses (the
+    // pre-M133 shape). The refusal rides here (not only on the driver
+    // surface) so every caller pays it (the M109 pattern).
+    if cfg.suppress_warnings && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-w suppresses the advisory faces' warnings, but the relocatable \
+                      output's shape is the input's, verbatim and every advisory face \
+                      is already refused beside -r — nothing to suppress: drop -w or \
+                      link an image (an executable, dylib or bundle)"
                 .into(),
         });
     }
