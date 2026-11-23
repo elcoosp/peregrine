@@ -202,6 +202,15 @@ pub struct ServedLink {
     /// decision decides whether it prints). The entries cross verbatim;
     /// the client prints the cold lane's bare face (the M62 convention).
     pub loaded_objects: Vec<String>,
+    /// The unused-dylib advisory entries (v82, M136): the session's own
+    /// resolved state rendered when the request's config carries
+    /// `-warn_unused_dylibs` — the riding-but-unbound install names
+    /// (`Resolution::unused_dylibs`, the M42 drop's own predicate
+    /// read-side), the list the cold lane prints as warnings and still
+    /// exits 0 (the off decision carries the empty list). The entries
+    /// cross verbatim; the client prints the cold lane's face (the M62
+    /// convention).
+    pub unused_dylibs: Vec<String>,
     /// The served link-statistics report (v63, M112): `Some` when the
     /// request's config carries `-print_statistics` — the counts the
     /// session's own run reported (the warm pipeline's product: the
@@ -309,6 +318,24 @@ fn serve_duplicate_warnings(
 /// whether it prints; the daemon never writes the client's stderr).
 fn serve_loaded_objects(objects: &[pgr_core::object::InputObject]) -> Vec<String> {
     objects.iter().map(|o| o.name.clone()).collect()
+}
+
+/// M136 (v82): the served unused-dylib advisory — the install names of
+/// the dylibs the session's own resolution kept riding with zero binding
+/// references (the same list the cold lane's `-warn_unused_dylibs` face
+/// prints, the M107/M116 config pattern). The `-warn_unused_dylibs`
+/// decision fills the list, the off decision carries the empty one (the
+/// face is a measurement, never a layout product; the daemon never
+/// writes the client's stderr).
+fn serve_unused_dylibs(
+    config: &pgr_core::layout::LinkConfig,
+    resolution: &pgr_core::resolve::Resolution,
+) -> Vec<String> {
+    if config.warn_unused_dylibs {
+        resolution.unused_dylibs()
+    } else {
+        Vec::new()
+    }
 }
 
 /// M112 (v63): the served link-statistics report — the counts the
@@ -810,6 +837,7 @@ impl ResidentSession {
             commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
             duplicate_warnings: serve_duplicate_warnings(&req.config, &result.resolution),
             loaded_objects: serve_loaded_objects(&result.objects),
+            unused_dylibs: serve_unused_dylibs(&req.config, &result.resolution),
             statistics,
             references,
         })
@@ -1027,6 +1055,7 @@ impl ResidentSession {
             commons_warnings: serve_commons_warnings(&req.config, &linked.resolution),
             duplicate_warnings: serve_duplicate_warnings(&req.config, &linked.resolution),
             loaded_objects: serve_loaded_objects(&linked.objects),
+            unused_dylibs: serve_unused_dylibs(&req.config, &linked.resolution),
             statistics: None,
             references: Vec::new(),
         })
@@ -1338,6 +1367,7 @@ impl ResidentSession {
                 commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
                 duplicate_warnings: serve_duplicate_warnings(&req.config, &result.resolution),
                 loaded_objects: serve_loaded_objects(&result.objects),
+                unused_dylibs: serve_unused_dylibs(&req.config, &result.resolution),
                 statistics: serve_statistics(req, &result, prev.len() as u64, started.elapsed()),
                 references,
             });
@@ -1500,6 +1530,7 @@ impl ResidentSession {
             commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
             duplicate_warnings: serve_duplicate_warnings(&req.config, &result.resolution),
             loaded_objects: serve_loaded_objects(&result.objects),
+            unused_dylibs: serve_unused_dylibs(&req.config, &result.resolution),
             statistics,
             references,
         })
