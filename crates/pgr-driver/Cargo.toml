@@ -92,3 +92,21 @@ harness = false
 [[bench]]
 name = "whats_loaded"
 harness = false
+
+# The M135 library-search-order bench: the driver run across the
+# `-search_paths_first`/`-search_dylibs_first` faces (the per-directory
+# default beside the dylibs-first rounds) over the same split corpus
+# (dir one's archive beside dir two's dylib) — a shape-parity gate, the
+# decision names which files the link consumes and the pipeline rides
+# the picked bytes either way.
+[[bench]]
+name = "search_paths"
+harness = false
+
+# The M136 unused-dylib advisory bench: the driver run across the
+# `-warn_unused_dylibs` faces (the silent default beside the named
+# advisory) over the same corpus — a shape-parity gate, the face reads
+# the M42 predicate read-side and never moves the bytes.
+[[bench]]
+name = "warn_unused"
+harness = false
