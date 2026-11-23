@@ -626,97 +626,11 @@ impl TraceJsonReader<'_> {
     /// verbatim, raw control bytes refused.
     fn parse_string(&mut self) -> Result<String, TraceJsonError> {
         self.expect(b'"')?;
-        let start = self.pos;
-        let mut out: Vec<u8> = Vec::new();
-        loop {
-            let Some(&b) = self.s.get(self.pos) else {
-                self.pos = self.s.len();
-                return self.invalid("unterminated string");
-            };
-            self.pos += 1;
-            match b {
-                b'"' => {
-                    return String::from_utf8(out).map_err(|_| TraceJsonError::Invalid {
-                        at: start,
-                        detail: "the trace JSON must be UTF-8".into(),
-                    });
-                }
-                b'\\' => {
-                    let Some(&esc) = self.s.get(self.pos) else {
-                        self.pos = self.s.len();
-                        return self.invalid("unterminated escape");
-                    };
-                    self.pos += 1;
-                    match esc {
-                        b'"' => out.push(b'"'),
-                        b'\\' => out.push(b'\\'),
-                        b'/' => out.push(b'/'),
-                        b'b' => out.push(0x08),
-                        b'f' => out.push(0x0C),
-                        b'n' => out.push(b'\n'),
-                        b'r' => out.push(b'\r'),
-                        b't' => out.push(b'\t'),
-                        b'u' => out.extend(self.parse_unicode_escape()?),
-                        _ => {
-                            return self.invalid(format!("unknown escape \\{}", esc as char));
-                        }
-                    }
-                }
-                b if b < 0x20 => return self.invalid("raw control byte in string"),
-                _ => out.push(b),
-            }
-        }
-    }
-
-    /// One `\uXXXX` escape (a surrogate pair decoded when the high half
-    /// leads — a foreign writer may pair them; the house writer's escapes
-    /// are always single control characters).
-    fn parse_unicode_escape(&mut self) -> Result<Vec<u8>, TraceJsonError> {
-        let hi = self.hex4()?;
-        let cp = if (0xD800..=0xDBFF).contains(&hi) {
-            if self.peek()? != b'\\' {
-                return self.invalid("unpaired high surrogate");
-            }
-            self.pos += 1;
-            if self.peek()? != b'u' {
-                return self.invalid("unpaired high surrogate");
-            }
-            self.pos += 1;
-            let lo = self.hex4()?;
-            if !(0xDC00..=0xDFFF).contains(&lo) {
-                return self.invalid("unpaired low surrogate");
-            }
-            0x1_0000 + ((u32::from(hi) - 0xD800) << 10) + (u32::from(lo) - 0xDC00)
-        } else if (0xDC00..=0xDFFF).contains(&hi) {
-            return self.invalid("unpaired low surrogate");
-        } else {
-            u32::from(hi)
-        };
-        let mut buf = [0u8; 4];
-        let enc = char::from_u32(cp)
-            .ok_or_else(|| TraceJsonError::Invalid {
-                at: self.pos,
-                detail: "the escape names no Unicode scalar".into(),
-            })?
-            .encode_utf8(&mut buf);
-        Ok(enc.as_bytes().to_vec())
-    }
-
-    /// Four hex digits (the `\u` payload).
-    fn hex4(&mut self) -> Result<u16, TraceJsonError> {
-        let mut v: u16 = 0;
-        for _ in 0..4 {
-            let b = self.peek()?;
-            let d = match b {
-                b'0'..=b'9' => u16::from(b - b'0'),
-                b'a'..=b'f' => u16::from(b - b'a') + 10,
-                b'A'..=b'F' => u16::from(b - b'A') + 10,
-                _ => return self.invalid("expected a hex digit in \\u escape"),
-            };
-            self.pos += 1;
-            v = (v << 4) | d;
-        }
-        Ok(v)
+        crate::jsonstr::parse_json_string(self.s, &mut self.pos, "the trace JSON must be UTF-8")
+            .map_err(|e| TraceJsonError::Invalid {
+                at: e.at,
+                detail: e.detail,
+            })
     }
 
     /// A non-negative integer: digits only — the trace schema carries no
