@@ -51,6 +51,7 @@ pub mod ids;
 pub mod image_base;
 pub mod init_offsets;
 pub mod interner;
+pub(crate) mod jsonstr;
 pub mod layout;
 pub mod link;
 pub mod make_undefined;
