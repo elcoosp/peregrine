@@ -637,6 +637,21 @@ fn encode_one(
                 ARM64_RELOC_UNSIGNED,
             ));
         }
+        RelocKind::Branch32
+        | RelocKind::RipRel32 { .. }
+        | RelocKind::GotRipRel32 { .. }
+        | RelocKind::TlvRipRel32 { .. } => {
+            // M10 rung 5 slice 3: the x86_64 disp32 forms never reach the
+            // relocatable output — the family refusal precedes Pass 3
+            // (`link_reloc` re-checks `cfg.cpu` so no library caller can
+            // plan the shape either), and the object's symtab is the
+            // input's, verbatim. The arm is the exhaustiveness backstop.
+            return Err(EmitError::Internal {
+                message: "x86_64 relocations cannot reach the relocatable output (the CPU \
+                          family refusal precedes Pass 3)"
+                    .into(),
+            });
+        }
     }
     Ok(())
 }
