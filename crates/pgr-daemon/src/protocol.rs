@@ -467,8 +467,13 @@ use std::time::Duration;
 /// `MH_APP_EXTENSION_SAFE` flags word the cold link plans (the parity
 /// gate is byte-identical — the bit is header-level, the producer's to
 /// name, the M122 `-pie` pattern over the flags word), and the
-/// ladder's replay rides the decision (the M81 pattern).
-pub const PROTO_VERSION: u32 = 81;
+/// ladder's replay rides the decision (the M81 pattern). v82 (M136):
+/// the unused-dylib advisory's decision byte rides the tail after the
+/// inventory byte (the bytes never move — the face is the advisory's,
+/// the session's own resolution renders the reply's `unused_dylibs`
+/// tail), and the ladder's replay rides the decision (the M81
+/// pattern).
+pub const PROTO_VERSION: u32 = 82;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1688,6 +1693,31 @@ pub(crate) fn decode_loaded_objects(r: &mut Reader<'_>) -> Result<Vec<String>, D
     (0..r.u32()?).map(|_| r.str()).collect()
 }
 
+/// Encodes the reply's unused-dylib advisory tail (v82, M136): a
+/// count-prefixed list of the session's own riding-but-unbound dylib
+/// install names (`Resolution::unused_dylibs`, the M42 drop's own
+/// predicate read-side) — the advisory face's product, rendered from the
+/// session's own resolved state. The off decision carries the empty list
+/// (the face is the decision's; the daemon never writes the client's
+/// stderr). The client prints each entry as the cold lane's `pgr:
+/// warning:` face — the wire never re-shapes the face the client prints
+/// (the M62 convention, the v67 commons tail shape).
+pub fn encode_unused_dylibs(out: &mut Vec<u8>, entries: &[String]) {
+    put_u32(out, entries.len() as u32);
+    for entry in entries {
+        put_str(out, entry);
+    }
+}
+
+/// Decodes the reply's unused-dylib advisory tail (v82; see
+/// [`encode_unused_dylibs`] for the shape).
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation.
+pub(crate) fn decode_unused_dylibs(r: &mut Reader<'_>) -> Result<Vec<String>, DecodeError> {
+    (0..r.u32()?).map(|_| r.str()).collect()
+}
+
 /// Encodes the reply's duplicate-symbol advisory tail (v72, M121): a
 /// count-prefixed list of the session's own duplicate-strong collision
 /// entries — the advisory face's product, rendered from the session's
@@ -2399,6 +2429,11 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // move (the face is a measurement, not a layout product), a resident
     // relink renders the inventory the client asked for.
     put_u8(out, u8::from(cfg.whats_loaded));
+    // M136 (v82 wire): the unused-dylib advisory's decision rides the
+    // tail after the inventory byte — one byte; the bytes never move
+    // (the face is a measurement over the M42 predicate read-side), a
+    // resident relink renders the advisory the client asked for.
+    put_u8(out, u8::from(cfg.warn_unused_dylibs));
     // M111 (v62 wire): the read-only-relocations policy rides the tail
     // after the fatal-warnings byte — one byte off the three-value
     // alphabet; a resident relink prices the same read-only targets the
@@ -2960,6 +2995,11 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // face is a measurement, not a layout product; the session's served
     // link plans the same shape either way).
     let whats_loaded = r.u8()? != 0;
+    // M136 (v82 wire): the unused-dylib advisory's decision — one byte,
+    // no validation beyond the bool (the bytes never move: the face is a
+    // measurement over the M42 predicate read-side; the session's served
+    // link renders the advisory when the decision rides).
+    let warn_unused_dylibs = r.u8()? != 0;
     // M111 (v62 wire): the read-only-relocations policy — an unknown
     // byte is malformed (a refusal, never a silently defaulted
     // policy; an old server reading a new client's alphabet refuses
@@ -3073,6 +3113,7 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         fatal_warnings,
         suppress_warnings,
         whats_loaded,
+        warn_unused_dylibs,
         read_only_relocs,
         print_statistics,
         trace_refs,
@@ -3091,10 +3132,11 @@ mod tests {
         ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_commons_warnings,
         decode_duplicate_warnings, decode_loaded_objects, decode_map_bytes, decode_policy_warnings,
         decode_provenance_bytes, decode_references, decode_statistics, decode_time_report,
-        decode_trace_bytes, decode_verify_report_bytes, encode_commons_warnings,
-        encode_duplicate_warnings, encode_loaded_objects, encode_map, encode_policy_warnings,
-        encode_provenance, encode_references, encode_statistics, encode_time_report, encode_trace,
-        encode_verify_report, put_str, put_u8, put_u32, put_u64, read_pattern,
+        decode_trace_bytes, decode_unused_dylibs, decode_verify_report_bytes,
+        encode_commons_warnings, encode_duplicate_warnings, encode_loaded_objects, encode_map,
+        encode_policy_warnings, encode_provenance, encode_references, encode_statistics,
+        encode_time_report, encode_trace, encode_unused_dylibs, encode_verify_report, put_str,
+        put_u8, put_u32, put_u64, read_pattern,
     };
     use pgr_core::export_filter::SymbolPattern;
     use pgr_core::fixups::FixupPointerFormat;
@@ -3388,6 +3430,7 @@ mod tests {
             // survive the round trip verbatim (the bytes never move —
             // the face is a measurement).
             whats_loaded: false,
+            warn_unused_dylibs: false,
             // The v63 tail: the link-statistics decision must survive
             // the round trip verbatim (the report the client asked for
             // is the report the session serves — never a silently
@@ -6458,6 +6501,25 @@ mod tests {
     }
 
     #[test]
+    fn the_unused_dylibs_decision_round_trips() {
+        // The v82 tail: the decision byte round-trips (the rich config
+        // carries the silent default; the named decision rides).
+        let cfg = rich_config();
+        assert!(
+            !cfg.warn_unused_dylibs,
+            "rich_config carries the silent default"
+        );
+        let mut body = Vec::new();
+        encode_unused_dylibs(&mut body, &["@rpath/libunused.dylib".into()]);
+        let back = decode_unused_dylibs(&mut Reader::new(&body)).expect("the tail decodes");
+        assert_eq!(back, vec!["@rpath/libunused.dylib".to_string()]);
+        let mut empty = Vec::new();
+        encode_unused_dylibs(&mut empty, &[]);
+        let back = decode_unused_dylibs(&mut Reader::new(&empty)).expect("the tail decodes");
+        assert_eq!(back.len(), 0);
+    }
+
+    #[test]
     fn the_loaded_objects_tail_round_trips() {
         // v81: the served loaded-object inventory tail (the M62
         // convention — the session's own Pass 1 inventory rides the
@@ -8775,7 +8837,7 @@ mod tests {
         // the M105 strip-debug byte, then the M107 commons-policy byte),
         // the hand-spliced rank table takes the first place and the
         // cstring absence follows.
-        body.truncate(body.len() - 13);
+        body.truncate(body.len() - 14);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -8796,6 +8858,7 @@ mod tests {
         put_u8(&mut body, 0); // the M109 fatal-warnings absence
         put_u8(&mut body, 0); // the M133 warn-suppression absence
         put_u8(&mut body, 0); // the M134 whats-loaded absence
+        put_u8(&mut body, 0); // the M136 unused-dylib absence
         put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
         put_u8(&mut body, 0); // the M112 print-statistics absence
         put_u8(&mut body, 0); // the M113 reference-trace absence
@@ -8875,7 +8938,7 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        body.truncate(body.len() - 13);
+        body.truncate(body.len() - 14);
         put_u8(&mut body, 0); // the rank table's absence
         // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
@@ -8893,6 +8956,7 @@ mod tests {
         put_u8(&mut body, 0); // the M109 fatal-warnings absence
         put_u8(&mut body, 0); // the M133 warn-suppression absence
         put_u8(&mut body, 0); // the M134 whats-loaded absence
+        put_u8(&mut body, 0); // the M136 unused-dylib absence
         put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
         put_u8(&mut body, 0); // the M112 print-statistics absence
         put_u8(&mut body, 0); // the M113 reference-trace absence
