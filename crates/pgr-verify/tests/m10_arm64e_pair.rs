@@ -82,7 +82,7 @@ fn pair_exec(pf: PointerFormatKind, bind_names: &[&str]) -> Image {
                 addr_div: false,
                 key: 2,
             },
-            PointerFormatKind::Offset64 => SlotKind::Bind {
+            PointerFormatKind::Offset64 | PointerFormatKind::Format64 => SlotKind::Bind {
                 sym_index,
                 addend: 0,
             },
