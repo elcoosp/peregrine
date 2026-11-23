@@ -66,6 +66,7 @@ pub mod export_trie;
 pub mod init_offsets;
 pub mod literal;
 pub mod misc;
+pub mod mod_term;
 pub mod module_table;
 pub mod objc;
 pub mod objcstubs;
@@ -229,6 +230,21 @@ pub enum Code {
     /// pinned byte-identity by the `m131_literal_merge` gate, the M5
     /// cstring precedent (cstrings carry no verify family).
     Literal,
+    /// The exit-time terminator surface is malformed (M132): the
+    /// `S_MOD_TERM_FUNC_POINTERS` section dyld's exit walk consumes
+    /// (`MachOAnalyzer::forEachTerminator`, the mirror of the initializer
+    /// walk the `InitOffsets` family gates) carries a size that is not a
+    /// whole multiple of the 8-byte pointer stride — the walk reads whole
+    /// slots, so a section off its stride is the malformed shape dyld
+    /// would misread. The slots are fixup words (chained rebase encodings
+    /// under `LC_DYLD_CHAINED_FIXUPS`, opcode-driven rebases under the
+    /// legacy streams), so the raw bytes stay unread and the stride is
+    /// the shape the gate can honestly check (the M94 pointer-form
+    /// precedent, one section type over). The read-side backstop the
+    /// producer's `__mod_term_func` emit-side stride assumes, regardless
+    /// of how the section was produced (the M115/M131 read-side-backstop
+    /// shape).
+    ModTerm,
     /// Suspicious but non-fatal condition.
     Suspicious,
     /// A consumer-side check's own code (M67): the token a
@@ -245,7 +261,7 @@ impl Code {
     /// tooling can enumerate the surface the way `Check::ALL` enumerates
     /// the families). A consumer-side check's own tokens ride
     /// [`Code::Custom`] outside this table.
-    pub const ALL: [Code; 27] = [
+    pub const ALL: [Code; 29] = [
         Code::HeaderInvalid,
         Code::LoadCommandMalformed,
         Code::SegmentContract,
@@ -273,6 +289,7 @@ impl Code {
         Code::ModuleTable,
         Code::DebugMap,
         Code::Literal,
+        Code::ModTerm,
         Code::Suspicious,
     ];
 
@@ -307,6 +324,7 @@ impl Code {
             Code::ModuleTable => "module_table",
             Code::DebugMap => "debug_map",
             Code::Literal => "literal",
+            Code::ModTerm => "mod_term",
             Code::Suspicious => "suspicious",
             Code::Custom(token) => token,
         }
