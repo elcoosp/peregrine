@@ -206,7 +206,7 @@ pub fn is_objc_msgsend_callsite(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        OBJC1_METADATA_PREFIXES, OBJC_METADATA_PREFIXES, ObjcFamily, classify_objc_metadata,
+        OBJC_METADATA_PREFIXES, OBJC1_METADATA_PREFIXES, ObjcFamily, classify_objc_metadata,
         defines_objc_metadata, is_objc_msgsend_callsite, objc_msgsend_selector,
     };
 
@@ -310,9 +310,15 @@ mod tests {
         // into `__objc_methname`.
         for (name, sel) in [
             (&b"_objc_msgSend$count"[..], &b"count"[..]),
-            (b"_objc_msgSend$initWithFrame:options:", b"initWithFrame:options:"),
+            (
+                b"_objc_msgSend$initWithFrame:options:",
+                b"initWithFrame:options:",
+            ),
             (b"_objc_msgSend$alloc", b"alloc"),
-            (b"_objc_msgSend$myCategory_selector:foo:", b"myCategory_selector:foo:"),
+            (
+                b"_objc_msgSend$myCategory_selector:foo:",
+                b"myCategory_selector:foo:",
+            ),
         ] {
             assert_eq!(
                 objc_msgsend_selector(name),
@@ -340,8 +346,8 @@ mod tests {
             b"_objc_msgSend",
             b"_printf",
             b"_main",
-            b"_objc_msgSend_extra",     // not the `$` form
-            b"objc_msgSend$count",      // missing the leading underscore
+            b"_objc_msgSend_extra", // not the `$` form
+            b"objc_msgSend$count",  // missing the leading underscore
             b"",
         ] {
             assert_eq!(
