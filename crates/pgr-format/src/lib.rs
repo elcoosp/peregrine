@@ -52,7 +52,6 @@ pub use reloc::RelocationInfo;
 pub use segment::{Section64, SegmentCommand64};
 pub use signature::{CodeDirectory, SuperBlob};
 pub use symtab::{DylibModule64, DysymtabCommand, Nlist64, SymtabCommand};
-pub use trie::exports as trie_exports;
 pub use unwind::{CompactUnwindEntry, read_compact_unwind, write_compact_unwind};
 
 /// The export surface a `-bundle_loader` host presents (M25): the
@@ -112,7 +111,7 @@ pub use tbd::{Tbd, TbdSymbol, parse_tbd};
 pub use trie::{TrieExport, exports as exports_trie};
 pub use universal::{FatArch, Universal, is_universal, parse_universal};
 
-use consts::LC_DYLD_CHAINED_FIXUPS;
+use consts::{DYLD_CHAINED_PTR_ARM64E, LC_DYLD_CHAINED_FIXUPS};
 use cursor::Cursor;
 
 /// Summary produced by the structural parser: counts of every table Pass 1
@@ -149,21 +148,33 @@ struct SegmentSpan {
     fileoff: u64,
 }
 
-/// Walks one chain page of the 64 family, counting slots and validating
-/// the stride invariants (8-byte slot alignment, no page crossing,
-/// termination). Returns slots visited.
+/// Walks one chain page of the family the segment declares, counting
+/// slots and validating the stride invariants (8-byte slot alignment, no
+/// page crossing, termination). Returns slots visited.
 ///
-/// The M0-era summary walk hard-codes the 64 family (the `ChainWord64`
-/// decode and the 4-byte stride units); the arm64e walk lives in
-/// `pgr-verify`'s dyld chain-walk simulation, which reads each segment's
-/// declared `pointer_format` — a named seam for a future slice, not a
-/// silent mis-decode.
+/// The walk reads each segment's declared `pointer_format` — the M10
+/// rung-4 seam this file named before it closed: the 64 families
+/// (`DYLD_CHAINED_PTR_64_OFFSET`, `DYLD_CHAINED_PTR_64`) decode
+/// [`fixups::ChainWord64`] words and count 4-byte strides, arm64e decodes
+/// [`fixups::ChainWordArm64e`] (the auth flag's bit 62 stays out of the
+/// 11-bit `next` field) and counts 8-byte strides —
+/// [`fixups::chain_stride`] is the one stride table both sides read. A
+/// format no reader walks refuses with the format named (the verifier's
+/// dynamic-walk convention), never a silent mis-decode.
 fn walk_chain_page(
     bytes: &[u8],
     page_base: u64,
     page_size: u64,
+    pointer_format: u16,
     start_off: u16,
 ) -> Result<u64, FormatError> {
+    let Some(stride_bytes) = fixups::chain_stride(pointer_format) else {
+        return Err(FormatError::Invalid {
+            offset: usize::try_from(page_base).unwrap_or(usize::MAX),
+            what: "chain pointer format unsupported (the summary walk reads DYLD_CHAINED_PTR_64_OFFSET, _64 and ARM64E)",
+            value: u64::from(pointer_format),
+        });
+    };
     if start_off % 8 != 0 {
         return Err(FormatError::Invalid {
             offset: usize::try_from(page_base).unwrap_or(usize::MAX),
@@ -185,13 +196,20 @@ fn walk_chain_page(
         }
         let mut c = Cursor::new(bytes);
         c.seek(usize::try_from(slot_file).unwrap_or(usize::MAX))?;
-        let word = fixups::ChainWord64::new(c.read_u64()?);
+        let raw = c.read_u64()?;
+        // The segment's declared family picks the word reader: under
+        // arm64e the 11-bit `next` field ends below the auth flag, and
+        // its strides count 8-byte units.
+        let strides = if pointer_format == DYLD_CHAINED_PTR_ARM64E {
+            u64::from(fixups::ChainWordArm64e::new(raw).next())
+        } else {
+            u64::from(fixups::ChainWord64::new(raw).next())
+        };
         visited += 1;
-        let strides = u64::from(word.next());
         if strides == 0 {
             return Ok(visited);
         }
-        let advance = strides * 4;
+        let advance = strides * stride_bytes;
         if slot_off % 8 != 0 || slot_off + advance + 8 > page_size {
             return Err(FormatError::Invalid {
                 offset: usize::try_from(slot_file).unwrap_or(usize::MAX),
@@ -235,7 +253,13 @@ fn walk_fixup_payload(
                         what: "fixup page base overflow",
                         value: u64::from(page),
                     })?;
-                total += walk_chain_page(bytes, page_base, u64::from(seg.page_size), start_off)?;
+                total += walk_chain_page(
+                    bytes,
+                    page_base,
+                    u64::from(seg.page_size),
+                    seg.pointer_format,
+                    start_off,
+                )?;
             }
         }
     }
