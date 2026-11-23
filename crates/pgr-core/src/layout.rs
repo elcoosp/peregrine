@@ -1126,6 +1126,21 @@ pub struct LinkConfig {
     /// M104/M105/M116 pattern — the layout's re-check and `link_reloc` back
     /// the driver refusal).
     pub warn_duplicate: bool,
+    /// M136 — the unused-dylib advisory: `-warn_unused_dylibs` /
+    /// `-no_warn_unused_dylibs` — ld64's face ("Warn about dylibs that
+    /// are linked by no symbols are used from them", the `ld` man page).
+    /// The decision gates the driver's print face over
+    /// [`crate::resolve::Resolution::unused_dylibs`] — the M42 drop's
+    /// own used-marks predicate made nameable read-side (re-exports and
+    /// hidden dylibs exempt, the dynamic-lookup escape silent, a
+    /// needed-marked survivor names beside the drop). The default
+    /// (`false`) prints nothing and keeps every pre-M136 link
+    /// byte-identical: the advisory is a measurement, never a layout
+    /// product — the bytes never move. The relocatable output refuses
+    /// the knob: the object carries no dylib load commands to advise
+    /// about (the M116/M121 advisory shape — the layout's re-check and
+    /// `link_reloc` back the driver refusal).
+    pub warn_unused_dylibs: bool,
     /// M111 — the read-only-relocations policy:
     /// `-read_only_relocs <policy>` — ld64's policy for relocations in
     /// read-only segments (the W^X contract's other half; see
@@ -1308,6 +1323,7 @@ impl Default for LinkConfig {
             module_policy: crate::resolve::ModulePolicy::default(),
             executable: false,
             warn_duplicate: false,
+            warn_unused_dylibs: false,
             read_only_relocs: crate::resolve::ReadOnlyRelocsPolicy::default(),
             weak_reference_mismatches: crate::resolve::WeakReferenceMismatchesPolicy::default(),
             print_statistics: false,
@@ -3309,6 +3325,20 @@ pub fn layout(
                       during resolve, but the relocatable output's symtab is the \
                       input's, verbatim — nothing to tally: drop -warn_duplicate or \
                       link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
+    // M136: the unused-dylib advisory names load-command riders — the
+    // relocatable output carries no dylib load commands (an object's
+    // undefineds stay open by design), so a named advisory would claim a
+    // measurement the object cannot carry (the M104/M105/M116/M121
+    // pattern).
+    if cfg.warn_unused_dylibs && cfg.filetype == OutputType::Relocatable {
+        return Err(LinkError::Layout {
+            message: "-warn_unused_dylibs advises which input dylibs ride unbound, but \
+                      the relocatable output carries no dylib load commands — nothing \
+                      to advise about: drop -warn_unused_dylibs or link an image (an \
+                      executable, dylib or bundle)"
                 .into(),
         });
     }
