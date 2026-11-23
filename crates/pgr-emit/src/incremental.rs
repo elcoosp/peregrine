@@ -1100,9 +1100,11 @@ impl LinkRecord {
             }
         }
         // v7: the chain word family (M82) — one byte, the plan's own
-        // field. The relink ladders admit through it.
+        // field. The relink ladders admit through it. The 64 family
+        // (M10 rung 5, slice 2) rides byte 2.
         p.push(match self.chain_word_format {
             pgr_core::fixups::FixupPointerFormat::Offset64 => 0,
+            pgr_core::fixups::FixupPointerFormat::Format64 => 2,
             pgr_core::fixups::FixupPointerFormat::Arm64e => 1,
         });
         // v8: the named-UUID decision (M99) — a present byte, then the
@@ -1291,13 +1293,14 @@ impl LinkRecord {
             1 => Some(decode_snapshot(&mut d)?),
             _ => return None,
         };
-        // v7: the chain word family (M82). 0 = Offset64, 1 = Arm64e;
-        // anything else is corruption.
+        // v7: the chain word family (M82). 0 = Offset64, 1 = Arm64e,
+        // 2 = Format64 (the rung-5 family); anything else is corruption.
         let mut family = [0u8; 1];
         d.bytes(&mut family)?;
         let chain_word_format = match family[0] {
             0 => pgr_core::fixups::FixupPointerFormat::Offset64,
             1 => pgr_core::fixups::FixupPointerFormat::Arm64e,
+            2 => pgr_core::fixups::FixupPointerFormat::Format64,
             _ => return None,
         };
         // v8: the named-UUID decision (M99, see encode). 0 = derived
