@@ -75,3 +75,20 @@ harness = false
 [[bench]]
 name = "fatal_warnings"
 harness = false
+
+# The M133 warning-suppression bench: the driver run across the print
+# faces (the advisory default beside the -w suppression) over the same
+# warning-producing 32-object corpus — a shape-parity gate, the decision
+# silences the `pgr: warning:` lines and never moves the tally the
+# faces keep counting.
+[[bench]]
+name = "warn_suppress"
+harness = false
+
+# The M134 loaded-object inventory bench: the driver run across the
+# `-whatsloaded` faces (the silent default beside the named inventory)
+# over the same clean 32-object corpus — a shape-parity gate, the face
+# prints one stderr line per loaded object and never moves the bytes.
+[[bench]]
+name = "whats_loaded"
+harness = false
