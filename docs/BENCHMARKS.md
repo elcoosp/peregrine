@@ -1111,7 +1111,7 @@ The `debug_map` bench: the symtab-build throughput (ns) and the output symtab by
 
 ### M130 — the ObjC-stubs synthesis decision
 
-The `objc_stubs` bench is pending the M130 synthesis code (the `__objc_stubs` synthesis lane lands in the M130 follow-up — this block records the bench's design ahead of the code, fixing the docs drift the skipped ceremony left). The planned shape: the stub-synthesis throughput (ns) and the output `__objc_stubs`/`__objc_methname` bytes over a generated `_objc_msgSend$<sel>` callsite corpus, the bench measuring the real cost (the selector classification, the stub emission, the `__objc_methname` dedup) once the synthesis lands; recorded on the dev sandbox (bounded `--measurement-time 1`) when the code ships.
+The `objc_stubs` bench (the M130 design record's named follow-up, shipped additively once the synthesis landed): the link cost over a generated `_objc_msgSend$<sel>` callsite corpus (64 objects × 8 callsites over 32 distinct selectors, the repeats deduping onto one stub per selector) beside the callsite-free corpus — `link_64_objects/synthesis_32_selectors` beside `link_64_objects/no_callsites`, the delta the synthesis's own price (the selector classification, the stub emission, the `__objc_methname` dedup). Recorded on the dev sandbox; the hardware gates own the comparable numbers.
 
 
 ### M131 — the mergeable literal-pool decision
@@ -1125,3 +1125,12 @@ The `warn_suppress` bench: the driver's run cost across the `-w` faces over the 
 ### M134 — the loaded-object inventory face
 
 The `whats_loaded` bench: the driver's run cost across the `-whatsloaded` faces over the same clean 32-object corpus (each object carrying its own entry symbol — a second `_main` would refuse the link) — `run_32_objects/silent_default` **581 µs** vs `run_32_objects/inventory` **710 µs**. The face is a measurement over data the link already had, never a layout product — the link cost never regresses when the inventory is named; the recorded delta is the named lane's 32 stderr lines (terminal I/O on the dev rig), the image byte-identical either way (the `whatsloaded` gate pins the byte-identity against the un-named decision's image). Recorded on the dev sandbox (bounded `--quick` medians, 2-core KVM rig; the hardware gates own the comparable numbers).
+
+### M135 — the library-search-order face
+
+The `search_paths` bench: the driver's run cost across the `-search_paths_first`/`-search_dylibs_first` faces over the same split corpus (dir one's `libgreet.a` beside dir two's `libgreet.dylib`, both exporting `_greet`, so each face's walk probes a real candidate list over both directories) — `run_32_objects/paths_first_default` **~615 µs**, `run_32_objects/paths_first_named` and `run_32_objects/dylibs_first` within noise (p > 0.05, bounded `--measurement-time 1` medians). The decision is Pass 0's own — it names which files the link consumes and the pipeline rides the picked bytes either way — so the honest expectation is parity, and the split corpus makes each walk honest work rather than a first-directory hit (the shape gate the M109/M133/M134 driver benches ride, one face over). Recorded on the dev sandbox; the hardware gates own the comparable numbers.
+
+### M136 — the unused-dylib advisory face
+
+The `warn_unused` bench: the driver's run cost across the `-warn_unused_dylibs` faces over the same 32-object corpus with one unbound-rider stub — `run_32_objects/silent_default` beside `run_32_objects/advisory`, the honest expectation is parity (the face reads the M42 predicate read-side and never moves the bytes; the delta is the one stderr line). Recorded on the dev sandbox; the hardware gates own the comparable numbers.
+
