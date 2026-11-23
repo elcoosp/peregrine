@@ -11,7 +11,7 @@ harness works end-to-end from day one and (b) give each pass a regression anchor
 > and the byte-identity gates fail the build on divergence.
 
 <p>
-  <a href="#results-at-a-glance">Results</a> • <a href="#gate-scoreboard">Gates</a> • <a href="#conditions--harness">Setup</a> • <a href="#pipeline-baselines">Pipeline</a> • <a href="#the-edit-loop--stages-abc">Edit loop</a> • <a href="#consumer-surfaces-m11m14">Surfaces</a> • <a href="#knob-parity-m10m46">Parity</a> • <a href="#pending-measurements">Pending</a> • <a href="#findings--corrections">Findings</a>
+  <a href="#results-at-a-glance">Results</a> • <a href="#gate-scoreboard">Gates</a> • <a href="#conditions--harness">Setup</a> • <a href="#pipeline-baselines">Pipeline</a> • <a href="#the-edit-loop--stages-abc">Edit loop</a> • <a href="#consumer-surfaces-m11m14">Surfaces</a> • <a href="#knob-parity-m10m46">Parity</a> • <a href="#the-rung-35-gate-run-recorded">Gate run</a> • <a href="#findings--corrections">Findings</a>
 </p>
 
 ---
@@ -782,23 +782,28 @@ link's hot path", recorded honestly:**
   the skipped segment/fixup walks (the honest expectation the M12 `checks` bench pins, composed
   over the slices).
 
-## Pending measurements
+## The rung 3–5 gate run (recorded)
 
-Benches landed with their milestones; the next gate run fills the numbers (criterion medians,
-same sandbox). Expectations are stated so any divergence is a finding:
+Benches landed with their milestones; the gate run filled the numbers (criterion medians, the dev
+sandbox, `cargo bench` defaults). Expectations are stated so any divergence is a finding — four
+diverged, and each carries its row in the findings table below:
 
-| Bench                                                                          | Pins                                                              | Honest expectation                                                  |
-| ------------------------------------------------------------------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `pgr-core/platform_floor/for_target/*` (M10 r3)                                | the consumer seam's decision cost (floor compare + tracing event) | cheap by construction; rotation catches shape regressions           |
-| `pgr-verify/verify_platform_floor/verify/<below\|at_floor>` (M10 r3)           | strict pass, images _born_ at their build versions                | the two shapes inside each other's noise                            |
-| `pgr-verify/verify_arm64e/verify/<arm64e_auth\|offset64_control>` (r4 s1)      | the read walk, both families                                      | arm64e inside the control's band — same work per slot, wider stride |
-| `pgr-core/plan_fixups_word_family/<offset64\|arm64e>/<1k\|10k\|100k>` (r4 s2)  | both encoders, same slot corpus                                   | curves track — one extra encoder branch                             |
-| `…/arm64e_auth/<1k\|10k\|100k>` (r4 s3)                                        | every slot signed (PAC triple; auth-bind addend split)            | inside the `arm64e` band                                            |
-| `pgr-verify/verify_arm64e/pair_replay/<arm64e_auth\|offset64_control>` (r4 s4) | the family-blind M3 pair gate                                     | inside the control's band — different word reader, doubled stride   |
-| `pgr-verify/verify_x86_64/verify/<x86e_format64\|offset64_control>` (r5 s1)   | the strict pass over the 64 family at 4 KiB pages                  | parity — one branch for the VM-address target translation           |
-| `pgr-core/x86_64/<format64\|offset64>/<n>` (r5 s2)                    | the planner over the same slot corpus, the two 4-byte-stride families | parity — only the rebase composition differs                        |
-| `pgr-format/summarize_family/<offset64_control\|arm64e>` (r4 s1, the format half) | the family-aware summary walk, both families over the same slot corpus | parity — one extra word-reader branch                               |
-| `pgr-core/x86_64_inputs/<arm64_control\|x86_64>/<n>` (r5 s3)          | the input decode + patch plan, both relocation alphabets over the same pointer-shaped corpus | parity — one family branch in the decode match                      |
+| Bench | Pins | Recorded median (this sandbox) | Expectation verdict |
+| --- | --- | --- | --- |
+| `pgr-core/platform_floor/for_target/*` (M10 r3) | the consumer seam's decision cost (floor compare + tracing event) | 465–535 ps across the five platforms | ✅ cheap by construction — a sub-nanosecond decision, one shape across the alphabet |
+| `pgr-verify/verify_platform_floor/verify/<below\|at_floor>` (M10 r3) | strict pass, images _born_ at their build versions | 21.68 vs 21.35 µs | ✅ inside each other's noise (1.5 %) |
+| `pgr-verify/verify_arm64e/verify/<arm64e_auth\|offset64_control>` (r4 s1) | the read walk, both families | 21.51 vs 21.50 µs | ✅ arm64e inside the control's band (0.05 %) — same work per slot, wider stride |
+| `pgr-core/plan_fixups_word_family/<offset64\|arm64e>/<1k\|10k\|100k>` (r4 s2) | both encoders, same slot corpus | 163/107 µs → 1.58/1.02 ms → 18.0/12.5 ms | ✅ curves track (arm64e ≈ 0.66–0.70× offset64 at every size) — one extra encoder branch priced nothing |
+| `…/arm64e_auth/<1k\|10k\|100k>` (r4 s3) | every slot signed (PAC triple; auth-bind addend split) | 342 µs / 5.52 ms / 64.2 ms | ❌ 3.1–3.2× the `arm64e` curve at every size — finding below |
+| `pgr-verify/verify_arm64e/pair_replay/<arm64e_auth\|offset64_control>` (r4 s4) | the family-blind M3 pair gate | 33.69 vs 33.44 µs | ✅ inside the control's band (0.7 %) — different word reader, doubled stride |
+| `pgr-verify/verify_x86_64/verify/<x86e_format64\|offset64_control>` (r5 s1) | the strict pass over the 64 family at 4 KiB pages | 6.91 vs 21.52 µs | ❌ 3.1× the control — finding below |
+| `pgr-core/plan_fixups_x86_64_family/<offset64\|format64>/<1k\|10k\|100k>` (r5 s2; the row's `pgr-core/x86_64` name resolves here) | the planner over the same slot corpus, the two 4-byte-stride families | 283/171 µs → 1.82/1.03 ms → 18.3/12.8 ms | ❌ `format64` ≈ 0.60–0.70× `offset64` at every size — finding below |
+| `pgr-format/summarize_family/<offset64_control\|arm64e>` (r4 s1, the format half) | the family-aware summary walk, both families over the same slot corpus | 178.9 vs 178.2 µs | ✅ parity (0.4 %) — one extra word-reader branch priced nothing |
+| `pgr-core/x86_64_inputs/<arm64_control\|x86_64>/<1k\|10k>` (r5 s3) | the input decode + patch plan, both relocation alphabets over the same pointer-shaped corpus | 385/261 µs → 4.28/3.34 ms | ❌ `x86_64` ≈ 0.68–0.78× the arm64 control at both sizes — finding below |
+
+The same gate run re-rode the format bench's own groups — `summarize/single_image` **978 ns**,
+`summarize/corpus_24_images` **179.2 µs**, `parse_archive/archive_64_members` **9.94 µs** — every
+one inside its ledger row's band (the M7 corrections still hold).
 
 ## Findings & corrections
 
@@ -812,6 +817,10 @@ The bench suite earning its keep — every item carries a regression gate in-tre
 | `cstring` 1.69 → 1.94 ms at M7                                                                                                        | environmental drift                                                                 | same-box re-measure of the M6 baseline: 1.88 ms — not M7 code                               |
 | Accounting loop indexed input 0 (the dylib) instead of the alternated object; import-churn warm-up asserted an already-consumed state | tier-2 bench file                                                                   | both fixed (reset precedes the group)                                                       |
 | `cache_entries` `HEADER_LEN + len` overflow; hostile-header arithmetic; stale `link()` signature; 8 GiB `nreloc` pre-allocation       | M7 fuzz sessions                                                                    | fixed; deterministic regression tests per crash class                                       |
+| **`arm64e_auth` runs 3.1–3.2× its `arm64e` band** (342 µs / 5.52 ms / 64.2 ms vs 107 µs / 1.02 ms / 12.5 ms at 1k/10k/100k)           | the rung 3–5 gate run (r4 s3 row)                                                   | recorded as a finding: per-slot PAC signing + the auth-bind addend split, consistent slope across sizes — rig confirmation pending |
+| **`verify_x86_64`'s `offset64_control` walk runs 3.1× its `x86e_format64` half** (21.52 vs 6.91 µs over the same one-rebase-one-bind corpus) | the rung 3–5 gate run (r5 s1 row)                                                   | recorded as a finding: the control's walk is the expensive half; same corpus shape, strict pass both sides — rig confirmation pending |
+| **`format64` planner runs 0.60–0.70× its `offset64` sibling** (171 µs/1.03 ms/12.8 ms vs 283 µs/1.82 ms/18.3 ms at 1k/10k/100k)       | the rung 3–5 gate run (r5 s2 row)                                                   | recorded as a finding: the VM-address rebase composition is the cheaper half, consistent slope — rig confirmation pending |
+| **`x86_64` input decode runs 0.68–0.78× its `arm64_control` sibling** (261 µs/3.34 ms vs 385 µs/4.28 ms at 1k/10k)                    | the rung 3–5 gate run (r5 s3 row)                                                   | recorded as a finding: the pointer-shaped x86_64 alphabet decodes cheaper on this corpus, consistent slope — rig confirmation pending |
 
 <details><summary><b>Regression ledger — every prior gate re-measured as milestones landed</b></summary>
 
