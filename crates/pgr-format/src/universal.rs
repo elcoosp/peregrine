@@ -226,14 +226,55 @@ impl Universal {
     }
 
     /// The arm64 slice's window — the slice the driver links (the
-    /// `-arch` match ld64 runs; the surface links `arm64`, so the
-    /// cputype match is exact).
+    /// `-arch` match ld64 runs; the arm64 default keeps the pre-slice
+    /// behavior — M10 rung 5 slice 3 names the second family through
+    /// [`Self::slice_for_cputype`]).
     ///
     /// # Errors
     /// [`FormatError::Malformed`] when the container carries no arm64
     /// slice — the refusal names the cputypes it does, so the fix (the
     /// container's own rebuild, or linking the arch it carries) is one
     /// line away.
+    /// The slice whose `cputype` the caller names (M10 rung 5 slice 3:
+    /// the family-parameterized reader — [`Self::arm64`] is the arm64
+    /// default's thin wrapper). The window rides the container's own
+    /// bytes, gated by the same bounds check every slice walks.
+    ///
+    /// # Errors
+    /// [`FormatError::Malformed`] when the container carries no slice of
+    /// the named cputype (the refusal names the cputypes it does);
+    /// [`FormatError::Overrun`] when the named window leaves the bytes.
+    pub fn slice_for_cputype<'a>(
+        &self,
+        bytes: &'a [u8],
+        cputype: u32,
+    ) -> Result<&'a [u8], FormatError> {
+        let Some(arch) = self.arches.iter().find(|a| a.cputype == cputype) else {
+            let listed = self
+                .arches
+                .iter()
+                .map(|a| format!("{:#x}", a.cputype))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(FormatError::Malformed {
+                what: format!(
+                    "the container carries no slice of cputype {cputype:#x} (cputypes \
+                     present: {listed}) — rebuild the container with the requested slice \
+                     or link the slice it carries"
+                ),
+            });
+        };
+        self.slice(bytes, arch)
+    }
+
+    /// The arm64 slice's window — the slice the driver links (the
+    /// `-arch` match ld64 runs; the arm64 default keeps the pre-slice
+    /// behavior — M10 rung 5 slice 3 names the second family through
+    /// [`Self::slice_for_cputype`]).
+    ///
+    /// # Errors
+    /// [`FormatError::Malformed`] when the container carries no arm64
+    /// slice — the refusal names the cputypes it does.
     pub fn arm64<'a>(&self, bytes: &'a [u8]) -> Result<&'a [u8], FormatError> {
         let Some(arch) = self.arches.iter().find(|a| a.cputype == CPU_TYPE_ARM64) else {
             let cputypes: Vec<String> = self
