@@ -193,6 +193,15 @@ pub struct ServedLink {
     /// client prints the cold lane's face (the M62 convention, the v67
     /// commons tail shape one warning over).
     pub duplicate_warnings: Vec<String>,
+    /// The loaded-object inventory (v81, M134): the names of the objects
+    /// the session's own Pass 1 actually loaded (the explicit objects
+    /// beside the archive members the S7 pull admitted), in the walk's
+    /// own order — ld64's `-whatsloaded` face's product, rendered from
+    /// the session's own run. The list rides regardless of the request's
+    /// decision (the tail is the measurement's record; the client's
+    /// decision decides whether it prints). The entries cross verbatim;
+    /// the client prints the cold lane's bare face (the M62 convention).
+    pub loaded_objects: Vec<String>,
     /// The served link-statistics report (v63, M112): `Some` when the
     /// request's config carries `-print_statistics` — the counts the
     /// session's own run reported (the warm pipeline's product: the
@@ -288,6 +297,18 @@ fn serve_duplicate_warnings(
     } else {
         Vec::new()
     }
+}
+
+/// M134 (v81): the served loaded-object inventory — the names of the
+/// objects the session's own Pass 1 actually loaded (the explicit
+/// objects beside the archive members the pull admitted), in the walk's
+/// own order (the same list the cold lane's `-whatsloaded` face prints).
+/// The face is a measurement, never a layout product — the decision
+/// never moves the bytes; the list rides regardless of the decision (the
+/// tail is the measurement's record, the client's decision decides
+/// whether it prints; the daemon never writes the client's stderr).
+fn serve_loaded_objects(objects: &[pgr_core::object::InputObject]) -> Vec<String> {
+    objects.iter().map(|o| o.name.clone()).collect()
 }
 
 /// M112 (v63): the served link-statistics report — the counts the
@@ -788,6 +809,7 @@ impl ResidentSession {
             multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
             commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
             duplicate_warnings: serve_duplicate_warnings(&req.config, &result.resolution),
+            loaded_objects: serve_loaded_objects(&result.objects),
             statistics,
             references,
         })
@@ -1004,6 +1026,7 @@ impl ResidentSession {
             multiply_warnings: serve_multiply_warnings(&req.config, &linked.resolution),
             commons_warnings: serve_commons_warnings(&req.config, &linked.resolution),
             duplicate_warnings: serve_duplicate_warnings(&req.config, &linked.resolution),
+            loaded_objects: serve_loaded_objects(&linked.objects),
             statistics: None,
             references: Vec::new(),
         })
@@ -1314,6 +1337,7 @@ impl ResidentSession {
                 multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
                 commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
                 duplicate_warnings: serve_duplicate_warnings(&req.config, &result.resolution),
+                loaded_objects: serve_loaded_objects(&result.objects),
                 statistics: serve_statistics(req, &result, prev.len() as u64, started.elapsed()),
                 references,
             });
@@ -1475,6 +1499,7 @@ impl ResidentSession {
             multiply_warnings: serve_multiply_warnings(&req.config, &result.resolution),
             commons_warnings: serve_commons_warnings(&req.config, &result.resolution),
             duplicate_warnings: serve_duplicate_warnings(&req.config, &result.resolution),
+            loaded_objects: serve_loaded_objects(&result.objects),
             statistics,
             references,
         })
