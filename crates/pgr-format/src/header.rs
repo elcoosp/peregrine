@@ -80,6 +80,13 @@ impl MachHeader64 {
     pub const fn is_arm64(&self) -> bool {
         self.cputype == crate::consts::CPU_TYPE_ARM64
     }
+
+    /// True when the header claims an `x86_64` cputype (M10 rung 5
+    /// slice 3: the input surface names the second CPU family).
+    #[must_use]
+    pub const fn is_x86_64(&self) -> bool {
+        self.cputype == crate::consts::CPU_TYPE_X86_64
+    }
 }
 
 #[cfg(test)]
