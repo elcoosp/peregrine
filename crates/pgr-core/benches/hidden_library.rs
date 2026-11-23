@@ -16,8 +16,13 @@ use std::hint::black_box;
 
 const OBJECTS: usize = 64;
 
-/// 64 objects; each binds one visible-dylib export through a `__data`
-/// pointer slot (the corpus the dylib benches share).
+/// 64 objects; each binds the visible-dylib export `_used` through a
+/// `__data` pointer slot (the corpus the dylib benches share). The
+/// reference rides the weak bit — the m110 shape the mark plans: a
+/// strong reference to a hidden export refuses (dyld cannot bind it
+/// without the load command), the weak one rides the flat-lookup slot
+/// on the hidden face and the ordinary weak bind on the visible face.
+/// `_main` rides the first object (the entry the default config names).
 fn corpus() -> Vec<LinkInput> {
     (0..OBJECTS)
         .map(|i| {
@@ -28,7 +33,11 @@ fn corpus() -> Vec<LinkInput> {
                 vec![],
             ));
             b.add_symbol(ObjectSymbol::Defined {
-                name: format!("_fn_{i:03}"),
+                name: if i == 0 {
+                    "_main".to_string()
+                } else {
+                    format!("_fn_{i:03}")
+                },
                 section_index: text,
                 value: 0,
                 weak: false,
@@ -36,7 +45,7 @@ fn corpus() -> Vec<LinkInput> {
             let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
             let undef = b.add_symbol(ObjectSymbol::Undefined {
                 name: "_used".into(),
-                weak_ref: false,
+                weak_ref: true,
             });
             let slot = b.sym_index(undef);
             b.section_mut(data)
