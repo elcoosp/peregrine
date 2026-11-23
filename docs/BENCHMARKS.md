@@ -914,6 +914,14 @@ The `order` bench carries the `-sectorder` rungs beside the M11 `order_file` gro
   read) **338 ns**, beside the whole-image pass over the honest image **50.7 µs** — the
   family is ~0.9 % of the pass, a per-section stride read plus a per-entry segment lookup
   (dev-sandbox medians, 2-core KVM rig; the hardware gates own the comparable numbers).
+- `mod_term` (`cargo bench -p pgr-verify --bench mod_term`, M132): the terminator-surface
+  family's price over one at-floor executable — `honest` (the 64-slot `__mod_term_func`
+  pointer section, whole stride) **281 ns**, `broken_stride` (the finding path: four trailing
+  bytes off the 8-byte stride) **393 ns**, beside the whole-image pass over the honest image
+  **59.9 µs** — the family is ~0.5 % of the pass, a per-section stride read (the
+  pointer-form-only shape, lighter than the M94 offsets-form target walk — no per-entry
+  segment lookup) (dev-sandbox `--quick` medians, 2-core KVM rig; the hardware gates own
+  the comparable numbers).
 - `sarif_universal` (the `sarif` bench's M95 group, `cargo bench -p pgr-verify --bench sarif`):
   the container face's render price — `render/2` (two-slice verdict) **6.8 µs**,
   `render/4` (four-slice verdict) **13.0 µs**, beside one slice's single-image render of
