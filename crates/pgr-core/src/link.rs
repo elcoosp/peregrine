@@ -986,6 +986,21 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M136: the unused-dylib advisory is a load-command decision — the
+    // relocatable output carries no dylib load commands (an object's
+    // undefineds stay open in its symbol table by design; no image loads
+    // to advise about). The re-check backs the driver surface's earlier
+    // refusal: no library caller can plan the shape either (the
+    // M116/M121 advisory shape).
+    if cfg.warn_unused_dylibs {
+        return Err(LinkError::Layout {
+            message: "-warn_unused_dylibs advises which input dylibs ride unbound, but \
+                      the relocatable output carries no dylib load commands — nothing \
+                      to advise about: drop -warn_unused_dylibs or link an image (an \
+                      executable, dylib or bundle)"
+                .into(),
+        });
+    }
     // M117: the init/term section suppression is a final-image decision
     // — the relocatable output's sections are the input's, verbatim
     // (its sections ride the inputs untouched; there is no init
