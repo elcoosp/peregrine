@@ -46,7 +46,7 @@ The design is deliberately built on **audited prior art rather than folklore**. 
 3. **Speed at the link step.** Serial passes, data-parallel within each pass; no `Mutex<HashMap>` anywhere in the hot path; zero-copy input parsing; allocation-light metadata. The reference point is mold's measured 2.4–16.1× over lld and up to 112× over GNU ld on ELF ([paper, §7.2](https://arxiv.org/html/2608.23228v1)); our target is to beat `ld-classic` (current Apple ld) and `ld-prime` (the new Rust ld) by ≥5× on large debug builds, and to stay within striking distance of mold's own Mach-O backend.
 4. **Apple Silicon native.** 16 KiB segment page alignment, 4 GiB `__PAGEZERO`, `LC_DYLD_CHAINED_FIXUPS` as the default fixup encoding, ad-hoc code signing, and two-level namespace symbol binding are *structural* properties of the layout engine, not command-line afterthoughts.
 
-**Explicit non-goals (v1):** arm64e (authenticated pointers) — schema supported, encoding deferred; bitcode/LTO object lowering (pass-through only); deterministic cross-run parallel *scheduling* beyond what output determinism requires.
+**Explicit non-goals (v1):** arm64e (authenticated pointers) — *superseded: the encoding shipped end to end in the M10 rung-4 slices (§15.4–§15.7), this line records the v1 scoping decision, not the current state*; bitcode/LTO object lowering (pass-through only); deterministic cross-run parallel *scheduling* beyond what output determinism requires.
 
 **Headline architectural decisions** (each defended in the section noted):
 
@@ -1209,6 +1209,65 @@ arm64e pair, and the 64_OFFSET controls), the pair-replay bench group
 dead word decode (built, then discarded with `let _ = word;` since the
 dynamic check took over ordinal validation) rides the sweep — the
 bounds check is the gate, the word was never read.
+
+### 15.8 Rung 5, slice 1 — the x86_64 read side
+
+The M10 row's remaining target after arm64e: **x86_64 macOS, "4 KiB
+constants, same tree"** (the row's own phrasing). §15.4's shape runs
+again: the read side names the second CPU family and the second page
+size, and everything it refuses, it refuses with the slot named. The
+producer half and the driver surface are the rung's next slice — this
+slice adds no user-facing refusal beyond the existing `-arch` one (the
+link surface stays arm64, honestly), and the wire stays v82 (no
+`LinkConfig` field moves — the shape is a read-side contract).
+
+1. **The constants** (`pgr_format::consts`): `CPU_TYPE_X86_64` and
+   `CPU_SUBTYPE_X86_64_ALL` beside the arm64 pair, `PAGE_SIZE_4K`, and
+   one decision function `page_size(cputype)` — 16 KiB for arm64, 4 KiB
+   for x86_64, the row's "4 KiB constants" as a table the gates read
+   instead of re-deriving. One table, four readers (the M16 floor-table
+   convention): the header-fit gate, the `__PAGEZERO` and base and
+   congruence gates, the `LC_MAIN` stack-size gate, and the fixtures'
+   segment packing. The ad-hoc signature's `CS_PAGE_SIZE` stays the
+   arch-independent 4096 constant (Apple hashes 4 KiB blocks on both
+   arches — the existing constant is already honest for x86_64).
+2. **The walk** (`pgr-verify::dynamic`): the non-arm64e branch stops
+   reading every word as a `64_OFFSET` image offset and dispatches the
+   rebase-target translation on the segment's own `pointer_format` —
+   `DYLD_CHAINED_PTR_64_OFFSET` composes the image offset exactly as
+   before (the M2 semantics, byte-for-byte), `DYLD_CHAINED_PTR_64`
+   composes a VM address (`high8 << 56 | target`) and refuses one that
+   sits below the image base, then validates `vmaddr − base` against
+   the image span (the arm64e unauth shape's translation, §15.4 — the
+   same dyld read, one family over). Binds replay unchanged: the 64
+   pair shares the bind bit and ordinal layout, so the M3 pair gate
+   stays family-blind and the `__chain_starts` mirror's format set
+   already named `DYLD_CHAINED_PTR_64`.
+3. **The builder** (`pgr_fixtures`): `CpuKind` (arm64 the default,
+   x86_64 the named second) drives the header's cputype/subtype write,
+   the segment packing's page constant (4 KiB under x86_64 — the
+   "4 KiB constants" born in the same tree), the header-region fit
+   check, and the fixup payload's per-segment `page_size` plus
+   chain-page bucketing. `PointerFormatKind::Format64` rides beside
+   `Offset64`: same word layout, same 4-byte strides, rebase targets
+   are VM addresses (`target + delta` — the composition dyld walks
+   back), and the auth shapes refuse (arm64e-only, the §15.4 rule).
+4. **The verifier's gates** admit the second family: `check_header`
+   accepts `cputype ∈ {CPU_TYPE_ARM64, CPU_TYPE_X86_64}` and reads the
+   arch's own `*_ALL` subtype constant, and every page-contract gate
+   (header fit, `__PAGEZERO`, the dylib base, the per-segment
+   congruence, the stack-size multiple) reads `page_size(cputype)` —
+   an x86_64 image born at 4 KiB packing verifies strict, and a hand-
+   broken congruence still names its segment.
+
+Supporting pieces: the x86_64 gate matrix
+(`crates/pgr-verify/tests/m10_x86_64.rs` — the honest chained
+executable strict end to end, the 4 KiB packing, the format-2 rebase
+walk and its below-base refusal, the `64_OFFSET` control beside it,
+the hand-broken cputype/subtype/congruence refusals), the
+`verify_x86_64` bench (the format-2 walk beside the `64_OFFSET`
+control), and the `x86_64_walk` consumer example (`PGR_TRACING=1`
+watches the spans).
 
 ### 15.x The reporting seams — the pipeline observed, the map interchanged (M54–M55)
 
