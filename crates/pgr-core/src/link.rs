@@ -877,6 +877,22 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M10 rung 5, slice 2: the CPU family is a segmented-output decision
+    // — the relocatable output's header is the input's, verbatim (the
+    // M10 rung-1 contract; the input parse admits the arm64 family this
+    // rung), so an x86_64 family decision would claim a family the
+    // object cannot carry. The re-check backs the driver surface's
+    // earlier refusal: no library caller can plan the shape either (the
+    // M125 `-force_cpusubtype_ALL` pattern, one header word over).
+    if cfg.cpu == crate::cpu::CpuFamily::X86_64 {
+        return Err(LinkError::Layout {
+            message: "-arch x86_64 produces the x86_64 family's image shape (4 KiB \
+                      packing, DYLD_CHAINED_PTR_64 words), but the relocatable \
+                      output's header is the input's, verbatim — drop -arch x86_64 \
+                      or link an image (an executable, a dylib or a bundle)"
+                .into(),
+        });
+    }
     // M106: the needed-dylib mark is a segmented-output decision — the
     // mark keeps a dylib's load command alive under the drop, and the
     // relocatable output carries no load commands (its symtab is the
