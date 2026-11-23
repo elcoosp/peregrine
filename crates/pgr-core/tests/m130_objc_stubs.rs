@@ -26,7 +26,7 @@
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, link};
 use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
-use pgr_format::consts::{OBJC_STUB_SIZE_ARM64, SECTION_TYPE_MASK, S_SYMBOL_STUBS};
+use pgr_format::consts::{OBJC_STUB_SIZE_ARM64, S_SYMBOL_STUBS, SECTION_TYPE_MASK};
 use pgr_format::segment::Section64;
 use pgr_verify::{Options as VerifyOptions, verify};
 
@@ -68,11 +68,7 @@ fn link_corpus(selectors: &[&str]) -> pgr_core::link::LinkResult {
 
 /// Finds an output section by `(segment, name)` (the raw walk the
 /// verifier reads — `Layout.sections` carries the planned view).
-fn section_named<'a>(
-    bytes: &'a [u8],
-    seg: &str,
-    name: &str,
-) -> Option<(Section64, u64)> {
+fn section_named(bytes: &[u8], seg: &str, name: &str) -> Option<(Section64, u64)> {
     let hdr = pgr_format::MachHeader64::parse(bytes).ok()?;
     let mut it = pgr_format::LoadCommandIter::new(
         bytes,
@@ -86,10 +82,16 @@ fn section_named<'a>(
             continue;
         }
         let seg_cmd = pgr_format::SegmentCommand64::parse(cmd.bytes, 0).ok()?;
-        let sects = seg_cmd.sections(cmd.bytes, pgr_format::SegmentCommand64::SIZE).ok()?;
+        let sects = seg_cmd
+            .sections(cmd.bytes, pgr_format::SegmentCommand64::SIZE)
+            .ok()?;
         for s in sects {
-            let s_name = std::str::from_utf8(&s.sectname).unwrap_or("").trim_end_matches('\0');
-            let s_seg = std::str::from_utf8(&s.segname).unwrap_or("").trim_end_matches('\0');
+            let s_name = std::str::from_utf8(&s.sectname)
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let s_seg = std::str::from_utf8(&s.segname)
+                .unwrap_or("")
+                .trim_end_matches('\0');
             if s_seg == seg && s_name == name {
                 return Some((*s, seg_cmd.fileoff));
             }
@@ -124,7 +126,10 @@ fn the_objc_stubs_and_methname_sections_exist() {
         .find(|s| s.seg_name == "__TEXT" && s.name == "__objc_methname")
         .expect("the __objc_methname section is planned");
     // "alloc\0" (6) + "init\0" (5) = 11 bytes.
-    assert_eq!(methname.size, 11, "the two selector strings dedup NUL-terminated");
+    assert_eq!(
+        methname.size, 11,
+        "the two selector strings dedup NUL-terminated"
+    );
 }
 
 #[test]
@@ -156,7 +161,10 @@ fn the_methname_strings_are_nul_terminated() {
     let start = (fileoff + u64::from(methname.offset)) as usize;
     let end = start + methname.size as usize;
     let data = &bytes[start..end];
-    assert_eq!(data, b"alloc\0init\0", "the selector strings ride NUL-terminated");
+    assert_eq!(
+        data, b"alloc\0init\0",
+        "the selector strings ride NUL-terminated"
+    );
 }
 
 #[test]
@@ -182,7 +190,10 @@ fn repeated_callsites_of_the_same_selector_plan_one_stub() {
         .iter()
         .find(|s| s.seg_name == "__TEXT" && s.name == "__objc_methname")
         .expect("the __objc_methname section is planned");
-    assert_eq!(methname.size, 6, "the selector string dedups to one 'alloc\\0'");
+    assert_eq!(
+        methname.size, 6,
+        "the selector string dedups to one 'alloc\\0'"
+    );
 }
 
 #[test]
