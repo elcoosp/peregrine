@@ -25,19 +25,19 @@
 
 use pgr_format::FatArch;
 use pgr_format::consts::{
-    CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, CS_ADHOC, CS_CODEDIRECTORY_VERSION_EXECSEG,
-    CS_EXECSEG_MAIN_BINARY, CS_HASHTYPE_SHA256, CS_PAGE_SIZE_LOG2, CS_SHA256_LEN,
-    CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE, CSSLOT_CODEDIRECTORY, DYLD_CHAINED_IMPORT,
-    DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
-    DYLD_CHAINED_PTR_START_NONE, FAT_MAGIC, INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION,
-    LC_CODE_SIGNATURE, LC_DATA_IN_CODE, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_ENVIRONMENT,
-    LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB, LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB,
-    LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64, LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA,
-    LC_SYMTAB, LC_UUID, MH_BUNDLE, MH_DYLDLINK, MH_DYLIB, MH_EXECUTE, MH_MAGIC_64,
-    MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL, N_EXT, N_PEXT, N_SECT, N_UNDF,
-    N_WEAK_REF, PAGE_SIZE_16K, PAGEZERO_SIZE_64, PLATFORM_MACOS, S_NON_LAZY_SYMBOL_POINTERS,
-    SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE, VM_PROT_NONE, VM_PROT_READ,
-    VM_PROT_WRITE,
+    CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_X86_64_ALL, CPU_TYPE_ARM64, CPU_TYPE_X86_64, CS_ADHOC,
+    CS_CODEDIRECTORY_VERSION_EXECSEG, CS_EXECSEG_MAIN_BINARY, CS_HASHTYPE_SHA256,
+    CS_PAGE_SIZE_LOG2, CS_SHA256_LEN, CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE,
+    CSSLOT_CODEDIRECTORY, DYLD_CHAINED_IMPORT, DYLD_CHAINED_IMPORT_ADDEND64, DYLD_CHAINED_PTR_64,
+    DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E, DYLD_CHAINED_PTR_START_NONE, FAT_MAGIC,
+    INDIRECT_SYMBOL_LOCAL, LC_BUILD_VERSION, LC_CODE_SIGNATURE, LC_DATA_IN_CODE,
+    LC_DYLD_CHAINED_FIXUPS, LC_DYLD_ENVIRONMENT, LC_DYLD_EXPORTS_TRIE, LC_DYSYMTAB,
+    LC_FUNCTION_STARTS, LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_DYLINKER, LC_MAIN, LC_SEGMENT_64,
+    LC_SUB_CLIENT, LC_SUB_LIBRARY, LC_SUB_UMBRELLA, LC_SYMTAB, LC_UUID, MH_BUNDLE, MH_DYLDLINK,
+    MH_DYLIB, MH_EXECUTE, MH_MAGIC_64, MH_NO_REEXPORTED_DYLIBS, MH_NOUNDEFS, MH_PIE, MH_TWOLEVEL,
+    N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_REF, PAGEZERO_SIZE_64, PLATFORM_MACOS,
+    S_NON_LAZY_SYMBOL_POINTERS, SEG_PAGEZERO, SIGNATURE_HASH_PAGE, TOOL_LD, VM_PROT_EXECUTE,
+    VM_PROT_NONE, VM_PROT_READ, VM_PROT_WRITE,
 };
 use pgr_format::fixups::{
     Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
@@ -200,6 +200,11 @@ pub enum PointerFormatKind {
     /// `DYLD_CHAINED_PTR_64_OFFSET` — the historical default (4-byte
     /// strides, image-offset rebase targets, no auth words).
     Offset64,
+    /// `DYLD_CHAINED_PTR_64` (M10 rung 5, slice 1: the `x86_64` family) —
+    /// 4-byte strides, VM-address rebase targets, no auth words; the
+    /// word layout is the `64_OFFSET` pair's, only the target reads as a
+    /// VM address.
+    Format64,
     /// `DYLD_CHAINED_PTR_ARM64E` — 8-byte strides, VM-address unauth
     /// rebase targets, 32-bit auth runtime offsets, authenticated words.
     Arm64e,
@@ -211,8 +216,48 @@ impl PointerFormatKind {
     pub const fn value(self) -> u16 {
         match self {
             Self::Offset64 => DYLD_CHAINED_PTR_64_OFFSET,
+            Self::Format64 => DYLD_CHAINED_PTR_64,
             Self::Arm64e => DYLD_CHAINED_PTR_ARM64E,
         }
+    }
+}
+
+/// The CPU family a fixture's header names (M10 rung 5, slice 1: the
+/// "4 KiB constants, same tree" knob — the segment packing, the
+/// header-region fit and the fixup payload's page size all read the
+/// family's page size).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuKind {
+    /// Apple Silicon (`CPU_TYPE_ARM64`; the historical default).
+    Arm64,
+    /// Intel Mac (`CPU_TYPE_X86_64`; 4 KiB pages).
+    X86_64,
+}
+
+impl CpuKind {
+    /// The `mach_header_64.cputype` value.
+    #[must_use]
+    pub const fn cputype(self) -> u32 {
+        match self {
+            Self::Arm64 => CPU_TYPE_ARM64,
+            Self::X86_64 => CPU_TYPE_X86_64,
+        }
+    }
+
+    /// The arch's "all CPUs" subtype (`CPU_SUBTYPE_ARM64_ALL` or
+    /// `CPU_SUBTYPE_X86_64_ALL`).
+    #[must_use]
+    pub const fn subtype_all(self) -> u32 {
+        match self {
+            Self::Arm64 => CPU_SUBTYPE_ARM64_ALL,
+            Self::X86_64 => CPU_SUBTYPE_X86_64_ALL,
+        }
+    }
+
+    /// The family's segment page size (`pgr_format::consts::page_size`).
+    #[must_use]
+    pub const fn page_size(self) -> u64 {
+        pgr_format::consts::page_size(self.cputype())
     }
 }
 
@@ -290,6 +335,10 @@ pub struct ImageBuilder {
     keep_relocs: bool,
     build_version: Option<(u32, u32, u32)>,
     pointer_format: PointerFormatKind,
+    /// M10 rung 5, slice 1: the header's CPU family (arm64 the default;
+    /// `x86_64` flips the segment packing, the header-region fit and the
+    /// fixup payload's page size to the 4 KiB page).
+    cpu: CpuKind,
     /// M15: the `__PAGEZERO` vmsize override (`None` = the 4 GiB
     /// Mach-O arm64 constant). Executables only.
     pagezero: Option<u64>,
@@ -386,6 +435,7 @@ impl ImageBuilder {
             keep_relocs: false,
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
+            cpu: CpuKind::Arm64,
             pagezero: None,
             image_base: None,
             header_pad: None,
@@ -419,6 +469,7 @@ impl ImageBuilder {
             keep_relocs: false,
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
+            cpu: CpuKind::Arm64,
             pagezero: None,
             image_base: None,
             header_pad: None,
@@ -451,6 +502,7 @@ impl ImageBuilder {
             keep_relocs: false,
             build_version: None,
             pointer_format: PointerFormatKind::Offset64,
+            cpu: CpuKind::Arm64,
             pagezero: None,
             image_base: None,
             header_pad: None,
@@ -693,6 +745,15 @@ impl ImageBuilder {
         self.pointer_format = fmt;
     }
 
+    /// Selects the header's CPU family (default: [`CpuKind::Arm64`]).
+    /// The M10 rung-5 knob: `X86_64` writes the Intel cputype/subtype
+    /// and flips the segment packing, the header-region fit check and
+    /// the fixup payload's page size to the 4 KiB page — the M10 row's
+    /// "4 KiB constants, same tree", born in the builder.
+    pub fn set_cputype(&mut self, cpu: CpuKind) {
+        self.cpu = cpu;
+    }
+
     fn prot(seg_name: &str) -> (u32, u32) {
         match seg_name {
             "__TEXT" => (
@@ -722,6 +783,10 @@ impl ImageBuilder {
     pub fn build(&self) -> Result<Image, BuildError> {
         let exec = self.kind == ImageKind::Exec;
         let bundle = self.kind == ImageKind::Bundle;
+        // M10 rung 5, slice 1: the family's segment page — the packing,
+        // the header-region fit and the vmsize rounding all read it (the
+        // M10 row's "4 KiB constants" live here, not per-gate).
+        let seg_page = self.cpu.page_size();
         if self.segments.is_empty() || self.segments[0].name != "__TEXT" {
             return Err(BuildError("first segment must be __TEXT".into()));
         }
@@ -743,8 +808,9 @@ impl ImageBuilder {
             }
         }
         // Auth slots are an arm64e-family shape: under the 64_OFFSET
-        // default there is no encoding for them, and the builder refuses
-        // instead of emitting a word dyld cannot read.
+        // default and the 64 family there is no encoding for them, and
+        // the builder refuses instead of emitting a word dyld cannot
+        // read.
         if !self.got.is_empty() {
             let has_auth_slots = self.got.iter().any(|slot| {
                 matches!(
@@ -752,7 +818,7 @@ impl ImageBuilder {
                     SlotKind::AuthRebase { .. } | SlotKind::AuthBind { .. }
                 )
             });
-            if has_auth_slots && self.pointer_format == PointerFormatKind::Offset64 {
+            if has_auth_slots && self.pointer_format != PointerFormatKind::Arm64e {
                 return Err(BuildError(
                     "auth slots require the arm64e pointer format".into(),
                 ));
@@ -827,7 +893,7 @@ impl ImageBuilder {
         }
         add_cmd(16); // LC_CODE_SIGNATURE
         let header_len = 32 + sizeofcmds;
-        if header_len as u64 > PAGE_SIZE_16K {
+        if header_len as u64 > seg_page {
             return Err(BuildError("load commands exceed the header page".into()));
         }
 
@@ -850,7 +916,7 @@ impl ImageBuilder {
             let seg_fileoff = if seg_i == 0 {
                 0
             } else {
-                align_up(placed.last().map_or(0, |(_, f, v)| f + v), PAGE_SIZE_16K)
+                align_up(placed.last().map_or(0, |(_, f, v)| f + v), seg_page)
             };
             let mut cursor = if seg_i == 0 {
                 // M29: the named header-region floor grows the reserved
@@ -867,7 +933,7 @@ impl ImageBuilder {
                 seg_fileoff
             };
             for sec in &seg.sections {
-                cursor = align_up(cursor, 1u64 << sec.align_log2.min(14));
+                cursor = align_up(cursor, 1u64 << sec.align_log2.min(seg_page.ilog2()));
                 sect_infos.push(SectionInfo {
                     name: sec.name.clone(),
                     segment: seg.name.clone(),
@@ -880,7 +946,7 @@ impl ImageBuilder {
                     cursor += sec.relocs.len() as u64 * 8;
                 }
             }
-            let vmsize = align_up(cursor - seg_fileoff, PAGE_SIZE_16K).max(PAGE_SIZE_16K);
+            let vmsize = align_up(cursor - seg_fileoff, seg_page).max(seg_page);
             placed.push((seg.name.clone(), seg_fileoff, vmsize));
         }
 
@@ -1014,6 +1080,7 @@ impl ImageBuilder {
                 fmt: self.imports_format,
                 pf: self.pointer_format,
                 delta,
+                page_size: seg_page,
             })?
         };
 
@@ -1030,7 +1097,7 @@ impl ImageBuilder {
         }
 
         // ---- __LINKEDIT segment + content layout ------------------------
-        let linkedit_fileoff = align_up(placed.last().map_or(0, |(_, f, v)| f + v), PAGE_SIZE_16K);
+        let linkedit_fileoff = align_up(placed.last().map_or(0, |(_, f, v)| f + v), seg_page);
         placed.push(("__LINKEDIT".into(), linkedit_fileoff, 0)); // vmsize patched below
         let mut cur = linkedit_fileoff;
         let mut take = |size: u64, align: u64| {
@@ -1073,7 +1140,7 @@ impl ImageBuilder {
         let file_len = sig_off + blob_len as u64;
         let linkedit_size = file_len - linkedit_fileoff;
         let le_i = placed.len() - 1;
-        placed[le_i].2 = align_up(linkedit_size, PAGE_SIZE_16K).max(linkedit_size);
+        placed[le_i].2 = align_up(linkedit_size, seg_page).max(linkedit_size);
 
         // ---- assemble header + load commands ----------------------------
         let mut buf = vec![0u8; file_len as usize];
@@ -1089,8 +1156,8 @@ impl ImageBuilder {
             MH_DYLDLINK | MH_TWOLEVEL | MH_NO_REEXPORTED_DYLIBS
         }) | self.mh_flags;
         buf[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
-        buf[4..8].copy_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
-        buf[8..12].copy_from_slice(&CPU_SUBTYPE_ARM64_ALL.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.cpu.cputype().to_le_bytes());
+        buf[8..12].copy_from_slice(&self.cpu.subtype_all().to_le_bytes());
         let filetype = if exec {
             MH_EXECUTE
         } else if bundle {
@@ -1501,6 +1568,10 @@ struct FixupContext<'a> {
     /// arm64e rebase target is a VM address, so the builder synthesizes
     /// `target + delta` into the word (dyld subtracts it walking back).
     delta: u64,
+    /// The family's chain page size (M10 rung 5, slice 1: 4 KiB under
+    /// the `x86_64` CPU family) — the page bucketing, the page count and
+    /// the payload's per-segment `page_size` field all read it.
+    page_size: u64,
 }
 
 /// Builds the `LC_DYLD_CHAINED_FIXUPS` payload (mold layout) and the encoded
@@ -1519,6 +1590,7 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
         fmt,
         pf,
         delta,
+        page_size,
     } = ctx;
     // Import name offsets inside the payload's name blob (leading NUL).
     let mut name_off = 1u32; // after the leading NUL
@@ -1527,8 +1599,9 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
         name_off += name.len() as u32 + 1;
     }
 
-    // ---- chain words: per 16 KiB page, sorted slots, single chain each
-    let page_size = 0x4000u64;
+    // ---- chain words: per family page, sorted slots, single chain each
+    // (the M10 row's "4 KiB constants": the page rides the CPU family)
+
     let mut page_slots: Vec<(u32, Vec<usize>)> = Vec::new(); // (page, slot indices)
     for (i, &f) in slot_fileoffs.iter().enumerate() {
         let page = ((f - got_seg_fileoff) / page_size) as u32;
@@ -1566,6 +1639,26 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
                             next_strides(&sorted, j, slot_fileoffs, 4),
                         )?
                     }
+                    // The 64 family (M10 rung 5, slice 1): the rebase
+                    // target reads as a VM address — the word carries
+                    // `target + delta` split into the 36-bit field and
+                    // the high8 top byte, exactly the composition dyld
+                    // walks back. Bits 36..56 have no field to ride in
+                    // (the layout jumps 36 -> 56), so a VM address that
+                    // lands there is a named refusal, not a truncation.
+                    PointerFormatKind::Format64 => {
+                        let vmaddr = target + delta;
+                        if (vmaddr >> 36) & 0xff_ffff != 0 {
+                            return Err(BuildError(format!(
+                                "64-family rebase vmaddr {vmaddr:#x} crosses the                                  field gap between the 36-bit target and the high8                                  byte (bits 36..56 carry no field)"
+                            )));
+                        }
+                        encode_rebase_word(
+                            vmaddr & 0x000f_ffff_ffff,
+                            (vmaddr >> 56) as u8,
+                            next_strides(&sorted, j, slot_fileoffs, 4),
+                        )?
+                    }
                     // Unauth arm64e rebase targets are VM addresses: the
                     // word carries `target + delta` (dyld subtracts the
                     // preferred load address walking back).
@@ -1589,11 +1682,13 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
                         ImportsFormat::Addend64 => 0,
                     };
                     match pf {
-                        PointerFormatKind::Offset64 => encode_bind_word(
-                            ordinal as u32,
-                            inline,
-                            next_strides(&sorted, j, slot_fileoffs, 4),
-                        )?,
+                        PointerFormatKind::Offset64 | PointerFormatKind::Format64 => {
+                            encode_bind_word(
+                                ordinal as u32,
+                                inline,
+                                next_strides(&sorted, j, slot_fileoffs, 4),
+                            )?
+                        }
                         PointerFormatKind::Arm64e => encode_arm64e_bind_word(
                             ordinal as u32,
                             i64::from(inline),
