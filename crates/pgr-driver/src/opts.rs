@@ -922,6 +922,20 @@ pub enum OptsError {
         /// The imperative tail naming the flags to change.
         fix: String,
     },
+    /// A `-arch x86_64` surface conflict (M10 rung 5, slice 2): the
+    /// family produces the `x86_64` image shape (the header words, the
+    /// 4 KiB packing, the format-2 chains) — the relocatable output's
+    /// header is the input's, verbatim (the M10 rung-1 contract), so
+    /// the family has no shape to name on `-r`. The layout's re-check
+    /// backs this (the M125 pattern, one header word over).
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    ArchConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
     /// A `-allow_subsections_via_symbols` surface conflict (M126): the
     /// knob ORs `MH_SUBSECTIONS_VIA_SYMBOLS` into the output's
     /// `mach_header_64.flags` word — the relocatable output's header is
@@ -1964,12 +1978,28 @@ fn apply_flag(
     match arg {
         "-arch" => {
             let v = next_value(args, i, arg)?;
-            if v != "arm64" {
-                return Err(OptsError::Unsupported {
-                    flag: arg.into(),
-                    hint: "M1 targets arm64-apple-darwin exclusively".into(),
-                });
-            }
+            // M10 rung 5, slice 2: the linked arches are the two CPU
+            // families the producer shapes (arm64 the default, x86_64
+            // the rung's second family — TDD §15.8); the refusal names
+            // the linked vocabulary.
+            opts.config.cpu = match v.as_str() {
+                "arm64" => pgr_core::cpu::CpuFamily::Arm64,
+                "x86_64" => pgr_core::cpu::CpuFamily::X86_64,
+                _ => {
+                    return Err(OptsError::Unsupported {
+                        flag: arg.into(),
+                        hint: format!(
+                            "arch {v:?} is not a linked architecture (the surface                              links arm64 and x86_64)"
+                        ),
+                    });
+                }
+            };
+            // The flag→config seam, spanned like the pipeline seams (inert
+            // until a subscriber installs).
+            tracing::debug!(
+                arch = %v,
+                "the -arch seam shaped the config"
+            );
         }
         "-platform_version" => {
             let platform = next_value(args, i, arg)?;
@@ -3742,6 +3772,24 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                 .into(),
         });
     }
+    // M10 rung 5, slice 2: the CPU family produces the image's shape —
+    // the relocatable output's header is the input's, verbatim (the
+    // M10 rung-1 contract), so the family has no shape to name on `-r`.
+    // The layout's re-check backs the surface: no library caller can
+    // plan the shape either (the M125 pattern, one header word over).
+    if opts.config.cpu == pgr_core::cpu::CpuFamily::X86_64
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::ArchConflict {
+            verdict: "-arch x86_64 produces the x86_64 family's image shape (4 KiB \
+                      packing, DYLD_CHAINED_PTR_64 words), but the relocatable \
+                      output's header is the input's, verbatim"
+                .into(),
+            fix: "drop -arch x86_64 or link a final image (an executable, a dylib \
+                  or a bundle)"
+                .into(),
+        });
+    }
     // M126: the output image's atomization decision — the
     // `MH_SUBSECTIONS_VIA_SYMBOLS` bit is the producer's to name (an
     // executable, a dylib or a bundle all carry the header the layout
@@ -5099,6 +5147,7 @@ pub fn parse_chain_format(v: &str) -> Option<FixupPointerFormat> {
 pub fn chain_format_text(format: FixupPointerFormat) -> &'static str {
     match format {
         FixupPointerFormat::Offset64 => "offset64",
+        FixupPointerFormat::Format64 => "64",
         FixupPointerFormat::Arm64e => "arm64e",
     }
 }
