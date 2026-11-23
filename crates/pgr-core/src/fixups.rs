@@ -41,8 +41,9 @@ use crate::ids::StringId;
 use crate::interner::Interner;
 use crate::stable_imports::StableImport;
 use pgr_format::consts::{
-    DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_ARM64E,
-    DYLD_CHAINED_PTR_START_MULTI, DYLD_CHAINED_PTR_START_MULTI_MASK, DYLD_CHAINED_PTR_START_NONE,
+    DYLD_CHAINED_IMPORT_ADDEND, DYLD_CHAINED_PTR_64, DYLD_CHAINED_PTR_64_OFFSET,
+    DYLD_CHAINED_PTR_ARM64E, DYLD_CHAINED_PTR_START_MULTI, DYLD_CHAINED_PTR_START_MULTI_MASK,
+    DYLD_CHAINED_PTR_START_NONE,
 };
 use pgr_format::fixups::{
     Import, encode_arm64e_auth_bind_word, encode_arm64e_auth_rebase_word, encode_arm64e_bind_word,
@@ -58,13 +59,22 @@ pub const MAX_CHAIN_STRIDE_BYTES: u64 = (MAX_CHAIN_STRIDE as u64) * 4;
 /// producer half of the rung; the read side has walked both since slice 1).
 /// The default is the M2-locked `DYLD_CHAINED_PTR_64_OFFSET` (§7.2): the
 /// seam is invisible on every clean link until a consumer asks for the
-/// arm64e family.
+/// arm64e family. Rung 5 (slice 2) names the second CPU family's words:
+/// `Format64` is the `DYLD_CHAINED_PTR_64` family the `x86_64` producer
+/// encodes — the same word layout and strides as `Offset64`, rebases
+/// composed as VM addresses (the slice-1 walk's translation).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum FixupPointerFormat {
     /// `DYLD_CHAINED_PTR_64_OFFSET` (6): rebase targets are image-base
     /// relative offsets, `next` counts 4-byte units with 12 bits.
     #[default]
     Offset64,
+    /// `DYLD_CHAINED_PTR_64` (2): the `x86_64` family (M10 rung 5, slice
+    /// 2). Same word layout, same 4-byte strides and 24-bit ordinal
+    /// binds as `Offset64`; rebase targets are **VM addresses**
+    /// (`high8 << 56 | target` — the composition the slice-1 walk
+    /// reads back and validates against the image span).
+    Format64,
     /// `DYLD_CHAINED_PTR_ARM64E` (1): unauth rebase targets are VM
     /// addresses (dyld subtracts the preferred load address walking back),
     /// binds carry a 16-bit ordinal and a signed 19-bit inline addend, and
@@ -79,6 +89,7 @@ impl FixupPointerFormat {
     pub const fn pointer_format(self) -> u16 {
         match self {
             Self::Offset64 => DYLD_CHAINED_PTR_64_OFFSET,
+            Self::Format64 => DYLD_CHAINED_PTR_64,
             Self::Arm64e => DYLD_CHAINED_PTR_ARM64E,
         }
     }
@@ -87,7 +98,7 @@ impl FixupPointerFormat {
     #[must_use]
     pub const fn stride_bytes(self) -> u64 {
         match self {
-            Self::Offset64 => 4,
+            Self::Offset64 | Self::Format64 => 4,
             Self::Arm64e => 8,
         }
     }
@@ -97,7 +108,7 @@ impl FixupPointerFormat {
     #[must_use]
     pub const fn max_next(self) -> u32 {
         match self {
-            Self::Offset64 => MAX_CHAIN_STRIDE,
+            Self::Offset64 | Self::Format64 => MAX_CHAIN_STRIDE,
             Self::Arm64e => 0x7FF,
         }
     }
@@ -226,6 +237,32 @@ fn rebase_word(target_vaddr: u64, image_base: u64) -> Result<u64, LinkError> {
     }
     encode_rebase_word(off & 0xF_FFFF_FFFF, (off >> 36) as u8, 0).map_err(|e| LinkError::Internal {
         message: format!("rebase word encode: {e}"),
+    })
+}
+
+/// Encodes a rebase chain word for `DYLD_CHAINED_PTR_64` (format 2 — the
+/// `x86_64` family, M10 rung 5 slice 2): the same word layout as
+/// `rebase_word` (4-byte strides, 12-bit `next`, bit 63 clear) with the
+/// target composed as a **VM address** (`high8 << 56 | target` — the
+/// slice-1 walk's translation, §15.8). Bits 36..56 of the VM address have
+/// no field to ride in (the word layout jumps from the 36-bit target to
+/// the `high8` top byte): a target that lands there refuses instead of
+/// silently truncating — the same named refusal the fixtures' builder
+/// arms for the family.
+fn rebase_word_64(target_vaddr: u64) -> Result<u64, LinkError> {
+    if (target_vaddr >> 36) & 0xff_ffff != 0 {
+        return Err(LinkError::Layout {
+            message: format!(
+                "64-family rebase vmaddr {target_vaddr:#x} crosses the field gap \
+                 between the 36-bit target and the high8 byte (bits 36..56 carry \
+                 no field)"
+            ),
+        });
+    }
+    encode_rebase_word(target_vaddr & 0xF_FFFF_FFFF, (target_vaddr >> 56) as u8, 0).map_err(|e| {
+        LinkError::Internal {
+            message: format!("64-family rebase word encode: {e}"),
+        }
     })
 }
 
@@ -637,13 +674,14 @@ pub fn plan_fixups_with_auth(
     let auth_map: std::collections::HashMap<u64, FixupAuth> = if auth.is_empty() {
         std::collections::HashMap::new()
     } else {
-        if format == FixupPointerFormat::Offset64 {
+        if format != FixupPointerFormat::Arm64e {
             return Err(LinkError::Layout {
                 message: format!(
                     "{} auth slot(s) declared; auth slots require the arm64e \
-                     pointer format — the 64_OFFSET family has no auth \
+                     pointer format — the {:?} family has no auth \
                      discriminator to set",
-                    auth.len()
+                    auth.len(),
+                    format
                 ),
             });
         }
@@ -730,6 +768,11 @@ pub fn plan_fixups_with_auth(
                 let word_base = match s.kind {
                     FixupKind::Rebase { target_vaddr } => match format {
                         FixupPointerFormat::Offset64 => rebase_word(target_vaddr, image_base)?,
+                        // Format 2 (the x86_64 family, rung 5 slice 2):
+                        // the VM address rides the word (the slice-1
+                        // walk's translation, one family over from the
+                        // 64_OFFSET composition).
+                        FixupPointerFormat::Format64 => rebase_word_64(target_vaddr)?,
                         // Format 1: the VM address rides the word, dyld
                         // subtracts the preferred load address walking back.
                         // A signed slot swaps the shape: the 32-bit runtime
@@ -778,7 +821,9 @@ pub fn plan_fixups_with_auth(
                         // word has no addend field; `addend_split` already
                         // moved the whole addend to the entry).
                         match format {
-                            FixupPointerFormat::Offset64 => bind_word(ordinal, inline)?,
+                            FixupPointerFormat::Offset64 | FixupPointerFormat::Format64 => {
+                                bind_word(ordinal, inline)?
+                            }
                             FixupPointerFormat::Arm64e => match policy {
                                 Some(p) => encode_arm64e_auth_bind_word(
                                     ordinal,
