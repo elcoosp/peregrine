@@ -31,6 +31,18 @@ pub enum CpuFamily {
 }
 
 impl CpuFamily {
+    /// The family a `mach_header_64.cputype` word names (`None` when
+    /// the word is outside the carried families — the input decode
+    /// refuses it rather than guessing, M10 rung 5 slice 3).
+    #[must_use]
+    pub const fn of_cputype(word: u32) -> Option<Self> {
+        match word {
+            pgr_format::consts::CPU_TYPE_ARM64 => Some(Self::Arm64),
+            pgr_format::consts::CPU_TYPE_X86_64 => Some(Self::X86_64),
+            _ => None,
+        }
+    }
+
     /// The family's `mach_header_64.cputype` value.
     #[must_use]
     pub const fn cputype(self) -> u32 {
