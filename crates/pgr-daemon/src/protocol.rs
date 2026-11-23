@@ -468,7 +468,7 @@ use std::time::Duration;
 /// gate is byte-identical — the bit is header-level, the producer's to
 /// name, the M122 `-pie` pattern over the flags word), and the
 /// ladder's replay rides the decision (the M81 pattern).
-pub const PROTO_VERSION: u32 = 79;
+pub const PROTO_VERSION: u32 = 81;
 
 // ---- message tags -----------------------------------------------------------
 
@@ -1662,6 +1662,32 @@ pub(crate) fn decode_commons_warnings(r: &mut Reader<'_>) -> Result<Vec<String>,
     (0..r.u32()?).map(|_| r.str()).collect()
 }
 
+/// Encodes the reply's loaded-object inventory tail (v81, M134): a
+/// count-prefixed list of the names of the objects the session's own
+/// Pass 1 actually loaded (the explicit objects beside the archive
+/// members the pull admitted), in the walk's own order — ld64's
+/// `-whatsloaded` face's product, rendered from the session's own run.
+/// The silent default carries the list regardless (the tail is the
+/// measurement's record; the client's decision decides whether it
+/// prints). The client prints each name as the cold lane's bare
+/// `-whatsloaded` line — the wire never re-shapes the face the client
+/// prints (the M62 convention, the v67 commons tail shape).
+pub fn encode_loaded_objects(out: &mut Vec<u8>, entries: &[String]) {
+    put_u32(out, entries.len() as u32);
+    for entry in entries {
+        put_str(out, entry);
+    }
+}
+
+/// Decodes the reply's loaded-object inventory tail (v81; see
+/// [`encode_loaded_objects`] for the shape).
+///
+/// # Errors
+/// [`DecodeError::Malformed`] on truncation.
+pub(crate) fn decode_loaded_objects(r: &mut Reader<'_>) -> Result<Vec<String>, DecodeError> {
+    (0..r.u32()?).map(|_| r.str()).collect()
+}
+
 /// Encodes the reply's duplicate-symbol advisory tail (v72, M121): a
 /// count-prefixed list of the session's own duplicate-strong collision
 /// entries — the advisory face's product, rendered from the session's
@@ -2362,6 +2388,17 @@ fn encode_config(out: &mut Vec<u8>, cfg: &LinkConfig) {
     // move (the policy is the exit's, not the image's), a resident
     // relink exits the shape the client asked for.
     put_u8(out, u8::from(cfg.fatal_warnings));
+    // M133 (v80 wire): the advisory faces' print-suppression decision
+    // rides the tail after the fatal-warnings byte — one byte; the bytes
+    // never move (the decision is the print face's, not the image's and
+    // not the exit's), a resident relink prints the shape the client
+    // asked for while the tally keeps counting.
+    put_u8(out, u8::from(cfg.suppress_warnings));
+    // M134 (v81 wire): the loaded-object inventory's decision rides the
+    // tail after the warn-suppression byte — one byte; the bytes never
+    // move (the face is a measurement, not a layout product), a resident
+    // relink renders the inventory the client asked for.
+    put_u8(out, u8::from(cfg.whats_loaded));
     // M111 (v62 wire): the read-only-relocations policy rides the tail
     // after the fatal-warnings byte — one byte off the three-value
     // alphabet; a resident relink prices the same read-only targets the
@@ -2913,6 +2950,16 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
     // is the exit's, not the image's; the session's served link plans
     // the same shape either way).
     let fatal_warnings = r.u8()? != 0;
+    // M133 (v80 wire): the advisory faces' print-suppression decision —
+    // one byte, no validation beyond the bool (the bytes never move: the
+    // decision is the print face's, not the image's; the session's
+    // served link plans the same shape either way).
+    let suppress_warnings = r.u8()? != 0;
+    // M134 (v81 wire): the loaded-object inventory's decision — one
+    // byte, no validation beyond the bool (the bytes never move: the
+    // face is a measurement, not a layout product; the session's served
+    // link plans the same shape either way).
+    let whats_loaded = r.u8()? != 0;
     // M111 (v62 wire): the read-only-relocations policy — an unknown
     // byte is malformed (a refusal, never a silently defaulted
     // policy; an old server reading a new client's alphabet refuses
@@ -3024,6 +3071,8 @@ fn decode_config(r: &mut Reader<'_>) -> Result<LinkConfig, DecodeError> {
         commons,
         multiply_defined,
         fatal_warnings,
+        suppress_warnings,
+        whats_loaded,
         read_only_relocs,
         print_statistics,
         trace_refs,
@@ -3040,11 +3089,11 @@ mod tests {
     use super::{
         ArchiveEntry, DecodeError, InputEntry, LinkRequest, PROTO_VERSION, Reader, ServedExport,
         ServedLive, ServedProvenance, TAG_LINK, content_hash, decode_commons_warnings,
-        decode_duplicate_warnings, decode_map_bytes, decode_policy_warnings,
+        decode_duplicate_warnings, decode_loaded_objects, decode_map_bytes, decode_policy_warnings,
         decode_provenance_bytes, decode_references, decode_statistics, decode_time_report,
         decode_trace_bytes, decode_verify_report_bytes, encode_commons_warnings,
-        encode_duplicate_warnings, encode_map, encode_policy_warnings, encode_provenance,
-        encode_references, encode_statistics, encode_time_report, encode_trace,
+        encode_duplicate_warnings, encode_loaded_objects, encode_map, encode_policy_warnings,
+        encode_provenance, encode_references, encode_statistics, encode_time_report, encode_trace,
         encode_verify_report, put_str, put_u8, put_u32, put_u64, read_pattern,
     };
     use pgr_core::export_filter::SymbolPattern;
@@ -3331,6 +3380,14 @@ mod tests {
             // survive the round trip verbatim (the bytes never move —
             // the decision is the exit's).
             fatal_warnings: false,
+            // The v80 tail: the advisory faces' print-suppression
+            // decision must survive the round trip verbatim (the bytes
+            // never move — the decision is the print face's).
+            suppress_warnings: false,
+            // The v81 tail: the loaded-object inventory's decision must
+            // survive the round trip verbatim (the bytes never move —
+            // the face is a measurement).
+            whats_loaded: false,
             // The v63 tail: the link-statistics decision must survive
             // the round trip verbatim (the report the client asked for
             // is the report the session serves — never a silently
@@ -6320,6 +6377,107 @@ mod tests {
     }
 
     #[test]
+    fn the_warn_suppression_decision_round_trips() {
+        // v80: the advisory faces' print-suppression decision must
+        // survive the round trip verbatim (a resident relink prints the
+        // shape the client asked for — the tally never rides the print
+        // face, the exit stays the exit).
+        let cfg = rich_config();
+        assert!(
+            !cfg.suppress_warnings,
+            "rich_config carries the unsuppressed default"
+        );
+        let mut cfg = rich_config();
+        cfg.suppress_warnings = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.suppress_warnings,
+            "the decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_whats_loaded_decision_round_trips() {
+        // v81: the loaded-object inventory's decision must survive the
+        // round trip verbatim (a resident relink renders the inventory
+        // the client asked for — the face is a measurement, the bytes
+        // never move).
+        let cfg = rich_config();
+        assert!(!cfg.whats_loaded, "rich_config carries the silent default");
+        let mut cfg = rich_config();
+        cfg.whats_loaded = true;
+        let back = LinkRequest::decode(
+            &LinkRequest {
+                config: cfg,
+                force_load: Vec::new(),
+                inputs: Vec::new(),
+                archives: Vec::new(),
+                record: None,
+                record_resolution: false,
+                prev_output: None,
+                audit: false,
+                tiles: false,
+                time: false,
+                trace: false,
+                verify: false,
+                verify_checks: None,
+                why_export: Vec::new(),
+                why_load: false,
+                map: false,
+                why_live: Vec::new(),
+            }
+            .encode(),
+        )
+        .expect("the frame decodes");
+        assert!(
+            back.config.whats_loaded,
+            "the decision crosses byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_loaded_objects_tail_round_trips() {
+        // v81: the served loaded-object inventory tail (the M62
+        // convention — the session's own Pass 1 inventory rides the
+        // reply verbatim, the client prints the cold lane's face).
+        let entries = vec!["hello.o".to_string(), "libfoo.a(member.o)".to_string()];
+        let mut body = Vec::new();
+        encode_loaded_objects(&mut body, &entries);
+        let back = decode_loaded_objects(&mut Reader::new(&body)).expect("the tail decodes");
+        assert_eq!(back, entries, "the inventory crosses verbatim");
+        let mut empty = Vec::new();
+        encode_loaded_objects(&mut empty, &[]);
+        assert!(
+            decode_loaded_objects(&mut Reader::new(&empty))
+                .expect("the empty tail decodes")
+                .is_empty(),
+            "the silent default crosses nothing"
+        );
+    }
+
+    #[test]
     fn the_warn_commons_decision_round_trips() {
         // v67: the common-symbol advisory's decision must survive the
         // round trip verbatim (a resident relink derives the same
@@ -8617,7 +8775,7 @@ mod tests {
         // the M105 strip-debug byte, then the M107 commons-policy byte),
         // the hand-spliced rank table takes the first place and the
         // cstring absence follows.
-        body.truncate(body.len() - 11);
+        body.truncate(body.len() - 13);
         // The v47 table tail: present, two entries, the second a
         // duplicate of the first (the lines ride, so the refusal reads
         // like the cold lane's).
@@ -8636,6 +8794,8 @@ mod tests {
         put_u8(&mut body, 0); // the M107 commons-policy absence
         put_u8(&mut body, 0); // the M108 multiply-defined-policy absence
         put_u8(&mut body, 0); // the M109 fatal-warnings absence
+        put_u8(&mut body, 0); // the M133 warn-suppression absence
+        put_u8(&mut body, 0); // the M134 whats-loaded absence
         put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
         put_u8(&mut body, 0); // the M112 print-statistics absence
         put_u8(&mut body, 0); // the M113 reference-trace absence
@@ -8715,7 +8875,7 @@ mod tests {
         let mut body = Vec::new();
         put_u32(&mut body, PROTO_VERSION);
         encode_config(&mut body, &rich_config());
-        body.truncate(body.len() - 11);
+        body.truncate(body.len() - 13);
         put_u8(&mut body, 0); // the rank table's absence
         // The M91 cstring tail: present, two entries, the second a
         // duplicate of the first.
@@ -8731,6 +8891,8 @@ mod tests {
         put_u8(&mut body, 0); // the M107 commons-policy absence
         put_u8(&mut body, 0); // the M108 multiply-defined-policy absence
         put_u8(&mut body, 0); // the M109 fatal-warnings absence
+        put_u8(&mut body, 0); // the M133 warn-suppression absence
+        put_u8(&mut body, 0); // the M134 whats-loaded absence
         put_u8(&mut body, 0); // the M111 read-only-relocs-policy absence
         put_u8(&mut body, 0); // the M112 print-statistics absence
         put_u8(&mut body, 0); // the M113 reference-trace absence
