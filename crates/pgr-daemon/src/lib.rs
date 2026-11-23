@@ -311,7 +311,7 @@ mod tests {
         // inventory tail (the session's own Pass 1 list rides verbatim —
         // the M62 convention): a served relink renders the inventory the
         // client asked for, the bytes never moving either way.
-        assert_eq!(crate::PROTO_VERSION, 82);
+        assert_eq!(crate::PROTO_VERSION, 83);
     }
 
     #[test]
