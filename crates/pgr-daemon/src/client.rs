@@ -149,6 +149,11 @@ pub struct ResidentImage {
     /// the link before the walk runs, so the off decision carries the
     /// empty list).
     pub duplicate_warnings: Vec<String>,
+    /// The loaded-object inventory (v81, M134): the names of the objects
+    /// the session's own Pass 1 actually loaded — the client prints each
+    /// as the cold lane's bare `-whatsloaded` line under the request's
+    /// decision (the M62 convention).
+    pub loaded_objects: Vec<String>,
     /// The served link-statistics report (v63, M112): `Some` when the
     /// request's config carries `-print_statistics` — the session's own
     /// run's counts, the fields the cold lane's report carries (the
@@ -509,6 +514,11 @@ impl DaemonClient {
                     // (M121, `-warn_duplicate`) — the client prints each
                     // as the cold lane's `pgr: warning:` face.
                     let duplicate_warnings = crate::protocol::decode_duplicate_warnings(&mut r)?;
+                    // The v81 tail: the loaded-object inventory (M134,
+                    // `-whatsloaded`) — the client prints each name as
+                    // the cold lane's bare face under the request's
+                    // decision.
+                    let loaded_objects = crate::protocol::decode_loaded_objects(&mut r)?;
                     // The v63 tail: the served link-statistics report when
                     // the request asked (the session's own run's counts,
                     // the M62 convention — the driver prints the cold
@@ -539,6 +549,7 @@ impl DaemonClient {
                         multiply_warnings,
                         commons_warnings,
                         duplicate_warnings,
+                        loaded_objects,
                         statistics,
                         references,
                         transport,
