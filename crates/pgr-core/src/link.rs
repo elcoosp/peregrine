@@ -862,6 +862,21 @@ fn link_reloc_inner(
                 .into(),
         });
     }
+    // M133: the advisory faces' print-suppression decision — the
+    // relocatable output has no advisory face to silence (every face
+    // that would warn is already refused beside `-r`), so there is
+    // nothing to suppress. The re-check backs the driver surface's
+    // earlier refusal: no library caller can plan the shape either (the
+    // M109 pattern).
+    if cfg.suppress_warnings {
+        return Err(LinkError::Layout {
+            message: "-w suppresses the advisory faces' warnings, but the relocatable \
+                      output's shape is the input's, verbatim and every advisory face \
+                      is already refused beside -r — nothing to suppress: drop -w or \
+                      link an image (an executable, dylib or bundle)"
+                .into(),
+        });
+    }
     // M106: the needed-dylib mark is a segmented-output decision — the
     // mark keeps a dylib's load command alive under the drop, and the
     // relocatable output carries no load commands (its symtab is the
