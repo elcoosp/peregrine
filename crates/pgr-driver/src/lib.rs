@@ -3902,7 +3902,9 @@ pub fn usage() -> String {
     s.push_str("Usage: pgr [options] <object files>\n\n");
     s.push_str("Options:\n");
     s.push_str("  -o <path>                    output file (required)\n");
-    s.push_str("  -arch arm64                  target architecture (arm64 only)\n");
+    s.push_str("  -arch arm64|x86_64           target architecture (M10 rung 5:\n");
+    s.push_str("                               the x86_64 family rides 4 KiB pages and\n");
+    s.push_str("                               DYLD_CHAINED_PTR_64 words)\n");
     s.push_str("  -platform_version <p> <min> <sdk>   build version; the platform is\n");
     s.push_str("                               macos, ios, tvos, watchos or visionos\n");
     s.push_str("                               (M10), and the SDK must be at least the\n");
