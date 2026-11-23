@@ -328,6 +328,15 @@ harness = false
 name = "objc"
 harness = false
 
+# The M130 synthesis bench (the design record's named follow-up — the
+# block docs/BENCHMARKS.md carried ahead of the code): the link cost over
+# an `_objc_msgSend$<sel>` callsite corpus beside the callsite-free
+# shape — the selector classification, the stub synthesis and the
+# `__objc_methname` dedup priced once the synthesis landed.
+[[bench]]
+name = "objc_stubs"
+harness = false
+
 # The M45 upward-load bench: the link across the load-command kinds
 # (plain load vs the LC_LOAD_UPWARD_DYLIB umbrella mark) over the same
 # 256-bind corpus — a shape-parity gate, the kind is one header opcode
