@@ -657,10 +657,11 @@ fn looks_like_tbd(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"--- !tbd-tbd-version")
 }
 
-/// M70: the universal read seam — a fat container is linked through its
-/// arm64 slice (ld64's `-arch` match; the surface links arm64, so the
-/// cputype match is exact). The container decodes, the arm64 window is
-/// copied out, and the caller's per-kind dispatch runs on it unchanged —
+/// M70: the universal read seam — a fat container is linked through the
+/// slice the link's CPU family names (ld64's `-arch` match; the arm64
+/// default keeps the pre-slice behavior — M10 rung 5 slice 3 names the
+/// second family). The container decodes, the family's window is copied
+/// out, and the caller's per-kind dispatch runs on it unchanged —
 /// every arm below (`map_input`'s tbd/dylib/archive/object chain, the
 /// `-l`/`-framework` scans) links the slice it already linked. A
 /// non-universal input rides untouched (`None` — the probe is one
@@ -669,9 +670,13 @@ fn looks_like_tbd(bytes: &[u8]) -> bool {
 ///
 /// # Errors
 /// [`DriverError::Universal`] when the container is malformed (the
-/// offset-tagged format refusal) or carries no arm64 slice (the refusal
-/// names the cputypes it does).
-fn universal_arm64_slice(path: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>, DriverError> {
+/// offset-tagged format refusal) or carries no slice of the requested
+/// family (the refusal names the cputypes it does).
+fn universal_family_slice(
+    path: &str,
+    bytes: &[u8],
+    cpu: pgr_core::cpu::CpuFamily,
+) -> Result<Option<Vec<u8>>, DriverError> {
     if !pgr_format::is_universal(bytes) {
         return Ok(None);
     }
@@ -680,8 +685,11 @@ fn universal_arm64_slice(path: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>, Dr
             path: path.to_string(),
             source,
         })?;
+    // M10 rung 5 slice 3: the slice selection rides the link's CPU
+    // family (the arm64 default keeps every pre-slice link byte-identical
+    // — the default family selects the arm64 slice exactly as before).
     let slice = container
-        .arm64(bytes)
+        .slice_for_cputype(bytes, cpu.cputype())
         .map_err(|source| DriverError::Universal {
             path: path.to_string(),
             source,
@@ -2042,7 +2050,7 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         // M70: a universal container rides its arm64 slice — the unwrap
         // runs before the per-kind dispatch (the `.tbd`/dylib/archive
         // arms below link the slice they already linked).
-        let bytes = match universal_arm64_slice(&path, &bytes)? {
+        let bytes = match universal_family_slice(&path, &bytes, opts.config.cpu)? {
             Some(sliced) => sliced,
             None => bytes,
         };
@@ -2142,7 +2150,7 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         deps.record_input(&dep_path(&path))?;
         // M70: a universal container rides its arm64 slice (SDK
         // frameworks ship fat) — the unwrap runs before the dispatch.
-        let bytes = match universal_arm64_slice(&path, &bytes)? {
+        let bytes = match universal_family_slice(&path, &bytes, opts.config.cpu)? {
             Some(sliced) => sliced,
             None => bytes,
         };
@@ -2508,7 +2516,7 @@ fn map_input(
     // M70: a universal container rides its arm64 slice — the unwrap runs
     // before the per-kind dispatch, so every arm below links the slice it
     // already linked.
-    let bytes = match universal_arm64_slice(path, &bytes)? {
+    let bytes = match universal_family_slice(path, &bytes, opts.config.cpu)? {
         Some(sliced) => sliced,
         None => bytes,
     };
