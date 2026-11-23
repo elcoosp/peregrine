@@ -1269,6 +1269,66 @@ the hand-broken cputype/subtype/congruence refusals), the
 control), and the `x86_64_walk` consumer example (`PGR_TRACING=1`
 watches the spans).
 
+### 15.9 Rung 5, slice 2 — the x86_64 producer half
+
+Slice 1's named next step ("the producer half and the driver surface
+are the rung's next slices"): the pipeline produces the second CPU
+family's image shape. §15.5's shape runs again, one family over: the
+shape decisions are the CPU's, the fixup decisions are nobody's —
+same slots, same import table, same chain heads.
+
+1. **The decision** (`pgr_core::cpu::CpuFamily`): `Arm64` the default
+   (every pre-slice link is byte-identical), `X86_64` the named second
+   — one enum, three readers: the header's `cputype`/`cpusubtype`
+   words (`CPU_TYPE_X86_64` / `CPU_SUBTYPE_X86_64_ALL`), the segment
+   packing's page constant (`page_size(cputype)` — the M16 table's
+   packing and header-fit readers join the verifier's page-contract
+   gates), and the chain word family. The ad-hoc signature's
+   `CS_PAGE_SIZE` stays the arch-independent 4096 constant (slice 1's
+   note — already honest). The arm64-only machine-code lanes
+   (`__stubs`/`__objc_stubs` synthesis from Branch26 callsites) refuse
+   under x86_64 with the fix named — the GOT-indirect call
+   (`*_sym@GOTPCREL(%rip)`) x86_64 clang emits needs no stub lane —
+   and the `-r` relocatable output refuses the family outright (its
+   header is the input's, verbatim; the M125 pattern).
+2. **The planner seam** (`FixupPointerFormat::Format64`): the
+   `DYLD_CHAINED_PTR_64` family rides beside `Offset64` — the same
+   word layout, the same 4-byte strides and 24-bit-ordinal/8-bit-addend
+   binds, rebase targets composed as **VM addresses**
+   (`high8 << 56 | target`, the slice-1 walk's translation), a target
+   whose bits 36..56 have no home in the word refusing instead of
+   silently truncating (the fixtures' builder refusal, one producer
+   over). The arm64e-only auth policy refuses under the 64 family (the
+   §15.4 rule); the import table stays `DYLD_CHAINED_IMPORT_ADDEND`
+   in every family.
+3. **The driver surface**: `-arch x86_64` shapes `LinkConfig::cpu`
+   (the arm64 spelling names the default; the refusal names the linked
+   vocabulary), `-fixup_chains_format arm64e` beside x86_64 refuses
+   with both names in the message (the layout's re-check, the rung-4
+   conflict shape), and `-arch x86_64` beside `-r` refuses at the
+   surface with the layout re-check backing it. The input surface
+   stays arm64 this rung (slice 1's honesty, unchanged) — the family
+   shapes the *image contract*, and the gates' corpora are
+   pointer-shaped content the family carries honestly.
+4. **The wire** (v83): the CPU family byte rides the config tail (the
+   append-in-place convention) — a resident relink produces the family
+   the client named, an unknown byte is a malformed frame; the record's
+   chain-family byte names `Format64` (2).
+
+Supporting pieces: the producer gate matrix
+(`crates/pgr-core/tests/m10_x86_64_producer.rs` — the pipeline's
+strict x86_64 image, the family header words, the 4 KiB packing read
+from the emitted bytes, the payload's format-2 declaration, the
+byte-identity default lock, the planner's VM-address composition and
+field-gap refusal, the arm64e and stub-lane refusals, the relocatable
+refusal), the driver gate matrix (`crates/pgr-driver/tests/m10_x86_64.rs`
+— the flag vocabulary, the end-to-end family link verifying strict at
+the 4 KiB packing, the determinism, the `-r` surface refusal), the
+wire round-trip gates, the `x86_64` planner parity bench (both
+4-byte-stride families over the same slot corpus), and the
+`x86_64_producer` consumer example (the same slots planned twice,
+decoded side by side).
+
 ### 15.x The reporting seams — the pipeline observed, the map interchanged (M54–M55)
 
 The knob family shipped through Pass 3 decisions; the two seams past it ship the *reporting*
