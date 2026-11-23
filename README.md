@@ -294,7 +294,7 @@ The milestone stream, per the [architecture doc](docs/peregrine-performance-arch
 | **M6–M7** | ICF, branch veneers, legacy fixups, Stage-A caches; versioned caches, compat suite, fuzzing at scale |
 | **M8** | Resident `pgrd` + incremental foundations: reverse reference index, insertion-stable imports, slack-anchored layout |
 | **M9** | Incremental engine → GA: record v5, span-diff planner, clone-and-patch, relayout + shrink rungs, per-symbol propagation, snapshot-backed resolve reuse, randomized-edit gate, daemon fusion (record → served audit → output residency) |
-| **M10** | `-r` relocatable output (self-consumption gated); five-platform targeting + per-platform floors; `FixupEncoding` seam & query; arm64e end-to-end (read → producer → auth → pair gate → floor refusals); x86_64 read side (rung 5 slice 1: `CPU_TYPE_X86_64` headers verify strict, the page gates read `page_size(cputype)` — 4 KiB x86_64 / 16 KiB arm64 — and the walk translates `DYLD_CHAINED_PTR_64` rebase targets as VM addresses; the link surface stays arm64, the producer half is the rung's next slice) |
+| **M10** | `-r` relocatable output (self-consumption gated); five-platform targeting + per-platform floors; `FixupEncoding` seam & query; arm64e end-to-end (read → producer → auth → pair gate → floor refusals); x86_64 end-to-end (rung 5: slice 1 the read side — `CPU_TYPE_X86_64` headers verify strict, the page gates read `page_size(cputype)` — 4 KiB x86_64 / 16 KiB arm64 — and the walk translates `DYLD_CHAINED_PTR_64` rebase targets as VM addresses; slice 2 the producer half + driver surface — the pipeline shapes the family (`pgr_core::cpu::CpuFamily` on `LinkConfig`: the header words, the 4 KiB packing, the format-2 chains with VM-address rebases, the stub lanes refusing with the GOT-indirect fix named, the `-r` output refusing the family), `-arch x86_64` rides the driver surface with the arm64e override and the relocatable output refusing beside it, and the wire v83 carries the decision byte) |
 | **M11** | `-order_file` rank seam + `-map` link map, rendered from the plan |
 | **M12** | Selectable verifier checks (`--checks`, `--list-checks`, the `ImageCheck` registry) |
 | **M13** | Report JSON interchange + baseline gate (`IssueIdentity` policies); `.pgr-inc` record inspector |
@@ -453,7 +453,7 @@ walks, the library faces); run with `cargo run -p <crate> --example <name>`:
 `fusion_provenance_link` · `fusion_dep_info_link` · `sectorder_link` ·
 `cstring_order_link` · `why_live_session` · `init_offsets_gate` · `universal_sarif` ·
 `universal_baseline` · `sarif_baseline` · `keep_local_symbols_link` · `strip_debug_link` · `walk_image` · `read_symtab` · `emit_corpus` · `emit_link_inputs` ·
-`pie_link` · `weak_reference_mismatches_link` · `seg1addr_link` · `force_cpusubtype_all_link` · `debug_map_link` · `objc_stubs_link` · `literal_merge_link` · `warn_suppress_link` · `whats_loaded_link` · `search_paths_link` · `warn_unused_dylibs_link` · `mod_term_gate` · `x86_64_walk`
+`pie_link` · `weak_reference_mismatches_link` · `seg1addr_link` · `force_cpusubtype_all_link` · `debug_map_link` · `objc_stubs_link` · `literal_merge_link` · `warn_suppress_link` · `whats_loaded_link` · `search_paths_link` · `warn_unused_dylibs_link` · `mod_term_gate` · `x86_64_walk` · `x86_64_producer`
 
 </details>
 
