@@ -26,11 +26,12 @@ use pgr_format::consts::{
     ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
     ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
     ARM64_RELOC_SUBTRACTOR, ARM64_RELOC_TLVP_LOAD_PAGE21, ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
-    ARM64_RELOC_UNSIGNED, CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, LC_BUILD_VERSION, MH_OBJECT,
-    N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF, N_WEAK_REF, PLATFORM_MACOS, RELOC_LENGTH_4,
-    RELOC_LENGTH_8, S_ATTR_DEBUG, S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS, S_REGULAR,
-    S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_VARIABLES, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL,
-    SECTION_TYPE_MASK, TOOL_CLANG, VM_PROT_READ, VM_PROT_WRITE,
+    ARM64_RELOC_UNSIGNED, LC_BUILD_VERSION, MH_OBJECT, N_EXT, N_PEXT, N_SECT, N_UNDF, N_WEAK_DEF,
+    N_WEAK_REF, PLATFORM_MACOS, RELOC_LENGTH_4, RELOC_LENGTH_8, S_ATTR_DEBUG,
+    S_ATTR_PURE_INSTRUCTIONS, S_CSTRING_LITERALS, S_REGULAR, S_THREAD_LOCAL_REGULAR,
+    S_THREAD_LOCAL_VARIABLES, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL, SECTION_TYPE_MASK, TOOL_CLANG,
+    VM_PROT_READ, VM_PROT_WRITE, X86_64_RELOC_BRANCH, X86_64_RELOC_GOT_LOAD, X86_64_RELOC_SIGNED,
+    X86_64_RELOC_SUBTRACTOR, X86_64_RELOC_TLV, X86_64_RELOC_UNSIGNED,
 };
 use pgr_format::cursor::pod_read_unaligned_at;
 use pgr_format::reloc::RelocationInfo;
@@ -131,6 +132,93 @@ impl ObjectReloc {
             length_log2: RELOC_LENGTH_4,
             extern_: false,
             rtype: ARM64_RELOC_ADDEND,
+        }
+    }
+
+    /// 8-byte absolute pointer (`X86_64_RELOC_UNSIGNED`, external) —
+    /// the chained-fixup food, and the **minuend** member of a
+    /// subtractor pair (the `x86_64` pairing: `SUBTRACTOR` names the
+    /// subtrahend, this `UNSIGNED` that follows names the minuend).
+    #[must_use]
+    pub const fn x86_unsigned(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: false,
+            length_log2: RELOC_LENGTH_8,
+            extern_: true,
+            rtype: X86_64_RELOC_UNSIGNED,
+        }
+    }
+
+    /// `X86_64_RELOC_SUBTRACTOR` — the **subtrahend** of a pair (the
+    /// paired `x86_unsigned` that follows names the minuend; LLVM's
+    /// Mach-O writer order).
+    #[must_use]
+    pub const fn x86_subtractor(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: false,
+            length_log2: RELOC_LENGTH_8,
+            extern_: true,
+            rtype: X86_64_RELOC_SUBTRACTOR,
+        }
+    }
+
+    /// Direct `call`/`jmp` displacement (`X86_64_RELOC_BRANCH`, external,
+    /// pcrel, 4 bytes).
+    #[must_use]
+    pub const fn x86_branch(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: true,
+            length_log2: RELOC_LENGTH_4,
+            extern_: true,
+            rtype: X86_64_RELOC_BRANCH,
+        }
+    }
+
+    /// Rip-relative displacement (`X86_64_RELOC_SIGNED`, external, pcrel,
+    /// 4 bytes) — the addend rides the field bytes in situ.
+    #[must_use]
+    pub const fn x86_signed(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: true,
+            length_log2: RELOC_LENGTH_4,
+            extern_: true,
+            rtype: X86_64_RELOC_SIGNED,
+        }
+    }
+
+    /// GOT load through a 32-bit rip-relative displacement
+    /// (`X86_64_RELOC_GOT_LOAD`) — the GOT-indirect call shape the
+    /// slice-2 record named.
+    #[must_use]
+    pub const fn x86_got_load(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: true,
+            length_log2: RELOC_LENGTH_4,
+            extern_: true,
+            rtype: X86_64_RELOC_GOT_LOAD,
+        }
+    }
+
+    /// TLV descriptor access (`X86_64_RELOC_TLV`, pcrel, 4 bytes).
+    #[must_use]
+    pub const fn x86_tlv(sym: u32) -> Self {
+        Self {
+            offset: 0,
+            symbolnum: sym,
+            pcrel: true,
+            length_log2: RELOC_LENGTH_4,
+            extern_: true,
+            rtype: X86_64_RELOC_TLV,
         }
     }
 
@@ -596,6 +684,10 @@ pub struct ObjectBuilder {
     /// the linker's parse validation refuses the shapes that cannot
     /// translate (beyond `__text`, entries without a `__text`).
     data_in_code: Vec<pgr_format::DataInCodeEntry>,
+    /// The header's CPU family (M10 rung 5 slice 3: the input surface
+    /// names the second family — an `x86_64` object carries `x86_64`
+    /// relocations the Pass-1 decode reads).
+    cpu: crate::CpuKind,
 }
 
 impl ObjectBuilder {
@@ -611,6 +703,7 @@ impl ObjectBuilder {
             subsections: false,
             alt_entries: std::collections::BTreeSet::new(),
             data_in_code: Vec::new(),
+            cpu: crate::CpuKind::Arm64,
         }
     }
 
@@ -653,6 +746,17 @@ impl ObjectBuilder {
     #[must_use]
     pub const fn set_subsections_via_symbols(mut self, on: bool) -> Self {
         self.subsections = on;
+        self
+    }
+
+    /// Selects the header's CPU family (M10 rung 5 slice 3: the default
+    /// stays [`crate::CpuKind::Arm64`]; [`crate::CpuKind::X86_64`] flips
+    /// the header words to `CPU_TYPE_X86_64` /
+    /// `CPU_SUBTYPE_X86_64_ALL` so the object carries the `x86_64`
+    /// relocation alphabet the Pass-1 decode reads).
+    #[must_use]
+    pub const fn set_cputype(mut self, cpu: crate::CpuKind) -> Self {
+        self.cpu = cpu;
         self
     }
 
@@ -1035,8 +1139,8 @@ impl ObjectBuilder {
         // ---- assemble ------------------------------------------------------
         let mut buf = vec![0u8; file_len as usize];
         buf[0..4].copy_from_slice(&pgr_format::consts::MH_MAGIC_64.to_le_bytes());
-        buf[4..8].copy_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
-        buf[8..12].copy_from_slice(&CPU_SUBTYPE_ARM64_ALL.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.cpu.cputype().to_le_bytes());
+        buf[8..12].copy_from_slice(&self.cpu.subtype_all().to_le_bytes());
         buf[12..16].copy_from_slice(&MH_OBJECT.to_le_bytes());
         buf[16..20].copy_from_slice(&ncmds.to_le_bytes());
         buf[20..24].copy_from_slice(&(sizeofcmds as u32).to_le_bytes());
