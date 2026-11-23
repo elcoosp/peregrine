@@ -811,17 +811,24 @@ pub fn scan_loader_executable(path: &str, bytes: &[u8]) -> Result<BundleLoader, 
 /// Resolves `-l<name>` against the given search dirs (already ld64-effective:
 /// `-syslibroot`-reshaped, defaults included — see
 /// [`opts::effective_lib_dirs`]) to a `.tbd` stub, a Mach-O dylib binary, or
-/// — M5 — a static archive (dylib candidates win, matching ld64's search
-/// order). Every probed-but-missing candidate lands in `not_found` (the
+/// — M5 — a static archive. Within one directory the dylib candidates win
+/// over the archive (the house order, ld64's post-Xcode4 default); the
+/// named search order ([`opts::SearchOrder`], M135) decides whether the
+/// walk stays per-directory (`PathsFirst`, the named default) or rounds
+/// the whole search path with the dylib candidates before the archive
+/// candidates (`DylibsFirst` — the pre-Xcode4 shape ld64's man page
+/// names). Every probed-but-missing candidate lands in `not_found` (the
 /// M60 dependency record's `0x11` rows — ld64's `checkFileExists` records
 /// each miss; a `-syslibroot`-prefixed candidate keeps its prefixed form,
-/// the path the search actually probed).
+/// the path the search actually probed), in probe order — the two faces
+/// probe a different order, so the record tells the faces apart.
 ///
 /// # Errors
 /// [`DriverError::Io`] when the file exists but cannot be read.
 pub fn resolve_lib(
     name: &str,
     lib_dirs: &[String],
+    order: opts::SearchOrder,
     not_found: &mut Vec<String>,
 ) -> Result<Option<(String, Vec<u8>)>, DriverError> {
     let candidates = [
@@ -832,17 +839,29 @@ pub fn resolve_lib(
         "lib".to_owned() + name + ".a",
         name.to_owned() + ".a",
     ];
-    for dir in lib_dirs {
-        for cand in &candidates {
-            let p = Path::new(dir).join(cand);
-            if p.is_file() {
-                let bytes = std::fs::read(&p).map_err(|source| DriverError::Io {
-                    path: p.display().to_string(),
-                    source,
-                })?;
-                return Ok(Some((p.display().to_string(), bytes)));
+    // M135: the two walks. `PathsFirst` keeps the per-directory loop the
+    // house has carried since M2/M5 (the default's probe order is
+    // byte-identical — the M60 record cannot change under the default).
+    // `DylibsFirst` splits the candidate list into the dylib family and
+    // the archive family and rounds the whole search path with the
+    // dylib family first; within a round the per-directory order holds.
+    let rounds: [&[String]; 2] = match order {
+        opts::SearchOrder::PathsFirst => [&candidates, &[]],
+        opts::SearchOrder::DylibsFirst => [&candidates[..4], &candidates[4..]],
+    };
+    for round in rounds {
+        for dir in lib_dirs {
+            for cand in round {
+                let p = Path::new(dir).join(cand);
+                if p.is_file() {
+                    let bytes = std::fs::read(&p).map_err(|source| DriverError::Io {
+                        path: p.display().to_string(),
+                        source,
+                    })?;
+                    return Ok(Some((p.display().to_string(), bytes)));
+                }
+                not_found.push(p.display().to_string());
             }
-            not_found.push(p.display().to_string());
         }
     }
     Ok(None)
@@ -1291,6 +1310,23 @@ fn link_to_image_recorded(
                         eprintln!("pgr: warning: duplicate symbol {entry}");
                     }
                 }
+                // M136: the exit policy's unused-dylib advisory face — the
+                // session's own resolved state prints as the cold lane's
+                // `pgr: warning:` face (the v82 tail carried them verbatim;
+                // the off decision rides empty by policy — the advisory is
+                // a measurement, never a layout product).
+                warnings += img.unused_dylibs.len();
+                for entry in &img.unused_dylibs {
+                    tracing::warn!(
+                        warn_unused_dylibs = %entry,
+                        "the link exits 0 with a dylib riding unbound (the M42 drop's \
+                         fix is -dead_strip_dylibs, the needed mark is the per-dylib \
+                         opt-out)"
+                    );
+                    if !opts.config.suppress_warnings {
+                        eprintln!("pgr: warning: unused dylib {entry}");
+                    }
+                }
                 // M109: the exit policy reads the tally — under
                 // `-fatal_warnings` the served faces' products are a hard
                 // failure (the image is never written; the one-shot
@@ -1525,6 +1561,11 @@ fn link_to_image_recorded(
     // strong definitions found during resolve without changing the
     // resolution policy), the exit still tallies the face's product.
     warnings += print_duplicate_warnings(opts, &result);
+    // M136: the unused-dylib advisory face — the warn_unused_dylibs
+    // decision never moves the bytes (the advisory reads the M42 drop's
+    // own used-marks predicate over the resolution's kept command list),
+    // the exit still tallies the face's product.
+    warnings += print_unused_dylib_warnings(opts, &result);
     // M123: the weak-reference-mismatches advisory face tallies its
     // product the same way (the `weak` / `non-weak` faces; under the
     // default `error` the link refused before this runs — the
@@ -1806,6 +1847,38 @@ fn print_duplicate_warnings(opts: &opts::Options, result: &pgr_core::LinkResult)
     warnings
 }
 
+/// M136: the unused-dylib advisory face — under `-warn_unused_dylibs`,
+/// every input dylib that rides the header with zero binding references
+/// ([`pgr_core::resolve::Resolution::unused_dylibs`] — the M42 drop's
+/// own used-marks predicate read-side) prints as a warning (the
+/// M103/M116/M121 advisory-face convention: a span, not a bare eprintln)
+/// and the link still exits 0 — ld64's face ("Warn about dylibs that are
+/// linked by no symbols are used from them", the `ld` man page). The
+/// decision never moves the resolution policy or the load commands
+/// themselves; the default records nothing and prints nothing. Returns
+/// the number of warnings printed (the M109 tally the exit policy
+/// reads).
+fn print_unused_dylib_warnings(opts: &opts::Options, result: &pgr_core::LinkResult) -> usize {
+    if !opts.config.warn_unused_dylibs {
+        return 0;
+    }
+    let mut warnings = 0usize;
+    for entry in result.resolution.unused_dylibs() {
+        tracing::warn!(
+            warn_unused_dylibs = %entry,
+            "the link exits 0 with a dylib riding unbound (the M42 drop's fix is \
+             -dead_strip_dylibs, the needed mark is the per-dylib opt-out)"
+        );
+        // M133: the print face is the `-w` decision's (the span records,
+        // the tally counts).
+        if !opts.config.suppress_warnings {
+            eprintln!("pgr: warning: unused dylib {entry}");
+        }
+        warnings += 1;
+    }
+    warnings
+}
+
 /// M123: the weak-reference-mismatches advisory face — the driver
 /// prints the entries the resolve walk recorded (the `weak` / `non-weak`
 /// faces; under the default `error` the link refused before this runs).
@@ -1942,9 +2015,12 @@ fn prepare_link(opts: &opts::Options) -> Result<(PreparedLink, Option<PoiCache>)
         // M60: the search's probes and hits ride the dependency record —
         // ld64's `checkFileExists` records every probed-but-missing
         // candidate (the consumer learns where the search looked), and
-        // the resolved file rides an input row.
+        // the resolved file rides an input row. M135: the search rides
+        // the named order (`-search_paths_first` the default,
+        // `-search_dylibs_first` the pre-Xcode4 rounds) — the probe
+        // order is the face's own story.
         let mut probes = Vec::new();
-        let found = resolve_lib(name, &lib_dirs, &mut probes)?;
+        let found = resolve_lib(name, &lib_dirs, opts.search_order, &mut probes)?;
         // The misses ride the record whether or not a later candidate
         // hit — ld64 records them at stat time, the search's own story.
         for probe in &probes {
