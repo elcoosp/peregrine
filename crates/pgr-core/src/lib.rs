@@ -38,6 +38,7 @@
 pub mod alias;
 pub mod bundle_loader;
 pub mod cache;
+pub mod cpu;
 pub mod deadstrip;
 pub mod dep_info;
 pub mod dyld_env;
@@ -88,6 +89,7 @@ pub mod why_live;
 pub use alias::{Alias, AliasError, AliasTable};
 pub use bundle_loader::{BundleLoader, BundleLoaderError};
 pub use cache::PoiCache;
+pub use cpu::CpuFamily;
 pub use deadstrip::{LiveRootKind, LivenessIndex};
 pub use dep_info::{DepInfoError, DependencyEntry, DependencyRecord};
 pub use dyld_env::{DyldEnv, DyldEnvEntry, DyldEnvError};
