@@ -39,7 +39,7 @@ use pgr_core::ids::StringId;
 use pgr_core::interner::Interner;
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, link};
-use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
+use pgr_fixtures::{CpuKind, ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use pgr_format::consts::{
     CPU_SUBTYPE_X86_64_ALL, CPU_TYPE_ARM64, CPU_TYPE_X86_64, DYLD_CHAINED_PTR_64, PAGE_SIZE_4K,
     PAGE_SIZE_16K,
@@ -54,22 +54,20 @@ const PAGE_64: u64 = PAGE_SIZE_16K;
 
 // ---- the pipeline corpus -------------------------------------------------------
 
-/// One arm64 object whose content is pointer-shaped only: a `__data`
+/// One `x86_64` object (M10 rung 5 slice 3: the input surface rides the
+/// family — the fixture names `CpuKind::X86_64` and carries the `x86_64`
+/// relocation alphabet) whose content is pointer-shaped only: a `__data`
 /// rebase slot against `_main` and a `_printf` GOT bind through the
-/// dylib — the callsite shape `x86_64` emits natively (`call
-/// *_printf@GOTPCREL(%rip)`), no Branch26 stub lane, so the family
-/// carries it honestly. The instructions are the arm64 adrp/ldr pair
-/// the arm64 inputs ride (the input surface stays arm64 this rung).
+/// dylib — the callsite shape `x86_64` emits natively (`movq
+/// *_printf@GOTPCREL(%rip)`), no stub lane, so the family carries it
+/// honestly.
 fn got_main() -> Vec<LinkInput> {
     let text: Vec<u8> = [
-        0x9000_0000u32, // adrp x0, _printf@GOTPAGE
-        0xF940_0000u32, // ldr x0, [x0, _printf@GOTPAGEOFF]
-        0xD65F_03C0u32, // ret
+        &[0x48u8, 0x8B, 0x05, 0xFC, 0xFF, 0xFF, 0xFF][..], // movq _printf@GOTPCREL(%rip)
+        &[0xC3],                                           // ret
     ]
-    .iter()
-    .flat_map(|w| w.to_le_bytes())
-    .collect();
-    let mut b = ObjectBuilder::new("got_main.o");
+    .concat();
+    let mut b = ObjectBuilder::new("got_main.o").set_cputype(CpuKind::X86_64);
     let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
     let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
     let main_sym = b.add_symbol(ObjectSymbol::Defined {
@@ -84,17 +82,52 @@ fn got_main() -> Vec<LinkInput> {
     });
     let main = b.sym_index(main_sym);
     let printf = b.sym_index(printf_sym);
-    b.section_mut(sect).relocs = vec![
-        ObjectReloc::got_page21(printf).at(0),
-        ObjectReloc::got_pageoff12(printf).at(4),
-    ];
+    b.section_mut(sect)
+        .relocs
+        .push(ObjectReloc::x86_got_load(printf).at(3));
     b.section_mut(data)
         .relocs
-        .push(ObjectReloc::unsigned(main).at(0));
+        .push(ObjectReloc::x86_unsigned(main).at(0));
     vec![LinkInput {
         name: "got_main.o".to_string(),
         bytes: b.build().expect("the fixture object builds"),
     }]
+}
+
+/// One arm64 pointer-shaped object (the pre-slice corpus shape): the
+/// `__data` rebase slot the default-family halves link (slice 3: the
+/// input surface rides the family, so the arm64 shapes link arm64
+/// inputs).
+fn arm64_ptr() -> Vec<LinkInput> {
+    let mut b = ObjectBuilder::new("arm64_ptr.o");
+    let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
+    let main_sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: data,
+        value: 0,
+        weak: false,
+    });
+    let main = b.sym_index(main_sym);
+    b.section_mut(data)
+        .relocs
+        .push(ObjectReloc::unsigned(main).at(0));
+    vec![LinkInput {
+        name: "arm64_ptr.o".to_string(),
+        bytes: b.build().expect("the fixture object builds"),
+    }]
+}
+
+/// Links one corpus under `tweak`; returns the full Pass 1–3 result.
+fn plan_corpus(
+    corpus: &[LinkInput],
+    tweak: impl FnOnce(&mut LinkConfig),
+) -> pgr_core::link::LinkResult {
+    let mut cfg = LinkConfig {
+        dylibs: vec![dylib()],
+        ..LinkConfig::default()
+    };
+    tweak(&mut cfg);
+    link(corpus, &[], &cfg).expect("the link plans")
 }
 
 /// The dylib the GOT bind resolves against (the M106 helper's shape).
@@ -207,7 +240,7 @@ fn the_family_packing_rides_4_kib_pages() {
         Some(PAGE_SIZE_4K),
         "the x86_64 packing rides the 4 KiB family page"
     );
-    let arm64 = image(&plan(|c| c.cpu = CpuFamily::Arm64));
+    let arm64 = image(&plan_corpus(&arm64_ptr(), |c| c.cpu = CpuFamily::Arm64));
     assert_eq!(
         segment_vmsize(&arm64, "__TEXT"),
         Some(PAGE_SIZE_16K),
@@ -226,7 +259,7 @@ fn the_fixup_payload_names_the_64_family() {
         DYLD_CHAINED_PTR_64,
         "the family words declare format 2"
     );
-    let arm64 = plan(|c| c.cpu = CpuFamily::Arm64);
+    let arm64 = plan_corpus(&arm64_ptr(), |c| c.cpu = CpuFamily::Arm64);
     assert_ne!(
         arm64.layout.fixups.chain_word_format.pointer_format(),
         DYLD_CHAINED_PTR_64,
@@ -239,8 +272,8 @@ fn the_arm64_default_is_byte_identical() {
     // Every pre-slice link: the default config and the explicit
     // `CpuFamily::Arm64` plan the same bytes (the seam is invisible
     // unless asked for).
-    let default = plan(|_| ());
-    let explicit = plan(|c| c.cpu = CpuFamily::Arm64);
+    let default = plan_corpus(&arm64_ptr(), |_| ());
+    let explicit = plan_corpus(&arm64_ptr(), |c| c.cpu = CpuFamily::Arm64);
     assert_eq!(
         image(&default),
         image(&explicit),
@@ -466,10 +499,10 @@ fn the_branch26_stub_lane_refuses_under_x86_64() {
     // §3.4's stub shapes); the 4 KiB family carries no x86_64 stub
     // words this rung, so a Branch26 callsite refuses with the fix —
     // the GOT-indirect call x86_64 clang emits.
-    let mut b = ObjectBuilder::new("stub_main.o");
+    let mut b = ObjectBuilder::new("stub_main.o").set_cputype(CpuKind::X86_64);
     let text = b.add_section(ObjectSection::text(
         "__text",
-        [0x14u8, 0x00, 0x00, 0x94].to_vec(),
+        vec![0xE8, 0xFC, 0xFF, 0xFF, 0xFF], // call _printf (disp32 placeholder)
         vec![],
     ));
     let printf_sym = b.add_symbol(ObjectSymbol::Undefined {
@@ -477,7 +510,7 @@ fn the_branch26_stub_lane_refuses_under_x86_64() {
         weak_ref: false,
     });
     let printf = b.sym_index(printf_sym);
-    b.section_mut(text).relocs = vec![ObjectReloc::branch26(printf).at(0)];
+    b.section_mut(text).relocs = vec![ObjectReloc::x86_branch(printf).at(1)];
     let corpus = vec![LinkInput {
         name: "stub_main.o".to_string(),
         bytes: b.build().expect("the fixture object builds"),
