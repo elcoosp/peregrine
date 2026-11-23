@@ -17,22 +17,24 @@ use std::hint::black_box;
 
 use pgr_core::layout::LinkConfig;
 use pgr_core::link::{LinkInput, link};
-use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
+use pgr_fixtures::{ObjectBuilder, ObjectSection, ObjectSymbol};
 
 const OBJECTS: usize = 64;
 const SELECTORS_PER_OBJECT: usize = 8;
 const DISTINCT_SELECTORS: usize = 32;
 
-/// One object: `_main` on the first, `_objc_msgSend$<sel>` undefineds
-/// through `__data` bind slots (the callsite pseudo-symbols the
-/// classifier recognizes).
+/// One object: `_main` on the first, then one `BL` `_objc_msgSend$<sel>`
+/// callsite per selector in `__text` (the shape modern clang emits and
+/// the classifier recognizes — the M130 corpus seam
+/// `add_objc_msgsend_call` builds; the repeated callsites across objects
+/// dedup onto one stub per distinct selector).
 fn callsite_object(idx: usize) -> Vec<u8> {
     let mut b = ObjectBuilder::new(&format!("obj_{idx:03}.o"));
-    let text = b.add_section(ObjectSection::text(
-        "__text",
-        [0xC0u8, 0x03, 0x5F, 0xD6].repeat(2),
-        vec![],
-    ));
+    let mut text_bytes: Vec<u8> = [0xC0u8, 0x03, 0x5F, 0xD6].to_vec(); // the entry: ret
+    for _ in 0..SELECTORS_PER_OBJECT {
+        text_bytes.extend_from_slice(&ObjectBuilder::OBJC_MSGSEND_CALL_BYTES);
+    }
+    let text = b.add_section(ObjectSection::text("__text", text_bytes, vec![]));
     if idx == 0 {
         b.add_symbol(ObjectSymbol::Defined {
             name: "_main".into(),
@@ -41,21 +43,10 @@ fn callsite_object(idx: usize) -> Vec<u8> {
             weak: false,
         });
     }
-    let data = b.add_section(ObjectSection::data(
-        "__data",
-        vec![0u8; 8 * SELECTORS_PER_OBJECT],
-        vec![],
-    ));
     for k in 0..SELECTORS_PER_OBJECT {
         let sel = (idx * SELECTORS_PER_OBJECT + k) % DISTINCT_SELECTORS;
-        let undef = b.add_symbol(ObjectSymbol::Undefined {
-            name: format!("_objc_msgSend$_method_{sel:03}"),
-            weak_ref: false,
-        });
-        let slot = b.sym_index(undef);
-        b.section_mut(data)
-            .relocs
-            .push(ObjectReloc::unsigned(slot as u32).at((k * 8) as u32));
+        // The BL lands at 4 + k*4: one entry word, then one word per call.
+        b.add_objc_msgsend_call(text, 4 + (k as u32) * 4, &format!("_method_{sel:03}"));
     }
     b.build().expect("the bench object builds")
 }
