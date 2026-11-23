@@ -27,7 +27,7 @@ use crate::resolve::{Def, Rank, Resolution, UndefinedPolicy};
 use pgr_format::consts::{
     BIND_SPECIAL_DYLIB_FLAT_LOOKUP, BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE, INDIRECT_SYMBOL_LOCAL,
     MH_BINDS_TO_WEAK, MH_TWOLEVEL, MH_WEAK_DEFINES, N_ABS, N_EXT, N_PEXT, N_SECT, N_UNDF,
-    N_WEAK_DEF, N_WEAK_REF, PAGE_SIZE_16K, REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS,
+    N_WEAK_DEF, N_WEAK_REF, REFERENCED_DYNAMICALLY, S_ATTR_PURE_INSTRUCTIONS,
     S_ATTR_SOME_INSTRUCTIONS, S_CSTRING_LITERALS, S_NON_LAZY_SYMBOL_POINTERS, S_REGULAR,
     S_SYMBOL_STUBS, S_THREAD_LOCAL_REGULAR, S_THREAD_LOCAL_VARIABLES, S_THREAD_LOCAL_ZEROFILL,
     S_ZEROFILL, SECTION_TYPE_MASK, STUB_SIZE_ARM64, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE,
@@ -271,7 +271,25 @@ pub struct LinkConfig {
     /// encoding (TDD §7.2): every clean link is byte-identical to the
     /// pre-seam planner. The classic opcode path (`fixup_chains = false`)
     /// does not read this — the opcode streams have one word shape.
+    /// Under the `x86_64` family ([`CpuFamily::X86_64`](crate::cpu::CpuFamily::X86_64))
+    /// the producer derives `DYLD_CHAINED_PTR_64` words regardless — the
+    /// rung's word family is the CPU's — and the `Arm64e` override beside
+    /// `x86_64` refuses (the arm64e shapes are the arm64 CPU's, TDD §15.4).
     pub chain_word_format: crate::fixups::FixupPointerFormat,
+    /// M10 rung 5, slice 2 — the CPU family the image is produced for
+    /// (the producer half of the `x86_64` rung; the read side admits the
+    /// family since slice 1, TDD §15.8). The default
+    /// [`CpuFamily::Arm64`](crate::cpu::CpuFamily::Arm64) is every
+    /// pre-slice link — byte-identical. The family rides the header's
+    /// `cputype`/`cpusubtype` words, the segment packing's page constant
+    /// (4 KiB under `x86_64` — the M10 row's "4 KiB constants, same tree")
+    /// and the chain word family the fixup planner encodes
+    /// (`DYLD_CHAINED_PTR_64`, VM-address rebases). The arm64-only
+    /// machine-code lanes (`__stubs`/`__objc_stubs` synthesis from
+    /// Branch26 callsites) refuse under `x86_64` with the fix named — the
+    /// GOT-indirect call `x86_64` clang emits needs no stub lane. The input
+    /// surface stays arm64 this rung (slice 1's honesty, unchanged).
+    pub cpu: crate::cpu::CpuFamily,
     /// M11 rung 1 — `-order_file`: the parsed order file's rank table
     /// (see [`crate::order`]). When set, the ordered buckets go
     /// atom-granular (the rank names symbols, so pieces must be
@@ -1289,6 +1307,7 @@ impl Default for LinkConfig {
             record_resolution: false,
             resolve_reuse: None,
             chain_word_format: crate::fixups::FixupPointerFormat::Offset64,
+            cpu: crate::cpu::CpuFamily::Arm64,
             symbol_order: None,
             pagezero: crate::pagezero::PageZero::default(),
             init_offsets: crate::init_offsets::InitOffsets::default(),
@@ -2453,6 +2472,30 @@ pub fn layout(
     live: &crate::deadstrip::LiveSet,
     fold: &crate::icf::FoldPlan,
 ) -> Result<Layout, LinkError> {
+    // M10 rung 5, slice 2: the CPU family's page constant and word
+    // family. The arm64 family rides the configured override (the
+    // `-fixup_chains_format` seam); the x86_64 family derives the
+    // format-2 words the slice-1 walk translates (TDD §15.8) — and the
+    // arm64e override beside it refuses: the authenticated shapes are
+    // the arm64 CPU's (TDD §15.4), one family over. The family shapes
+    // the image contract (header words, page constant, word family),
+    // never the fixup decisions — same slots, same import table.
+    let family_page = cfg.cpu.page_size();
+    let chain_format = match cfg.cpu {
+        crate::cpu::CpuFamily::Arm64 => cfg.chain_word_format,
+        crate::cpu::CpuFamily::X86_64 => match cfg.chain_word_format {
+            crate::fixups::FixupPointerFormat::Arm64e => {
+                return Err(LinkError::Layout {
+                    message: "-fixup_chains_format arm64e encodes the arm64 CPU's \
+                              authenticated word family, but the link plans an x86_64 \
+                              image (CPU_TYPE_X86_64): drop -fixup_chains_format or \
+                              link -arch arm64"
+                        .into(),
+                });
+            }
+            _ => crate::fixups::FixupPointerFormat::Format64,
+        },
+    };
     // M124: the first segment's base address is an executable/dylib
     // decision — the layout's re-check backs the driver surface's
     // earlier refusal, so no library caller can plan the shape either:
@@ -3552,6 +3595,26 @@ pub fn layout(
     )?;
     // M2: GOT/stub synthesis needs (first-use scan over every relocation).
     let needs = scan_needs(objects, res, interner, live)?;
+    // M10 rung 5, slice 2: the arm64 machine-code lanes cannot ride the
+    // x86_64 family this rung — `__stubs`/`__objc_stubs` entries are
+    // arm64 words (TDD §3.4), and the Branch26 callsites that plan them
+    // have the GOT-indirect shape x86_64 clang emits instead
+    // (`call *_sym@GOTPCREL(%rip)`). The lane refuses with the fix named
+    // (the rung-4 conflict shape), never a silently arm64 stub in an
+    // x86_64 header.
+    if cfg.cpu == crate::cpu::CpuFamily::X86_64
+        && (!needs.stubs.is_empty() || !needs.objc_stubs.is_empty())
+    {
+        return Err(LinkError::Layout {
+            message: format!(
+                "{} Branch26/objc callsite(s) plan __stubs/__objc_stubs entries, \
+                 but the stub lanes emit arm64 machine code the x86_64 image \
+                 cannot carry — call through the GOT (the *_sym@GOTPCREL(%rip) \
+                 shape x86_64 clang emits) or link -arch arm64",
+                needs.stubs.len() + needs.objc_stubs.len()
+            ),
+        });
+    }
     // The fixups payload exists when *any* slot is planned: input pointer
     // slots (M1 rebases), synthesized GOT binds and POINTER_TO_GOT rebases.
     // The gate counts LIVE slots — the placement skips dead atoms, so
@@ -3684,10 +3747,11 @@ pub fn layout(
         let plan = if !has_fixups {
             // No pointer slots at all: no fixup metadata of either kind.
             // The plan still names the family the config asked for (M82:
-            // the record's single source for the word family).
+            // the record's single source for the word family) — the CPU
+            // family's derivation included (M10 rung 5, slice 2).
             FixupPlan {
                 payload: Vec::new(),
-                chain_word_format: cfg.chain_word_format,
+                chain_word_format: chain_format,
                 slot_words: Vec::new(),
                 chain_starts: Vec::new(),
                 slot_count: 0,
@@ -3701,10 +3765,10 @@ pub fn layout(
                 slots,
                 &segs,
                 image_base,
-                PAGE_SIZE_16K,
+                family_page,
                 interner,
                 cfg.stable_imports.as_deref(),
-                cfg.chain_word_format,
+                chain_format,
             )?
         } else {
             // M6 legacy: the classic opcode streams replace the chained
@@ -4320,8 +4384,7 @@ pub fn layout(
     // __LINKEDIT covers through EOF (§8: verifier asserts this).
     let le_size = file_size - state.segments[le_idx].fileoff;
     state.segments[le_idx].filesize = le_size;
-    state.segments[le_idx].vmsize =
-        le_size.max(PAGE_SIZE_16K).div_ceil(PAGE_SIZE_16K) * PAGE_SIZE_16K;
+    state.segments[le_idx].vmsize = le_size.max(family_page).div_ceil(family_page) * family_page;
     let text_vmsize = state
         .segments
         .iter()
@@ -4974,6 +5037,11 @@ fn place(
     emit_dice: bool,
     unwind_size: usize,
 ) -> Result<PlacedState, LinkError> {
+    // M10 rung 5, slice 2: the packing's page constant is the family's
+    // (TDD §15.8 item 3 — the fixture builder's page constant, one
+    // producer over): 4 KiB under x86_64, the 16 KiB arm64 page on
+    // every pre-slice link.
+    let page = cfg.cpu.page_size();
     let (mut pieces_of_bucket, cstring_instances, cstring_matched) = build_bucket_pieces(
         objects,
         buckets,
@@ -5238,11 +5306,11 @@ fn place(
     // The fixups LC follows the payload presence (not the mirror section).
     let sizeofcmds = command_size(cfg, nsections, fixup_lc, emit_dice);
     let header_len = 32 + sizeofcmds;
-    if header_len as u64 > PAGE_SIZE_16K {
+    if header_len as u64 > page {
         return Err(LinkError::Layout {
             message: format!(
-                "header and load commands ({header_len} bytes) exceed the 16 KiB first page \
-                 (TDD §8.1 rule 7)"
+                "header and load commands ({header_len} bytes) exceed the {page}-byte \
+                 first page (TDD §8.1 rule 7)"
             ),
         });
     }
@@ -5283,13 +5351,11 @@ fn place(
                 _ => (VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE),
             },
         };
-        let prev_end = segments
-            .last()
-            .map_or(PAGE_SIZE_16K, |s| s.fileoff + s.vmsize);
+        let prev_end = segments.last().map_or(page, |s| s.fileoff + s.vmsize);
         let seg_fileoff = if seg_name == "__TEXT" {
             0
         } else {
-            align_up_u64(prev_end, PAGE_SIZE_16K)
+            align_up_u64(prev_end, page)
         };
         // VM and file cursors move in lockstep under the constant-delta
         // contract (`vmaddr = fileoff + base`); zero-fill sections advance
@@ -5349,7 +5415,7 @@ fn place(
             }
             sects.push(i);
         }
-        let vmsize = align_up_u64(cursor - seg_fileoff, PAGE_SIZE_16K).max(PAGE_SIZE_16K);
+        let vmsize = align_up_u64(cursor - seg_fileoff, page).max(page);
         segments.push(SegmentPlan {
             name: seg_name.into(),
             vmaddr: seg_fileoff + base,
@@ -5362,7 +5428,7 @@ fn place(
         });
     }
     let prev_end = segments.last().map_or(0, |s| s.fileoff + s.vmsize);
-    let le_fileoff = align_up_u64(prev_end.max(PAGE_SIZE_16K), PAGE_SIZE_16K);
+    let le_fileoff = align_up_u64(prev_end.max(page), page);
     segments.push(SegmentPlan {
         name: "__LINKEDIT".into(),
         vmaddr: le_fileoff + base,
@@ -7605,7 +7671,10 @@ fn build_header(
     let w64 = |buf: &mut [u8], at: usize, v: u64| buf[at..at + 8].copy_from_slice(&v.to_le_bytes());
 
     w32(&mut buf, 0, pgr_format::consts::MH_MAGIC_64);
-    w32(&mut buf, 4, pgr_format::consts::CPU_TYPE_ARM64);
+    // M10 rung 5, slice 2: the CPU family words — the default arm64
+    // pair on every pre-slice link, the x86_64 pair under the named
+    // family (TDD §15.8: the read side admits the family since slice 1).
+    w32(&mut buf, 4, cfg.cpu.cputype());
     // M125: the cpusubtype word — `CPU_SUBTYPE_ARM64_ALL`. The default
     // and the named `-force_cpusubtype_ALL` both carry ALL (every
     // pre-M125 image carried it), so the knob is byte-identity (the
@@ -7613,7 +7682,9 @@ fn build_header(
     // `cfg.force_cpusubtype_all` (the driver surface refuses the knob
     // on `-r`, the wire v76 carries it), and the byte is ALL either way
     // — a future subtype-deriving default would read the same field.
-    w32(&mut buf, 8, pgr_format::consts::CPU_SUBTYPE_ARM64_ALL);
+    // M10 rung 5, slice 2: the family's own ALL word under x86_64
+    // (`CPU_SUBTYPE_X86_64_ALL`).
+    w32(&mut buf, 8, cfg.cpu.subtype_all());
     w32(&mut buf, 12, hi.filetype.filetype());
     w32(&mut buf, 16, ncmds);
     w32(&mut buf, 20, sizeofcmds as u32);
