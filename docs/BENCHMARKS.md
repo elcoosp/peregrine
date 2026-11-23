@@ -797,6 +797,7 @@ same sandbox). Expectations are stated so any divergence is a finding:
 | `pgr-verify/verify_arm64e/pair_replay/<arm64e_auth\|offset64_control>` (r4 s4) | the family-blind M3 pair gate                                     | inside the control's band — different word reader, doubled stride   |
 | `pgr-verify/verify_x86_64/verify/<x86e_format64\|offset64_control>` (r5 s1)   | the strict pass over the 64 family at 4 KiB pages                  | parity — one branch for the VM-address target translation           |
 | `pgr-core/x86_64/<format64\|offset64>/<n>` (r5 s2)                    | the planner over the same slot corpus, the two 4-byte-stride families | parity — only the rebase composition differs                        |
+| `pgr-format/summarize_family/<offset64_control\|arm64e>` (r4 s1, the format half) | the family-aware summary walk, both families over the same slot corpus | parity — one extra word-reader branch                               |
 
 ## Findings & corrections
 
