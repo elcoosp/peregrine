@@ -118,6 +118,40 @@ pub enum AliasSource {
     },
 }
 
+/// The `-l` library-search order (M135): ld64's man page names the two
+/// alphabets. The default ("This is now the default (in Xcode4 tools)")
+/// searches *each directory* in the library search path for the dylib
+/// forms (`libx.tbd`, `x.tbd`, `libx.dylib`, `x.dylib`) then the archive
+/// forms (`libx.a`, `x.a`) before moving on to the next path;
+/// `-search_dylibs_first` "restores the search behavior of the linker
+/// prior to Xcode4" — the dylib forms sweep every directory first, and
+/// only when no directory carries one does the archive round start.
+///
+/// The decision is Pass 0's own: it names *which files* the link
+/// consumes, and the picked file's bytes ride the driver's mapped
+/// inputs (the daemon request carries resolved inputs, not `-l` names),
+/// so the resident lane inherits the decision through the existing
+/// input transport — no wire byte (the M53-rename precedent: a surface
+/// decision the machinery already carries). The search rides the
+/// [`crate::resolve_lib`] walk; the framework search has no archive
+/// form, so the flags are `-l`-scoped (the man page names `-lx`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchOrder {
+    /// The per-directory walk (the post-Xcode4 default): within one
+    /// directory the dylib forms win over the archive — the shape the
+    /// house `resolve_lib` carried since M2/M5 ("dylib candidates win,
+    /// matching ld64's search order").
+    #[default]
+    PathsFirst,
+    /// `-search_dylibs_first`: the dylib forms round the whole search
+    /// path first, the archive forms round it second (the pre-Xcode4
+    /// shape). Within a round the house's per-directory order holds —
+    /// the stub-before-binary priority is the house's own candidate
+    /// list, and the old linker's one-filename-per-round sweep is the
+    /// dylib family's round.
+    DylibsFirst,
+}
+
 /// Parsed driver options (the current milestone surface; M10 adds `-r`).
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -242,6 +276,11 @@ pub struct Options {
     /// library/framework search paths (ld64 rule — see
     /// [`effective_lib_dirs`]).
     pub syslibroots: Vec<String>,
+    /// M135: the `-l` library-search order (`-search_paths_first` the
+    /// named default, `-search_dylibs_first` the pre-Xcode4 shape) —
+    /// see [`SearchOrder`] for the two alphabets and the Pass-0
+    /// carriage (no wire byte: the picked bytes ride the request).
+    pub search_order: SearchOrder,
     /// M7 `-cache_max <bytes>` / `PGR_CACHE_MAX`: the cache directory's size
     /// bound (oldest-mtime LRU eviction; `0` = unbounded). Defaults to 2 GiB
     /// when a cache directory is active.
@@ -513,6 +552,7 @@ impl Default for Options {
             no_cache: false,
             cache_max: None,
             syslibroots: Vec::new(),
+            search_order: SearchOrder::PathsFirst,
             resident: false,
             resident_socket: None,
             final_output: None,
@@ -1271,6 +1311,19 @@ pub enum OptsError {
     #[error("{verdict}")]
     #[diagnostic(help("{fix}"))]
     WarnCommonsConflict {
+        /// What conflicts with what.
+        verdict: String,
+        /// The imperative tail naming the flags to change.
+        fix: String,
+    },
+    /// A `-warn_unused_dylibs` surface conflict (M136): the unused-dylib
+    /// advisory names load-command riders — the relocatable output
+    /// carries no dylib load commands (an object's undefineds stay open
+    /// by design). The verdict names the shape conflict; the help is the
+    /// fix — the house convention.
+    #[error("{verdict}")]
+    #[diagnostic(help("{fix}"))]
+    WarnUnusedConflict {
         /// What conflicts with what.
         verdict: String,
         /// The imperative tail naming the flags to change.
@@ -2173,6 +2226,22 @@ fn apply_flag(
         "-syslibroot" => {
             let v = next_value(args, i, arg)?;
             opts.syslibroots.push(v);
+        }
+        // M135: the library-search-order pair (the M102 last-wins shape
+        // — each flag assigns the decision, the later occurrence is the
+        // decision). `-search_paths_first` names the default (the
+        // M104 `-keep_local_symbols` named-default pattern),
+        // `-search_dylibs_first` restores the pre-Xcode4 walk (the
+        // dylib forms round the whole path before the archive round).
+        // No conflict family: the decision applies wherever a `-l`
+        // search happens (the relocatable output takes `-l` inputs
+        // through the same Pass-0 walk — an `-r` object's inputs are
+        // its own, the search naming them is not an image decision).
+        "-search_paths_first" => {
+            opts.search_order = SearchOrder::PathsFirst;
+        }
+        "-search_dylibs_first" => {
+            opts.search_order = SearchOrder::DylibsFirst;
         }
         "-object_path_lto" => {
             // The LTO object scratch path build systems pass; accepted, no
@@ -3123,6 +3192,20 @@ fn apply_flag(
         // `finish`'s — it sees the whole surface.
         "-warn_duplicate" => {
             opts.config.warn_duplicate = true;
+        }
+        // M136: the unused-dylib advisory pair — ld64's
+        // `-warn_unused_dylibs` ("Warn about dylibs that are linked by no
+        // symbols are used from them") beside its `-no_warn_unused_dylibs`
+        // off face (the M109 `-fatal_warnings`/`-no_fatal_warnings`
+        // pair shape: each flag assigns the decision, the later
+        // occurrence is the decision). The advisory rides the M42
+        // drop's own used-marks predicate read-side; the relocatable
+        // conflict is `finish`'s — it sees the whole surface.
+        "-warn_unused_dylibs" => {
+            opts.config.warn_unused_dylibs = true;
+        }
+        "-no_warn_unused_dylibs" => {
+            opts.config.warn_unused_dylibs = false;
         }
         // M99: the named output UUID — the other half of the M32
         // suppression. ld64's `-uuid <uuid>` names the image's identity:
@@ -4375,6 +4458,24 @@ fn finish(opts: &mut Options) -> Result<Options, OptsError> {
                       input's, verbatim"
                 .into(),
             fix: "drop -warn_duplicate or link an image (an executable, dylib or bundle)".into(),
+        });
+    }
+    // M136: the unused-dylib advisory's surface conflict — the
+    // relocatable output carries no dylib load commands (an object's
+    // undefineds stay open by design; there is no rider to name). An
+    // explicitly named knob that cannot apply is a refusal, never a
+    // silently dropped one (the library's re-checks back this so no
+    // caller can plan the shape either).
+    if opts.config.warn_unused_dylibs
+        && opts.config.filetype == pgr_core::layout::OutputType::Relocatable
+    {
+        return Err(OptsError::WarnUnusedConflict {
+            verdict: "-warn_unused_dylibs advises which input dylibs ride unbound, but \
+                      the relocatable output carries no dylib load commands"
+                .into(),
+            fix: "drop -warn_unused_dylibs or link an image (an executable, dylib or \
+                  bundle)"
+                .into(),
         });
     }
     // M40: the export-trie suppression is an executable decision — a
