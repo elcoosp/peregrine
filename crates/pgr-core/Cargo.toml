@@ -53,6 +53,13 @@ harness = false
 name = "arm64e"
 harness = false
 
+# The rung-5 word-family parity bench (M10 rung 5, slice 2): the same
+# slot corpus planned as 64_OFFSET and 64 (format 2) words — the shared
+# 4-byte-stride layout, only the rebase composition differs.
+[[bench]]
+name = "x86_64"
+harness = false
+
 # The M11 order-file bench: the same corpus laid out with and without a
 # rank table (the atom split plus one stable sort per bucket).
 [[bench]]
