@@ -68,12 +68,20 @@ fn bench_trace_refs(c: &mut Criterion) {
             &observed,
             |b, &subscribe| {
                 b.iter(|| {
+                    // The m113 corpus contract: the flat-lookup policy —
+                    // `_shared` stays unresolved (no provider rides the
+                    // corpus) and binds dynamically, the references still
+                    // visited (and traced) by the resolve's walk.
+                    let cfg = LinkConfig {
+                        undefined_policy: pgr_core::resolve::UndefinedPolicy::DynamicLookup,
+                        ..LinkConfig::default()
+                    };
                     if subscribe {
                         let mut refs = RefsCollector::default();
                         let result = link_observed(
                             black_box(&inputs),
                             &[],
-                            &LinkConfig::default(),
+                            &cfg,
                             pgr_core::Parallelism::Auto,
                             None,
                             &mut refs,
@@ -81,8 +89,7 @@ fn bench_trace_refs(c: &mut Criterion) {
                         .expect("the corpus links");
                         black_box((refs.finish().len(), result.layout.file_size));
                     } else {
-                        let result = link(black_box(&inputs), &[], &LinkConfig::default())
-                            .expect("the corpus links");
+                        let result = link(black_box(&inputs), &[], &cfg).expect("the corpus links");
                         black_box(&result.layout);
                     }
                 });
