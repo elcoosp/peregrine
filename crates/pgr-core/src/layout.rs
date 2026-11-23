@@ -1406,6 +1406,15 @@ pub enum PatchOp {
         /// The resolved 64-bit value.
         value: u64,
     },
+    /// 4-byte signed displacement write (the `x86_64` rel32 forms —
+    /// `BRANCH`/`SIGNED`/GOT/TLV disp32 patches and 4-byte subtractor
+    /// results; M10 rung 5 slice 3).
+    Disp32 {
+        /// Patch position, piece-relative.
+        in_offset: u32,
+        /// The resolved signed displacement.
+        value: i64,
+    },
 }
 
 /// One contribution to an output section: a whole input section (M1) or a
@@ -1859,7 +1868,28 @@ fn scan_needs(
                     match r.kind {
                         RelocKind::GotLoadPage21 { .. }
                         | RelocKind::GotLoadPageOff12 { .. }
+                        | RelocKind::GotRipRel32 { .. }
                         | RelocKind::PointerToGot => needs.push_got(id),
+                        // M10 rung 5 slice 3: the x86_64 pairing names the
+                        // subtrahend in `target` and the minuend inside the
+                        // kind — an external minuend is the same
+                        // relative-pointer-pair refusal the target side
+                        // carries (the resolved state must vouch for both
+                        // members).
+                        RelocKind::Subtractor { minuend } => {
+                            if let RelocTarget::Extern(m) = minuend
+                                && res.def(m).is_none()
+                            {
+                                return Err(LinkError::Unsupported {
+                                    file: obj.name.clone(),
+                                    message: format!(
+                                        "subtractor relocation against external symbol \"{}\" \
+                                         (relative-pointer pairs must target in-image symbols)",
+                                        interner.name(m)
+                                    ),
+                                });
+                            }
+                        }
                         _ => {}
                     }
                     continue;
@@ -1914,11 +1944,47 @@ fn scan_needs(
                 }
                 match r.kind {
                     RelocKind::Branch26 => needs.push_stub(id),
-                    RelocKind::GotLoadPage21 { .. } | RelocKind::GotLoadPageOff12 { .. } => {
+                    RelocKind::GotLoadPage21 { .. }
+                    | RelocKind::GotLoadPageOff12 { .. }
+                    | RelocKind::GotRipRel32 { .. }
+                    | RelocKind::PointerToGot => {
                         needs.push_got(id);
                     }
-                    RelocKind::PointerToGot => needs.push_got(id),
                     RelocKind::Unsigned => {} // direct bind, no slot needed
+                    RelocKind::Branch32 => {
+                        // M10 rung 5 slice 3: the x86_64 shape carries no
+                        // stub lane (the slice-2 record's refusal — the
+                        // `__stubs`/`__objc_stubs` synthesis emits arm64
+                        // machine code). The fix is the GOT-indirect call
+                        // the family's clang emits natively.
+                        return Err(LinkError::Unsupported {
+                            file: obj.name.clone(),
+                            message: format!(
+                                "direct branch to external symbol \"{}\" — the x86_64 shape \
+                                 carries no stub lane (ld64 synthesizes one; Peregrine's \
+                                 lane emits arm64 words only): compile the call as the \
+                                 GOT-indirect form `*_sym@GOTPCREL(%rip)` \
+                                 (X86_64_RELOC_GOT_LOAD), which the synthesized __got slot \
+                                 serves",
+                                interner.name(id)
+                            ),
+                        });
+                    }
+                    RelocKind::RipRel32 { .. } => {
+                        // A displacement cannot name a foreign vaddr (dyld
+                        // binds whole slots, never instruction fields): the
+                        // fix is the GOT-indirect form.
+                        return Err(LinkError::Unsupported {
+                            file: obj.name.clone(),
+                            message: format!(
+                                "rip-relative reference to external symbol \"{}\" — a \
+                                 displacement cannot name a foreign vaddr (dyld binds whole \
+                                 slots, never instruction fields): load through the GOT with \
+                                 the `*_sym@GOTPCREL(%rip)` form the synthesized slot serves",
+                                interner.name(id)
+                            ),
+                        });
+                    }
                     RelocKind::Page21 { .. } | RelocKind::PageOff12 { .. } => {
                         return Err(LinkError::Unsupported {
                             file: obj.name.clone(),
@@ -1940,7 +2006,9 @@ fn scan_needs(
                             ),
                         });
                     }
-                    RelocKind::TlvpLoadPage21 | RelocKind::TlvpLoadPageOff12 => {
+                    RelocKind::TlvRipRel32 { .. }
+                    | RelocKind::TlvpLoadPage21
+                    | RelocKind::TlvpLoadPageOff12 => {
                         return Err(LinkError::Unsupported {
                             file: obj.name.clone(),
                             message: format!(
@@ -6386,17 +6454,168 @@ fn resolve_reloc(
                 delta,
             });
         }
+        RelocKind::Branch32 => {
+            // M10 rung 5 slice 3: the x86_64 direct call/jmp — the patch
+            // writes `S + embedded − site` (the in-situ field
+            // reconstructs the addend: clang wrote `a − 4`, the pcrel
+            // base is the site + 4). External targets never reach this
+            // arm (the scan refused them — no x86_64 stub lane).
+            let Some(target) = lookup_opt(obj, r.target, 0, space)? else {
+                return Err(LinkError::Internal {
+                    message: "x86_64 branch without an in-image target".into(),
+                });
+            };
+            let at = in_sect.data.start as usize + r.offset as usize;
+            let embedded = i64::from(read_slot_i32(&obj.bytes, at)?);
+            let value = (target as i64)
+                .checked_add(embedded)
+                .and_then(|v| v.checked_sub(slot_v as i64))
+                .ok_or(LinkError::Layout {
+                    message: "branch displacement overflow".into(),
+                })?;
+            if value < i64::from(i32::MIN) || value > i64::from(i32::MAX) {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "branch displacement {value} exceeds the ±2 GiB x86_64 rel32 range"
+                    ),
+                });
+            }
+            patches.push(PatchOp::Disp32 {
+                in_offset: r.offset,
+                value,
+            });
+        }
+        RelocKind::RipRel32 { embedded } => {
+            // The SIGNED disp32 form: `final = S + embedded − site` (the
+            // in-situ field carries `a − 4`).
+            let Some(target) = lookup_opt(obj, r.target, 0, space)? else {
+                return Err(LinkError::Unsupported {
+                    file: obj.name.clone(),
+                    message: "rip-relative reference to a non-resolvable symbol (the scan \
+                              refuses dylib exports; a dynamic lookup cannot ride a \
+                              displacement)"
+                        .into(),
+                });
+            };
+            let value = (target as i64)
+                .checked_add(embedded)
+                .and_then(|v| v.checked_sub(slot_v as i64))
+                .ok_or(LinkError::Layout {
+                    message: "rip-relative displacement overflow".into(),
+                })?;
+            if value < i64::from(i32::MIN) || value > i64::from(i32::MAX) {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "rip-relative displacement {value} exceeds the ±2 GiB x86_64 rel32 range"
+                    ),
+                });
+            }
+            patches.push(PatchOp::Disp32 {
+                in_offset: r.offset,
+                value,
+            });
+        }
+        RelocKind::GotRipRel32 { embedded } => {
+            let RelocTarget::Extern(id) = r.target else {
+                return Err(LinkError::Internal {
+                    message: "GOT reference without an external target".into(),
+                });
+            };
+            let slot = space
+                .got_slot_addr
+                .get(&id.0)
+                .copied()
+                .ok_or(LinkError::Internal {
+                    message: format!(
+                        "GOT reference for \"{}\" without a synthesized slot",
+                        space.interner.name(id)
+                    ),
+                })?;
+            let value = (slot as i64)
+                .checked_add(embedded)
+                .and_then(|v| v.checked_sub(slot_v as i64))
+                .ok_or(LinkError::Layout {
+                    message: "GOT displacement overflow".into(),
+                })?;
+            if value < i64::from(i32::MIN) || value > i64::from(i32::MAX) {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "GOT displacement {value} exceeds the ±2 GiB x86_64 rel32 range"
+                    ),
+                });
+            }
+            patches.push(PatchOp::Disp32 {
+                in_offset: r.offset,
+                value,
+            });
+        }
+        RelocKind::TlvRipRel32 { embedded } => {
+            // M37 one family over: the descriptor is a definition in this
+            // image — the load patches directly against its vaddr, no
+            // slot, no chain word.
+            let Some(target) = lookup_opt(obj, r.target, 0, space)? else {
+                return Err(LinkError::Internal {
+                    message: "TLV descriptor load without an in-image descriptor".into(),
+                });
+            };
+            let value = (target as i64)
+                .checked_add(embedded)
+                .and_then(|v| v.checked_sub(slot_v as i64))
+                .ok_or(LinkError::Layout {
+                    message: "TLV displacement overflow".into(),
+                })?;
+            if value < i64::from(i32::MIN) || value > i64::from(i32::MAX) {
+                return Err(LinkError::Layout {
+                    message: format!(
+                        "TLV displacement {value} exceeds the ±2 GiB x86_64 rel32 range"
+                    ),
+                });
+            }
+            patches.push(PatchOp::Disp32 {
+                in_offset: r.offset,
+                value,
+            });
+        }
         RelocKind::Subtractor { minuend } => {
             let minuend_v = lookup(obj, minuend, 0, space)?;
             let subtrahend_v = lookup(obj, r.target, 0, space)?;
             let at = in_sect.data.start as usize + r.offset as usize;
-            let addend = read_slot_i64(&obj.bytes, at)?;
-            patches.push(PatchOp::Write64 {
-                in_offset: r.offset,
-                value: (minuend_v as i64)
-                    .wrapping_sub(subtrahend_v as i64)
-                    .wrapping_add(addend) as u64,
-            });
+            // The pair's width is the pair member's (the arm64 pairs are
+            // 8-byte pointers; the x86_64 pairs ride 4- or 8-byte
+            // differences — M10 rung 5 slice 3).
+            match r.length_log2 {
+                3 => {
+                    let addend = read_slot_i64(&obj.bytes, at)?;
+                    patches.push(PatchOp::Write64 {
+                        in_offset: r.offset,
+                        value: (minuend_v as i64)
+                            .wrapping_sub(subtrahend_v as i64)
+                            .wrapping_add(addend) as u64,
+                    });
+                }
+                2 => {
+                    let addend = i64::from(read_slot_i32(&obj.bytes, at)?);
+                    let value = (minuend_v as i64)
+                        .wrapping_sub(subtrahend_v as i64)
+                        .wrapping_add(addend);
+                    if value < i64::from(i32::MIN) || value > i64::from(i32::MAX) {
+                        return Err(LinkError::Layout {
+                            message: format!(
+                                "4-byte subtractor result {value} exceeds the rel32 range"
+                            ),
+                        });
+                    }
+                    patches.push(PatchOp::Disp32 {
+                        in_offset: r.offset,
+                        value,
+                    });
+                }
+                other => {
+                    return Err(LinkError::Internal {
+                        message: format!("subtractor pair width {other} is not carried"),
+                    });
+                }
+            }
         }
     }
     Ok(())
@@ -6410,6 +6629,18 @@ fn read_slot_i64(bytes: &[u8], at: usize) -> Result<i64, LinkError> {
         .map(i64::from_le_bytes)
         .ok_or(LinkError::Internal {
             message: "pointer slot out of input bounds".into(),
+        })
+}
+
+/// Reads the 4-byte slot addend at `at` (the `x86_64` in-situ field the
+/// BRANCH patch reconstructs its addend from — M10 rung 5 slice 3).
+fn read_slot_i32(bytes: &[u8], at: usize) -> Result<i32, LinkError> {
+    bytes
+        .get(at..at + 4)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map(i32::from_le_bytes)
+        .ok_or(LinkError::Internal {
+            message: "displacement slot out of input bounds".into(),
         })
 }
 
