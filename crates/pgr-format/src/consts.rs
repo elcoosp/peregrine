@@ -28,6 +28,12 @@ pub const FAT_MAGIC_64: u32 = 0xcafe_babf;
 pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 /// `arm64` subtype: all Apple Silicon CPUs.
 pub const CPU_SUBTYPE_ARM64_ALL: u32 = 0;
+/// CPU type for Intel Mac (M10 rung 5, slice 1: the read side's second
+/// family — the link surface stays arm64).
+pub const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+/// `x86_64` subtype: all Intel Mac CPUs (`CPU_SUBTYPE_X86_64_ALL`; the
+/// high capability bits ride outside the low 24 the header gate reads).
+pub const CPU_SUBTYPE_X86_64_ALL: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // File types
@@ -772,10 +778,28 @@ pub fn chained_fixups_floor(platform: u32) -> u32 {
 
 /// arm64 segment page size (16 KiB; 4 KiB on `x86_64` macOS).
 pub const PAGE_SIZE_16K: u64 = 0x4000;
+/// `x86_64` segment page size (4 KiB — the M10 row's "4 KiB constants";
+/// M10 rung 5, slice 1 names the constant the gates read).
+pub const PAGE_SIZE_4K: u64 = 0x1000;
 /// 64-bit `__PAGEZERO` size (4 GiB, unmapped).
 pub const PAGEZERO_SIZE_64: u64 = 0x1_0000_0000;
 /// Code-signature hashing page size in bytes (4 KiB, see `CS_PAGE_SIZE`).
 pub const SIGNATURE_HASH_PAGE: u64 = 4096;
+
+/// The segment page size a CPU family's page-contract gates read:
+/// 16 KiB for `arm64`, 4 KiB for `x86_64` (M10 rung 5, slice 1). One
+/// decision, four readers — the header-fit, `__PAGEZERO`, base,
+/// congruence and stack-size gates plus the fixtures' segment packing
+/// — so the "4 KiB constants" of the M10 row live in one table instead
+/// of re-derived constants per gate.
+#[must_use]
+pub const fn page_size(cputype: u32) -> u64 {
+    if cputype == CPU_TYPE_X86_64 {
+        PAGE_SIZE_4K
+    } else {
+        PAGE_SIZE_16K
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Compact-unwind constants (M34; Apple `mach-o/compact_unwind_encoding.h`,
