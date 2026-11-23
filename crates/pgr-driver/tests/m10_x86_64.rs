@@ -11,7 +11,7 @@
 //! layout's re-check, surfaced through the driver).
 
 use pgr_driver::opts::{Options, parse};
-use pgr_fixtures::{ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
+use pgr_fixtures::{CpuKind, ObjectBuilder, ObjectReloc, ObjectSection, ObjectSymbol};
 use pgr_format::consts::{CPU_TYPE_ARM64, CPU_TYPE_X86_64, PAGE_SIZE_4K};
 use pgr_format::{LoadCommandIter, LoadCommandKind, MachHeader64, SegmentCommand64};
 use std::ffi::OsString;
@@ -31,21 +31,18 @@ fn libsystem_tbd() -> &'static str {
     "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: /usr/lib/libSystem.B.dylib\ncurrent-version: 1.2.3\ncompatibility-version: 1.0.0\nexports:\n  - targets: [ arm64-macos ]\n    symbols: [ _printf, _strlen ]\n...\n"
 }
 
-/// A self-contained `main.o` with one rebase slot (`__data`) and a
-/// `_printf` GOT bind (the callsite shape `x86_64` emits natively — the
-/// GOT-indirect pair, no Branch26 stub lane). The instruction bytes are
-/// the arm64 adrp/ldr pair the arm64 inputs ride (the input surface
-/// stays arm64 this rung).
+/// A self-contained `x86_64` `main.o` (M10 rung 5 slice 3: the input
+/// surface rides the family — the fixture names `CpuKind::X86_64`) with
+/// one rebase slot (`__data`) and a `_printf` GOT bind (the callsite
+/// shape `x86_64` emits natively — the GOT-indirect pair, no stub
+/// lane).
 fn printf_main() -> Vec<u8> {
     let text: Vec<u8> = [
-        0x9000_0000u32, // adrp x0, _printf@GOTPAGE
-        0xF940_0000u32, // ldr x0, [x0, _printf@GOTPAGEOFF]
-        0xD65F_03C0u32, // ret
+        &[0x48u8, 0x8B, 0x05, 0xFC, 0xFF, 0xFF, 0xFF][..], // movq _printf@GOTPCREL(%rip)
+        &[0xC3],                                           // ret
     ]
-    .iter()
-    .flat_map(|w| w.to_le_bytes())
-    .collect();
-    let mut b = ObjectBuilder::new("printf_main.o");
+    .concat();
+    let mut b = ObjectBuilder::new("printf_main.o").set_cputype(CpuKind::X86_64);
     let sect = b.add_section(ObjectSection::text("__text", text, Vec::new()));
     let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
     let main_sym = b.add_symbol(ObjectSymbol::Defined {
@@ -60,15 +57,14 @@ fn printf_main() -> Vec<u8> {
     });
     let main = b.sym_index(main_sym);
     let printf = b.sym_index(printf_sym);
-    b.section_mut(sect).relocs = vec![
-        ObjectReloc::got_page21(printf).at(0),
-        ObjectReloc::got_pageoff12(printf).at(4),
-    ];
+    b.section_mut(sect)
+        .relocs
+        .push(ObjectReloc::x86_got_load(printf).at(3));
     // An UNSIGNED pointer against a *defined* symbol: a pure rebase slot
-    // in __data (the bind rides the GOT relocs above).
+    // in __data (the bind rides the GOT reloc above).
     b.section_mut(data)
         .relocs
-        .push(ObjectReloc::unsigned(main).at(0));
+        .push(ObjectReloc::x86_unsigned(main).at(0));
     b.build().unwrap()
 }
 
@@ -199,8 +195,36 @@ fn the_x86_64_image_verifies_strict() {
 
 #[test]
 fn the_default_link_stays_arm64() {
+    // The arm64 corpus (the pre-slice shape) under the flag-less link
+    // keeps the arm64 family (slice 3: the input surface rides the
+    // family, so the default's corpus is arm64-typed).
     let dir = scratch("default");
-    let opts = parsed_opts(&dir, &[]);
+    let mut b = ObjectBuilder::new("arm64_main.o");
+    let data = b.add_section(ObjectSection::data("__data", vec![0u8; 8], vec![]));
+    let sym = b.add_symbol(ObjectSymbol::Defined {
+        name: "_main".into(),
+        section_index: data,
+        value: 0,
+        weak: false,
+    });
+    let idx = b.sym_index(sym);
+    b.section_mut(data)
+        .relocs
+        .push(ObjectReloc::unsigned(idx).at(0));
+    let obj = dir.join("arm64_main.o");
+    std::fs::write(&obj, b.build().unwrap()).unwrap();
+    let tbd = dir.join("libSystem.tbd");
+    std::fs::write(&tbd, libsystem_tbd()).unwrap();
+    let argv: Vec<std::ffi::OsString> = [
+        "-o".to_string(),
+        dir.join("exe").display().to_string(),
+        obj.display().to_string(),
+        tbd.display().to_string(),
+    ]
+    .iter()
+    .map(std::ffi::OsString::from)
+    .collect();
+    let opts = parse(&argv).expect("the flag set parses");
     let image = link(&opts);
     assert_eq!(
         cputype_of(&image),
