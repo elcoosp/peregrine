@@ -87,5 +87,12 @@ harness = false
 name = "init_offsets"
 harness = false
 
+# The M132 terminator-surface bench: the gate's price over the honest
+# pointer form and a hand-broken stride, beside the whole-image pass
+# (for scale).
+[[bench]]
+name = "mod_term"
+harness = false
+
 [lints]
 workspace = true
