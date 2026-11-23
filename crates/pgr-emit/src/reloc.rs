@@ -97,6 +97,26 @@ pub fn apply(buf: &mut [u8], op: &PatchOp, at: u64) -> Result<(), EmitError> {
             };
             dst.copy_from_slice(&value.to_le_bytes());
         }
+        PatchOp::Disp32 {
+            in_offset: _,
+            value,
+        } => {
+            // The x86_64 rel32 forms (M10 rung 5 slice 3): a plain LE
+            // i32 write — the displacement is the whole field, no
+            // opcode bits to preserve.
+            let end = at + 4;
+            if value < i64::from(i32::MIN) || value > i64::from(i32::MAX) {
+                return Err(EmitError::Contract {
+                    message: format!("disp32 value {value} exceeds the ±2 GiB x86_64 rel32 range"),
+                });
+            }
+            let Some(dst) = buf.get_mut(at as usize..end as usize) else {
+                return Err(EmitError::Internal {
+                    message: format!("disp32 patch at {at:#x} leaves the output buffer"),
+                });
+            };
+            dst.copy_from_slice(&(value as i32).to_le_bytes());
+        }
     }
     Ok(())
 }
