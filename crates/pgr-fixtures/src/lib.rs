@@ -1650,7 +1650,9 @@ fn build_fixup_payload(ctx: FixupContext<'_>) -> Result<(Vec<u8>, Vec<u64>), Bui
                         let vmaddr = target + delta;
                         if (vmaddr >> 36) & 0xff_ffff != 0 {
                             return Err(BuildError(format!(
-                                "64-family rebase vmaddr {vmaddr:#x} crosses the                                  field gap between the 36-bit target and the high8                                  byte (bits 36..56 carry no field)"
+                                "64-family rebase vmaddr {vmaddr:#x} crosses the \
+                                 field gap between the 36-bit target and the high8 \
+                                 byte (bits 36..56 carry no field)"
                             )));
                         }
                         encode_rebase_word(
