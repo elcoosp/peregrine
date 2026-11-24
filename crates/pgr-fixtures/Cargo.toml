@@ -15,5 +15,20 @@ sha2 = { workspace = true }
 # `BuildError` Display/Error impls were the last hand-rolled pair).
 thiserror = { workspace = true }
 
+[dev-dependencies]
+# The corpus gate matrix links its generated corpus in-process (the
+# link-honesty gate), emits the image and strict-verifies it — the same
+# read-side engine the surface tests ride.
+pgr-core = { workspace = true }
+pgr-emit = { workspace = true }
+pgr-verify = { workspace = true }
+# The corpus generation bench (the presets' price, in memory — the
+# corpora contract is no I/O, no clocks).
+criterion = { workspace = true }
+
+[[bench]]
+name = "corpus"
+harness = false
+
 [lints]
 workspace = true
