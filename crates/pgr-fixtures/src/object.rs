@@ -21,7 +21,7 @@
 //! relocation applier under test patches words that decode exactly like
 //! clang's output.
 
-use crate::pad_name;
+use crate::{BuildError, pad_name};
 use pgr_format::consts::{
     ARM64_RELOC_ADDEND, ARM64_RELOC_BRANCH26, ARM64_RELOC_GOT_LOAD_PAGE21,
     ARM64_RELOC_GOT_LOAD_PAGEOFF12, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12,
@@ -829,15 +829,15 @@ impl ObjectBuilder {
     /// but commit no file bytes.
     ///
     /// # Errors
-    /// A descriptive `String` when the spec exceeds a Mach-O object limit
+    /// A [`BuildError`] when the spec exceeds a Mach-O object limit
     /// (section/symbol counts) or a relocation references a missing
     /// symbol or a section beyond the section table.
-    pub fn build(&self) -> Result<Vec<u8>, String> {
+    pub fn build(&self) -> Result<Vec<u8>, BuildError> {
         if self.sections.len() > u8::MAX as usize {
-            return Err(format!("{}: too many sections", self.name));
+            return Err(BuildError(format!("{}: too many sections", self.name)));
         }
         if self.symbols.len() >= u16::MAX as usize {
-            return Err(format!("{}: too many symbols", self.name));
+            return Err(BuildError(format!("{}: too many symbols", self.name)));
         }
 
         // ---- load command sizing ----------------------------------------
