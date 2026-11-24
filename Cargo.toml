@@ -8,6 +8,7 @@ members = [
     "crates/pgr-emit",
     "crates/pgr-verify",
     "crates/pgr-fixtures",
+    "xtask",
 ]
 # cargo-fuzz harness lives in its own workspace (nightly-only).
 exclude = ["fuzz"]
