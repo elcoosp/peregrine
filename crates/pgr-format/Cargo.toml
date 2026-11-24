@@ -31,5 +31,14 @@ harness = false
 name = "universal"
 harness = false
 
+# The byte-touching parse bench (the parser-rate caveat's own pricing):
+# the structural parse unit over the byte-touching corpus — one object
+# whose section payload carries the file at 1/16/64 MiB — beside the
+# metadata-walk control, so the streaming rate the recorded GB/s sit
+# "well below" is on the record too.
+[[bench]]
+name = "parse_bytes"
+harness = false
+
 [lints]
 workspace = true
