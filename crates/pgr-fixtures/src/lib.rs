@@ -2121,9 +2121,14 @@ fn page_hashes(
 }
 
 pub mod archive;
+pub mod corpus;
 pub mod object;
 
 pub use archive::ArchiveBuilder;
+pub use corpus::{
+    CorpusContents, CorpusError, CorpusFileInfo, CorpusManifest, CorpusPreset, CorpusSpec, Shape,
+    build_corpus, write_corpus,
+};
 pub use object::{
     FIXTURE_OSO_MTIME, ObjectBuilder, ObjectReloc, ObjectSection, ObjectStab, ObjectSymbol,
     read_relocs, read_section, read_sym,
