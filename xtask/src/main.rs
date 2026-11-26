@@ -38,11 +38,11 @@
 
 use std::path::PathBuf;
 
-use pgr_core::budget::check_sweep;
+use pgr_core::budget::{RssSample, check_rss, check_sweep, peak_rss_bytes};
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, Parallelism};
-use pgr_core::sweep::{SweepPlan, write_ledger};
-use pgr_emit::sweep::run_verified_sweep;
+use pgr_core::sweep::{GatePair, SweepPlan, run_sweep_gated, write_ledger};
+use pgr_emit::sweep::{DeterminismGate, VerifyGate};
 use pgr_fixtures::corpus::{CorpusPreset, CorpusSpec, build_corpus, write_corpus};
 use pgr_verify::Options;
 
@@ -236,6 +236,11 @@ struct SweepArgs {
     /// The §9.3 budget gate's mode (`off`, `report` — the default — or
     /// `enforce`; the calibrated rig job's face).
     budgets: Option<String>,
+    /// Where the gate's run-0 image writes (`--determinism <path>`):
+    /// the separate-process artifact the CI determinism job
+    /// byte-compares — TDD §11's "link the same corpus twice in
+    /// separate processes → byte-identical (CI-level, every PR)".
+    determinism: Option<PathBuf>,
 }
 
 /// The `--budgets` flag's parsed mode (the §9.3 gate's three faces).
@@ -374,9 +379,14 @@ fn apply_sweep_flag(args: &mut SweepArgs, flag: &str, value: &str) -> Result<(),
             args.budgets = Some(value.to_string());
             Ok(())
         }
+        "determinism" => {
+            args.determinism = Some(PathBuf::from(value));
+            Ok(())
+        }
         other => Err(format!(
             "--{other} is not a sweep flag (the flags are --out --preset --objects --text-kib \
-             --symbols-per-object --archive-members --member-text-kib --runs --parallel --budgets)"
+             --symbols-per-object --archive-members --member-text-kib --runs --parallel \
+             --budgets --determinism)"
         )),
     }
 }
@@ -442,25 +452,27 @@ fn run_sweep_command(args: &SweepArgs) -> Result<(), String> {
         label: args.label(),
         runs: args.runs(),
     };
-    let outcome = run_verified_sweep(
-        &inputs,
-        &archives,
-        &cfg,
-        args.parallel(),
-        &plan,
-        // The strict pass (the M73 `-verify` gate's shape): warnings
-        // fail, the signature hash recomputed — §9.3's "performance
-        // jobs never gate on unverified output" is the nightly's own
-        // contract, not a flag.
-        &Options {
-            strict_warnings: true,
-            skip_hash_recompute: false,
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    // The strict options (the M73 `-verify` gate's shape): warnings
+    // fail, the signature hash recomputed — §9.3's "performance jobs
+    // never gate on unverified output" is the nightly's own contract,
+    // not a flag.
+    let strict = Options {
+        strict_warnings: true,
+        skip_hash_recompute: false,
+    };
+    // The nightly's gate pair: every run's image rides the strict
+    // verifier (§9.3's correctness half) *and* the byte-equality
+    // comparison against the run-0 image (§9.3's determinism half —
+    // "double-link byte-equality on every PR (TDD §4.3)"), both outside
+    // the measured wall, either refusal aborting the sweep.
+    let mut verify_gate = VerifyGate::new(strict);
+    let mut determinism_gate = DeterminismGate::new();
+    let mut pair = GatePair::new(&mut verify_gate, &mut determinism_gate);
+    let outcome = run_sweep_gated(&inputs, &archives, &cfg, args.parallel(), &plan, &mut pair)
+        .map_err(|e| e.to_string())?;
     print!("{}", contents.manifest.render());
-    print!("{}", outcome.outcome.render());
-    for stat in outcome.gate.stats() {
+    print!("{}", outcome.render());
+    for stat in verify_gate.stats() {
         println!(
             "verify: run {} strict-clean ({} symbols, {} fixup slots, verify {} µs)",
             stat.run,
@@ -469,13 +481,32 @@ fn run_sweep_command(args: &SweepArgs) -> Result<(), String> {
             stat.verify_wall.as_micros()
         );
     }
-    let written = write_ledger(
-        &outcome.outcome.label,
-        outcome.outcome.runs,
-        &outcome.outcome.summary,
-        out,
-    )
-    .map_err(|e| e.to_string())?;
+    for stat in determinism_gate.stats() {
+        println!(
+            "determinism: run {} byte-identical ({} bytes, gate {} µs)",
+            stat.run,
+            stat.bytes,
+            stat.gate_wall.as_micros()
+        );
+    }
+    // The §11 separate-process artifact: the run-0 image written where
+    // the CI determinism job's second process writes its own — the two
+    // files byte-compare (TDD §11: "twice in separate processes →
+    // byte-identical").
+    if let Some(path) = &args.determinism {
+        let baseline = determinism_gate.baseline_image().ok_or_else(|| {
+            "the sweep recorded no run-0 image (the plan's runs are zero)".to_string()
+        })?;
+        std::fs::write(path, baseline).map_err(|e| e.to_string())?;
+        println!(
+            "determinism: the run-0 image written to {} ({} bytes) — byte-compare it against \
+             the second process's",
+            path.display(),
+            baseline.len()
+        );
+    }
+    let written = write_ledger(&outcome.label, outcome.runs, &outcome.summary, out)
+        .map_err(|e| e.to_string())?;
     println!("ledger: {} ({written} bytes)", out.display());
 
     // The §9.3 budget gate: the recorded rows priced against the
@@ -488,17 +519,22 @@ fn run_sweep_command(args: &SweepArgs) -> Result<(), String> {
     if mode != BudgetsMode::Off {
         let measured_lane = args.parallel();
         let reference = if measured_lane == Parallelism::Auto {
+            // The 1-thread reference lane sweeps gated too — §9.3's
+            // "every benchmark link is also run through `pgr-verify`"
+            // names every benchmark link, the reference lane's
+            // included, and its bytes ride the same double-link
+            // comparison.
+            let mut verify_ref = VerifyGate::new(strict);
+            let mut determinism_ref = DeterminismGate::new();
+            let mut pair_ref = GatePair::new(&mut verify_ref, &mut determinism_ref);
             Some(
-                run_verified_sweep(
+                run_sweep_gated(
                     &inputs,
                     &archives,
                     &cfg,
                     Parallelism::Serial,
                     &plan,
-                    &Options {
-                        strict_warnings: true,
-                        skip_hash_recompute: false,
-                    },
+                    &mut pair_ref,
                 )
                 .map_err(|e| e.to_string())?,
             )
@@ -512,17 +548,36 @@ fn run_sweep_command(args: &SweepArgs) -> Result<(), String> {
         };
         let verdict = check_sweep(
             &args.label(),
-            &outcome.outcome.summary,
-            reference.as_ref().map(|r| &r.outcome.summary),
+            &outcome.summary,
+            reference.as_ref().map(|r| &r.summary),
             threads,
         );
         print!("{}", verdict.render());
         println!("{}", verdict.render_json());
-        if mode == BudgetsMode::Enforce && !verdict.is_clean() {
+        // The peak-RSS row (§2.2's note — "peak RSS ≤ 2.5× output (TDD
+        // §10.5)"): the process's high-water mark over the sweep priced
+        // against the gated image's byte size — the determinism gate's
+        // recorded run-0 image is the §2.1 metric's denominator. A
+        // platform that does not expose the mark records the honest
+        // `None` (the rig's numbers own it), and the calibrated
+        // `enforce` face is the rig job's, the tree's own convention.
+        let rss = check_rss(peak_rss_bytes().and_then(|peak_bytes| {
+            let output_bytes =
+                u64::try_from(determinism_gate.baseline_image().map_or(0, <[u8]>::len)).ok()?;
+            Some(RssSample {
+                peak_bytes,
+                output_bytes,
+            })
+        }));
+        print!("{}", rss.render());
+        println!("{}", rss.render_json());
+        if mode == BudgetsMode::Enforce && (!verdict.is_clean() || rss.breach) {
             return Err(format!(
                 "budget gate: {} breach(es) against the §9.3 budgets (the verdict above names \
-                 each gate, the measured value and the budget it broke)",
-                verdict.breaches.len()
+                 each gate, the measured value and the budget it broke) — the peak-RSS row \
+                 breached: {}",
+                verdict.breaches.len(),
+                rss.render().trim()
             ));
         }
     }
