@@ -25,6 +25,14 @@
 //!   the driver's report is the plan's named source — against the run's
 //!   own wall (the total band when the caller measured it, the measured
 //!   rows plus the emit band otherwise: the share column's own rule).
+//! * **The peak-RSS row** ([`check_rss`]) prices §2.2's third budget —
+//!   "peak RSS ≤ 2.5× output (TDD §10.5)" — over the caller's
+//!   measurement ([`RssSample`]: the process's high-water mark,
+//!   [`peak_rss_bytes`] reading it where the platform exposes it,
+//!   against the gated image's byte size, §2.1's "Peak RSS / output
+//!   size"). Its verdict ([`RssVerdict`]) renders in the same two
+//!   faces; the calibrated `enforce` face stays the rig job's, the
+//!   tree's own convention.
 //!
 //! The arithmetic is integer permille end to end (the time-report share
 //! column's rule — no float rounding rides a gate), and the gate never
@@ -421,6 +429,137 @@ pub fn check_sweep(
         }
     }
     report
+}
+
+/// The peak-RSS budget, in permille of the output's byte size — §2.2's
+/// note ("peak RSS ≤ 2.5× output (TDD §10.5)"), TDD §10.5's own table
+/// pricing the peak at "≈ 2.2–2.5× output size — comparable to mold's
+/// ratio", and §2.1's metric ("Peak RSS | Peak RSS / output size") the
+/// ratio implements.
+pub const RSS_RATIO_PERMILLE_MAX: u32 = 2500;
+
+/// The peak-RSS measurement the caller feeds the gate: the process's
+/// own high-water mark over the measured run(s) ([`peak_rss_bytes`]
+/// reads it where the platform exposes it) and the output's byte size
+/// the ratio is priced against — the gated image's, the §2.1 metric's
+/// denominator. The plan's 2.2–2.5× band counts the output buffer the
+/// emit allocates; the sweep's peak covers the pipeline *and* its gates
+/// (the fused emit rides outside the measured wall), so the measured
+/// shape is comparable — and the calibrated enforce face stays the rig
+/// job's (the honest runner reports, the calibrated job enforces).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RssSample {
+    /// The process's peak resident set over the measurement, in bytes.
+    pub peak_bytes: u64,
+    /// The output's byte size the ratio is priced against.
+    pub output_bytes: u64,
+}
+
+/// The peak-RSS row's verdict: the §2.1 ratio in integer permille (no
+/// floats — the budget arithmetic's own rule) and whether it breached
+/// the limit. `None` is "not measurable" — the sample never rode, the
+/// peak is the platform's "unavailable", or the output size is zero —
+/// recorded, never guessed, and never a breach (the gate never
+/// guesses: an unmeasurable gate is not a breach).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RssVerdict {
+    /// The measured ratio in permille of the output's size (`None` when
+    /// unmeasurable).
+    pub ratio_permille: Option<u32>,
+    /// Whether a measured ratio exceeded [`RSS_RATIO_PERMILLE_MAX`]
+    /// (`false` when unmeasured — at the limit is clean, "≤ 2.5×").
+    pub breach: bool,
+}
+
+/// Prices the peak-RSS budget (§2.2's note, TDD §10.5's table) over the
+/// caller's sample: the measured peak over the output's bytes, integer
+/// permille, breaching only over [`RSS_RATIO_PERMILLE_MAX`]. A missing
+/// sample, a zero peak (the reader's "unavailable") or a zero output
+/// size records `None` — never a fabricated ratio.
+#[must_use]
+pub fn check_rss(sample: Option<RssSample>) -> RssVerdict {
+    let ratio = sample.and_then(|s| {
+        if s.peak_bytes == 0 || s.output_bytes == 0 {
+            return None;
+        }
+        Some(permille(s.peak_bytes, u128::from(s.output_bytes)))
+    });
+    RssVerdict {
+        breach: ratio.is_some_and(|r| r > RSS_RATIO_PERMILLE_MAX),
+        ratio_permille: ratio,
+    }
+}
+
+impl RssVerdict {
+    /// Whether the budget holds (no measured breach rode).
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        !self.breach
+    }
+
+    /// Renders the row as the deterministic text line the verdict table
+    /// carries: the gate, the limit, the measured ratio (or the honest
+    /// absence), and the ok/OVER word — a build system can diff two
+    /// verdicts line by line.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let value = match self.ratio_permille {
+            Some(ratio) => format!("{ratio} permille"),
+            None => {
+                "not measured (the reader refused — the rig's numbers own the platform)".to_string()
+            }
+        };
+        let word = match self.ratio_permille {
+            Some(_) if self.breach => "OVER",
+            Some(_) => "ok",
+            None => "n/a",
+        };
+        format!(
+            "  peak rss (limit {RSS_RATIO_PERMILLE_MAX} permille of the output): {value}  {word}\n"
+        )
+    }
+
+    /// Renders the row as the one-line JSON interchange: fixed key
+    /// order, whole numbers only, `null` when unmeasured (the
+    /// report-JSON escape rules — no floats ride).
+    #[must_use]
+    pub fn render_json(&self) -> String {
+        match self.ratio_permille {
+            Some(ratio) => format!(
+                "{{\"peak_rss\":{{\"ratio_permille\":{ratio},\"breach\":{}}}}}",
+                self.breach
+            ),
+            None => "{\"peak_rss\":null}".to_string(),
+        }
+    }
+}
+
+/// Reads the process's own peak resident set (the high-water mark) in
+/// bytes — the caller's [`RssSample`] input. Linux reads `/proc`'s
+/// `VmHWM` (the kernel's monotonic high-water mark, whole `kB` units —
+/// the sweep's process peak over the pipeline and its gates); a
+/// platform that does not expose the mark, or a read that fails,
+/// returns `None` — the gate records unmeasured, never a fabricated
+/// zero.
+#[must_use]
+pub fn peak_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        let kb: u64 = line
+            .strip_prefix("VmHWM:")?
+            .trim()
+            .strip_suffix("kB")?
+            .trim()
+            .parse()
+            .ok()?;
+        kb.checked_mul(1024)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 /// Prices one run's `--time` rows against the serial-fraction budget —
