@@ -12,7 +12,7 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use std::time::Duration;
 
-use pgr_core::budget::{check_report, check_sweep};
+use pgr_core::budget::{RssSample, check_report, check_rss, check_sweep};
 use pgr_core::observe::{Phase, PhaseDetail, PhaseEvent};
 use pgr_core::sweep::{SweepPhaseRow, SweepSummary};
 use pgr_core::time_report::TimeReport;
@@ -141,6 +141,28 @@ fn bench_budgets(c: &mut Criterion) {
     });
     group.bench_function("render_json_7_phases", |b| {
         b.iter(|| black_box(dirty.render_json().len()));
+    });
+
+    // The peak-RSS row (§2.2's note, TDD §10.5's table): the check over
+    // one measured sample beside the row's rendered faces — the
+    // arithmetic is one permille division, the honest shape the
+    // enforcement half rides.
+    let rss = RssSample {
+        peak_bytes: 1_800_000,
+        output_bytes: 1_000_000,
+    };
+    group.bench_function("check_rss", |b| {
+        b.iter(|| {
+            let verdict = check_rss(Some(black_box(rss)));
+            black_box(verdict.is_clean());
+        });
+    });
+    let rss_verdict = check_rss(Some(rss));
+    group.bench_function("render_rss", |b| {
+        b.iter(|| black_box(rss_verdict.render().len()));
+    });
+    group.bench_function("render_rss_json", |b| {
+        b.iter(|| black_box(rss_verdict.render_json().len()));
     });
 
     group.finish();
