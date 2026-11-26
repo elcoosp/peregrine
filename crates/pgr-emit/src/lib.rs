@@ -27,6 +27,7 @@ pub mod incremental;
 pub mod object;
 pub mod reloc;
 pub mod signature;
+pub mod sweep;
 pub mod tile;
 pub mod writer;
 
