@@ -1,27 +1,38 @@
 //! The workspace's developer commands — the `xtask` pattern's crate, run
 //! as `cargo run -p xtask -- <command>`.
 //!
-//! The first command is the one the benchmarks ledger names as a
-//! follow-up: the **parameterized corpus generator** for nightly shape
-//! sweeps (docs/BENCHMARKS.md, "How to read these numbers" — "Known
-//! follow-ups: … parameterized corpus generator behind an `xtask` for
-//! nightly shape sweeps"). The generator itself is the
-//! `pgr_fixtures::corpus` seam; this crate is the CLI face the ledger
-//! names — the command a nightly shape-sweep job drives:
+//! The commands are the two faces of the benchmarks ledger's named
+//! follow-up — the nightly shape sweep (docs/BENCHMARKS.md, "How to read
+//! these numbers" — "Known follow-ups: … parameterized corpus generator
+//! behind an `xtask` for nightly shape sweeps"):
+//!
+//! - **corpus** writes the generated corpus (the `pgr_fixtures::corpus`
+//!   seam's deterministic bytes) and prints the manifest the sweep
+//!   records beside its measurements:
 //!
 //! ```sh
 //! cargo run -p xtask -- corpus --out /tmp/sweep/many-tiny \
 //!     --preset many-tiny --objects 50
 //! ```
 //!
-//! The command writes the generated corpus (deterministic bytes — the
-//! BENCHMARKS corpora contract) under zero-padded command-line-ordered
-//! names and prints the manifest the sweep records beside its
-//! measurements.
+//! - **sweep** measures the §9.3 nightly face over a generated corpus —
+//!   the observed pipeline run `--runs` times (the contract names ten),
+//!   the runs reduced to the median/p95 walls and the per-phase rows
+//!   ([`pgr_core::sweep`], the harness seam), the ledger line written to
+//!   `--out` (the file the nightly keeps and the next nightly's baseline
+//!   compares against):
+//!
+//! ```sh
+//! cargo run -p xtask -- sweep --out /tmp/sweep/many-tiny.json \
+//!     --preset many-tiny --runs 10
+//! ```
 
 use std::path::PathBuf;
 
-use pgr_fixtures::corpus::{CorpusPreset, CorpusSpec, write_corpus};
+use pgr_core::layout::{LinkConfig, OutputType};
+use pgr_core::link::{LinkInput, Parallelism};
+use pgr_core::sweep::{SweepPlan, run_sweep, write_ledger};
+use pgr_fixtures::corpus::{CorpusPreset, CorpusSpec, build_corpus, write_corpus};
 
 /// The exit code a malformed command line exits with (the driver's usage
 /// convention).
@@ -117,7 +128,14 @@ fn apply_flag(args: &mut CorpusArgs, flag: &str, value: &str) -> Result<(), Stri
             let preset = CorpusPreset::from_name(value).ok_or_else(|| {
                 format!(
                     "--preset {value:?} is not a preset name (the presets are {})",
-                    ["many-tiny", "large-debug", "archive-heavy", "single-giant"].join(", ")
+                    [
+                        "many-tiny",
+                        "large-debug",
+                        "archive-heavy",
+                        "single-giant",
+                        "byte-touching"
+                    ]
+                    .join(", ")
                 )
             })?;
             args.preset = Some(preset);
@@ -180,27 +198,247 @@ fn run_corpus(args: &CorpusArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// The sweep command's parsed arguments: the corpus shape (the corpus
+/// command's axes), the run count and the ledger file.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SweepArgs {
+    /// The ledger file to write (required — never a repo-tree default).
+    out: Option<PathBuf>,
+    /// The preset shape (kebab-case; the default is `many-tiny`).
+    preset: Option<CorpusPreset>,
+    /// Direct objects (overrides the preset's count).
+    objects: Option<usize>,
+    /// `__text` payload per object, in KiB.
+    text_kib: Option<usize>,
+    /// Extra defined symbols per object.
+    symbols_per_object: Option<usize>,
+    /// Archive members (0 = no archive).
+    archive_members: Option<usize>,
+    /// `__text` payload per archive member, in KiB.
+    member_text_kib: Option<usize>,
+    /// Recorded runs (the §9.3 contract names 10; the default rides it).
+    runs: Option<usize>,
+    /// `auto` (the M4 parallel pipeline, the default) or `serial` (the
+    /// determinism lane).
+    parallel: Option<String>,
+}
+
+impl SweepArgs {
+    /// The spec the arguments name: the preset's shape with the parsed
+    /// overrides applied (the corpus command's own projection).
+    fn spec(&self) -> CorpusSpec {
+        let base = CorpusSpec::new(self.preset.unwrap_or(CorpusPreset::ManyTiny));
+        CorpusSpec {
+            preset: base.preset,
+            objects: self.objects,
+            text_kib: self.text_kib,
+            symbols_per_object: self.symbols_per_object,
+            archive_members: self.archive_members,
+            member_text_kib: self.member_text_kib,
+        }
+    }
+
+    /// The recorded-run count (the §9.3 nightly contract's ten).
+    fn runs(&self) -> usize {
+        self.runs.unwrap_or(10)
+    }
+
+    /// The lane the sweep rides: the M4 parallel pipeline by default, the
+    /// serial determinism lane under `--parallel serial`.
+    fn parallel(&self) -> Parallelism {
+        match self.parallel.as_deref() {
+            Some("serial") => Parallelism::Serial,
+            _ => Parallelism::Auto,
+        }
+    }
+
+    /// The ledger's shape label: the preset and the effective axes, in a
+    /// stable order — the string the next nightly's baseline names.
+    fn label(&self) -> String {
+        let shape = self.spec().resolved();
+        format!(
+            "{} objects={} text_kib={} syms_per_obj={} archive_members={}",
+            self.spec().preset.name(),
+            shape.objects,
+            shape.text_kib,
+            shape.symbols_per_object,
+            shape.archive_members,
+        )
+    }
+}
+
+/// Applies one sweep flag to the args, refusing unknown names (the
+/// surface's own vocabulary is the fix). The shape axes ride the corpus
+/// command's projection; `--runs` and `--parallel` are the sweep's own.
+fn apply_sweep_flag(args: &mut SweepArgs, flag: &str, value: &str) -> Result<(), String> {
+    match flag {
+        "out" => {
+            args.out = Some(PathBuf::from(value));
+            Ok(())
+        }
+        "preset" => {
+            let preset = CorpusPreset::from_name(value).ok_or_else(|| {
+                format!(
+                    "--preset {value:?} is not a preset name (the presets are {})",
+                    [
+                        "many-tiny",
+                        "large-debug",
+                        "archive-heavy",
+                        "single-giant",
+                        "byte-touching"
+                    ]
+                    .join(", ")
+                )
+            })?;
+            args.preset = Some(preset);
+            Ok(())
+        }
+        "objects" => {
+            args.objects = Some(parse_count(flag, value)?);
+            Ok(())
+        }
+        "text-kib" => {
+            args.text_kib = Some(parse_count(flag, value)?);
+            Ok(())
+        }
+        "symbols-per-object" => {
+            args.symbols_per_object = Some(parse_count(flag, value)?);
+            Ok(())
+        }
+        "archive-members" => {
+            args.archive_members = Some(parse_count(flag, value)?);
+            Ok(())
+        }
+        "member-text-kib" => {
+            args.member_text_kib = Some(parse_count(flag, value)?);
+            Ok(())
+        }
+        "runs" => {
+            args.runs = Some(parse_count(flag, value)?);
+            Ok(())
+        }
+        "parallel" => {
+            if value != "auto" && value != "serial" {
+                return Err(format!(
+                    "--parallel {value:?} is not a lane (the lanes are auto and serial)"
+                ));
+            }
+            args.parallel = Some(value.to_string());
+            Ok(())
+        }
+        other => Err(format!(
+            "--{other} is not a sweep flag (the flags are --out --preset --objects --text-kib \
+             --symbols-per-object --archive-members --member-text-kib --runs --parallel)"
+        )),
+    }
+}
+
+/// Parses the sweep command's argument list.
+///
+/// # Errors
+/// A descriptive message for a malformed command line — an unexpected
+/// positional, a flag missing its value, an unknown flag, a bad count or
+/// a missing `--out`.
+fn parse_sweep_args(args: &[String]) -> Result<SweepArgs, String> {
+    let mut parsed = SweepArgs::default();
+    for flag in parse_flags(args)? {
+        apply_sweep_flag(&mut parsed, flag.name, flag.value)?;
+    }
+    if parsed.runs() == 0 {
+        return Err("--runs 0 records nothing — plan at least one run".to_string());
+    }
+    if parsed.out.is_none() {
+        return Err(
+            "the sweep command needs --out <ledger.json> (the file the nightly keeps)".to_string(),
+        );
+    }
+    Ok(parsed)
+}
+
+/// Runs the sweep command: generates the corpus in memory, sweeps it
+/// through the observed pipeline, prints the manifest and the reduced
+/// faces, and writes the ledger line to `--out`.
+///
+/// # Errors
+/// The generator's, the pipeline's or the filesystem's refusal, already
+/// worded.
+fn run_sweep_command(args: &SweepArgs) -> Result<(), String> {
+    let out = args.out.as_ref().expect("parse_sweep_args checked --out");
+    let spec = args.spec();
+    let contents = build_corpus(&spec).map_err(|e| e.to_string())?;
+    // The corpus's files split on their kind: the direct objects ride the
+    // inputs, the one `libcorpus.a` (when the shape carries one) projects
+    // onto the archives — the S7 pull's own input, never a direct parse.
+    let mut inputs = Vec::new();
+    let mut archives = Vec::new();
+    for (name, bytes) in &contents.files {
+        if name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("a"))
+        {
+            archives.push(
+                pgr_core::sweep::archive_input(name, bytes.clone()).map_err(|e| e.to_string())?,
+            );
+        } else {
+            inputs.push(LinkInput {
+                name: name.clone(),
+                bytes: bytes.clone(),
+            });
+        }
+    }
+    let cfg = LinkConfig {
+        filetype: OutputType::Execute,
+        ..LinkConfig::default()
+    };
+    let plan = SweepPlan {
+        label: args.label(),
+        runs: args.runs(),
+    };
+    let outcome =
+        run_sweep(&inputs, &archives, &cfg, args.parallel(), &plan).map_err(|e| e.to_string())?;
+    print!("{}", contents.manifest.render());
+    print!("{}", outcome.render());
+    let written = write_ledger(&outcome.label, outcome.runs, &outcome.summary, out)
+        .map_err(|e| e.to_string())?;
+    println!("ledger: {} ({written} bytes)", out.display());
+    Ok(())
+}
+
 /// Parses the command line into the one command the crate carries.
 ///
 /// # Errors
 /// A descriptive message for a missing or unknown command.
-fn parse_command(args: &[String]) -> Result<CorpusArgs, String> {
+fn parse_command(args: &[String]) -> Result<Command, String> {
     match args.first().map(String::as_str) {
-        Some("corpus") => parse_corpus_args(&args[1..]),
+        Some("corpus") => Ok(Command::Corpus(parse_corpus_args(&args[1..])?)),
+        Some("sweep") => Ok(Command::Sweep(parse_sweep_args(&args[1..])?)),
         Some(other) => Err(format!(
-            "unknown command {other:?} (the commands are: corpus)"
+            "unknown command {other:?} (the commands are: corpus, sweep)"
         )),
-        None => Err("a command is required: corpus".to_string()),
+        None => Err("a command is required: corpus | sweep".to_string()),
     }
+}
+
+/// One dispatched command: the parsed arguments and the runner they ride.
+#[derive(Debug)]
+enum Command {
+    /// The corpus generator's face.
+    Corpus(CorpusArgs),
+    /// The shape-sweep harness's face.
+    Sweep(SweepArgs),
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match parse_command(&args).and_then(|parsed| run_corpus(&parsed)) {
+    let dispatch = parse_command(&args).and_then(|command| match command {
+        Command::Corpus(ref parsed) => run_corpus(parsed),
+        Command::Sweep(ref parsed) => run_sweep_command(parsed),
+    });
+    match dispatch {
         Ok(()) => {}
         Err(message) => {
             eprintln!("pgr-xtask: {message}");
-            let usage = args.first().is_none_or(|c| c != "corpus");
+            let usage = args.first().is_none_or(|c| c != "corpus" && c != "sweep");
             std::process::exit(if usage { USAGE_EXIT } else { FAILURE_EXIT });
         }
     }
@@ -281,10 +519,61 @@ mod tests {
     }
 
     #[test]
+    fn sweep_args_default_to_the_nightly_contract() {
+        let parsed = parse_sweep_args(&args(&["--out", "/tmp/ledger.json"]))
+            .expect("the command line parses");
+        assert_eq!(
+            parsed.runs(),
+            10,
+            "the §9.3 contract's ten runs is the default"
+        );
+        assert_eq!(
+            parsed.parallel(),
+            Parallelism::Auto,
+            "the M4 lane is the default"
+        );
+        assert_eq!(parsed.spec().preset, CorpusPreset::ManyTiny);
+        let label = parsed.label();
+        assert!(
+            label.contains("many-tiny") && label.contains("objects=50"),
+            "the label names the preset and the axes: {label}"
+        );
+    }
+
+    #[test]
+    fn sweep_args_parse_the_runs_and_the_lane() {
+        let parsed = parse_sweep_args(&args(&[
+            "--out",
+            "/tmp/ledger.json",
+            "--runs",
+            "3",
+            "--parallel",
+            "serial",
+            "--preset",
+            "large-debug",
+        ]))
+        .expect("the command line parses");
+        assert_eq!(parsed.runs(), 3);
+        assert_eq!(parsed.parallel(), Parallelism::Serial);
+        assert_eq!(parsed.spec().preset, CorpusPreset::LargeDebug);
+        let err = parse_sweep_args(&args(&["--out", "/tmp/l.json", "--parallel", "turbo"]))
+            .expect_err("the unknown lane refuses");
+        assert!(err.contains("auto"), "the refusal names the lanes: {err}");
+        let err = parse_sweep_args(&args(&["--runs", "0"])).expect_err("zero runs refuse");
+        assert!(
+            err.contains("at least one run"),
+            "the refusal names the fix: {err}"
+        );
+        let err =
+            parse_sweep_args(&args(&["--runs", "3"])).expect_err("the missing ledger refuses");
+        assert!(err.contains("--out"), "the refusal names the flag: {err}");
+    }
+
+    #[test]
     fn the_command_name_gates_the_parse() {
         let err = parse_command(&args(&["link"])).expect_err("the unknown command refuses");
         assert!(
-            err.contains("corpus"),
+            err.contains("corpus") && err.contains("sweep"),
             "the refusal names the commands: {err}"
         );
         let err = parse_command(&args(&[])).expect_err("the missing command refuses");
@@ -292,5 +581,8 @@ mod tests {
             err.contains("corpus"),
             "the refusal names the command: {err}"
         );
+        let parsed = parse_command(&args(&["sweep", "--out", "/tmp/l.json"]))
+            .expect("the sweep command dispatches");
+        assert!(matches!(parsed, Command::Sweep(_)));
     }
 }
