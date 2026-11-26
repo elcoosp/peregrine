@@ -775,3 +775,13 @@ harness = false
 [[bench]]
 name = "sweep"
 harness = false
+
+# The §9.3 budget-gate bench (the BENCHMARKS ledger's "Budgets land in
+# CI as they ship" row: the enforcement half) — both checkers over the
+# nightly's row sets (the sweep face with and without the 1-thread
+# reference, the --time report face) and the two rendered faces. The
+# bench measures the gate's own price, not a clock — the budget
+# arithmetic is the `sweep_budgets` gate matrix.
+[[bench]]
+name = "budgets"
+harness = false
