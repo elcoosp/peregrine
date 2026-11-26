@@ -1039,7 +1039,9 @@ name = "xtask"
 version = "0.22.0"
 dependencies = [
  "pgr-core",
+ "pgr-emit",
  "pgr-fixtures",
+ "pgr-verify",
 ]
 
 [[package]]
