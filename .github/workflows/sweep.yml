@@ -13,12 +13,25 @@ name: Shape sweep
 # walls plus the per-phase rows, and the stored ledger lines upload as
 # workflow artifacts — the "results stored" half.
 #
+# The §9.3 correctness half rides the sweep itself: every benchmark link
+# ships through the strict verifier (pgr_emit::sweep — the run-gate seam)
+# before the ledger records, so the stored ledgers are earned by images
+# the strict pass shipped ("performance jobs never gate on unverified
+# output").
+#
+# The §9.3 budget gate rides in report mode here ("--budgets report" —
+# the verdict renders with the ledger): the budgets' thresholds are the
+# §9.1 rig job's calibration ("at 8 P-cores"), and this runner's walls
+# are dev-sandbox-class numbers against tiny synthesized shapes — the
+# calibrated enforce face is the rig job's (`--budgets enforce`).
+#
 # The rig-bound half stays named, not faked: the wall-clock comparison
 # against ld-prime / ld64.lld / mold-macho baselines and the G1 gate
 # need the §9.1 Apple Silicon rigs (docs/BENCHMARKS.md, "Known
 # follow-ups: … rig-bound: S1 writer matrix, S4 P-core sizing, PGO, the
-# G1 gate"). This runner's walls are dev-sandbox-class numbers — recorded
-# honestly, never compared against linker baselines that do not run here.
+# G1 gate, the per-PR instruction/cache-miss counts"). This runner's
+# walls are dev-sandbox-class numbers — recorded honestly, never
+# compared against linker baselines that do not run here.
 
 on:
   workflow_dispatch:
@@ -54,13 +67,13 @@ jobs:
           mkdir -p sweep-ledgers
           cargo run --locked -p xtask -- sweep \
             --out sweep-ledgers/many-tiny.json \
-            --preset many-tiny --runs 10
+            --preset many-tiny --runs 10 --budgets report
           cargo run --locked -p xtask -- sweep \
             --out sweep-ledgers/large-debug.json \
-            --preset large-debug --runs 10
+            --preset large-debug --runs 10 --budgets report
           cargo run --locked -p xtask -- sweep \
             --out sweep-ledgers/archive-heavy.json \
-            --preset archive-heavy --runs 10
+            --preset archive-heavy --runs 10 --budgets report
       - name: The ledgers parse (the stored face's own gate)
         run: cargo test --release --locked -p pgr-core --test shape_sweep
       - name: Upload the stored ledgers
