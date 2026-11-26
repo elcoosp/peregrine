@@ -187,3 +187,164 @@ pub fn run_verified_sweep(
     let outcome = run_sweep_gated(inputs, archives, cfg, parallel, plan, &mut gate)?;
     Ok(VerifiedSweep { outcome, gate })
 }
+
+/// One run's determinism stats: the run's fused image size and the
+/// gate's own wall (the emit + byte-compare — its own measurement,
+/// never a link-wall row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeterminismStat {
+    /// The run the stats rode (the sweep's run order).
+    pub run: usize,
+    /// The image's byte size (the baseline's first — the compared runs
+    /// must match it byte for byte or the sweep refuses).
+    pub bytes: usize,
+    /// The gate's own wall (the fused emit + the compare).
+    pub gate_wall: std::time::Duration,
+}
+
+/// The sweep's determinism gate: every run's image is compared
+/// byte-for-byte against the run-0 image — §9.3's determinism bullet
+/// ("**Determinism:** double-link byte-equality on every PR (TDD
+/// §4.3)") riding the run-gate seam, and TDD §11's normative verifier
+/// assertion ("link the same corpus twice in separate processes →
+/// byte-identical (CI-level, every PR)") at the sweep's own scale.
+///
+/// The gate composes the same half the verify gate owns — the run's
+/// plan emits through the fused tile path — and refuses with the first
+/// differing byte named when a run's bytes move. The recorded run-0
+/// image ([`DeterminismGate::baseline_image`]) is the separate-process
+/// artifact: the CI determinism job writes it from two processes and
+/// byte-compares the files, the "twice in separate processes" half of
+/// the §11 assertion.
+#[derive(Debug, Clone)]
+pub struct DeterminismGate {
+    /// The run-0 image (the baseline the compared runs must match).
+    baseline: Option<Vec<u8>>,
+    /// One stat per compared run, in run order (a refused run records
+    /// nothing — the measurement never rode a divergent image).
+    stats: Vec<DeterminismStat>,
+}
+
+impl Default for DeterminismGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeterminismGate {
+    /// A gate with no baseline yet (the first compared run records it).
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            baseline: None,
+            stats: Vec::new(),
+        }
+    }
+
+    /// The compared runs' stats, in run order.
+    #[must_use]
+    pub fn stats(&self) -> &[DeterminismStat] {
+        &self.stats
+    }
+
+    /// The recorded run-0 image — the separate-process artifact the CI
+    /// determinism job byte-compares (`None` before the first run).
+    #[must_use]
+    pub fn baseline_image(&self) -> Option<&[u8]> {
+        self.baseline.as_deref()
+    }
+
+    /// The gate's per-image face: the honest image records the baseline
+    /// (run 0) or matches it (a later run); a divergent one refuses with
+    /// the run, the contract and the first differing byte named. The
+    /// fused emit (`on_run`'s composition) rides this face too; the
+    /// different-code-path rule (the §11 shapes) gates through here.
+    ///
+    /// # Errors
+    /// The divergence's own wording — the run, the byte-identity
+    /// contract and the first differing byte (or both images' sizes on
+    /// a length mismatch).
+    pub fn compare_image(&mut self, run: usize, image: &[u8]) -> Result<(), String> {
+        let started = Instant::now();
+        let bytes = image.len();
+        let Some(baseline) = self.baseline.as_ref() else {
+            self.baseline = Some(image.to_vec());
+            let gate_wall = started.elapsed();
+            self.stats.push(DeterminismStat {
+                run,
+                bytes,
+                gate_wall,
+            });
+            return Ok(());
+        };
+        if baseline.len() != bytes {
+            return Err(format!(
+                "the run-{run} image is not byte-identical to the run-0 image — the \
+                 double-link byte-equality contract (TDD §4.3) refuses: {bytes} bytes vs \
+                 {} baseline bytes",
+                baseline.len()
+            ));
+        }
+        if let Some(offset) = baseline.iter().zip(image.iter()).position(|(a, b)| a != b) {
+            return Err(format!(
+                "the run-{run} image is not byte-identical to the run-0 image — the \
+                 double-link byte-equality contract (TDD §4.3) refuses: first difference \
+                 at byte {offset}"
+            ));
+        }
+        let gate_wall = started.elapsed();
+        self.stats.push(DeterminismStat {
+            run,
+            bytes,
+            gate_wall,
+        });
+        Ok(())
+    }
+}
+
+impl SweepRunGate for DeterminismGate {
+    fn on_run(&mut self, run: usize, result: &pgr_core::link::LinkResult) -> Result<(), String> {
+        // The run's own plan is the image's source: the fused tile emit
+        // over the Passes-1–3 plan the sweep measured. An emit refusal
+        // is the gate's refusal too — the image the link planned is the
+        // image the byte-equality contract covers.
+        let image = build_image_fused(&result.layout, &result.objects)
+            .map_err(|e| format!("the run-{run} image's fused emit refused: {e}"))?;
+        self.compare_image(run, &image)
+    }
+}
+
+/// A deterministic sweep: the outcome the sweep recorded (the walls and
+/// the reduced rows — every run byte-compared) beside the gate's stats
+/// (the comparison's own record, the baseline included).
+#[derive(Debug, Clone)]
+pub struct DeterministicSweep {
+    /// The sweep's measurement (every run gated).
+    pub outcome: SweepOutcome,
+    /// The determinism gate's stats, in run order.
+    pub gate: DeterminismGate,
+}
+
+/// Runs the observed pipeline `plan.runs` times over one corpus with
+/// [`DeterminismGate`] on every run — the §9.3 determinism half: the
+/// walls and rows the nightly records, each run's image first compared
+/// byte-for-byte against the run-0 image, the sweep aborting on any
+/// divergence (the nightly never stores a wall from a link whose bytes
+/// moved).
+///
+/// # Errors
+/// The sweep's own refusals ([`pgr_core::sweep::SweepError::Runs`],
+/// [`pgr_core::sweep::SweepError::Link`]) and the gate's
+/// ([`pgr_core::sweep::SweepError::Gate`] — the divergence's lines, the
+/// run named).
+pub fn run_deterministic_sweep(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    plan: &SweepPlan,
+) -> Result<DeterministicSweep, pgr_core::sweep::SweepError> {
+    let mut gate = DeterminismGate::new();
+    let outcome = run_sweep_gated(inputs, archives, cfg, parallel, plan, &mut gate)?;
+    Ok(DeterministicSweep { outcome, gate })
+}
