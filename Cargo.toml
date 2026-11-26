@@ -49,6 +49,13 @@ rayon = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 miette = { version = "7", default-features = false, features = ["derive", "fancy-no-backtrace"] }
+# The §9.3 per-PR allocation-count seam's seat: DHAT (the valgrind-class
+# tooling the plan names) as its in-process Rust face — `dhat::Alloc` is
+# the counting global allocator the measurement binaries install, and the
+# library's `alloc_count` seat samples its cumulative counters. The
+# counting unsafe lives inside the dependency; the tree's
+# `unsafe_code = "forbid"` gate stays intact.
+dhat = "0.3"
 
 # Workspace-wide lint policy (Peregrine hot-path rules, perf doc §5):
 #   * `unsafe` is forbidden everywhere at M0. When `pgr-emit`/`pgr-format` later
