@@ -765,3 +765,13 @@ harness = false
 [[bench]]
 name = "literal_merge"
 harness = false
+
+# The shape-sweep harness bench (the BENCHMARKS ledger's named follow-up:
+# the nightly's measurement core) — the reduction's O(n log n) over the
+# recorded run sets, the stored ledger's render/parse faces, and one
+# swept run beside the plain link (the harness's per-link overhead). The
+# bench measures the harness's own price, not a byte-parity assertion —
+# the parity lock is the `shape_sweep` gate matrix.
+[[bench]]
+name = "sweep"
+harness = false
