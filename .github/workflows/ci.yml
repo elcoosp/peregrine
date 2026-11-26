@@ -63,3 +63,35 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+
+  determinism:
+    name: determinism — double-link byte-equality on every PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+      - name: Build (locked, release)
+        run: cargo build --release --locked --workspace
+      - name: Double-link the shape — two processes, each run byte-compared
+        run: |
+          mkdir -p determinism/process-a determinism/process-b
+          # Each process double-links in-process (the determinism gate
+          # compares every run against the run-0 image — §9.3
+          # "double-link byte-equality on every PR (TDD §4.3)") and
+          # writes its run-0 image for the separate-process compare
+          # (TDD §11: "link the same corpus twice in separate processes
+          # → byte-identical (CI-level, every PR)").
+          cargo run --locked -p xtask -- sweep \
+            --out determinism/process-a/ledger.json \
+            --preset many-tiny --runs 2 --budgets off \
+            --determinism determinism/process-a/image.bin
+          cargo run --locked -p xtask -- sweep \
+            --out determinism/process-b/ledger.json \
+            --preset many-tiny --runs 2 --budgets off \
+            --determinism determinism/process-b/image.bin
+      - name: Byte-compare the two processes' images (TDD §11)
+        run: cmp determinism/process-a/image.bin determinism/process-b/image.bin
