@@ -903,15 +903,20 @@ The "30 CPU-days clean" gate formally closes on the rig.
 
 1. **Starting lines, not targets.** Each pass's gate is beating its own baseline on the same
    corpora, then parallel efficiency — then the hardware comparisons.
-2. **Budgets land in CI as they ship**: `--time` JSON, serial fraction ≤ 15 % (except flush),
-   parallel efficiency ≥ 70 % on Passes 1/3/4.
+2. **Budgets landed in CI** (`pgr_core::budget`, the §9.3 gate): `--time` JSON rows priced —
+   serial fraction ≤ 15 ‰×100 (≤ 15 %, except flush) and parallel efficiency ≥ 70 % on
+   Passes 1/3/4; the nightly sweeps ride `--budgets report` (the verdict renders with the
+   ledger), the §9.1 rig job carries `--budgets enforce` ("fail the build if").
 3. **Nightly wall-clock vs ld-prime / `ld64.lld` / mold-macho needs the P0 rigs** (perf doc §9.1).
    The CI skeleton ships; the hardware baselines do not exist yet.
 
-**Known follow-ups**: a byte-touching parse bench (memory-bound, not metadata-bound) ·
-parameterized corpus generator behind an `xtask` for nightly shape sweeps · D7 canonical import
-order remains optional (M4 shipped without needing it; M8's insertion-stable ordinals cover the
-incremental requirement) · rig-bound: S1 writer matrix, S4 P-core sizing, PGO, the G1 gate.
+**Known follow-ups** (updated — the byte-touching parse bench and the parameterized corpus
+generator behind an `xtask` landed with the shape-sweep rungs, and the §9.3 budget gate plus the
+sweep's verify gate landed with them; the rows below are what still stands): the per-PR
+instruction/cache-miss/allocation-count job (§9.3's first bullet — the perf counters the
+dev-class runners do not carry) · D7 canonical import order remains optional (M4 shipped without
+needing it; M8's insertion-stable ordinals cover the incremental requirement) · rig-bound: S1
+writer matrix, S4 P-core sizing, PGO, the G1 gate, the budget gate's `enforce` face.
 
 
 ## The order-surface groups (M90/M91)
@@ -1163,3 +1168,34 @@ and the import table; only the rebase encoder's composition differs, one
 branch — the same shape gate the rung-4 family bench pinned one family
 over). No numbers claimed yet — the bench lands with the slice and the
 next gate run fills the row the way the rung-3 floor bench was filled.
+
+## The §9.3 measurement gates
+
+The measurement infrastructure's enforcement half — the budget gate (`pgr_core::budget`) and the
+sweep's verify gate (`pgr_emit::sweep` over the run-gate seam) — both priced beside the rows they
+read. Recorded on the dev sandbox (2-core KVM rig); the hardware gates own the comparable numbers.
+
+### The budget gate
+
+The `budgets` bench (`cargo bench -p pgr-core --bench budgets`): both checkers over the nightly's
+row sets and the two rendered faces. `budgets/check_sweep_7_phases/{10|100}` — the sweep face
+over the seven-phase segmented shape at the nightly's ten-run set and the hundred-run slope
+**93.6 ns** and **106 ns** (the gate reads the reduced rows — the reduction already paid the
+sort); `check_sweep_7_phases_paired` — the efficiency half beside it (the 1-thread reference
+paired per gated pass) **149 ns**; `check_report_7_rows` — the `--time` report face (one run's
+rows against the run's own wall) **96.6 ns**; `render_verdict_7_phases` — the text table over a
+dirty verdict **1.72 µs** (the `render_json` face rides the same family). The gate is integer
+permille over the recorded rows — its price is a rounding of the pass it rides, and the nightly
+pays it once per shape.
+
+### The sweep's verify gate
+
+The `verified_sweep` bench (`cargo bench -p pgr-emit --bench verified_sweep`): the gate's
+per-image cost beside the emit it gates over the 64-object many-tiny corpus.
+`verified_sweep/link_emit_64_objects` — the fused emit alone **1.65 ms**;
+`link_emit_verify_64_objects` — the same corpus's image plus the strict verifier's whole-image
+pass **1.83 ms** (the gate's overhead is the verifier's own price — the M73 shape, warnings
+failing, the signature hash recomputed); `sweep_1_run/{plain|verified}` — one sweep run without
+and with the gate (**1.00 ms** vs **1.70 ms**: the verified run pays the emit and the verify
+outside the measured wall, which is exactly the §9.3 contract — the walls price the pipeline,
+the gate owns the product).
