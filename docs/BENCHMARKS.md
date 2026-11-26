@@ -924,9 +924,11 @@ The "30 CPU-days clean" gate formally closes on the rig.
 **Known follow-ups** (updated — the byte-touching parse bench and the parameterized corpus
 generator behind an `xtask` landed with the shape-sweep rungs, and the §9.3 budget gate, the
 sweep's verify gate, the §9.3 determinism gate and the §2.2 peak-RSS budget row landed with
-them; the rows below are what still stands): the per-PR
-instruction/cache-miss/allocation-count job (§9.3's first bullet — the perf counters the
-dev-class runners do not carry) · D7 canonical import order remains optional (M4 shipped without
+them; the per-PR job's **allocation half** — the `pgr_core::alloc_count` seat, the gated alloc
+sweep lane, its stored ledger and delta, the `xtask-alloc` CI face — landed with them; the rows
+below are what still stands): the per-PR instruction/cache-miss job (§9.3's first bullet — the
+perf counters the dev-class runners do not carry; the allocation half is the alloc lane's, the
+nightly's `.allocs.json` ledgers) · D7 canonical import order remains optional (M4 shipped without
 needing it; M8's insertion-stable ordinals cover the incremental requirement) · rig-bound: S1
 writer matrix, S4 P-core sizing, PGO, the G1 gate, the budget gate's `enforce` face.
 
@@ -1225,3 +1227,25 @@ deterministic run pays the fused emit and the compare outside the measured wall,
 exactly the §9.3 contract — the walls price the pipeline, the gate owns the bytes). The
 separate-process face is the CI job's (`cmp` over two processes' run-0 images), not a bench
 row — a file compare is not the linker's work.
+
+### The per-PR allocation-count lane
+
+The `alloc_count` bench (`cargo bench -p pgr-core --bench alloc_count`): the §9.3 allocation
+face's own price beside the lane it rides. `alloc_count/collector/events_14` — the collector's
+per-event cost over the fourteen-row segmented shape (one seat sample plus one push)
+**103 ns** for the fourteen events, ~7 ns per event; `report/render_14_rows` — the text table
+**1.39 µs** beside `report/render_json_14_rows` **592 ns** (the faces are O(rows), the
+nightly's own row counts); `seat/dhat_sample` — the DHAT bridge's sample price **8.2 ns**
+(the seat's counters are atomics); `seat/counted_alloc_4kib` — one 4 KiB alloc/free cycle
+under the recording seat **2.52 µs** (the backtrace capture included — the counted lane's
+honest per-allocation price, the walls it rides its own);
+`counted_collector/events_14` — the collector's per-event cost under the recording seat
+**3.20 µs** for the fourteen events (the collector's own bookkeeping rides the recorder's
+captures too); and `sweep/{wall_lane,alloc_lane_silent_seat,alloc_lane_counted_seat}_1_run` —
+one sweep run per lane over the quartered many-tiny corpus, **2.54 ms** / **2.37 ms** /
+**2.42 ms** (the lanes' plumbing is a wash beside the wall lane's — the counts, not the
+walls, are the lane's deliverable, the counted walls riding the recorder's price honestly in
+their own ledger). The counts' determinism rides the delta face (the `alloc_sweep` consumer
+example's two lanes pair at +0‰ on the stable phases — the layout's parallel drain riding
+its few permille). Recorded on the dev sandbox (2-core KVM rig); the hardware gates own the
+comparable numbers.
