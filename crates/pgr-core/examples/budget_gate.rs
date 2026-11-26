@@ -14,7 +14,7 @@
 //! cargo run -p pgr-core --example budget_gate
 //! ```
 
-use pgr_core::budget::{check_report, check_sweep};
+use pgr_core::budget::{RssSample, check_report, check_rss, check_sweep, peak_rss_bytes};
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, Parallelism};
 use pgr_core::sweep::{SweepPlan, run_sweep};
@@ -71,6 +71,19 @@ fn main() {
     let run_verdict = check_report("many-tiny-16/run-0", report);
     print!("{}", run_verdict.render());
 
+    // The output bytes the RSS ratio is priced against: the measured
+    // lane's last run emits through the fused tile path (the gate's
+    // product, outside the measured wall — the §2.1 denominator).
+    let last = measured.samples.last().expect("the lane recorded runs");
+    let image = {
+        // The lane's runs share one corpus and one plan — the link's
+        // own product emits through the fused tile path, the gated
+        // image the walk prices the RSS ratio against.
+        let result = pgr_core::link::link(&inputs, &[], &cfg).expect("the corpus links");
+        pgr_emit::build_image_fused(&result.layout, &result.objects).expect("the image emits")
+    };
+    let _ = last;
+
     // The fail-the-build face over a recorded row set that earned its
     // breach: a parse owning most of the wall (the skew the budget
     // exists to name). The rows are synthetic — the arithmetic, not the
@@ -94,4 +107,21 @@ fn main() {
     );
     print!("{}", breached.render());
     println!("enforce face: the nightly's `--budgets enforce` exits non-zero on this verdict");
+
+    // The peak-RSS row (§2.2's note — "peak RSS ≤ 2.5× output (TDD
+    // §10.5)"): the process's own high-water mark (the reader records
+    // `None` where the platform does not expose it — the gate never
+    // guesses) priced against the gated image's byte size, the §2.1
+    // metric's denominator. The measured face beside the unmeasured
+    // one, both rendered.
+    let peak = peak_rss_bytes();
+    let rss_verdict = check_rss(peak.map(|peak_bytes| RssSample {
+        peak_bytes,
+        output_bytes: u64::try_from(image.len()).unwrap_or(u64::MAX),
+    }));
+    print!("{}", rss_verdict.render());
+    println!("{}", rss_verdict.render_json());
+    println!(
+        "enforce face: the rig job's `--budgets enforce` counts this row's breach beside the pass rows"
+    );
 }
