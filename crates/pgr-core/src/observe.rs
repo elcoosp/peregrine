@@ -135,6 +135,30 @@ impl Phase {
             Self::Flush => "flush",
         }
     }
+
+    /// The token's phase — [`Phase::as_str`]'s reader side (the sweep
+    /// ledger's strict reader restores the reduced rows through it). The
+    /// tokens ride `as_str` itself, so the two faces cannot desync.
+    #[must_use]
+    pub(crate) fn from_token(token: &str) -> Option<Self> {
+        const TOKENS: &[(Phase, &str)] = &[
+            (Phase::Parse, Phase::Parse.as_str()),
+            (Phase::ArchivePull, Phase::ArchivePull.as_str()),
+            (Phase::Intern, Phase::Intern.as_str()),
+            (Phase::Resolve, Phase::Resolve.as_str()),
+            (Phase::Liveness, Phase::Liveness.as_str()),
+            (Phase::Fold, Phase::Fold.as_str()),
+            (Phase::Layout, Phase::Layout.as_str()),
+            (Phase::Reloc, Phase::Reloc.as_str()),
+            (Phase::RelinkGate, Phase::RelinkGate.as_str()),
+            (Phase::RelinkPlan, Phase::RelinkPlan.as_str()),
+            (Phase::RelinkPatch, Phase::RelinkPatch.as_str()),
+            (Phase::RelinkAudit, Phase::RelinkAudit.as_str()),
+            (Phase::Emit, Phase::Emit.as_str()),
+            (Phase::Flush, Phase::Flush.as_str()),
+        ];
+        TOKENS.iter().find(|(_, t)| *t == token).map(|(p, _)| *p)
+    }
 }
 
 /// The phase's own detail: the shape the pass already computed (the counts
