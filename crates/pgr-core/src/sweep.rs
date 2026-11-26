@@ -330,6 +330,32 @@ impl SweepRunGate for () {
     }
 }
 
+/// Pairs two run gates behind one [`SweepRunGate`] — the observer-pair
+/// shape for gates: the nightly rides the strict verifier *and* the
+/// determinism comparison, each gate keeping its own stats, either
+/// refusal aborting the sweep with its own wording (the run-gate
+/// seam's contract, one delegate at a time — the first refusal wins and
+/// the second gate never sees the run).
+pub struct GatePair<'a, 'b> {
+    first: &'a mut dyn SweepRunGate,
+    second: &'b mut dyn SweepRunGate,
+}
+
+impl<'a, 'b> GatePair<'a, 'b> {
+    /// Pairs two run gates behind one [`SweepRunGate`].
+    #[must_use]
+    pub fn new(first: &'a mut dyn SweepRunGate, second: &'b mut dyn SweepRunGate) -> Self {
+        Self { first, second }
+    }
+}
+
+impl SweepRunGate for GatePair<'_, '_> {
+    fn on_run(&mut self, run: usize, result: &LinkResult) -> Result<(), String> {
+        self.first.on_run(run, result)?;
+        self.second.on_run(run, result)
+    }
+}
+
 /// Runs the observed pipeline `plan.runs` times over one corpus, handing
 /// each run's plan to `gate` outside the measured wall — the gated
 /// sweep. See [`run_sweep`] for the measurement contract and
