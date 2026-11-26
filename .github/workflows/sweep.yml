@@ -25,6 +25,13 @@ name: Shape sweep
 # are dev-sandbox-class numbers against tiny synthesized shapes — the
 # calibrated enforce face is the rig job's (`--budgets enforce`).
 #
+# The §9.3 per-PR allocation-count job's allocation half rides the same
+# job ("plus allocation counts per pass" — counted in CI the §10.3 M1
+# gate's own wording): the allocation lane's binary (xtask-alloc — the
+# DHAT seat's own process, the wall lane's baselines riding the plain
+# allocator) records the per-pass counts beside the wall lane's sweeps,
+# the same gated runs, the same shapes, its own stored ledgers.
+#
 # The rig-bound half stays named, not faked: the wall-clock comparison
 # against ld-prime / ld64.lld / mold-macho baselines and the G1 gate
 # need the §9.1 Apple Silicon rigs (docs/BENCHMARKS.md, "Known
@@ -74,8 +81,19 @@ jobs:
           cargo run --locked -p xtask -- sweep \
             --out sweep-ledgers/archive-heavy.json \
             --preset archive-heavy --runs 10 --budgets report
+      - name: The allocation lane sweeps the shapes (the per-pass counts)
+        run: |
+          cargo run --locked -p xtask --bin xtask-alloc \
+            -- --out sweep-ledgers/many-tiny.allocs.json \
+            --preset many-tiny --runs 10
+          cargo run --locked -p xtask --bin xtask-alloc \
+            -- --out sweep-ledgers/large-debug.allocs.json \
+            --preset large-debug --runs 10
+          cargo run --locked -p xtask --bin xtask-alloc \
+            -- --out sweep-ledgers/archive-heavy.allocs.json \
+            --preset archive-heavy --runs 10
       - name: The ledgers parse (the stored face's own gate)
-        run: cargo test --release --locked -p pgr-core --test shape_sweep
+        run: cargo test --release --locked -p pgr-core --test shape_sweep --test alloc_sweep
       - name: Upload the stored ledgers
         uses: actions/upload-artifact@v4
         with:
