@@ -13,6 +13,11 @@ pgr-fixtures = { workspace = true }
 # The sweep command drives the harness seam (pgr_core::sweep) over the
 # generated corpus — the pipeline face the nightly job's ledger rides.
 pgr-core = { workspace = true }
+# The §9.3 correctness half: the nightly's sweep rides the verify gate
+# (pgr_emit::sweep) — every benchmark link ships through the strict
+# verifier before the ledger records.
+pgr-emit = { workspace = true }
+pgr-verify = { workspace = true }
 
 [lints]
 workspace = true
