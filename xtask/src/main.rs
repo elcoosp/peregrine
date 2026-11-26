@@ -26,13 +26,25 @@
 //! cargo run -p xtask -- sweep --out /tmp/sweep/many-tiny.json \
 //!     --preset many-tiny --runs 10
 //! ```
+//!
+//! The sweep prices the §9.3 budgets beside the walls when `--budgets`
+//! rides (`report` the default — the verdict renders with the ledger;
+//! `enforce` fails the build on a breach, the calibrated rig job's face;
+//! `off` skips the gate): the serial share per pass (`flush` exempt, the
+//! plan's own exception) and, when the measured lane is `auto`, the
+//! parallel efficiency of Passes 1/3/4 against the 1-thread reference
+//! lane the command sweeps beside it ([`pgr_core::budget`], the gate
+//! seam).
 
 use std::path::PathBuf;
 
+use pgr_core::budget::check_sweep;
 use pgr_core::layout::{LinkConfig, OutputType};
 use pgr_core::link::{LinkInput, Parallelism};
-use pgr_core::sweep::{SweepPlan, run_sweep, write_ledger};
+use pgr_core::sweep::{SweepPlan, write_ledger};
+use pgr_emit::sweep::run_verified_sweep;
 use pgr_fixtures::corpus::{CorpusPreset, CorpusSpec, build_corpus, write_corpus};
+use pgr_verify::Options;
 
 /// The exit code a malformed command line exits with (the driver's usage
 /// convention).
@@ -221,6 +233,24 @@ struct SweepArgs {
     /// `auto` (the M4 parallel pipeline, the default) or `serial` (the
     /// determinism lane).
     parallel: Option<String>,
+    /// The §9.3 budget gate's mode (`off`, `report` — the default — or
+    /// `enforce`; the calibrated rig job's face).
+    budgets: Option<String>,
+}
+
+/// The `--budgets` flag's parsed mode (the §9.3 gate's three faces).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum BudgetsMode {
+    /// Skip the gate entirely (the walls-only ledger face).
+    Off,
+    /// Price the budgets and render the verdict; never fail the build
+    /// (the dev-class runner's honest face — the thresholds are the
+    /// §9.1 rig job's calibration).
+    #[default]
+    Report,
+    /// Price the budgets and fail the build on a breach (the rig job's
+    /// face — §9.3's "fail the build if").
+    Enforce,
 }
 
 impl SweepArgs {
@@ -249,6 +279,15 @@ impl SweepArgs {
         match self.parallel.as_deref() {
             Some("serial") => Parallelism::Serial,
             _ => Parallelism::Auto,
+        }
+    }
+
+    /// The budget gate's mode (`report` the default).
+    fn budgets_mode(&self) -> BudgetsMode {
+        match self.budgets.as_deref() {
+            Some("off") => BudgetsMode::Off,
+            Some("enforce") => BudgetsMode::Enforce,
+            _ => BudgetsMode::Report,
         }
     }
 
@@ -326,9 +365,18 @@ fn apply_sweep_flag(args: &mut SweepArgs, flag: &str, value: &str) -> Result<(),
             args.parallel = Some(value.to_string());
             Ok(())
         }
+        "budgets" => {
+            if value != "off" && value != "report" && value != "enforce" {
+                return Err(format!(
+                    "--budgets {value:?} is not a mode (the modes are off, report and enforce)"
+                ));
+            }
+            args.budgets = Some(value.to_string());
+            Ok(())
+        }
         other => Err(format!(
             "--{other} is not a sweep flag (the flags are --out --preset --objects --text-kib \
-             --symbols-per-object --archive-members --member-text-kib --runs --parallel)"
+             --symbols-per-object --archive-members --member-text-kib --runs --parallel --budgets)"
         )),
     }
 }
@@ -394,13 +442,90 @@ fn run_sweep_command(args: &SweepArgs) -> Result<(), String> {
         label: args.label(),
         runs: args.runs(),
     };
-    let outcome =
-        run_sweep(&inputs, &archives, &cfg, args.parallel(), &plan).map_err(|e| e.to_string())?;
+    let outcome = run_verified_sweep(
+        &inputs,
+        &archives,
+        &cfg,
+        args.parallel(),
+        &plan,
+        // The strict pass (the M73 `-verify` gate's shape): warnings
+        // fail, the signature hash recomputed — §9.3's "performance
+        // jobs never gate on unverified output" is the nightly's own
+        // contract, not a flag.
+        &Options {
+            strict_warnings: true,
+            skip_hash_recompute: false,
+        },
+    )
+    .map_err(|e| e.to_string())?;
     print!("{}", contents.manifest.render());
-    print!("{}", outcome.render());
-    let written = write_ledger(&outcome.label, outcome.runs, &outcome.summary, out)
-        .map_err(|e| e.to_string())?;
+    print!("{}", outcome.outcome.render());
+    for stat in outcome.gate.stats() {
+        println!(
+            "verify: run {} strict-clean ({} symbols, {} fixup slots, verify {} µs)",
+            stat.run,
+            stat.symbols,
+            stat.fixup_slots,
+            stat.verify_wall.as_micros()
+        );
+    }
+    let written = write_ledger(
+        &outcome.outcome.label,
+        outcome.outcome.runs,
+        &outcome.outcome.summary,
+        out,
+    )
+    .map_err(|e| e.to_string())?;
     println!("ledger: {} ({written} bytes)", out.display());
+
+    // The §9.3 budget gate: the recorded rows priced against the
+    // budgets — the serial share per pass (`flush` exempt), and, when
+    // the measured lane is the parallel pool, the Passes 1/3/4
+    // efficiency against the 1-thread reference lane swept beside it.
+    // The walls are stored regardless (the §9.3 "results stored" half —
+    // the ledger is data); under `enforce` a breach fails the build.
+    let mode = args.budgets_mode();
+    if mode != BudgetsMode::Off {
+        let measured_lane = args.parallel();
+        let reference = if measured_lane == Parallelism::Auto {
+            Some(
+                run_verified_sweep(
+                    &inputs,
+                    &archives,
+                    &cfg,
+                    Parallelism::Serial,
+                    &plan,
+                    &Options {
+                        strict_warnings: true,
+                        skip_hash_recompute: false,
+                    },
+                )
+                .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
+        let threads = if measured_lane == Parallelism::Auto {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        } else {
+            1
+        };
+        let verdict = check_sweep(
+            &args.label(),
+            &outcome.outcome.summary,
+            reference.as_ref().map(|r| &r.outcome.summary),
+            threads,
+        );
+        print!("{}", verdict.render());
+        println!("{}", verdict.render_json());
+        if mode == BudgetsMode::Enforce && !verdict.is_clean() {
+            return Err(format!(
+                "budget gate: {} breach(es) against the §9.3 budgets (the verdict above names \
+                 each gate, the measured value and the budget it broke)",
+                verdict.breaches.len()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -567,6 +692,29 @@ mod tests {
         let err =
             parse_sweep_args(&args(&["--runs", "3"])).expect_err("the missing ledger refuses");
         assert!(err.contains("--out"), "the refusal names the flag: {err}");
+    }
+
+    #[test]
+    fn sweep_args_parse_the_budget_gate_modes() {
+        let parsed =
+            parse_sweep_args(&args(&["--out", "/tmp/l.json"])).expect("the command line parses");
+        assert_eq!(
+            parsed.budgets_mode(),
+            BudgetsMode::Report,
+            "report is the default — the verdict rides, the build holds"
+        );
+        let parsed = parse_sweep_args(&args(&["--out", "/tmp/l.json", "--budgets", "off"]))
+            .expect("the command line parses");
+        assert_eq!(parsed.budgets_mode(), BudgetsMode::Off);
+        let parsed = parse_sweep_args(&args(&["--out", "/tmp/l.json", "--budgets", "enforce"]))
+            .expect("the command line parses");
+        assert_eq!(parsed.budgets_mode(), BudgetsMode::Enforce);
+        let err = parse_sweep_args(&args(&["--out", "/tmp/l.json", "--budgets", "strict"]))
+            .expect_err("the unknown mode refuses");
+        assert!(
+            err.contains("off, report and enforce"),
+            "the refusal names the modes: {err}"
+        );
     }
 
     #[test]
