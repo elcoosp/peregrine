@@ -36,6 +36,7 @@
 //! query, names the form on the link command line itself).
 
 pub mod alias;
+pub mod budget;
 pub mod bundle_loader;
 pub mod cache;
 pub mod cpu;
