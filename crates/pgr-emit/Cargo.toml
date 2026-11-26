@@ -53,3 +53,13 @@ harness = false
 
 [lints]
 workspace = true
+
+# The §9.3 verify-gate bench (the "Correctness stays first" row: the
+# sweep's correctness half) — the fused emit beside the emit-plus-strict
+# verify over the same corpus (the gate's overhead is the verifier's
+# whole-image pass) and one verified sweep run beside the plain sweep.
+# The bench measures the gate's own price, not a verdict — the gate
+# matrix is the `verified_sweep` tests.
+[[bench]]
+name = "verified_sweep"
+harness = false
