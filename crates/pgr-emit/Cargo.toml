@@ -63,3 +63,14 @@ workspace = true
 [[bench]]
 name = "verified_sweep"
 harness = false
+
+# The §9.3 determinism-gate bench (the "double-link byte-equality" row:
+# the sweep's determinism half) — the fused emit beside the
+# emit-plus-byte-compare over the same corpus (the gate's overhead is
+# the compare over the image the emit already built) and one
+# deterministic sweep run beside the plain sweep. The bench measures the
+# gate's own price, not a verdict — the gate matrix is the
+# `determinism_sweep` tests.
+[[bench]]
+name = "determinism"
+harness = false
