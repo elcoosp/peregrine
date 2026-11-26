@@ -133,8 +133,9 @@ fn detail_text(detail: &PhaseDetail) -> String {
 /// The wall time, as the table renders it: whole microseconds below a
 /// millisecond, milliseconds with three decimals below a second, seconds
 /// with three decimals beyond. Integer math on the nanoseconds — no
-/// float rounding rides the table.
-fn wall_text(elapsed: Duration) -> String {
+/// float rounding rides the table. (Crate-visible so the sweep ledger's
+/// text face renders through the same one copy.)
+pub(crate) fn wall_text(elapsed: Duration) -> String {
     let ns = elapsed.as_nanos();
     if ns < 1_000 {
         format!("{ns} ns")
