@@ -7,6 +7,21 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 publish = false
+# Two lane binaries share the crate (the sweep lanes' shared flag
+# surface and corpus projection ride the lib target): the wall lane's
+# `xtask` stays the default `cargo run -p xtask` face, and the
+# allocation lane's `xtask-alloc` is the counted seat's own process —
+# the seat is process-global, the wall lane's baselines ride the plain
+# allocator.
+default-run = "xtask"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[[bin]]
+name = "xtask-alloc"
+path = "src/bin/alloc.rs"
 
 [dependencies]
 pgr-fixtures = { workspace = true }
@@ -18,6 +33,11 @@ pgr-core = { workspace = true }
 # verifier before the ledger records.
 pgr-emit = { workspace = true }
 pgr-verify = { workspace = true }
+# The allocation lane's seat (the §9.3 per-PR allocation-count job):
+# `dhat::Alloc` is the counting allocator the `xtask-alloc` binary
+# installs — the wall lane's binary never records (its walls stay the
+# plain allocator's; the seat's bookkeeping would ride them).
+dhat = { workspace = true }
 
 [lints]
 workspace = true
