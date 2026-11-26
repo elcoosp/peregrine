@@ -39,12 +39,14 @@
 use std::path::PathBuf;
 
 use pgr_core::budget::{RssSample, check_rss, check_sweep, peak_rss_bytes};
-use pgr_core::layout::{LinkConfig, OutputType};
-use pgr_core::link::{LinkInput, Parallelism};
+use pgr_core::link::Parallelism;
 use pgr_core::sweep::{GatePair, SweepPlan, run_sweep_gated, write_ledger};
 use pgr_emit::sweep::{DeterminismGate, VerifyGate};
 use pgr_fixtures::corpus::{CorpusPreset, CorpusSpec, build_corpus, write_corpus};
 use pgr_verify::Options;
+use xtask::{
+    BudgetsMode, SweepArgs, parse_count, parse_flags, parse_sweep_args, split_corpus, sweep_config,
+};
 
 /// The exit code a malformed command line exits with (the driver's usage
 /// convention).
@@ -86,46 +88,6 @@ impl CorpusArgs {
             member_text_kib: self.member_text_kib,
         }
     }
-}
-
-/// One parsed flag: its name and the value token that followed it.
-struct Flag<'a> {
-    name: &'a str,
-    value: &'a str,
-}
-
-/// Parses `--flag value` pairs out of the argument list — the value rides
-/// the next token (the driver's two-token flag shape). An odd trailing
-/// flag or an unknown name refuses with the fix named.
-fn parse_flags(args: &[String]) -> Result<Vec<Flag<'_>>, String> {
-    let mut flags = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if !arg.starts_with("--") {
-            return Err(format!(
-                "unexpected argument {arg:?} (the corpus command reads --flags only)"
-            ));
-        }
-        let Some(value) = args.get(i + 1) else {
-            return Err(format!(
-                "{arg} needs a value (the flags are two-token: --flag value)"
-            ));
-        };
-        flags.push(Flag {
-            name: &arg[2..],
-            value,
-        });
-        i += 2;
-    }
-    Ok(flags)
-}
-
-/// Parses an unsigned count for the flags that take one.
-fn parse_count(flag: &str, value: &str) -> Result<usize, String> {
-    value
-        .parse::<usize>()
-        .map_err(|_| format!("--{flag} {value:?} is not a non-negative integer"))
 }
 
 /// Applies one flag to the args, refusing unknown names (the surface's
@@ -210,209 +172,6 @@ fn run_corpus(args: &CorpusArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// The sweep command's parsed arguments: the corpus shape (the corpus
-/// command's axes), the run count and the ledger file.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SweepArgs {
-    /// The ledger file to write (required — never a repo-tree default).
-    out: Option<PathBuf>,
-    /// The preset shape (kebab-case; the default is `many-tiny`).
-    preset: Option<CorpusPreset>,
-    /// Direct objects (overrides the preset's count).
-    objects: Option<usize>,
-    /// `__text` payload per object, in KiB.
-    text_kib: Option<usize>,
-    /// Extra defined symbols per object.
-    symbols_per_object: Option<usize>,
-    /// Archive members (0 = no archive).
-    archive_members: Option<usize>,
-    /// `__text` payload per archive member, in KiB.
-    member_text_kib: Option<usize>,
-    /// Recorded runs (the §9.3 contract names 10; the default rides it).
-    runs: Option<usize>,
-    /// `auto` (the M4 parallel pipeline, the default) or `serial` (the
-    /// determinism lane).
-    parallel: Option<String>,
-    /// The §9.3 budget gate's mode (`off`, `report` — the default — or
-    /// `enforce`; the calibrated rig job's face).
-    budgets: Option<String>,
-    /// Where the gate's run-0 image writes (`--determinism <path>`):
-    /// the separate-process artifact the CI determinism job
-    /// byte-compares — TDD §11's "link the same corpus twice in
-    /// separate processes → byte-identical (CI-level, every PR)".
-    determinism: Option<PathBuf>,
-}
-
-/// The `--budgets` flag's parsed mode (the §9.3 gate's three faces).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum BudgetsMode {
-    /// Skip the gate entirely (the walls-only ledger face).
-    Off,
-    /// Price the budgets and render the verdict; never fail the build
-    /// (the dev-class runner's honest face — the thresholds are the
-    /// §9.1 rig job's calibration).
-    #[default]
-    Report,
-    /// Price the budgets and fail the build on a breach (the rig job's
-    /// face — §9.3's "fail the build if").
-    Enforce,
-}
-
-impl SweepArgs {
-    /// The spec the arguments name: the preset's shape with the parsed
-    /// overrides applied (the corpus command's own projection).
-    fn spec(&self) -> CorpusSpec {
-        let base = CorpusSpec::new(self.preset.unwrap_or(CorpusPreset::ManyTiny));
-        CorpusSpec {
-            preset: base.preset,
-            objects: self.objects,
-            text_kib: self.text_kib,
-            symbols_per_object: self.symbols_per_object,
-            archive_members: self.archive_members,
-            member_text_kib: self.member_text_kib,
-        }
-    }
-
-    /// The recorded-run count (the §9.3 nightly contract's ten).
-    fn runs(&self) -> usize {
-        self.runs.unwrap_or(10)
-    }
-
-    /// The lane the sweep rides: the M4 parallel pipeline by default, the
-    /// serial determinism lane under `--parallel serial`.
-    fn parallel(&self) -> Parallelism {
-        match self.parallel.as_deref() {
-            Some("serial") => Parallelism::Serial,
-            _ => Parallelism::Auto,
-        }
-    }
-
-    /// The budget gate's mode (`report` the default).
-    fn budgets_mode(&self) -> BudgetsMode {
-        match self.budgets.as_deref() {
-            Some("off") => BudgetsMode::Off,
-            Some("enforce") => BudgetsMode::Enforce,
-            _ => BudgetsMode::Report,
-        }
-    }
-
-    /// The ledger's shape label: the preset and the effective axes, in a
-    /// stable order — the string the next nightly's baseline names.
-    fn label(&self) -> String {
-        let shape = self.spec().resolved();
-        format!(
-            "{} objects={} text_kib={} syms_per_obj={} archive_members={}",
-            self.spec().preset.name(),
-            shape.objects,
-            shape.text_kib,
-            shape.symbols_per_object,
-            shape.archive_members,
-        )
-    }
-}
-
-/// Applies one sweep flag to the args, refusing unknown names (the
-/// surface's own vocabulary is the fix). The shape axes ride the corpus
-/// command's projection; `--runs` and `--parallel` are the sweep's own.
-fn apply_sweep_flag(args: &mut SweepArgs, flag: &str, value: &str) -> Result<(), String> {
-    match flag {
-        "out" => {
-            args.out = Some(PathBuf::from(value));
-            Ok(())
-        }
-        "preset" => {
-            let preset = CorpusPreset::from_name(value).ok_or_else(|| {
-                format!(
-                    "--preset {value:?} is not a preset name (the presets are {})",
-                    [
-                        "many-tiny",
-                        "large-debug",
-                        "archive-heavy",
-                        "single-giant",
-                        "byte-touching"
-                    ]
-                    .join(", ")
-                )
-            })?;
-            args.preset = Some(preset);
-            Ok(())
-        }
-        "objects" => {
-            args.objects = Some(parse_count(flag, value)?);
-            Ok(())
-        }
-        "text-kib" => {
-            args.text_kib = Some(parse_count(flag, value)?);
-            Ok(())
-        }
-        "symbols-per-object" => {
-            args.symbols_per_object = Some(parse_count(flag, value)?);
-            Ok(())
-        }
-        "archive-members" => {
-            args.archive_members = Some(parse_count(flag, value)?);
-            Ok(())
-        }
-        "member-text-kib" => {
-            args.member_text_kib = Some(parse_count(flag, value)?);
-            Ok(())
-        }
-        "runs" => {
-            args.runs = Some(parse_count(flag, value)?);
-            Ok(())
-        }
-        "parallel" => {
-            if value != "auto" && value != "serial" {
-                return Err(format!(
-                    "--parallel {value:?} is not a lane (the lanes are auto and serial)"
-                ));
-            }
-            args.parallel = Some(value.to_string());
-            Ok(())
-        }
-        "budgets" => {
-            if value != "off" && value != "report" && value != "enforce" {
-                return Err(format!(
-                    "--budgets {value:?} is not a mode (the modes are off, report and enforce)"
-                ));
-            }
-            args.budgets = Some(value.to_string());
-            Ok(())
-        }
-        "determinism" => {
-            args.determinism = Some(PathBuf::from(value));
-            Ok(())
-        }
-        other => Err(format!(
-            "--{other} is not a sweep flag (the flags are --out --preset --objects --text-kib \
-             --symbols-per-object --archive-members --member-text-kib --runs --parallel \
-             --budgets --determinism)"
-        )),
-    }
-}
-
-/// Parses the sweep command's argument list.
-///
-/// # Errors
-/// A descriptive message for a malformed command line — an unexpected
-/// positional, a flag missing its value, an unknown flag, a bad count or
-/// a missing `--out`.
-fn parse_sweep_args(args: &[String]) -> Result<SweepArgs, String> {
-    let mut parsed = SweepArgs::default();
-    for flag in parse_flags(args)? {
-        apply_sweep_flag(&mut parsed, flag.name, flag.value)?;
-    }
-    if parsed.runs() == 0 {
-        return Err("--runs 0 records nothing — plan at least one run".to_string());
-    }
-    if parsed.out.is_none() {
-        return Err(
-            "the sweep command needs --out <ledger.json> (the file the nightly keeps)".to_string(),
-        );
-    }
-    Ok(parsed)
-}
-
 /// Runs the sweep command: generates the corpus in memory, sweeps it
 /// through the observed pipeline, prints the manifest and the reduced
 /// faces, and writes the ledger line to `--out`.
@@ -426,28 +185,10 @@ fn run_sweep_command(args: &SweepArgs) -> Result<(), String> {
     let contents = build_corpus(&spec).map_err(|e| e.to_string())?;
     // The corpus's files split on their kind: the direct objects ride the
     // inputs, the one `libcorpus.a` (when the shape carries one) projects
-    // onto the archives — the S7 pull's own input, never a direct parse.
-    let mut inputs = Vec::new();
-    let mut archives = Vec::new();
-    for (name, bytes) in &contents.files {
-        if name
-            .rsplit_once('.')
-            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("a"))
-        {
-            archives.push(
-                pgr_core::sweep::archive_input(name, bytes.clone()).map_err(|e| e.to_string())?,
-            );
-        } else {
-            inputs.push(LinkInput {
-                name: name.clone(),
-                bytes: bytes.clone(),
-            });
-        }
-    }
-    let cfg = LinkConfig {
-        filetype: OutputType::Execute,
-        ..LinkConfig::default()
-    };
+    // onto the archives — the S7 pull's own input, never a direct parse
+    // (the lanes' shared projection, the lib's own face).
+    let (inputs, archives) = split_corpus(&contents.files)?;
+    let cfg = sweep_config();
     let plan = SweepPlan {
         label: args.label(),
         runs: args.runs(),
