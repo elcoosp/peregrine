@@ -1,0 +1,71 @@
+name: Shape sweep
+
+# The nightly benchmark job the architecture doc §10.2 names as a P0
+# deliverable ("CI skeleton: build, rustfmt/clippy, ASan, --time JSON
+# schema, nightly benchmark job (even if it only runs baselines)") and
+# §9.3 contracts ("Nightly (wall-clock, dedicated hardware): full corpus,
+# 10 runs, median and p95, vs baselines. Results stored and charted.").
+#
+# The committable half runs here: the parameterized corpus generator
+# (pgr_fixtures::corpus) synthesizes the §9.2 corpus-table rows the tree
+# can carry, the shape-sweep harness (pgr_core::sweep, the xtask sweep
+# command) records ten runs per shape and reduces them to the median/p95
+# walls plus the per-phase rows, and the stored ledger lines upload as
+# workflow artifacts — the "results stored" half.
+#
+# The rig-bound half stays named, not faked: the wall-clock comparison
+# against ld-prime / ld64.lld / mold-macho baselines and the G1 gate
+# need the §9.1 Apple Silicon rigs (docs/BENCHMARKS.md, "Known
+# follow-ups: … rig-bound: S1 writer matrix, S4 P-core sizing, PGO, the
+# G1 gate"). This runner's walls are dev-sandbox-class numbers — recorded
+# honestly, never compared against linker baselines that do not run here.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sweep-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  sweep:
+    name: nightly shape sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+      - name: Build (locked, release)
+        run: cargo build --release --locked --workspace
+      - name: Sweep the §9.2 shapes (10 runs each — the §9.3 contract)
+        run: |
+          mkdir -p sweep-ledgers
+          cargo run --locked -p xtask -- sweep \
+            --out sweep-ledgers/many-tiny.json \
+            --preset many-tiny --runs 10
+          cargo run --locked -p xtask -- sweep \
+            --out sweep-ledgers/large-debug.json \
+            --preset large-debug --runs 10
+          cargo run --locked -p xtask -- sweep \
+            --out sweep-ledgers/archive-heavy.json \
+            --preset archive-heavy --runs 10
+      - name: The ledgers parse (the stored face's own gate)
+        run: cargo test --release --locked -p pgr-core --test shape_sweep
+      - name: Upload the stored ledgers
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-ledgers
+          path: sweep-ledgers/*.json
+          retention-days: 90
