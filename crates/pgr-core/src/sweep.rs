@@ -46,9 +46,10 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+use crate::alloc_count::{AllocCollector, AllocReport, AllocSource};
 use crate::layout::LinkConfig;
 use crate::link::{LinkArchive, LinkInput, LinkResult, Parallelism, link_observed};
-use crate::observe::Phase;
+use crate::observe::{ObserverPair, Phase};
 use crate::time_report::{TimeCollector, TimeReport};
 
 use crate::LinkError;
@@ -1055,6 +1056,636 @@ impl SweepDelta {
                     Some(p) => p.to_string(),
                     None => "null".to_string(),
                 },
+            );
+        }
+        s.push_str("]}");
+        s
+    }
+}
+
+// ── The allocation lane (§9.3 bullet 1: "plus allocation counts per
+//    pass" — the per-PR job's allocation half, "counted in CI" the
+//    §10.3 M1 gate's own wording) ─────────────────────────────────────
+//
+// The wall lane measures how long the passes took; the allocation lane
+// measures what they allocated — the same corpus, the same runs, the
+// same gate seam (§9.3's correctness half: the lane never records an
+// ungated measurement), the same reduction arithmetic (the lower
+// median), its own stored ledger and delta face. The lane rides the
+// [`crate::alloc_count`] seam: the seat is the caller's (the DHAT seat
+// the measurement binaries install — the valgrind-class tooling §9.3
+// names — or any [`AllocSource`] a consumer counts through), the
+// windows are the M54 phase completions', and the collector's own
+// bookkeeping (a few pushes) rides the windows with everything else.
+
+/// One allocation-lane run: the run's counted wall (the counted lane's
+/// own — the seat's recording rides it) and the run's own per-pass
+/// [`AllocReport`] (the M54 windows).
+#[derive(Debug, Clone)]
+pub struct AllocSweepSample {
+    /// The run's wall clock under the recording seat.
+    pub wall: Duration,
+    /// The run's per-pass allocation windows.
+    pub report: AllocReport,
+}
+
+/// One phase's reduced allocation row: the phase and its per-run median
+/// block and byte counts (the same lower-median rule the walls ride —
+/// integer-exact, no float rounding).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllocSweepPhaseRow {
+    /// The phase (the M54 vocabulary — [`Phase::as_str`] is the token).
+    pub phase: Phase,
+    /// The phase's per-run median allocation count.
+    pub median_blocks: u64,
+    /// The phase's per-run median byte count.
+    pub median_bytes: u64,
+}
+
+/// The allocation lane's reduction: the median counted wall beside one
+/// reduced row per phase, in link order. Pure: the same samples answer
+/// the same summary.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AllocSweepSummary {
+    /// The runs the reduction read.
+    pub runs: usize,
+    /// The median run wall under the recording seat, in µs.
+    pub median_wall_us: u64,
+    /// One row per phase, in first-seen (link) order.
+    pub phases: Vec<AllocSweepPhaseRow>,
+}
+
+/// The allocation lane's outcome: every run's sample plus the reduction
+/// over the run set.
+#[derive(Debug, Clone)]
+pub struct AllocSweepOutcome {
+    /// The shape's name (the plan's label).
+    pub label: String,
+    /// The run count (the plan's).
+    pub runs: usize,
+    /// One sample per run, in run order.
+    pub samples: Vec<AllocSweepSample>,
+    /// The reduction over the samples.
+    pub summary: AllocSweepSummary,
+}
+
+/// The allocation lane's stored face: the label, the run count and the
+/// reduced summary — the data [`parse_alloc_ledger`] restores from the
+/// JSON line [`alloc_ledger_json`] emits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllocLedger {
+    /// The shape's name, verbatim.
+    pub label: String,
+    /// The run count.
+    pub runs: usize,
+    /// The reduced summary.
+    pub summary: AllocSweepSummary,
+}
+
+/// Reduces the allocation lane's recorded runs into its summary: the
+/// median counted wall plus one reduced row per phase (each phase's
+/// per-run block and byte counts riding the lower median). Pure: the
+/// same samples answer the same summary, so a gate pins it without a
+/// seat.
+#[must_use]
+pub fn reduce_allocs(label: &str, samples: &[AllocSweepSample]) -> AllocSweepSummary {
+    let _ = label;
+    let mut walls: Vec<u64> = samples.iter().map(|s| wall_us(s.wall)).collect();
+    walls.sort_unstable();
+    let mut phases: Vec<Phase> = Vec::new();
+    let mut per_phase: Vec<Vec<(u64, u64)>> = Vec::new();
+    for s in samples {
+        for r in &s.report.rows {
+            if let Some(i) = phases.iter().position(|p| *p == r.phase) {
+                per_phase[i].push((r.blocks, r.bytes));
+            } else {
+                phases.push(r.phase);
+                per_phase.push(vec![(r.blocks, r.bytes)]);
+            }
+        }
+    }
+    let rows = phases
+        .drain(..)
+        .zip(per_phase.drain(..))
+        .map(|(phase, mut counts)| {
+            counts.sort_unstable();
+            let blocks: Vec<u64> = counts.iter().map(|(b, _)| *b).collect();
+            let bytes: Vec<u64> = counts.iter().map(|(_, by)| *by).collect();
+            AllocSweepPhaseRow {
+                phase,
+                median_blocks: lower_median(&blocks),
+                median_bytes: lower_median(&bytes),
+            }
+        })
+        .collect();
+    AllocSweepSummary {
+        runs: samples.len(),
+        median_wall_us: lower_median(&walls),
+        phases: rows,
+    }
+}
+
+/// Runs the observed pipeline `plan.runs` times over one corpus under a
+/// recording seat, handing each run's plan to `gate` outside the
+/// counted windows — the allocation lane's gated sweep. Each run
+/// subscribes the time collector beside the allocation collector (the
+/// M61 observer-pair shape — one event stream, both faces); the
+/// collector opens before the link and closes before the gate (the
+/// gate's own allocations never ride the totals), and a refused run
+/// records nothing.
+///
+/// # Errors
+/// [`SweepError::Runs`] on a zero-run plan, [`SweepError::Link`] when a
+/// run's link refuses (the pipeline's own wording), and
+/// [`SweepError::Gate`] when a run's gate refuses (the gate's own
+/// wording, the run named).
+pub fn run_alloc_sweep(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    plan: &SweepPlan,
+    gate: &mut dyn SweepRunGate,
+    alloc: &dyn AllocSource,
+) -> Result<AllocSweepOutcome, SweepError> {
+    if plan.runs == 0 {
+        return Err(SweepError::Runs { runs: plan.runs });
+    }
+    let mut samples = Vec::with_capacity(plan.runs);
+    for run in 0..plan.runs {
+        let mut time = TimeCollector::default();
+        let mut allocs = AllocCollector::new(alloc);
+        let mut pair = ObserverPair::new(&mut time, &mut allocs);
+        let started = Instant::now();
+        let result = link_observed(inputs, archives, cfg, parallel, None, &mut pair);
+        let wall = started.elapsed();
+        let result = result?;
+        let report = allocs.finish();
+        gate.on_run(run, &result)
+            .map_err(|reason| SweepError::Gate { run, reason })?;
+        samples.push(AllocSweepSample { wall, report });
+    }
+    let summary = reduce_allocs(&plan.label, &samples);
+    Ok(AllocSweepOutcome {
+        label: plan.label.clone(),
+        runs: plan.runs,
+        samples,
+        summary,
+    })
+}
+
+impl AllocSweepOutcome {
+    /// The stored face: the label, the run count and the summary.
+    #[must_use]
+    pub fn ledger(&self) -> AllocLedger {
+        AllocLedger {
+            label: self.label.clone(),
+            runs: self.runs,
+            summary: self.summary.clone(),
+        }
+    }
+
+    /// Renders the deterministic text face: the shape, the run count,
+    /// the median counted wall and one row per phase — the §9.3 face a
+    /// human reads beside the stored JSON line. The walls render through
+    /// the time-report's own table (the crate's one copy of the wall
+    /// text).
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut s = String::with_capacity(96 + self.summary.phases.len() * 48);
+        let _ = writeln!(
+            s,
+            "the allocation sweep: {} — {} runs",
+            self.label, self.runs
+        );
+        let _ = writeln!(
+            s,
+            "  median counted wall  {}",
+            crate::time_report::wall_text(Duration::from_micros(self.summary.median_wall_us)),
+        );
+        for row in &self.summary.phases {
+            let _ = writeln!(
+                s,
+                "  {:<14} {:>6} blocks {:>8} bytes",
+                row.phase.as_str(),
+                row.median_blocks,
+                row.median_bytes,
+            );
+        }
+        s
+    }
+}
+
+/// Renders the allocation ledger's JSON line: fixed key order, one
+/// line, the report-JSON escape rules (the label rides
+/// [`crate::map::escape_json`]; the counts ride whole numbers).
+#[must_use]
+pub fn alloc_ledger_json(label: &str, runs: usize, summary: &AllocSweepSummary) -> String {
+    let mut s = String::with_capacity(96 + summary.phases.len() * 56);
+    let _ = write!(
+        s,
+        "{{\"label\":{},\"runs\":{},\"median_wall_us\":{},\"phases\":[",
+        crate::map::escape_json(label),
+        runs,
+        summary.median_wall_us,
+    );
+    for (i, row) in summary.phases.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let _ = write!(
+            s,
+            "{{\"phase\":\"{}\",\"median_blocks\":{},\"median_bytes\":{}}}",
+            row.phase.as_str(),
+            row.median_blocks,
+            row.median_bytes,
+        );
+    }
+    s.push_str("]}");
+    s
+}
+
+/// Writes the allocation ledger file: the JSON line plus a trailing
+/// newline. The write refuses an existing path (the nightly job writes
+/// one per-shape path per run) and creates the parent directories.
+///
+/// # Errors
+/// [`SweepError::Exists`] when the path exists, [`SweepError::Io`] when
+/// the filesystem refuses the write.
+pub fn write_alloc_ledger(
+    label: &str,
+    runs: usize,
+    summary: &AllocSweepSummary,
+    path: &Path,
+) -> Result<u64, SweepError> {
+    if path.exists() {
+        return Err(SweepError::Exists {
+            path: path.display().to_string(),
+        });
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| SweepError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+    }
+    let mut line = alloc_ledger_json(label, runs, summary);
+    line.push('\n');
+    std::fs::write(path, line.as_bytes()).map_err(|source| SweepError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    Ok(line.len() as u64)
+}
+
+/// Parses the allocation ledger JSON the writer emits — the same rigid
+/// schema any conforming writer produces (keys in any order, the
+/// ledger's exact fields, no floats, no trailing commas). The reader
+/// restores the writer's data exactly: the round-trip is gated in
+/// `tests/alloc_sweep.rs`.
+///
+/// # Errors
+/// [`SweepError::Ledger`] on a malformed document (byte-positioned), on
+/// unknown, duplicate or missing keys, and on a phase token the M54
+/// vocabulary does not name.
+pub fn parse_alloc_ledger(raw: &str) -> Result<AllocLedger, SweepError> {
+    let mut rd = SweepLedgerReader {
+        s: raw.as_bytes(),
+        pos: 0,
+    };
+    let ledger = rd.parse_alloc_ledger()?;
+    rd.skip_ws();
+    if rd.pos != rd.s.len() {
+        return rd.invalid("trailing bytes after the ledger object");
+    }
+    Ok(ledger)
+}
+
+impl SweepLedgerReader<'_> {
+    /// The allocation ledger object: the writer's four fields, any
+    /// order, each at most once, none missing.
+    fn parse_alloc_ledger(&mut self) -> Result<AllocLedger, SweepError> {
+        self.expect(b'{')?;
+        let mut label: Option<String> = None;
+        let mut runs: Option<usize> = None;
+        let mut median: Option<u64> = None;
+        let mut phases: Option<Vec<AllocSweepPhaseRow>> = None;
+        let mut first = true;
+        while let Some(key) = self.next_key(first)? {
+            first = false;
+            match key.as_str() {
+                "label" => Self::set(self.pos, &mut label, "label", self.parse_string()?)?,
+                "runs" => {
+                    let raw = self.parse_u64()?;
+                    let count = usize::try_from(raw).map_err(|_| SweepError::Ledger {
+                        at: self.pos,
+                        detail: format!("{raw} exceeds usize"),
+                    })?;
+                    Self::set(self.pos, &mut runs, "runs", count)?;
+                }
+                "median_wall_us" => {
+                    Self::set(self.pos, &mut median, "median_wall_us", self.parse_u64()?)?;
+                }
+                "phases" => {
+                    Self::set(self.pos, &mut phases, "phases", self.parse_alloc_phases()?)?;
+                }
+                other => {
+                    return Err(SweepError::Ledger {
+                        at: self.pos,
+                        detail: format!(
+                            "unknown key {other:?} — the allocation ledger's fields are the writer's"
+                        ),
+                    });
+                }
+            }
+        }
+        let runs = Self::require(runs, "runs")?;
+        Ok(AllocLedger {
+            label: Self::require(label, "label")?,
+            runs,
+            summary: AllocSweepSummary {
+                runs,
+                median_wall_us: Self::require(median, "median_wall_us")?,
+                phases: Self::require(phases, "phases")?,
+            },
+        })
+    }
+
+    /// The phases array: one `{"phase":…,"median_blocks":…,"median_bytes":…}`
+    /// row per reduced phase, the M54 tokens.
+    fn parse_alloc_phases(&mut self) -> Result<Vec<AllocSweepPhaseRow>, SweepError> {
+        self.expect(b'[')?;
+        let mut rows = Vec::new();
+        if self.peek()? == b']' {
+            self.pos += 1;
+            return Ok(rows);
+        }
+        loop {
+            self.expect(b'{')?;
+            let mut phase: Option<Phase> = None;
+            let mut blocks: Option<u64> = None;
+            let mut bytes: Option<u64> = None;
+            let mut first = true;
+            while let Some(key) = self.next_key(first)? {
+                first = false;
+                match key.as_str() {
+                    "phase" => {
+                        let token = self.parse_string()?;
+                        match Phase::from_token(&token) {
+                            Some(p) => Self::set(self.pos, &mut phase, "phase", p)?,
+                            None => {
+                                return Err(SweepError::Ledger {
+                                    at: self.pos,
+                                    detail: format!(
+                                        "unknown phase token {token:?} — the M54 vocabulary names the phases"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    "median_blocks" => {
+                        Self::set(self.pos, &mut blocks, "median_blocks", self.parse_u64()?)?;
+                    }
+                    "median_bytes" => {
+                        Self::set(self.pos, &mut bytes, "median_bytes", self.parse_u64()?)?;
+                    }
+                    other => {
+                        return Err(SweepError::Ledger {
+                            at: self.pos,
+                            detail: format!(
+                                "unknown key {other:?} — a phase row's fields are phase, median_blocks and median_bytes"
+                            ),
+                        });
+                    }
+                }
+            }
+            rows.push(AllocSweepPhaseRow {
+                phase: Self::require(phase, "phase")?,
+                median_blocks: Self::require(blocks, "median_blocks")?,
+                median_bytes: Self::require(bytes, "median_bytes")?,
+            });
+            match self.peek()? {
+                b',' => {
+                    self.pos += 1;
+                    if self.peek()? == b']' {
+                        return self.invalid("trailing comma in the phases array");
+                    }
+                }
+                b']' => {
+                    self.pos += 1;
+                    return Ok(rows);
+                }
+                other => {
+                    return self.invalid(format!("expected ',' or ']', found {:?}", other as char));
+                }
+            }
+        }
+    }
+}
+
+/// One allocation row's paired move: the phase, either nightly's median
+/// block and byte counts (the side a nightly lacks rides `None`), and
+/// the signed permille moves when both sides rode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllocSweepPhaseDelta {
+    /// The phase (the M54 vocabulary).
+    pub phase: Phase,
+    /// The previous nightly's median blocks (`None` when new).
+    pub previous_blocks: Option<u64>,
+    /// The current nightly's median blocks (`None` when gone).
+    pub current_blocks: Option<u64>,
+    /// The blocks' signed move, in permille (`None` when one side is
+    /// absent).
+    pub blocks_permille: Option<i64>,
+    /// The previous nightly's median bytes (`None` when new).
+    pub previous_bytes: Option<u64>,
+    /// The current nightly's median bytes (`None` when gone).
+    pub current_bytes: Option<u64>,
+    /// The bytes' signed move, in permille (`None` when one side is
+    /// absent).
+    pub bytes_permille: Option<i64>,
+}
+
+/// The stored allocation ledgers' comparison (§9.3: "vs baselines"): one
+/// shape's own history, the median counted wall and the per-phase rows
+/// paired by token, the moves in signed permille — integer math, no
+/// float rounding. The current ledger's phase order leads; a phase the
+/// previous nightly lacked rides `None` previous sides, a phase it lost
+/// trails the paired rows with `None` current sides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllocSweepDelta {
+    /// The shape's name (the ledgers' shared label).
+    pub label: String,
+    /// The run counts: the previous and the current nightly's.
+    pub runs: (usize, usize),
+    /// The median counted wall's move.
+    pub median_wall: SweepBandDelta,
+    /// One row per phase, the current order leading, the lost phases
+    /// trailing.
+    pub phases: Vec<AllocSweepPhaseDelta>,
+}
+
+impl AllocSweepDelta {
+    /// Compares one shape's own allocation history: the previous
+    /// nightly's stored ledger beside the current one's. The labels must
+    /// match (a cross-shape comparison refuses with both names); the
+    /// phases pair by token — the current order leads, the lost phases
+    /// trail.
+    ///
+    /// # Errors
+    /// [`SweepError::LabelsDiffer`] when the two ledgers name different
+    /// shapes.
+    pub fn between(previous: &AllocLedger, current: &AllocLedger) -> Result<Self, SweepError> {
+        if previous.label != current.label {
+            return Err(SweepError::LabelsDiffer {
+                previous: previous.label.clone(),
+                current: current.label.clone(),
+            });
+        }
+        let side = |rows: &[AllocSweepPhaseRow], phase: Phase, blocks: bool| {
+            rows.iter().find(|r| r.phase == phase).map(|r| {
+                if blocks {
+                    r.median_blocks
+                } else {
+                    r.median_bytes
+                }
+            })
+        };
+        let mut phases = Vec::with_capacity(current.summary.phases.len());
+        for row in &current.summary.phases {
+            let prior_blocks = side(&previous.summary.phases, row.phase, true);
+            let prior_bytes = side(&previous.summary.phases, row.phase, false);
+            let (blocks_move, bytes_move) = match (prior_blocks, prior_bytes) {
+                (Some(prior_b), Some(prior_by)) => (
+                    Some(permille_move(prior_b, row.median_blocks)),
+                    Some(permille_move(prior_by, row.median_bytes)),
+                ),
+                _ => (None, None),
+            };
+            phases.push(AllocSweepPhaseDelta {
+                phase: row.phase,
+                previous_blocks: prior_blocks,
+                current_blocks: Some(row.median_blocks),
+                blocks_permille: blocks_move,
+                previous_bytes: prior_bytes,
+                current_bytes: Some(row.median_bytes),
+                bytes_permille: bytes_move,
+            });
+        }
+        for row in &previous.summary.phases {
+            if !current.summary.phases.iter().any(|p| p.phase == row.phase) {
+                phases.push(AllocSweepPhaseDelta {
+                    phase: row.phase,
+                    previous_blocks: Some(row.median_blocks),
+                    current_blocks: None,
+                    blocks_permille: None,
+                    previous_bytes: Some(row.median_bytes),
+                    current_bytes: None,
+                    bytes_permille: None,
+                });
+            }
+        }
+        Ok(Self {
+            label: current.label.clone(),
+            runs: (previous.runs, current.runs),
+            median_wall: band_delta(
+                previous.summary.median_wall_us,
+                current.summary.median_wall_us,
+            ),
+            phases,
+        })
+    }
+
+    /// Renders the deterministic text face: the shape and the run pair,
+    /// the counted wall's move and one row per phase — the chart's face
+    /// beside the stored JSON lines. A new phase renders its counts
+    /// alone; a lost phase renders the previous counts alone.
+    ///
+    /// # Panics
+    /// Never: a paired phase row carries both sides by construction (the
+    /// `expect` guards an invariant [`AllocSweepDelta::between`] builds
+    /// — the arm is unreachable, and the `None`-sided rows take the
+    /// other arms).
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut s = String::with_capacity(96 + self.phases.len() * 64);
+        let _ = writeln!(
+            s,
+            "the allocation-sweep delta: {} ({} runs → {} runs)",
+            self.label, self.runs.0, self.runs.1,
+        );
+        let _ = writeln!(
+            s,
+            "  median wall  {} → {}   ({:+}‰)",
+            crate::time_report::wall_text(Duration::from_micros(self.median_wall.previous_us)),
+            crate::time_report::wall_text(Duration::from_micros(self.median_wall.current_us)),
+            self.median_wall.permille,
+        );
+        for row in &self.phases {
+            match (row.previous_blocks, row.current_blocks) {
+                (Some(p), Some(c)) => {
+                    let _ = writeln!(
+                        s,
+                        "  {:<14} {:>6} → {:>6} blocks   ({:+}‰)",
+                        row.phase.as_str(),
+                        p,
+                        c,
+                        row.blocks_permille.expect("both sides rode"),
+                    );
+                }
+                (None, Some(c)) => {
+                    let _ = writeln!(s, "  {:<14} (new) → {:>6} blocks", row.phase.as_str(), c);
+                }
+                (Some(p), None) => {
+                    let _ = writeln!(s, "  {:<14} {:>6} → (gone) blocks", row.phase.as_str(), p);
+                }
+                (None, None) => {}
+            }
+        }
+        s
+    }
+
+    /// Renders the delta as the deterministic compact JSON line: fixed
+    /// key order, one line, the report-JSON escape rules (the label
+    /// rides [`crate::map::escape_json`]). A new or lost phase's absent
+    /// sides ride `null` — the chart reads the pairing.
+    #[must_use]
+    pub fn render_json(&self) -> String {
+        let side = |v: Option<u64>| match v {
+            Some(n) => n.to_string(),
+            None => "null".to_string(),
+        };
+        let mut s = String::with_capacity(128 + self.phases.len() * 112);
+        let median_wall = format!(
+            "{{\"previous_us\":{},\"current_us\":{},\"permille\":{}}}",
+            self.median_wall.previous_us, self.median_wall.current_us, self.median_wall.permille
+        );
+        let _ = write!(
+            s,
+            "{{\"label\":{},\"runs\":{{\"previous\":{},\"current\":{}}},\"median_wall\":{},\"phases\":[",
+            crate::map::escape_json(&self.label),
+            self.runs.0,
+            self.runs.1,
+            median_wall,
+        );
+        for (i, row) in self.phases.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let perm = |v: Option<i64>| match v {
+                Some(p) => p.to_string(),
+                None => "null".to_string(),
+            };
+            let _ = write!(
+                s,
+                "{{\"phase\":\"{}\",\"previous_blocks\":{},\"current_blocks\":{},\"blocks_permille\":{},\"previous_bytes\":{},\"current_bytes\":{},\"bytes_permille\":{}}}",
+                row.phase.as_str(),
+                side(row.previous_blocks),
+                side(row.current_blocks),
+                perm(row.blocks_permille),
+                side(row.previous_bytes),
+                side(row.current_bytes),
+                perm(row.bytes_permille),
             );
         }
         s.push_str("]}");
