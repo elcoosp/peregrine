@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::layout::LinkConfig;
-use crate::link::{LinkArchive, LinkInput, Parallelism, link_observed};
+use crate::link::{LinkArchive, LinkInput, LinkResult, Parallelism, link_observed};
 use crate::observe::Phase;
 use crate::time_report::{TimeCollector, TimeReport};
 
@@ -180,6 +180,16 @@ pub enum SweepError {
         #[source]
         source: pgr_format::FormatError,
     },
+    /// A run's gate refused (the consumer gate's own wording, the run
+    /// named — §9.3's correctness half: the sweep never records an
+    /// ungated measurement).
+    #[error("the sweep's run-{run} gate refused: {reason}")]
+    Gate {
+        /// The run the gate refused.
+        run: usize,
+        /// The gate's own wording, verbatim.
+        reason: String,
+    },
     /// The two ledgers name different shapes — a cross-shape comparison
     /// is a caller mistake (the delta pairs one shape's own history).
     #[error(
@@ -291,6 +301,79 @@ pub fn archive_input(name: &str, bytes: Vec<u8>) -> Result<LinkArchive, SweepErr
     })
 }
 
+/// The per-run gate a caller hangs on the sweep — §9.3's correctness
+/// half ("performance jobs never gate on unverified output — every
+/// benchmark link is also run through `pgr-verify`") as a consumer-side
+/// seam, the M67 custom-check shape: the sweep runs the observed
+/// pipeline and hands each run's plan to the gate *outside the measured
+/// wall* (the gate reads the product, the measurement prices the
+/// pipeline — the M54 parity contract holds), and a refusal aborts the
+/// sweep ([`SweepError::Gate`], the gate's own wording verbatim). The
+/// crate's `()` unit is the pass-through gate — the ungated sweep is
+/// this trait's `Ok(())` arm, one shape with no decision copy. The
+/// first consumer is `pgr_emit::sweep::VerifyGate` (the strict verifier
+/// over each run's fused image).
+pub trait SweepRunGate {
+    /// One run's product: the plan Passes 1–3 planned (the image is the
+    /// emit's to build from it). A refusal aborts the sweep — the
+    /// measurement never rides an ungated image.
+    ///
+    /// # Errors
+    /// The gate's own refusal, verbatim — the wording a gate exists to
+    /// name (the fix is the gate's, not the sweep's).
+    fn on_run(&mut self, run: usize, result: &LinkResult) -> Result<(), String>;
+}
+
+impl SweepRunGate for () {
+    fn on_run(&mut self, _run: usize, _result: &LinkResult) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Runs the observed pipeline `plan.runs` times over one corpus, handing
+/// each run's plan to `gate` outside the measured wall — the gated
+/// sweep. See [`run_sweep`] for the measurement contract and
+/// [`SweepRunGate`] for the gate's.
+///
+/// # Errors
+/// [`SweepError::Runs`] on a zero-run plan, [`SweepError::Link`] when a
+/// run's link refuses (the pipeline's own wording), and
+/// [`SweepError::Gate`] when a run's gate refuses (the gate's own
+/// wording, the run named).
+pub fn run_sweep_gated(
+    inputs: &[LinkInput],
+    archives: &[LinkArchive],
+    cfg: &LinkConfig,
+    parallel: Parallelism,
+    plan: &SweepPlan,
+    gate: &mut dyn SweepRunGate,
+) -> Result<SweepOutcome, SweepError> {
+    if plan.runs == 0 {
+        return Err(SweepError::Runs { runs: plan.runs });
+    }
+    let mut samples = Vec::with_capacity(plan.runs);
+    for run in 0..plan.runs {
+        let mut collector = TimeCollector::default();
+        let started = Instant::now();
+        let result = link_observed(inputs, archives, cfg, parallel, None, &mut collector);
+        let wall = started.elapsed();
+        // The link result is the pipeline's own product — the sweep
+        // records the measurement, the caller's gates own the image.
+        let result = result?;
+        gate.on_run(run, &result)
+            .map_err(|reason| SweepError::Gate { run, reason })?;
+        let report = collector.report();
+        samples.push(SweepSample { wall, report });
+    }
+    let summary = reduce(&plan.label, &samples);
+    Ok(SweepOutcome {
+        label: plan.label.clone(),
+        runs: plan.runs,
+        samples,
+        summary,
+    })
+}
+
 /// Runs the observed pipeline `plan.runs` times over one corpus and
 /// records every run: the wall clock and the run's own
 /// [`TimeCollector`] rows. The inputs are borrowed — the pipeline parses
@@ -298,6 +381,9 @@ pub fn archive_input(name: &str, bytes: Vec<u8>) -> Result<LinkArchive, SweepErr
 /// POI cache rides (the sweep prices the uncached pipeline; a cached
 /// sweep is a different measurement). Measuring is read-only: a swept
 /// run is the plain observed run's rows (the M54 parity contract).
+/// This is the pass-through gate's sweep — the ungated shape of
+/// [`run_sweep_gated`]; a correctness gate rides [`SweepRunGate`] (the
+/// §9.3 "every benchmark link is also run through `pgr-verify"` half).
 ///
 /// # Errors
 /// [`SweepError::Runs`] on a zero-run plan, [`SweepError::Link`] when a
@@ -309,28 +395,7 @@ pub fn run_sweep(
     parallel: Parallelism,
     plan: &SweepPlan,
 ) -> Result<SweepOutcome, SweepError> {
-    if plan.runs == 0 {
-        return Err(SweepError::Runs { runs: plan.runs });
-    }
-    let mut samples = Vec::with_capacity(plan.runs);
-    for _ in 0..plan.runs {
-        let mut collector = TimeCollector::default();
-        let started = Instant::now();
-        let result = link_observed(inputs, archives, cfg, parallel, None, &mut collector);
-        let wall = started.elapsed();
-        // The link result is the pipeline's own product — the sweep
-        // records the measurement, the caller's gates own the image.
-        result?;
-        let report = collector.report();
-        samples.push(SweepSample { wall, report });
-    }
-    let summary = reduce(&plan.label, &samples);
-    Ok(SweepOutcome {
-        label: plan.label.clone(),
-        runs: plan.runs,
-        samples,
-        summary,
-    })
+    run_sweep_gated(inputs, archives, cfg, parallel, plan, &mut ())
 }
 
 impl SweepOutcome {
