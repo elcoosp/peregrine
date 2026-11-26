@@ -78,6 +78,7 @@ pub mod stable_imports;
 pub mod stack_size;
 pub mod statistics;
 pub mod sub_client;
+pub mod sweep;
 pub mod thunks;
 pub mod time_report;
 pub mod trace;
