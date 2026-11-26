@@ -58,6 +58,8 @@ harness works end-to-end from day one and (b) give each pass a regression anchor
 | M6 ICF cost               | ≤ +25 %                                      | +12.0 % (M7 re-measure: +14.8 %)                      | ✅ closed                         |
 | M6 `.tbd` startup         | < 1 ms                                       | 19.9 µs frozen / 35.8 µs text                         | ✅ closed                         |
 | M7 fuzzers clean          | 30 CPU-days                                  | 61 s sessions clean after fixes (ledger below)        | 🔶 rig-bound                      |
+| §9.3 double-link byte-equality | byte-identical, every run, every PR    | the `determinism_sweep` gate matrix + the CI job's two-process `cmp` | ✅ closed |
+| §2.2 peak-RSS budget      | ≤ 2.5× output (TDD §10.5: ≈ 2.2–2.5×)        | the `check_rss` row rides report-mode (enforce = rig job's) | 🔶 rig-bound (calibration)        |
 | M9 bytes ∝ change         | patch ≪ image                                | 1.2 % / ~13 % / 0.67 % across the ladder              | ✅ closed (sandbox)               |
 | M9 randomized edits       | 10⁴ sequences                                | engine-level 10⁴ steps green in 11.4 s                | 🔶 driver-level + hardware on rig |
 | M2/M4 parallel efficiency | ≥ 70 % @ 8 P-cores, serial ≤ 15 %            | 2 threads cannot exhibit it                           | 🔶 rig-bound                      |
@@ -907,12 +909,22 @@ The "30 CPU-days clean" gate formally closes on the rig.
    serial fraction ≤ 15 ‰×100 (≤ 15 %, except flush) and parallel efficiency ≥ 70 % on
    Passes 1/3/4; the nightly sweeps ride `--budgets report` (the verdict renders with the
    ledger), the §9.1 rig job carries `--budgets enforce` ("fail the build if").
-3. **Nightly wall-clock vs ld-prime / `ld64.lld` / mold-macho needs the P0 rigs** (perf doc §9.1).
+3. **The §9.3 determinism gate rides every PR**: the sweep's run-gate seam carries the
+   double-link byte-equality gate (`pgr_emit::sweep::DeterminismGate` — every run's image
+   byte-compared against the run-0 image, TDD §4.3/§11), a CI job links the shape in two
+   processes and byte-compares the artifacts (the separate-process face), and the nightly's
+   sweep gates every run through the verify + determinism pair.
+4. **The §2.2 peak-RSS budget row landed** (`pgr_core::budget::check_rss`): the process's
+   high-water mark over the gated image's bytes, priced in report mode beside the pass rows —
+   the calibrated `enforce` face stays the rig job's (the small-corpus runs measure the fixed
+   overhead the 2.2–2.5× band's 1 GiB scale prices away).
+5. **Nightly wall-clock vs ld-prime / `ld64.lld` / mold-macho needs the P0 rigs** (perf doc §9.1).
    The CI skeleton ships; the hardware baselines do not exist yet.
 
 **Known follow-ups** (updated — the byte-touching parse bench and the parameterized corpus
-generator behind an `xtask` landed with the shape-sweep rungs, and the §9.3 budget gate plus the
-sweep's verify gate landed with them; the rows below are what still stands): the per-PR
+generator behind an `xtask` landed with the shape-sweep rungs, and the §9.3 budget gate, the
+sweep's verify gate, the §9.3 determinism gate and the §2.2 peak-RSS budget row landed with
+them; the rows below are what still stands): the per-PR
 instruction/cache-miss/allocation-count job (§9.3's first bullet — the perf counters the
 dev-class runners do not carry) · D7 canonical import order remains optional (M4 shipped without
 needing it; M8's insertion-stable ordinals cover the incremental requirement) · rig-bound: S1
@@ -1199,3 +1211,17 @@ failing, the signature hash recomputed); `sweep_1_run/{plain|verified}` — one 
 and with the gate (**1.00 ms** vs **1.70 ms**: the verified run pays the emit and the verify
 outside the measured wall, which is exactly the §9.3 contract — the walls price the pipeline,
 the gate owns the product).
+
+### The sweep's determinism gate
+
+The `determinism` bench (`cargo bench -p pgr-emit --bench determinism`): the gate's per-image
+cost beside the emit it compares over the 64-object many-tiny corpus.
+`determinism/link_emit_64_objects` — the fused emit alone **1.65 ms**;
+`link_emit_compare_64_objects` — the same corpus's image plus the gate's baseline record and
+the whole-image byte-compare **1.84 ms** (the gate's overhead is the compare over the image
+the emit already built — no second emit rides the compare face); `sweep_1_run/{plain|
+deterministic}` — one sweep run without and with the gate (**1.05 ms** vs **1.31 ms**: the
+deterministic run pays the fused emit and the compare outside the measured wall, which is
+exactly the §9.3 contract — the walls price the pipeline, the gate owns the bytes). The
+separate-process face is the CI job's (`cmp` over two processes' run-0 images), not a bench
+row — a file compare is not the linker's work.
